@@ -29,6 +29,9 @@
 #  15. Remote parent-replies.status is not classified as wrong-home
 #  16. An escalated correlation stays retryable while undelivered, is never reset
 #      once delivered, and its delivery-unknown decision still closes on resolve
+#  17. Recovery and escalation grace are measured from the relevant turn's
+#      completion, never from delivery or send time, and each takes one fresh,
+#      uncached status read - accepting any verb - immediately before firing
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -196,6 +199,225 @@ test_completed_turn_no_report_triggers_one_recovery() {
     *) fail "recovery message must ask for a repost"$'\n'"$(cat "$hook_log")" ;;
   esac
   pass "completed turn with no report triggers exactly one recovery"
+}
+
+test_recovery_grace_measures_from_turn_completion() {
+  local home state corr hook_log lines
+  home=$(setup_parent grace-from-completion)
+  state="$home/state"
+  hook_log="$TMP_ROOT/grace-from-completion.log"
+  : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() { printf '%s\n' ok >> "$hook_log"; }
+  export -f recovery_hook
+  export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
+  export FM_PENDING_REPLY_GRACE_SECS=120
+
+  export FM_PENDING_REPLY_NOW=20000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "long turn then missed report")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  # The request turn runs long: it completes 300s after delivery, well past
+  # the 120s grace if grace were still measured from delivery.
+  export FM_PENDING_REPLY_NOW=20300
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+  [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$corr")" request_turn_completed_epoch)" = 20300 ] \
+    || fail "setup: turn should complete at 20300"
+
+  # One second after the turn completed: grace has not elapsed from that
+  # completion (age 1), even though it long ago elapsed from delivery (age
+  # 301). On the tip this fires immediately because grace is measured from
+  # delivery.
+  export FM_PENDING_REPLY_NOW=20301
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "recovery must not fire before grace elapses from the turn's completion"
+  fi
+  [ ! -s "$hook_log" ] || fail "recovery must not have sent before completion grace elapsed"
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "phase must stay awaiting_report before completion grace elapsed"
+
+  # 121s after completion: grace has now elapsed from the turn's completion.
+  export FM_PENDING_REPLY_NOW=20421
+  fm_pending_reply_send_recovery "$state" "$corr" \
+    || fail "recovery should fire once grace elapses from the turn's completion"
+  lines=$(wc -l < "$hook_log" | tr -d ' ')
+  [ "$lines" = 1 ] || fail "expected exactly one recovery send, got $lines"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "phase should be recovery_sent, got $(phase_of "$state" "$corr")"
+
+  export FM_PENDING_REPLY_GRACE_SECS=0
+  pass "recovery grace is measured from the request turn's completion, not delivery"
+}
+
+test_recovery_fresh_status_read_resolves_before_firing() {
+  local home state corr status rec
+  home=$(setup_parent fresh-read-before-fire)
+  state="$home/state"
+  status="$state/hibit.status"
+  export FM_PENDING_REPLY_SEND_HOOK=true
+  export FM_PENDING_REPLY_GRACE_SECS=120
+  export FM_PENDING_REPLY_NOW=30000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "reply lands just before the demand fires")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_observe_busy "$state" "$corr" busy
+  export FM_PENDING_REPLY_NOW=30300
+  fm_pending_reply_observe_busy "$state" "$corr" idle
+
+  # An earlier resolve attempt with nothing to find caches the current status
+  # file's scan signature.
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "setup: nothing should resolve yet"
+  fi
+
+  # The correlated reply lands, carrying a non-terminal verb, in a write the
+  # cached signature cannot see (for example a same-size rewrite inside the
+  # stat timestamp granularity): the cache now matches the file that holds it,
+  # so only a read that bypasses the cache can find the reply.
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  printf 'working [corr=%s]: still wrapping up\n' "$corr" >> "$status"
+  fm_pending_reply_set "$rec" parent_status_scan_signature "$(fm_pending_reply_file_signature "$status")"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "setup: the cached signature should hide the reply from a cached read"
+  fi
+
+  # Grace has elapsed from the turn's completion, so the demand is otherwise
+  # eligible to fire; its own fresh, uncached read must catch the reply first.
+  export FM_PENDING_REPLY_NOW=30421
+  if fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+    fail "recovery must not fire once a correlated reply has landed"
+  fi
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "the fresh pre-fire read should have resolved the record, got $(phase_of "$state" "$corr")"
+  [ "$(fm_pending_reply_get "$rec" resolved_via)" = status ] \
+    || fail "resolved_via should be status"
+
+  # The missed-report escalation takes the same fresh read before firing.
+  export FM_PENDING_REPLY_NOW=31000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "reply lands just before the escalation fires")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  export FM_PENDING_REPLY_NOW=31120
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "setup: recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  printf 'working [corr=%s]: still wrapping up\n' "$corr" >> "$status"
+  fm_pending_reply_set "$rec" parent_status_scan_signature "$(fm_pending_reply_file_signature "$status")"
+  export FM_PENDING_REPLY_NOW=31240
+  fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null \
+    || fail "the escalation's fresh read should resolve the record"
+  [ "$(phase_of "$state" "$corr")" = resolved ] \
+    || fail "the fresh pre-escalation read should have resolved the record, got $(phase_of "$state" "$corr")"
+  if grep -qF "blocked [key=pending-reply-$corr]" "$status"; then
+    fail "escalation must not publish once a correlated reply has landed"
+  fi
+
+  unset FM_PENDING_REPLY_SEND_HOOK
+  export FM_PENDING_REPLY_GRACE_SECS=0
+  pass "one fresh status read immediately before firing catches a just-landed reply, any verb"
+}
+
+test_partial_resolve_write_blocks_firing() {
+  local home state status hook_log
+  home=$(setup_parent partial-resolve-write)
+  state="$home/state"
+  status="$state/hibit.status"
+  hook_log="$TMP_ROOT/partial-resolve-write.log"
+  : > "$hook_log"
+  # A resolve that commits phase=resolved and then fails a later field write
+  # must still stop the repost and the escalation. Run in a subshell so the
+  # injected write failure cannot leak into later tests.
+  (
+    # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+    # shellcheck disable=SC2329
+    recovery_hook() { printf '%s\n' sent >> "$hook_log"; }
+    eval "_orig_$(declare -f fm_pending_reply_set)"
+    fm_pending_reply_set() {
+      [ "$2" != resolved_epoch ] || [ "${FAIL_RESOLVED_EPOCH:-0}" != 1 ] || return 1
+      _orig_fm_pending_reply_set "$@"
+    }
+
+    corr=$(fm_pending_reply_create "$home" "$state" "hibit" "partial resolve before recovery")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+    printf 'working [corr=%s]: still wrapping up\n' "$corr" >> "$status"
+    if FAIL_RESOLVED_EPOCH=1 FM_PENDING_REPLY_SEND_HOOK=recovery_hook fm_pending_reply_send_recovery "$state" "$corr" 2>/dev/null; then
+      fail "recovery must not fire after a partial resolve"
+    fi
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "partial resolve should leave phase resolved, got $(phase_of "$state" "$corr")"
+    [ ! -s "$hook_log" ] || fail "recovery was sent after a partial resolve"
+
+    corr=$(fm_pending_reply_create "$home" "$state" "hibit" "partial resolve before escalation")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+    FM_PENDING_REPLY_SEND_HOOK=true fm_pending_reply_send_recovery "$state" "$corr" \
+      || fail "setup: recovery send failed"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+    printf 'working [corr=%s]: still wrapping up\n' "$corr" >> "$status"
+    FAIL_RESOLVED_EPOCH=1 fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null || true
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "partial resolve should block escalation, got $(phase_of "$state" "$corr")"
+    if grep -qF "blocked [key=pending-reply-$corr]" "$status"; then
+      fail "escalation must not publish after a partial resolve"
+    fi
+  ) || exit 1
+  pass "a resolve that fails after committing resolved still blocks repost and escalation"
+}
+
+test_escalation_grace_measures_from_recovery_turn_completion() {
+  local home state corr hook_log status_line escalations
+  home=$(setup_parent escalation-grace-from-completion)
+  state="$home/state"
+  hook_log="$TMP_ROOT/escalation-grace-from-completion.log"
+  : > "$hook_log"
+  # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
+  # shellcheck disable=SC2329
+  recovery_hook() { printf '%s\n' ok >> "$hook_log"; }
+  export -f recovery_hook
+  export FM_PENDING_REPLY_SEND_HOOK='recovery_hook'
+  export FM_PENDING_REPLY_GRACE_SECS=120
+
+  export FM_PENDING_REPLY_NOW=40000
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "recovery also runs long")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  export FM_PENDING_REPLY_NOW=40120
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] || fail "phase should be recovery_sent"
+
+  # The recovery turn also runs long: it completes 300s after the recovery
+  # was sent.
+  export FM_PENDING_REPLY_NOW=40420
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+
+  # One second after the recovery turn completed: grace has not elapsed from
+  # that completion. On the tip nothing gates this at all, so escalation
+  # fires the instant completion is observed.
+  export FM_PENDING_REPLY_NOW=40421
+  if fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null; then
+    fail "escalation must not fire before grace elapses from the recovery turn's completion"
+  fi
+  [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+    || fail "phase must stay recovery_sent before escalation grace elapsed"
+  if grep -qF 'pending-reply-missed' "$state/hibit.status" 2>/dev/null; then
+    fail "escalation must not have published before grace elapsed"
+  fi
+
+  # 121s after the recovery turn completed: grace has now elapsed.
+  export FM_PENDING_REPLY_NOW=40541
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire once grace elapses"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated"
+  status_line=$(tail -1 "$state/hibit.status")
+  case "$status_line" in
+    "blocked [key=pending-reply-$corr]"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
+    *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
+  esac
+  escalations=$(grep -Fc "blocked [key=pending-reply-$corr]" "$state/hibit.status")
+  [ "$escalations" = 1 ] || fail "missed recovery should publish exactly one escalation, got $escalations"
+
+  export FM_PENDING_REPLY_GRACE_SECS=0
+  pass "missed-report escalation grace is measured from the recovery turn's completion"
 }
 
 test_recovery_attempt_is_never_reinjected() {
@@ -969,13 +1191,26 @@ test_unknown_backend_state_uses_capture_fallback() {
       # shellcheck disable=SC2030,SC2031
       export FM_PENDING_REPLY_NOW=10010
       fm_pending_reply_tick "$state"
+      [ "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)" = 10010 ] \
+        || fail "$backend fallback idle past grace should complete the request turn"
+      [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+        || fail "$backend recovery must wait a fresh grace period after the turn completes, not fire the moment it completes"
+      # Recovery grace runs from that completion, not from delivery: only once
+      # a further grace period has elapsed does the repost fire.
+      export FM_PENDING_REPLY_NOW=10020
+      fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
-        || fail "$backend fallback idle should trigger recovery after grace"
-      export FM_PENDING_REPLY_NOW=10011
+        || fail "$backend fallback idle should trigger recovery after its own grace period"
+      export FM_PENDING_REPLY_NOW=10021
       export FM_PENDING_TEST_CAPTURE='Working...'
       fm_pending_reply_tick "$state"
-      export FM_PENDING_REPLY_NOW=10012
+      export FM_PENDING_REPLY_NOW=10022
       export FM_PENDING_TEST_CAPTURE='idle footer'
+      fm_pending_reply_tick "$state"
+      [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
+        || fail "$backend escalation must wait a fresh grace period after the recovery turn completes, not fire the moment it completes"
+      # Escalation grace runs from the recovery turn's own completion.
+      export FM_PENDING_REPLY_NOW=10032
       fm_pending_reply_tick "$state"
       [ "$(phase_of "$state" "$corr")" = escalated ] \
         || fail "$backend capture busy-to-idle should complete recovery turn"
@@ -1692,6 +1927,10 @@ test_escalated_undelivered_correlation_stays_retryable() {
 
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
+test_recovery_grace_measures_from_turn_completion
+test_recovery_fresh_status_read_resolves_before_firing
+test_partial_resolve_write_blocks_firing
+test_escalation_grace_measures_from_recovery_turn_completion
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable

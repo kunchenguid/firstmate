@@ -963,9 +963,8 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
-# A scout brief offers the Lavish review loop only when bootstrap confirms the
-# supported lavish-axi floor at scaffold time; a missing or older build gets a
-# text-report instruction instead, so a scout never drives a below-floor Lavish.
+# A scout brief offers the Lavish review loop for every compatible board version,
+# including older builds that use the legacy reply path.
 test_scout_lavish_line_follows_presentation_floor() {
   local base label version expect case_dir fakebin brief n=0
   local hosting='use the lavish-axi rule'
@@ -990,9 +989,11 @@ test_scout_lavish_line_follows_presentation_floor() {
       assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
     fi
   done <<'ROWS'
-lavish-axi at the floor^0.1.77^hosting
-lavish-axi above the floor^0.2.0^hosting
-lavish-axi just below the floor^0.1.76^text
+lavish-axi at the board compatibility floor^0.1.77^hosting
+lavish-axi below the reply feature floor^0.1.79^hosting
+lavish-axi at the reply feature floor^0.1.80^hosting
+lavish-axi above the reply feature floor^0.2.0^hosting
+lavish-axi below the board compatibility floor^0.1.76^text
 absent lavish-axi^absent^text
 ROWS
   pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"

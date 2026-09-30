@@ -7,7 +7,9 @@
 #   fm-supervision-host.sh park [--restart]
 #
 # A primary's arm owner runs this in place of bin/fm-watch-arm.sh when the home
-# opted in (config/supervision-host): the Claude Stop auto-arm
+# runs the host (by default on Claude, by config/supervision-host elsewhere,
+# never with config/supervision-host-off; docs/configuration.md "Supervision
+# host"): the Claude Stop auto-arm
 # (bin/fm-claude-stop-autoarm.sh), the Cursor stop-hook park
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
@@ -208,7 +210,7 @@ COOLDOWN_MAX=3600
 AUTOARM_GEN=${FM_SUPERVISION_HOST_AUTOARM_GEN:-}
 AUTOARM_OWNER=${FM_SUPERVISION_HOST_OWNER_PID:-}
 PRIMARY=${FM_SUPERVISION_HOST_PRIMARY:-}
-[ -n "$PRIMARY" ] || PRIMARY=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+[ -n "$PRIMARY" ] || PRIMARY=$(fm_supervision_host_primary)
 # The owner's predecessor arm belongs to the first cycle only.
 OWNER_PREDECESSOR=${FM_WATCH_PREDECESSOR_ARM_PID:-}
 case "$OWNER_PREDECESSOR" in *[!0-9]*) OWNER_PREDECESSOR= ;; esac
@@ -489,11 +491,19 @@ stream_ready_line() {
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
+  local i
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
-    sleep "$POLL"
+    # The arm's exit is probed at a tenth of a second between POLL-cadence
+    # checks: the close is read as soon as the arm dies instead of up to POLL
+    # seconds late, while refresh keeps its per-second cadence.
+    i=$((POLL * 10))
+    while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
+      sleep 0.1
+      i=$((i - 1))
+    done
   done
   wait "$ARM_PID" 2>/dev/null || true
   ARM_TEXT=$(cat "$ARM_OUT" 2>/dev/null || true)
@@ -1032,7 +1042,7 @@ while :; do
       stand_down "this session no longer owns supervision"
     fi
     if ! fm_supervision_host_config "$CONFIG" "$PRIMARY"; then
-      exit_to_main "the home no longer opts into the supervision host"
+      exit_to_main "the home no longer runs the supervision host"
     fi
     if [ -z "$FM_SUPERVISION_ENGINE" ]; then
       exit_to_main "no supervision engine runs here: $FM_SUPERVISION_ENGINE_PROBLEM; this wake is yours"

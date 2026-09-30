@@ -75,7 +75,8 @@ install_scripts() {
            fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh fm-path-lib.sh \
            fm-session-lock-lib.sh fm-cursor-lib.sh fm-operational-input.sh \
            fm-supervision-instructions.sh fm-harness.sh fm-lock.sh \
-           fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do
+           fm-gate-refuse-lib.sh fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh \
+           fm-supervision-engine-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
@@ -510,6 +511,16 @@ test_park_runs_the_supervision_host_only_when_opted_in() {
   out=$(run_park "$dir")
   [ -e "$dir/state/arm-ran" ] || fail "a home without config/supervision-host must park on the arm"
   [ ! -e "$dir/state/host-ran" ] || fail "a home without config/supervision-host ran the supervision host"
+
+  dir=$(make_primary_dir "$TMP_ROOT/park-host-opted-out")
+  : > "$dir/state/task1.meta"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host-off"
+  write_arm_fixture "$dir" actionable
+  write_host_fixture "$dir" handback
+  out=$(run_park "$dir")
+  [ -e "$dir/state/arm-ran" ] || fail "a home opted out by config/supervision-host-off must park on the arm"
+  [ ! -e "$dir/state/host-ran" ] || fail "a home opted out by config/supervision-host-off ran the supervision host"
 
   dir=$(make_primary_dir "$TMP_ROOT/park-host-on")
   : > "$dir/state/task1.meta"
