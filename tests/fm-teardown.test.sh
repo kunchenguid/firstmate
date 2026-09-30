@@ -53,6 +53,11 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#   (z) stale record + slot reused by a live successor + landed slot content
+#       -> the stale record retires records-only; the successor record, the
+#       slot copy, and the slot-owner claim are untouched, and treehouse is
+#       never asked to return the slot.
+#   (aa) same setup with unlanded slot content -> REFUSE, everything retained.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -4281,6 +4286,95 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
+# Relocate the case worktree into a Treehouse pool-slot layout
+# (<case>/pool/s1/<repo>), publish the pool state, and rewrite the case task's
+# record plus a live successor record onto the same slot, with the slot-owner
+# claim naming the successor - so the case task's record is the stale one.
+# Also publishes a home dir carrying the state dir the Treehouse project lock
+# needs. Echoes the slot path.
+relocate_wt_into_pool_slot() {
+  local case_dir=$1 slot
+  mkdir -p "$case_dir/pool/s1" "$case_dir/home/state"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$case_dir/pool/s1/wt" >/dev/null \
+    || fail "stale-slot: could not move the worktree into a pool slot"
+  : > "$case_dir/pool/treehouse-state.json"
+  slot="$case_dir/pool/s1/wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$slot" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=teardown-test-task-x1"
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=firstmate:fm-task-x2" \
+    "endpoint_task_id=task-x2" \
+    "worktree=$slot" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=teardown-test-task-x2"
+  printf 'task=task-x2\nhome=%s\n' "$case_dir/home" > "$case_dir/pool/s1/.fm-slot-owner"
+  printf '%s\n' "$slot"
+}
+
+# Stale-record hatch (teardown-slot-collision): a task whose recorded pool slot
+# was handed to another live task retires only its own records, gated on the
+# existing landed-work proof; unlanded slot content still refuses.
+test_stale_record_reused_slot_retires_records_only_when_landed() {
+  local case_dir slot rc
+  case_dir=$(make_case stale-slot-landed)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  slot=$(relocate_wt_into_pool_slot "$case_dir")
+  # Land the slot content into local main, as a merged local-only task would be.
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$slot" rev-parse HEAD)"
+  # Prove the slot itself is never returned: log every treehouse invocation.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf 'treehouse %s\n' "\$*" >> "$case_dir/treehouse-calls"
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "stale-slot-landed: teardown should retire the stale record: $(cat "$case_dir/stderr")"
+  assert_no_grep "REFUSED" "$case_dir/stderr" "stale-slot-landed: teardown printed a REFUSED line"
+  assert_grep "only its own records are retired" "$case_dir/stderr" \
+    "stale-slot-landed: no records-only warning"
+  assert_grep "left to task task-x2" "$case_dir/stdout" \
+    "stale-slot-landed: completion did not name the slot holder"
+  assert_absent "$case_dir/state/task-x1.meta" "stale-slot-landed: the stale record was not retired"
+  assert_present "$case_dir/state/task-x2.meta" "stale-slot-landed: the successor record was touched"
+  [ "$(cat "$slot/feature.txt")" = hello ] \
+    || fail "stale-slot-landed: the slot copy was touched"
+  assert_grep "task=task-x2" "$case_dir/pool/s1/.fm-slot-owner" \
+    "stale-slot-landed: the slot-owner claim was touched"
+  assert_absent "$case_dir/treehouse-calls" "stale-slot-landed: treehouse was asked to return the slot"
+
+  # Same setup with unlanded slot content still refuses and retains everything.
+  case_dir=$(make_case stale-slot-unlanded)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  slot=$(relocate_wt_into_pool_slot "$case_dir")
+
+  set +e
+  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "stale-slot-unlanded: teardown retired a stale record over unlanded slot content"
+  assert_grep "REFUSED" "$case_dir/stderr" "stale-slot-unlanded: no REFUSED line in stderr"
+  assert_present "$case_dir/state/task-x1.meta" "stale-slot-unlanded: refusal did not retain the stale record"
+  assert_present "$case_dir/state/task-x2.meta" "stale-slot-unlanded: refusal touched the successor record"
+  [ "$(cat "$slot/feature.txt")" = hello ] \
+    || fail "stale-slot-unlanded: refusal touched the slot copy"
+  pass "a stale record on a reused slot retires records-only when landed and refuses when unlanded"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4607,3 +4701,4 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_stale_record_reused_slot_retires_records_only_when_landed
