@@ -110,7 +110,7 @@
 #              is reserved BEFORE the old agent is touched, naming the
 #              incarnation it replaces, so a full destination pool refuses
 #              with nothing changed; the old generation is released only after
-#              its stop is proven, and a secondmate replacement is confirmed
+#              its stop is proven, and the replacement is confirmed
 #              only once its endpoint reads alive. The journal records the
 #              seat generations. A candidate that never reached launch
 #              delivery is released on rollback; one that did stays counted.

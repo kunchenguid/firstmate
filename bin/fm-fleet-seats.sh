@@ -17,9 +17,9 @@
 # a local secondmate walks its .fm-secondmate-parent binding to the primary.
 # The root's config/fleet-seats declares the pools, and every grant is decided
 # under the root's lock (<root>/state/.fleet-seats.lock). A home whose walk
-# ends at a remote parent binding keeps its OWN ledger for its workers under
-# its own lock and receives its policy and grants from the root (REMOTE HOMES
-# below).
+# ends at a remote parent binding shares that host root's ledger and lock with
+# its local descendants, and receives policy and grants from the primary
+# (REMOTE HOMES below).
 #
 # THE LEDGER. Each holder is one record at
 # <authority-state>/fleet-seats/holders/<seat-name>.json, where <seat-name> is
@@ -57,9 +57,10 @@
 #   reserved -> released          release --reason prelaunch (never dispatched)
 #                                 or cancelled (dispatched endpoint proven gone).
 #   nonterminal -> released       release --reason replaced (a candidate naming
-#                                 this generation as previous exists and this
-#                                 route no longer runs an agent) or teardown
-#                                 (the task record is gone after cleanup).
+#                                 this generation as previous exists and its
+#                                 confirmed agent stopped or endpoint is proven
+#                                 destroyed) or teardown (cleanup no longer
+#                                 binds the task record to this generation).
 #   nonterminal -> reclaimed      reclaim, recovery with fresh generation-bound
 #                                 endpoint or host-operation evidence.
 #   remote operations             reconcile-remote applies one host disposition.
@@ -138,9 +139,11 @@
 #   fm-fleet-seats.sh reserve <id> --generation <gen> [--previous-generation <gen|->]
 #       --harness <harness> --model <model|default> --holder-pid <pid>
 #       [--kind ship|scout|secondmate] [--raw-launch]
-#       Prints nothing and exits 0 with no declaration. With one, records the
-#       holder and prints "fleet-seats: reserved pool=..." (pooled) or
-#       "fleet-seats: recorded ..." (a model in no pool).
+#       Prints nothing and exits 0 with no declaration for a new holder key.
+#       Existing holders still record successors during policy opt-out.
+#       With a declaration, records the holder and prints
+#       "fleet-seats: reserved pool=..." (pooled) or "fleet-seats: recorded ..."
+#       (a model in no pool).
 #   fm-fleet-seats.sh dispatch <id> --generation <gen> --route-file <private-json>
 #       Exit 0 "fleet-seats: dispatched ..." permits the one launch delivery;
 #       exit 3 "already-dispatched" forbids delivering again.
@@ -776,7 +779,8 @@ route_local_gone() {
 }
 
 # remote_disposition_fetch <task> <operation> <out-file>: ask the host for the
-# token-scoped disposition, bounded and outside every lock.
+# token-scoped disposition, bounded and outside the ledger lock; the caller
+# still holds the supervisor lifecycle episode while collecting evidence.
 remote_disposition_fetch() {
   local out
   out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" FM_DATA_OVERRIDE="$DATA" \

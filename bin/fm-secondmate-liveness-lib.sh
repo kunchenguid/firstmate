@@ -19,9 +19,12 @@
 #   unverified  - the endpoint is recorded under a session this home does not
 #                 own, so probing is not authorized
 #
-# Only `dead` and `missing` authorize recovery. The probe and recovery functions
-# below own whether that means resuming the endpoint or proving its close before
-# replacement; docs/t3code-backend.md owns T3's native status meanings.
+# Only `dead` and `missing` authorize recovery. The generation-bound recheck
+# and seat reclamation below must authorize replacement before any endpoint is
+# closed or spawn is attempted; a shell-only endpoint from an unconfirmed
+# submitted launch can still start its agent. The probe and recovery functions
+# below own whether recovery means resuming the endpoint or proving its close
+# before replacement; docs/t3code-backend.md owns T3's native status meanings.
 # `ambiguous`, `unreadable`, and `unverified` leave the endpoint untouched -
 # relaunching on inconclusive evidence could create a second endpoint beside a
 # live one - and an unreachable remote host is never evidence of death, so a
