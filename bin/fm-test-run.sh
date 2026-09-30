@@ -1631,6 +1631,10 @@ families_for_changed_path() {
     bin/fm-peek.sh|bin/fm-composer*)
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
+      # fm-spawn.sh generates the per-worker busy-state adapter, so a change to
+      # the generator alone must still select the suite that drives the artifact
+      # it writes, not only the families around the launcher.
+      printf '%s\n' "__script__:fm-busy-adapter-wiring.test.sh"
       ;;
     bin/fm-task-inbox-lib.sh)
       # The steering-inbox record/doorbell/ladder owner: fm-send's data plane
@@ -1696,6 +1700,13 @@ families_for_changed_path() {
       # The reference scan is not transitive, so match the two helpers that
       # source this one as well: most suites inherit it only through them.
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/assets/fm-opencode-plugin-host.mjs)
+      # The shared OpenCode 2 test host. The suites that import it are selected
+      # individually, because a direct reference is per-script evidence: a change
+      # to the host must run the suites that drive plugins through it.
+      families_for_test_reference "fm-opencode-plugin-host.mjs" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*)

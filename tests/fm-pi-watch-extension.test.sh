@@ -3349,7 +3349,11 @@ test_opencode_plugin_package_boundary_is_explicit_esm() {
   printf '%s\n' '{"dependencies":{}}' > "$fixture/package.json"
   cp "$ROOT/.opencode/plugins/package.json" "$fixture/plugins/package.json"
   cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$plugin"
+  # The plugin imports both of its own lib modules by relative path, so the
+  # boundary fixture carries both; a plugin that resolved either of them from the
+  # host's ambient module tree would pass on a developer machine and fail here.
   cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$fixture/plugins/lib/fm-operational-input.js"
+  cp "$ROOT/.opencode/plugins/lib/fm-opencode-contract.js" "$fixture/plugins/lib/fm-opencode-contract.js"
   out=$(PLUGIN="$plugin" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 await import(pathToFileURL(process.env.PLUGIN).href);
@@ -3377,19 +3381,25 @@ printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_L
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async () => {};
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3427,19 +3437,25 @@ printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async () => {};
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3476,26 +3492,31 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async () => {};
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
-const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
-await hooks.event(event);
+await hooks.turnEnd();
 // The hook starts its attempt without awaiting it, and the plugin answers a
 // second attempt from the one already in flight. Join that attempt through the
 // coordinator rather than waiting a fixed span: refusing an unowned lock walks
 // git and ps probes that can outlast any such span, and the owned-lock event
 // below would then be answered from the refusal instead of arming.
-const refusal = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const refusal = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", armContext);
 if (refusal !== "read-only") {
   console.error(`expected a read-only refusal without the session lock, got ${refusal}`);
   process.exit(1);
@@ -3505,7 +3526,7 @@ if (existsSync(process.env.FM_ARM_LOG)) {
   process.exit(1);
 }
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event(event);
+await hooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3538,19 +3559,25 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const client = { session: { promptAsync: async () => {} } };
-await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async () => {};
+await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", armContext);
 await new Promise((resolve) => setTimeout(resolve, 120));
 if (status !== "not-primary") {
   console.error(`expected not-primary, got ${status}`);
@@ -3597,9 +3624,10 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
@@ -3608,25 +3636,25 @@ let releasePrompt = () => {};
 const promptBlocked = new Promise((resolve) => {
   releasePrompt = resolve;
 });
-const client = {
-  session: {
-    promptAsync: async () => {
+const onPrompt = async () => {
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
         : 0;
       prompts += 1;
       await promptBlocked;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
-const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event(event);
+await hooks.turnEnd();
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -3712,16 +3740,26 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-supervision-host.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" RECORD_KIND="$kind" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
-const client = { session: { promptAsync: async (request) => { prompts.push(request.body.parts[0].text); } } };
-const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.WORKTREE, worktree: process.env.WORKTREE });
+const onPrompt = async (input) => { prompts.push(input.text); };
+const hooks = await loadPlugin(process.env.PLUGIN, {
+  directory: process.env.WORKTREE,
+  onPrompt,
+});
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 400 && prompts.length < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 const rows = existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
@@ -3786,26 +3824,28 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_PRE_READY_RELEASE_FILE="$release" FM_PRE_READY_RETIRED_FILE="$retired" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_PRE_READY_RELEASE_FILE="$release" FM_PRE_READY_RETIRED_FILE="$retired" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async (input) => {
+      prompts.push(input.text);
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 500; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -3859,30 +3899,32 @@ trap 'exit 0' TERM INT
 while :; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+const onPrompt = async (input) => {
+      prompt += input.text;
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
         : 0;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 // Three unready successors each cost the full readiness budget, so wait well
 // past their sum. The wait ends as soon as the wake lands.
 for (let i = 0; i < 1500 && !prompt; i += 1) {
@@ -3935,30 +3977,32 @@ printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
+const onPrompt = async (input) => {
+      prompt += input.text;
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
         ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length
         : 0;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 500 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -4015,19 +4059,16 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
     chmod +x "$repo/bin/fm-watch-arm.sh"
-    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+    out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_UNRETIRED_READY_FILE="$ready" FM_UNRETIRED_RETIRE_FILE="$retired" FM_RELEASE_FILE="$release" FM_STOP_FILE="$stop" FM_LATE_KIND="$kind" FM_OPENCODE_ARM_READY_TIMEOUT_MS="$ARM_READY_TIMEOUT_MS" FM_WATCH_ARM_RETIRE_TIMEOUT_MS=20 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
-    },
-  },
-};
+const onPrompt = async (input) => {
+      prompts.push(input.text);
+    };
 const rows = () => existsSync(process.env.FM_ARM_LOG)
   ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
   : [];
@@ -4038,13 +4079,18 @@ async function waitFor(predicate, message) {
   }
   throw new Error(message);
 }
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 await waitFor(
   () => existsSync(process.env.FM_UNRETIRED_READY_FILE),
   "unretired successor did not enter its retirement wait",
@@ -4099,26 +4145,28 @@ trap 'exit 0' TERM INT
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
-const client = {
-  session: {
-    promptAsync: async () => {
+const onPrompt = async () => {
       prompts += 1;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -4155,26 +4203,28 @@ printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async (input) => {
+      prompt += input.text;
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await hooks.turnEnd();
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -4209,28 +4259,30 @@ while [ ! -e "$FM_RELEASE_FILE" ]; do sleep 0.02; done
 printf 'signal: lock handoff\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_RELEASE_FILE="$release" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      prompt += request.body.parts[0].text;
-    },
-  },
-};
-const hooks = await mod.FmPrimaryWatchArm({
-  client,
+const onPrompt = async (input) => {
+      prompt += input.text;
+    };
+const hooks = await loadPlugin(process.env.PLUGIN, {
   directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
+  onPrompt,
 });
+// The coordinator hands this context to the plugins it wakes, so a block that
+// drives the coordinator directly needs one in scope.
+const armContext = {
+  location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } },
+  session: { prompt: async () => {} },
+};
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
-const eventPromise = hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const eventPromise = hooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -4280,32 +4332,18 @@ printf 'guard should not run\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
-const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
-const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
-    },
-  },
-};
-await armMod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const onPrompt = async (input) => { promptBody = input.text; };
+const arm = await loadPlugin(process.env.ARM_PLUGIN, { directory: process.env.WORKTREE, onPrompt });
+const armContext = { location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } } };
+const guardHooks = await loadPlugin(process.env.GUARD_PLUGIN, { directory: process.env.WORKTREE, onPrompt });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await guardHooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4353,32 +4391,18 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
 
-const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
-const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
-const client = {
-  session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
-    },
-  },
-};
-await armMod.FmPrimaryWatchArm({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
-const guardHooks = await guardMod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const onPrompt = async (input) => { promptBody = input.text; };
+const arm = await loadPlugin(process.env.ARM_PLUGIN, { directory: process.env.WORKTREE, onPrompt });
+const armContext = { location: { directory: process.env.WORKTREE, project: { id: "t", directory: process.env.WORKTREE, canonical: process.env.WORKTREE } } };
+const guardHooks = await loadPlugin(process.env.GUARD_PLUGIN, { directory: process.env.WORKTREE, onPrompt });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await guardHooks.turnEnd();
 for (let i = 0; i < 250 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }

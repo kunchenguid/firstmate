@@ -58,6 +58,10 @@ let retryTimer = null;
 let retryFailures = 0;
 let launchInFlight = null;
 let restorationInFlight = null;
+// Set when the plugin is unloading. An arm child that the cleanup retires looks
+// to its own close handler like a watcher failure, which would schedule another
+// arm after the plugin is gone; that successor would then be owned by nothing.
+let unloading = false;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
@@ -355,6 +359,7 @@ async function restoreAfterActionableClose(paths, sessionID, ctx, predecessorArm
 }
 
 async function scheduleRetry(paths, sessionID, ctx, reason, predecessorArmPid) {
+  if (unloading) return;
   if (child || retryTimer) return;
   if (!(await sessionOwnsLock(paths))) {
     setArmStatus("failed");
@@ -442,6 +447,10 @@ function spawnArm(paths, sessionID, ctx, predecessorArmPid = "") {
     const classification = classifyArmClose(paths, hostMode, stdout, stderr, code, signal);
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
+    if (unloading) {
+      setArmStatus("idle");
+      return;
+    }
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
       retryFailures = 0;
@@ -546,6 +555,7 @@ export default {
     // abort the subscription and stop that child: a plugin that unloads with a
     // live arm child would leave a watcher nothing owns.
     return () => {
+      unloading = true;
       stopWatching();
       if (retryTimer) {
         clearTimeout(retryTimer);
