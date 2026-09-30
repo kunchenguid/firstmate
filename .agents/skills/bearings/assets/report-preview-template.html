@@ -80,7 +80,17 @@ __FM_BEARINGS_REPORT_DATA__
     return n;
   }
   function safeHref(u) { return /^https?:\/\//i.test(u) ? u : null; }
-  var INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>)"'`]+[^\s<>)"'`.,;:!?])/;
+  var INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)|(https?:\/\/[^\s<>"'`]+)/;
+  /* Same trim as the board template: drop trailing punctuation and a closing
+     parenthesis that has no opening one inside the URL. */
+  function trimUrl(u) {
+    for (;;) {
+      var t = u.replace(/[.,;:!?'"]+$/, "");
+      if (t.slice(-1) === ")" && (t.split("(").length < t.split(")").length)) t = t.slice(0, -1);
+      if (t === u) return u;
+      u = t;
+    }
+  }
   function inline(parent, text) {
     /* a fresh matcher per call, because marks recurse into their own text */
     var re = new RegExp(INLINE.source, "g"), last = 0, m;
@@ -99,8 +109,10 @@ __FM_BEARINGS_REPORT_DATA__
           parent.appendChild(document.createTextNode(m[6] + " (" + m[7] + ")"));
         }
       } else if (m[8]) {
-        var u = parent.appendChild(el("a", m[8]));
-        u.href = m[8]; u.target = "_blank"; u.rel = "noopener";
+        var shown = trimUrl(m[8]);
+        var u = parent.appendChild(el("a", shown));
+        u.href = shown; u.target = "_blank"; u.rel = "noopener";
+        re.lastIndex = m.index + shown.length;
       }
       last = re.lastIndex;
     }
