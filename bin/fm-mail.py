@@ -19,6 +19,7 @@ import os
 import re
 import socket
 import ssl
+import signal
 import subprocess
 import sys
 import time
@@ -514,27 +515,41 @@ def poll_budget():
         value = 6.0
     return value if value > 0 else 6.0
 
+class PollDeadline(TimeoutError):
+    pass
+
+def raise_poll_deadline(signum, frame):
+    raise PollDeadline('mail poll budget exhausted')
+
+def arm_poll_deadline(seconds):
+    """Interrupt any blocking IMAP work once the poll's wall-clock budget ends."""
+    if hasattr(signal, 'setitimer'):
+        signal.signal(signal.SIGALRM, raise_poll_deadline)
+        signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.001))
+
+def disarm_poll_deadline():
+    if hasattr(signal, 'setitimer'):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
 def load_away_scan(path, identity):
-    """Return uids already examined and ignored under this away posture and
-    mailbox generation; any other identity starts an empty scan."""
+    """Return the highest uid already examined under this away posture and
+    mailbox generation; any other identity starts the scan from the beginning."""
     if not path:
-        return set()
+        return 0
     try:
         lines = open(path, encoding='utf-8').read().splitlines()
     except OSError:
-        return set()
-    if not lines or lines[0] != identity:
-        return set()
-    return {line for line in lines[1:] if line}
+        return 0
+    if len(lines) != 2 or lines[0] != identity or not lines[1].isdigit():
+        return 0
+    return int(lines[1])
 
-def save_away_scan(path, identity, uids):
+def save_away_scan(path, identity, high):
     if not path:
         return
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
-        f.write(identity + '\n')
-        for uid in sorted(uids, key=lambda u: (len(u), u)):
-            f.write(uid + '\n')
+        f.write('%s\n%d\n' % (identity, high))
     os.replace(tmp, path)
 
 def cmd_poll_list():
@@ -555,6 +570,7 @@ def cmd_poll_list():
     deadline = time.monotonic() + budget
     m = None
     try:
+        arm_poll_deadline(budget)
         m = connect_mailbox(min(MAIL_TIMEOUT, budget))
         m.select('INBOX')
         ur = m.untagged_responses.get('UIDVALIDITY')
@@ -584,38 +600,30 @@ def cmd_poll_list():
         retry_candidates = [u for u in retry_window if u in seen]
         recipient, afk_email_active, invalid_posture = afk_email_context()
 
-        # While away, ask IMAP to identify messages whose From header names the
-        # configured owner and scan those first; fetched headers still undergo
-        # strict Gmail-authentication checks below. A failed owner search
-        # fails the poll so it is retried. Messages already examined and
-        # ignored under this away posture are skipped, so a spoofed or
-        # outsider backlog is fetched at most once and cannot block later
-        # mail; they stay out of the cursor for attended polling after return.
-        owner_priority = set()
+        # While away, one persistent away-scan cursor walks unseen mail, new
+        # and retry alike, in ascending uid order, so each uid is examined at
+        # most once per away posture and ignored mail can never block a later
+        # reply. Ignored mail stays unseen and out of the mail cursor, so
+        # attended polling reports it after return.
+        away_mode = afk_email_active and not invalid_posture
         away_scan_path = os.environ.get('FM_MAIL_AWAY_SCAN', '')
         away_scan_identity = ''
-        away_scanned = set()
-        if afk_email_active and not invalid_posture:
-            owner_type, owner_data = m.uid(
-                'search', None, 'UNSEEN', 'FROM', f'"{OWNER_EMAIL}"')
-            if owner_type != 'OK':
-                raise RuntimeError('away owner sender search failed')
-            owner_priority = {
-                item.decode() if isinstance(item, bytes) else str(item)
-                for item in ((owner_data or [b''])[0] or b'').split()
-            }
+        away_high = 0
+        away_processed = []
+        away_skipped = set()
+        away_held = set()
+        if away_mode:
             away_scan_identity = 'away-scan\t%s\t%s' % (
                 uidv, afk_record_field('entered_epoch') or '')
-            away_scanned = load_away_scan(away_scan_path, away_scan_identity)
-            new_uids = [u for u in new_uids if u not in away_scanned]
-        retry_header_reserve = min(len(retry_candidates), 5) if afk_email_active else 0
-        if afk_email_active:
-            retry_candidates = retry_candidates[:retry_header_reserve]
-        new_window = max(0, window - retry_header_reserve)
-        priority_new = [u for u in new_uids if u in owner_priority]
-        new_candidates = (
-            priority_new + [u for u in new_uids if u not in owner_priority]
-        )[:new_window]
+            away_high = load_away_scan(away_scan_path, away_scan_identity)
+            new_set = set(new_uids)
+            new_candidates = sorted(
+                (u for u in unseen if u.isdigit() and int(u) > away_high), key=int)
+            retry_window = []
+            retry_candidates = []
+        else:
+            new_set = set()
+            new_candidates = new_uids[:window]
         # Only a retry uid that is already surfaced (in the cursor) is a pure
         # retry re-fetch. A retry-set uid that is not yet in the cursor is a
         # degraded wake that failed to record - it stays a new candidate so
@@ -654,103 +662,32 @@ def cmd_poll_list():
         retry_idx = -1
         first_retry_emitted_index = -1
         header_fetches = 0
-        for u in new_candidates + retry_candidates:
-            is_retry = u in retry and u in seen
-            if is_retry:
-                retry_idx += 1
-            if is_retry:
-                if retry_emitted >= retry_budget:
-                    # Past the retry budget: leave this candidate in the scan
-                    # (do not advance past it) so a later poll reaches it once
-                    # budget frees up. Advancing the durable position by the
-                    # full window while emitting only the budgeted prefix would
-                    # revisit the same prefix forever and strand later
-                    # recovered uids (a scan is a cursor over the whole retry
-                    # set, and every uid must be reachable).
+        try:
+            for u in new_candidates + retry_candidates:
+                is_retry = u in retry and u in seen
+                if away_mode:
+                    if new_emitted + retry_emitted >= cap:
+                        break
+                    away_processed.append(u)
+                    if not is_retry and u not in new_set:
+                        away_skipped.add(u)
+                        continue
+                elif is_retry:
+                    retry_idx += 1
+                    if retry_emitted >= retry_budget:
+                        # Past the retry budget: leave this candidate in the scan
+                        # (do not advance past it) so a later poll reaches it once
+                        # budget frees up. Advancing the durable position by the
+                        # full window while emitting only the budgeted prefix would
+                        # revisit the same prefix forever and strand later
+                        # recovered uids (a scan is a cursor over the whole retry
+                        # set, and every uid must be reachable).
+                        continue
+                    retry_examined += 1
+                elif new_emitted >= new_budget:
                     continue
-                retry_examined += 1
-            elif new_emitted >= new_budget:
-                continue
-            if invalid_posture:
-                out.append((clean(u), '', '', '', 'deferred'))
-                if is_retry:
-                    retry_emitted += 1
-                    if first_retry_emitted_index == -1:
-                        first_retry_emitted_index = retry_idx
-                else:
-                    new_emitted += 1
-                continue
-
-            if header_fetches >= 20:
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            sock = getattr(m, 'sock', None)
-            if sock is not None:
-                sock.settimeout(min(MAIL_TIMEOUT, remaining))
-            header_fetches += 1
-            # A raised or empty header FETCH is treated as a failure for THIS uid only,
-            # so one bad message can never abort the bounded scan: a new uid is
-            # surfaced degraded, a retry uid is left for a later scan step, and
-            # the scan advances.
-            try:
-                fetch_spec = '(RFC822.SIZE BODY.PEEK[HEADER])' if afk_enabled else '(BODY.PEEK[HEADER])'
-                typ, msg = m.uid('fetch', u.encode(), fetch_spec)
-                if typ != 'OK' or not msg or not msg[0]:
-                    raise ValueError('no header data')
-                header_bytes = fetched_literal(msg)
-                if not header_bytes:
-                    raise ValueError('no header data')
-                mi = email.message_from_bytes(header_bytes)
-
-                uid = clean(u)
-                idate = clean(dec(mi.get('Date')))
-                subj = clean(dec(mi.get('Subject')))
-                fr = clean(dec(mi.get('From')))
-                ignored = afk_email_active and (
-                    not from_is_configured(fr, OWNER_EMAIL)
-                    or not gmail_authentication_pass(mi)
-                )
-                if afk_enabled and not ignored and from_is_configured(fr, recipient):
-
-                    try:
-                        message_size = fetched_size(msg)
-                        if message_size is None:
-                            raise AfkBodyFetchError('RFC822.SIZE was unavailable for the configured sender')
-                        if message_size <= MAX_AFK_BODY_BYTES:
-                            body_type, body_data = m.uid(
-                                'fetch', u.encode(), f'(BODY.PEEK[]<0.{MAX_AFK_BODY_BYTES}>)')
-                            body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
-                            if body_bytes is None or len(body_bytes) != message_size:
-                                raise AfkBodyFetchError('configured sender body fetch was incomplete')
-                            body_message = email.message_from_bytes(body_bytes)
-                            afk_messages.append({
-                                'uidvalidity': uidv,
-                                'uid': uid,
-                                'from': fr,
-                                'subject': subj,
-                                'body': plain_body(body_message),
-                            })
-                        else:
-                            subj = clean(
-                                f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
-
-                    except (AfkBodyFetchError, socket.timeout, TimeoutError):
-                        raise
-                    except Exception as error:
-                        raise AfkBodyFetchError('configured sender body fetch failed') from error
-            except AfkBodyFetchError:
-                if is_retry:
-                    continue
-                out.append((uid, idate, fr, subj, 'degraded'))
-                new_emitted += 1
-                continue
-            except (socket.timeout, TimeoutError):
-                break
-            except Exception:
-                if afk_email_active:
-                    out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
+                if invalid_posture:
+                    out.append((clean(u), '', '', '', 'deferred'))
                     if is_retry:
                         retry_emitted += 1
                         if first_retry_emitted_index == -1:
@@ -758,24 +695,109 @@ def cmd_poll_list():
                     else:
                         new_emitted += 1
                     continue
-                if is_retry:
-                    continue
-                out.append((clean(u), '', '(no header)',
-                            'unfetchable header - see fm-mail read', 'degraded'))
-                new_emitted += 1
-                continue
-            status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
-            if not ignored and afk_email_active and not afk_enabled:
 
-                status = 'degraded'
-            out.append((uid, idate, fr, subj, status))
-            if status != 'ignored':
-                if is_retry:
-                    retry_emitted += 1
-                    if first_retry_emitted_index == -1:
-                        first_retry_emitted_index = retry_idx
-                else:
+                if header_fetches >= 20:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                sock = getattr(m, 'sock', None)
+                if sock is not None:
+                    sock.settimeout(min(MAIL_TIMEOUT, remaining))
+                header_fetches += 1
+                # A raised or empty header FETCH is treated as a failure for THIS uid only,
+                # so one bad message can never abort the bounded scan: a new uid is
+                # surfaced degraded, a retry uid is left for a later scan step, and
+                # the scan advances.
+                try:
+                    fetch_spec = '(RFC822.SIZE BODY.PEEK[HEADER])' if afk_enabled else '(BODY.PEEK[HEADER])'
+                    typ, msg = m.uid('fetch', u.encode(), fetch_spec)
+                    if typ != 'OK' or not msg or not msg[0]:
+                        raise ValueError('no header data')
+                    header_bytes = fetched_literal(msg)
+                    if not header_bytes:
+                        raise ValueError('no header data')
+                    mi = email.message_from_bytes(header_bytes)
+
+                    uid = clean(u)
+                    idate = clean(dec(mi.get('Date')))
+                    subj = clean(dec(mi.get('Subject')))
+                    fr = clean(dec(mi.get('From')))
+                    ignored = afk_email_active and (
+                        not from_is_configured(fr, OWNER_EMAIL)
+                        or not gmail_authentication_pass(mi)
+                    )
+                    if afk_enabled and not ignored and from_is_configured(fr, recipient):
+
+                        try:
+                            message_size = fetched_size(msg)
+                            if message_size is None:
+                                raise AfkBodyFetchError('RFC822.SIZE was unavailable for the configured sender')
+                            if message_size <= MAX_AFK_BODY_BYTES:
+                                body_type, body_data = m.uid(
+                                    'fetch', u.encode(), f'(BODY.PEEK[]<0.{MAX_AFK_BODY_BYTES}>)')
+                                body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
+                                if body_bytes is None or len(body_bytes) != message_size:
+                                    raise AfkBodyFetchError('configured sender body fetch was incomplete')
+                                body_message = email.message_from_bytes(body_bytes)
+                                afk_messages.append({
+                                    'uidvalidity': uidv,
+                                    'uid': uid,
+                                    'from': fr,
+                                    'subject': subj,
+                                    'body': plain_body(body_message),
+                                })
+                            else:
+                                subj = clean(
+                                    f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
+
+                        except (AfkBodyFetchError, socket.timeout, TimeoutError):
+                            raise
+                        except Exception as error:
+                            raise AfkBodyFetchError('configured sender body fetch failed') from error
+                except AfkBodyFetchError:
+                    away_held.add(u)
+                    if is_retry:
+                        continue
+                    out.append((uid, idate, fr, subj, 'degraded'))
                     new_emitted += 1
+                    continue
+                except (socket.timeout, TimeoutError):
+                    break
+                except Exception:
+                    if afk_email_active:
+                        out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
+                        if is_retry:
+                            retry_emitted += 1
+                            if first_retry_emitted_index == -1:
+                                first_retry_emitted_index = retry_idx
+                        else:
+                            new_emitted += 1
+                        continue
+                    if is_retry:
+                        continue
+                    out.append((clean(u), '', '(no header)',
+                                'unfetchable header - see fm-mail read', 'degraded'))
+                    new_emitted += 1
+                    continue
+                status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
+                if not ignored and afk_email_active and not afk_enabled:
+
+                    status = 'degraded'
+                out.append((uid, idate, fr, subj, status))
+                if status != 'ignored':
+                    if is_retry:
+                        retry_emitted += 1
+                        if first_retry_emitted_index == -1:
+                            first_retry_emitted_index = retry_idx
+                    else:
+                        new_emitted += 1
+        except TimeoutError:
+            pass
+        disarm_poll_deadline()
+        sock = getattr(m, 'sock', None)
+        if sock is not None:
+            sock.settimeout(1)
         # Finish every IMAP round-trip before emit or persist so a hung
         # logout cannot run after the retry-scan position advances. Then emit
         # the mailbox generation guard and each message row (uid, date, from,
@@ -794,6 +816,8 @@ def cmd_poll_list():
         except Exception:
             pass
         m = None
+        row_uids = {row[0] for row in out}
+        afk_messages = [message for message in afk_messages if message['uid'] in row_uids]
         if afk_messages:
             helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
             try:
@@ -810,6 +834,7 @@ def cmd_poll_list():
                 handoff_failed = True
             if handoff_failed:
                 failed_uids = {message['uid'] for message in afk_messages}
+                away_held |= failed_uids
                 out = [
                     (uid, idate, fr, subj, 'degraded' if uid in failed_uids else status)
                     for uid, idate, fr, subj, status in out
@@ -893,11 +918,15 @@ def cmd_poll_list():
         # skip an unspent turn.
         if next_turn is not None:
             save_turn(turn_path, next_turn)
-        if afk_email_active and not invalid_posture:
-            newly_ignored = {row[0] for row in out if row[4] == 'ignored'}
-            if newly_ignored:
-                save_away_scan(away_scan_path, away_scan_identity,
-                               away_scanned | newly_ignored)
+        if away_mode:
+            row_uids = {row[0] for row in out}
+            high = away_high
+            for u in away_processed:
+                if u in away_held or (u not in row_uids and u not in away_skipped):
+                    break
+                high = int(u)
+            if high != away_high:
+                save_away_scan(away_scan_path, away_scan_identity, high)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures
@@ -906,6 +935,7 @@ def cmd_poll_list():
         print('fm-mail poll error:', e, file=sys.stderr)
         return 1
     finally:
+        disarm_poll_deadline()
         if m is not None:
             try:
                 m.logout()

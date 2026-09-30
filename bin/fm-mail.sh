@@ -180,9 +180,9 @@ RETRY_POS="$STATE_DIR/.mail-retry-pos"
 # retry recovery) at cap 1; cleared with the retry machinery on a generation
 # change so a new mailbox starts with new mail first.
 TURN="$STATE_DIR/.mail-turn"
-# Away-posture scan record: uids examined and ignored while away, keyed to the
-# mailbox generation and away entry, so a spoofed or outsider backlog is
-# fetched once per away posture without entering the cursor.
+# Away-posture scan cursor: the highest uid examined while away, keyed to the
+# mailbox generation and away entry, so each uid is fetched at most once per
+# away posture and ignored mail stays out of the cursor above.
 AWAY_SCAN="$STATE_DIR/.mail-away-scan"
 
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the

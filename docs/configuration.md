@@ -1454,7 +1454,7 @@ Pi's optional `/afk` email destination is separate from general mail transport; 
 
 
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
-`FM_MAIL_POLL_BUDGET` (default 6 seconds; the mail check sets half its own budget) bounds the elapsed IMAP work of one poll and each fetch's socket timeout; a poll that reaches it hands off what it already fetched and leaves the remaining candidates for the next poll.
+`FM_MAIL_POLL_BUDGET` (default 6 seconds; the mail check sets half its own budget) is one wall-clock bound on a poll's IMAP work from connect through every fetch, and caps each socket timeout; a poll that reaches it hands off what it already fetched and leaves the remaining candidates for the next poll.
 
 **Unfetchable headers**
 
