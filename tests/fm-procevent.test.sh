@@ -3313,14 +3313,21 @@ cat > "$READ" <<'EOF'
 session:
   file: /review.html
   status: feedback
-prompts[2]{uid,prompt,selector,tag,text}:
+prompts[4]{uid,prompt,selector,tag,text}:
   "5","Q1 hosting: Option A - note: sample note, with a comma?\n second line.\n\nContext data:\n{\n  \"question\": \"Q1-hosting\",\n  \"answer\": \"Option A\",\n  \"note\": \"sample note, with a comma?\\n second line.\"\n}","section#decisions > form:nth-of-type(1)",choice,"Q1 hosting: Option A"
+  "7","Q3 language: Spanish - note: ¿Por qué? Está bien.\n\nContext data:\n{\n  \"question\": \"Q3-language\",\n  \"answer\": \"Spanish\",\n  \"note\": \"¿Por qué? Está bien.\"\n}","section#decisions > form:nth-of-type(3)",choice,"Q3 language: Spanish"
+  "8","Q4 rollout: Later - note: first → then\n\nContext data:\n{\n  \"question\": \"Q4-rollout\",\n  \"answer\": \"Later\",\n  \"note\": \"first → then\"\n}","section#decisions > form:nth-of-type(4)",choice,"Q4 rollout: Later"
   "6","Q2 zones: Option B\n\nContext data:\n{\n  \"question\": \"Q2-zones\",\n  \"answer\": \"Option B\",\n  \"note\": \"\"\n}","section#decisions > form:nth-of-type(2)",choice,"Q2 zones: Option B"
 EOF
-out=$(read_out) || fail "read failed on a tabular capture of annotated choices"
-assert_contains "$out" "presented_items: 2" "an annotated choice row was not presented"
-assert_contains "$out" $'| Q1 hosting: Option A\nnote:\n| sample note, with a comma?\n|  second line.\nANNOTATION 2 of 2' \
+out=$(read_out 2>&1) || fail "read failed on a tabular capture of annotated choices"
+assert_contains "$out" "presented_items: 4" "an annotated choice row was not presented"
+assert_contains "$out" $'| Q1 hosting: Option A\nnote:\n| sample note, with a comma?\n|  second line.\nANNOTATION 2 of 4' \
   "a choice's typed note was dropped"
+assert_contains "$out" $'| Q3 language: Spanish\nnote:\n| ¿Por qué? Está bien.\nANNOTATION 3 of 4' \
+  "a choice's accented typed note was not kept as UTF-8"
+assert_contains "$out" $'| Q4 rollout: Later\nnote:\n| first → then\nANNOTATION 4 of 4' \
+  "a choice's typed note beyond Latin-1 was not kept as UTF-8"
+assert_not_contains "$out" "Wide character" "a choice's typed note was printed as wide characters"
 assert_contains "$out" $'| Q2 zones: Option B\nEND ANNOTATIONS' \
   "a choice with an empty note invented a note field"
 assert_not_contains "$out" "Context data:" "a choice note surfaced the machine-generated context"

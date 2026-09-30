@@ -848,7 +848,9 @@ cmd_read() {
       if (defined $ctx) {
         my $data = eval { JSON::PP::decode_json($ctx) };
         if (ref($data) eq "HASH" && defined $data->{note} && !ref $data->{note}) {
-          return $data->{note};
+          my $note = $data->{note};
+          utf8::encode($note);
+          return $note;
         }
       }
       $prose =~ s/\A\s+|\s+\z//g;
