@@ -2081,7 +2081,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 ## Fleet seat pools (config/fleet-seats)
 
 `config/fleet-seats` is an optional local, gitignored JSON file in the primary home that caps how many agents may be active at once on a shared model endpoint across the whole fleet, rather than per home.
-Without it, nothing is capped and every spawn behaves as before.
+Without it, launches are not capped.
 [`bin/fm-fleet-seats.sh`](../bin/fm-fleet-seats.sh) owns the accounting mechanics and exit codes; this section owns the operator contract.
 
 ```json
@@ -2106,7 +2106,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 **What a seat is**
 
 - A seat is one active agent slot, never an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
-- Every launch holds its seat per incarnation: the launch's generation is reserved before anything else, and it counts while reserved or confirmed.
+- Every tracked launch reserves its generation before endpoint effects; its holder counts once in each pool containing a reserved or confirmed incarnation's model.
 - A ship or scout on a pooled model holds a seat from spawn until cleanup releases exactly its generation, including while it waits for review or merge.
 - A relaunch reserves the replacement before the old agent is touched: on the same pool it keeps one seat even when the pool is full, and onto another pool it needs a destination seat first and frees the old seat only after the old agent's stop is proven.
 - An exact predecessor observed alive is confirmed before control stops it, including workers and unpooled supervisors whose initial spawn needed no startup wait.
@@ -2121,19 +2121,22 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
 - Ambiguous liveness, a transport failure, or a timeout keeps the seat counted.
 - The startup wait accepts fractional `FM_CONTROL_LAUNCH_WAIT` and `FM_CONTROL_POLL` values, matching the control plane.
-- A v1 seat matching a task’s model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
+- A v1 seat matching a task's model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
 - The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
-- While any pool is configured, every launch needs an explicit, verified `--model`. A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably. With no declaration, those launches behave as before.
+- While any pool is configured, every launch needs an explicit, verified `--model`.
+  A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably.
+  Without pools, seat accounting does not impose this model requirement.
 
 **Which homes share a pool**
 
 - The primary home and every local secondmate whose parent binding leads to it share the primary's pools and one lock, so simultaneous launches cannot both take the last seat.
 - The count includes every pooled agent recorded in the primary and in local secondmates reached through each home's `data/secondmates.md`, including nested homes and agents launched before the pool was declared.
-- A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired. A record with a resolved unpooled model occupies none.
+- A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired.
+  A record with a resolved unpooled model occupies none.
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds outside the fleet lock, with certificate publication fenced by the pending epoch, and a pooled remote launch files a seat request in that host's remote root home and waits for that answer.
 - Each remote home and its local descendants share one host ledger, delivery path, and certificate, including pooled descendants that predate the declaration.
 - Unpooled remote approvals are recorded as holders before certificate publication, so a later policy change counts them immediately.
-- A remote secondmate's own seat belongs to the primary: an initial launch or relaunch reserves its generation at the primary before the host is asked anything, and the host reports one outcome bound to that generation.
+- A remote secondmate's own seat belongs to the primary: an initial launch or relaunch reserves its generation at the primary before the host's launch or relaunch operation, and the host reports one outcome bound to that generation.
 - A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
 - A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.
 - A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation.
@@ -2142,23 +2145,27 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - Each delivery invalidates the remote's previous confirmation before it is sent and restores it only from a complete, matching answer, so a lost or late answer keeps admission refused rather than trusting stale counts.
 - An unreachable remote keeps its last counted seats rather than freeing them, and a remote running an older version stays unconfirmed until it is updated.
 - An in-flight seat remains counted by its recorded model when that model moves between pools, including before the agent publishes a task record.
-- Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused. Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery. A home with no declaration, or a delivered empty declaration, launches as before.
+- Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused.
+  Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery.
+  With no declaration, or a delivered empty declaration, launches are uncapped, with existing holders still tracked as described above.
 - A remote request the primary does not answer within 90 seconds is withdrawn and refused, and removing this file clears every remote on the next delivery.
 
 **Refusals**
 
-- `fm-spawn.sh` reserves the seat before any endpoint, worktree, or record exists, so a refusal costs nothing to unwind.
+- `fm-spawn.sh` reserves the seat before creating a fresh task's endpoint, worktree, or task record.
 - A full pool refuses with the current holders listed.
 - An unreachable, unconfirmed, unreadable, locked, or malformed authority also refuses, including a missing registered local home, missing remote snapshot, or unparseable secondmate registry record, because an uncounted seat is never treated as free.
 - A running agent, including a primary that starts while the pool is full, is never refused or preempted; new pooled launches refuse until the count is back under capacity.
 - No refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
-- A reservation whose launching process died is resolved by the watcher's periodic seat maintenance once evidence proves it never launched or its endpoint is gone; until then it stays counted, so an orphan can briefly hold capacity.
+- A reservation whose launching process died is resolved by the watcher's periodic seat maintenance only with evidence that it never dispatched, its confirmed agent later died, or its exact endpoint is proven destroyed; until then the orphan stays counted, however long that evidence remains unavailable.
 - Bounded maintenance rotates its starting holder every 30 seconds so uncertain or busy launches do not permanently prevent later holders from being reconciled.
-- A live task record is never reclaimed.
+- A ship or scout's seat is retained until cleanup while its task record still names that generation; a supervisor's record may remain during generation-specific recovery.
 
 **Delivery**
 
-The primary delivers its current declaration directly to remote secondmates, including an empty declaration after a pool is removed. An inherited copy identifies pools that must refuse before first delivery; it never grants a seat or acts as reservation authority. With no declaration, reservation does not require `jq` or remote confirmation.
+The primary delivers its current declaration directly to remote secondmates, including an empty declaration after a pool is removed.
+An inherited copy identifies pools that must refuse before first delivery; it never grants a seat or acts as reservation authority.
+With no declaration and no existing holder ledger, reservation does not require `jq` or remote confirmation; previously recorded holders still require `jq` for generation tracking.
 
 ## Toolchain
 
@@ -3435,7 +3442,7 @@ FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn, expli
 FM_STREAM_SILENT_MAX_SECS=         # opt-in Pi worker foreground model-stream silence threshold; off by default; see the option above and bin/fm-busy-lib.sh
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog captain hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered supervisor-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a captain-held transfer or backlog captain hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
-FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery actions and refusal rules; zero or invalid values use 60
+FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery authorization, actions, refusal rules, and emits exactly one check wake per relaunch; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-driven relaunch's per-home lock wait and its spawn execution; a lock-wait timeout skips recovery without touching the endpoint or recording an attempt; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600

@@ -444,14 +444,10 @@ All remote secondmates on one host share `fm-remote` and retain separate `2ndmat
 
 ### Liveness recovery
 
-Startup liveness recovery relaunches a dead or missing remote second mate through this same command.
+Startup liveness recovery uses this same command when the shared recovery owner authorizes replacement.
 So recovery passes the same readiness gate rather than a weaker one.
 
-The watcher's liveness tick applies the identical rule during ordinary supervision through the shared `bin/fm-secondmate-liveness-lib.sh`:
-
-- The remote endpoint is probed read-only once per cadence.
-- Only a positive `dead` or `missing` reply relaunches through that command.
-- An unreachable transport or inconclusive state is left untouched rather than replaced locally.
+The watcher's liveness tick uses the same [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh), whose header owns generation-bound authorization, read-only remote probes, and refusal to replace an uncertain remote locally.
 
 ### Inventory reconcile for markerless routes
 
@@ -652,15 +648,9 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
-Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reserves the replacement's primary fleet seat before host control, reads the confirmed identity back from the host's endpoint record, and republishes the primary's own route metadata to match.
+Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reserves the replacement's primary fleet seat before host replacement, reads the confirmed identity back from the host's endpoint record, and republishes the primary's own route metadata to match.
 When fleet seat pools are configured, this wrapper is the required path: the host refuses a supervisor relaunch that does not carry the primary's seat operation.
-A persist-before-restart request binds to the host's recorded launch generation as well as the primary's route.
-The wrapper forwards that expected generation into host control, which compares it inside the host lifecycle episode before stopping anything.
-Host-local launch, relaunch, and disposition acquire or adopt the same episode even when no seat pools or parent operation are present.
-A missing binding or newer incarnation takes the re-read nudge path.
-When a launch reuses an existing generation, its receipt binds the request token to that actual generation.
-Later disposition reads probe that generation’s endpoint again, and host replacement resolves predecessor evidence through the same binding.
-A terminal outcome preserves every matching receipt’s request identity for delayed retries.
+[`bin/fm-secondmate-restart.sh`](../bin/fm-secondmate-restart.sh)'s header owns persistence-gated restart and the re-read fallback when the original incarnation cannot safely be replaced.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence

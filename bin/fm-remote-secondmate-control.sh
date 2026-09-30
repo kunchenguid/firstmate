@@ -60,7 +60,7 @@
 # refusal, or failure - with one "seat_disposition=<json>" line:
 #   {schema:"fm-remote-seat-operation.v2", task, operation,
 #    requested_generation, actual_generation, previous_generation,
-#    disposition, startup_confirmed, old_stopped, route, actual_model,
+#    disposition, startup_confirmed, old_stopped, old_destroyed, route, actual_model,
 #    complete:true}
 # with disposition prelaunch | started | existing | cancelled |
 # dead-after-start | unknown. A same-token retry reports the durable episode
@@ -68,12 +68,16 @@
 # or foreign receipt is unknown, never a refusal). While this home has seat
 # pools, a launch or relaunch with no operation refuses before touching
 # anything: the parent wrapper must account for it. Each operation keeps its
-# own receipt, so a later operation never erases the one that answers for the
-# running generation; opening a receipt prunes every other receipt except the
-# running generation's. Receipt keys: schema,
+# own receipt; opening a new one preserves earlier receipts. An `existing`
+# receipt binds its request token to the actual generation it observed, so
+# disposition and predecessor readiness resolve evidence through that binding,
+# not just a receipt filename equal to the generation. Replacement preserves
+# matching receipts' request identities when recording terminal outcomes.
+# Receipt keys: schema,
 # operation, verb, requested_generation, previous_generation, phase
-# (received | prelaunch | existing | dispatched | started), actual_generation,
-# route_backend, route_target, actual_model.
+# (received | prelaunch | existing | dispatched | started | dead-after-start |
+# cancelled), actual_generation, route_backend, route_target, actual_model,
+# old_stopped, old_destroyed.
 #
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the

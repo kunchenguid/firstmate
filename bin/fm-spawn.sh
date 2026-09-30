@@ -1466,8 +1466,8 @@ spawn_remote_secondmate() {
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
   # The remote supervisor's seat is parent-owned (bin/fm-fleet-seats.sh
-  # "REMOTE SUPERVISORS"): reserve this generation before the host is asked for
-  # anything, dispatch it with the host operation token, and let the host's
+  # "REMOTE SUPERVISORS"): reserve this generation before the host launch
+  # operation, dispatch it with the host operation token, and let the host's
   # token-scoped disposition - never a bare marker or exit status - decide
   # whether the candidate is released, confirmed, or stays counted.
   local seat_out seat_prev seat_ledger_gen seat_tracked=0 seat_disposition seat_response seat_rc accounting_gen remote_spawn_gen
