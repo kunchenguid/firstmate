@@ -6,7 +6,7 @@ It provides task workspaces and terminals while Treehouse continues to provide g
 
 ## Setup
 
-Pick Paseo when you already use the app as your terminal and want each project's tasks as tabs of one `firstmate` workspace in its sidebar, with the same UX as Herdr.
+Pick Paseo when you already use the app as your terminal and want tasks as tabs in its sidebar, with the same UX as Herdr: in Firstmate's own workspace when Firstmate runs inside Paseo, otherwise in one `firstmate` workspace per project.
 Paseo is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Firstmate session.
 
 Prerequisites:
@@ -92,10 +92,10 @@ Paseo exposes no native generic agent busy signal, so supervision uses capture/h
 ## Visible tabs versus nested agent views
 
 Paseo can show sub-agents nested inside the current tab, clickable to open as their own view, without opening a separate top-level tab.
-Firstmate's design keeps the terminal-per-task model as the authority: every task gets exactly one terminal tab in the project's shared workspace, opened at spawn and closed at cleanup.
+Firstmate's design keeps the terminal-per-task model as the authority: every task gets exactly one terminal tab in its workspace, opened at spawn and closed at cleanup.
 A nested sub-agent view therefore never becomes routing or lifecycle authority for Firstmate - it is an extra view the captain may click into while the task's single terminal remains the endpoint.
 
-The practical tradeoff: a task terminal running a harness that itself spawns sub-agents will show those agents nested inside the task's tab, not as new top-level tabs, so the tab count under the shared workspace matches Firstmate tasks exactly.
+The practical tradeoff: a task terminal running a harness that itself spawns sub-agents will show those agents nested inside the task's tab, not as new top-level tabs, so each Firstmate task adds exactly one tab.
 The tradeoff surfaced is agent surface versus terminal surface - a nested agent view is visible and clickable but not separately addressable by `fm-send`/`fm-peek`, which always target the task's one recorded terminal.
 
 A closed tab does not preserve its visible scrollback history: `terminal kill` reclaims the endpoint with no transcript left behind for later reading.
