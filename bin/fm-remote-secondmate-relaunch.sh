@@ -53,7 +53,7 @@ usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 EXPECT_GENERATION=
 case "$#" in
   4) ;;
-  6) [ "$5" = --expect-generation ] || usage; EXPECT_GENERATION=$6 ;;
+  6) [ "$5" = --expect-generation ] || usage; [ -n "$6" ] || { echo "error: missing expected generation; nothing was changed" >&2; exit 6; }; EXPECT_GENERATION=$6 ;;
   *) usage ;;
 esac
 ID=$1
@@ -125,6 +125,7 @@ SEAT_TRACKED=0
 case "$SEAT_OUT" in 'fleet-seats: reserved '*|'fleet-seats: recorded '*) SEAT_TRACKED=1 ;; esac
 
 RELAUNCH_ARGS=(relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT")
+[ -z "$EXPECT_GENERATION" ] || RELAUNCH_ARGS+=(--expect-generation "$EXPECT_GENERATION")
 if [ "$SEAT_TRACKED" -eq 1 ]; then
   ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || die "cannot stage the seat route for $ID"
   if ! { jq -cn --arg host "$REMOTE_HOST" --arg root "$(fm_meta_get "$META" remote_root)" \
@@ -150,6 +151,10 @@ if [ "$SEAT_TRACKED" -eq 1 ]; then
     seat_rc=0
     seats reconcile-remote "$ID" --generation "$NEW_GEN" --response-file "$ROUTE_FILE" >&2 || seat_rc=$?
     [ "$seat_rc" -ne 0 ] || DISPOSITION=$(printf '%s\n' "$RESPONSE" | jq -r '.disposition // empty' 2>/dev/null || true)
+  fi
+  if [ "$rc" -eq 6 ]; then
+    printf '%s\n' "$RELAUNCH_OUT" >&2
+    exit 6
   fi
   if [ "$DISPOSITION" != started ]; then
     printf '%s\n' "$RELAUNCH_OUT" >&2

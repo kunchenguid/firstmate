@@ -973,7 +973,7 @@ test_spawn_rejects_unverified_models() {
 }
 
 test_spawn_holds_a_seat_until_cleanup() {
-  local out
+  local out gen
   spawn_case spawn-seat
   pools "$HOME_DIR" 1
   out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode local-only --yolo off \
@@ -982,7 +982,12 @@ test_spawn_holds_a_seat_until_cleanup() {
   out=$(in_home "$SEATS" reserve other --generation g-other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1)
   expect_code 4 "$?" "a second seat while the spawned worker holds the only one"
   assert_contains "$out" "$TASK" "the seat does not name the spawned task"
+  gen=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$TASK.meta")
+  in_home "$SEATS" reserve "$TASK" --generation g-unpublished --previous-generation "$gen" \
+    --kind ship --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" >/dev/null \
+    || fail "could not reserve the unpublished successor"
   out=$(in_home "$ROOT/bin/fm-teardown.sh" "$TASK" 2>&1) || fail "cleanup failed: $out"
+  assert_equals true "$(in_home "$SEATS" show "$TASK" | jq 'all(.incarnations[]; .lifecycle == "released")')" "cleanup left a generation hidden by stale metadata counted"
   new_holder
   out=$(in_home "$SEATS" reserve other --generation g-other --harness claude --model pool-model-a --holder-pid "$LAST_HOLDER" 2>&1) \
     || fail "cleanup did not release the seat: $out"
@@ -1438,6 +1443,86 @@ test_serve_delivery_releases_fleet_lock() {
   pass "serve delivery permits concurrent fleet transitions and publishes its fenced certificate"
 }
 
+test_unpooled_grants_exist_before_certificate_publication() {
+  local base="$TMP_ROOT/unpooled-publication" pid req n out gen
+  make_remote_fleet unpooled-publication 1
+  serve_remotes >/dev/null || fail "initial serve"
+  new_holder
+  gen=g-unpooled
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$R_REMOTE" "$SEATS" reserve unpooled --generation "$gen" --harness pi \
+    --model unpooled-model --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
+  pid=$!
+  req=
+  for n in $(seq 1 100); do
+    for req in "$R_REMOTE/state/fleet-seats/requests/"*.req; do [ ! -f "$req" ] || break; done
+    [ ! -f "$req" ] || break
+    sleep 0.1
+  done
+  [ -f "$req" ] || fail "unpooled client did not request admission"
+  kill -STOP "$pid"
+  serve_remotes >/dev/null || { kill -CONT "$pid"; wait "$pid"; fail "unpooled serve"; }
+  assert_equals reserved "$(lifecycle_of "$R_REMOTE" unpooled "$gen")" "serve published approval before its holder"
+  assert_equals true "$(jq --arg g "$gen" 'any(.holders[]; .generation == $g and .model == "unpooled-model")' "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "the certificate omitted the approved unpooled holder"
+  printf '{"pools":[{"name":"shared","capacity":1,"models":["unpooled-model"]}]}\n' > "$R_ROOT/config/fleet-seats"
+  serve_remotes >/dev/null || { kill -CONT "$pid"; wait "$pid"; fail "new-policy serve"; }
+  kill -CONT "$pid"
+  wait "$pid" || fail "the counted client lost its grant: $(cat "$base/client.out")"
+  new_holder
+  out=$(reserve "$R_ROOT" contender unpooled-model 2>&1)
+  expect_code 4 "$?" "a policy change omitted an approved holder: $out"
+  pass "unpooled grants are materialized before certificates and remain counted across policy changes"
+}
+
+test_remote_descendants_use_one_authority() {
+  local base="$TMP_ROOT/remote-descendants" child pid out n
+  make_remote_fleet remote-descendants 2
+  child="$base/child"
+  make_local_secondmate "$child" "$R_REMOTE" nested
+  task_record "$child" existing pool-model-a
+  serve_remotes >/dev/null || fail "initial descendant serve"
+  assert_equals true "$(jq --arg st "$child/state" 'any(.holders[]; .state_dir == $st and .task == "existing")' "$R_ROOT/state/fleet-seats/remote-theshop.cert")" "the remote certificate omitted a descendant worker"
+  new_holder
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    FM_HOME="$child" "$SEATS" reserve nested-worker --generation g-nested --harness pi \
+    --model pool-model-a --holder-pid "$LAST_HOLDER" > "$base/client.out" 2>&1 &
+  pid=$!
+  for n in $(seq 1 100); do
+    [ -z "$(ls "$R_REMOTE/state/fleet-seats/requests/"*.req 2>/dev/null)" ] || break
+    sleep 0.1
+  done
+  serve_remotes >/dev/null || fail "descendant grant serve"
+  wait "$pid" || fail "the descendant could not receive its shared grant: $(cat "$base/client.out")"
+  assert_equals reserved "$(lifecycle_of "$child" nested-worker g-nested)" "the descendant could not read its shared holder"
+  assert_absent "$child/state/fleet-seats" "the descendant created a separate ledger"
+  new_holder
+  out=$(reserve "$R_ROOT" contender pool-model-a 2>&1)
+  expect_code 4 "$?" "remote descendant capacity was not counted: $out"
+  seats "$child" release nested-worker --generation g-nested --reason prelaunch >/dev/null || fail "descendant release"
+  serve_remotes >/dev/null || fail "descendant release serve"
+  reserve "$R_ROOT" contender pool-model-a >/dev/null || fail "descendant release did not return shared capacity"
+  pass "remote certificates and descendant transitions share one host authority"
+}
+
+test_opt_out_records_only_existing_holder_successors() {
+  local home="$TMP_ROOT/optout-successor" out
+  make_home "$home"
+  pools "$home" 1
+  new_holder
+  reserve_gen "$home" original g1 - pool-model-a >/dev/null || fail "initial holder"
+  rm "$home/config/fleet-seats"
+  out=$(reserve_gen "$home" newcomer g-new - pool-model-a)
+  assert_equals '' "$out" "opt-out recorded a new admission"
+  assert_equals '' "$(seats "$home" show newcomer)" "opt-out issued an unrelated holder"
+  reserve_gen "$home" original g2 g1 pool-model-a >/dev/null || fail "opt-out successor"
+  assert_equals reserved "$(lifecycle_of "$home" original g2)" "opt-out lost the tracked successor"
+  seats "$home" release original --generation g1 --reason prelaunch >/dev/null || fail "predecessor release"
+  pools "$home" 1
+  out=$(reserve_gen "$home" contender g-other - pool-model-a 2>&1)
+  expect_code 4 "$?" "restored policy forgot its opt-out successor: $out"
+  pass "policy opt-out preserves existing holder handoffs and leaves new admissions untracked"
+}
+
 test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
@@ -1475,3 +1560,7 @@ test_confirmed_missing_and_policy_removal
 test_unconfirmed_replacement_retains_predecessor
 test_terminal_generations_and_removed_aliases
 test_serve_delivery_releases_fleet_lock
+
+test_unpooled_grants_exist_before_certificate_publication
+test_remote_descendants_use_one_authority
+test_opt_out_records_only_existing_holder_successors

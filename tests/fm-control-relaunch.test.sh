@@ -3078,8 +3078,8 @@ test_same_pool_relaunch_keeps_one_seat_through_the_handoff() {
     || fail "the journal did not record the replacement's seat generation"
   [ "$(journal_field "$dir" rl51 seat_previous_generation)" = g-old ] \
     || fail "the journal did not record the replaced generation"
-  [ "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .launch_phase')" = dispatching ] \
-    || fail "the replacement's seat was not dispatched with its endpoint"
+  [ "$(case_seats "$dir" show rl51 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .launch_phase')" = started ] \
+    || fail "the replacement's seat was not confirmed with its endpoint"
   out=$(probe_seat "$dir" pool-model-a); rc=$?
   expect_code 4 "$rc" "another holder after the same-pool relaunch: $out"
   pass "fm-control relaunch: a same-pool replacement keeps exactly one counted seat"
@@ -3219,6 +3219,47 @@ test_unconfirmed_predecessor_prevents_control_launch() {
   pass "manual control refuses to launch while its unconfirmed predecessor remains executable"
 }
 
+test_observed_predecessors_and_opt_out_successors() {
+  local dir kind out rc gen old home route
+  for kind in ship scout secondmate optout; do
+    dir=$(new_case "observed-$kind" rl63)
+    mkdir -p "$dir/home/config"
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl63
+      old=g-sm-old
+      printf '{"pools":[{"name":"unrelated","capacity":1,"models":["another-model"]}]}\n' > "$dir/home/config/fleet-seats"
+    else
+      add_ship_task "$dir" rl63 claude
+      pool_case "$dir" rl63
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl63.meta"
+    fi
+    home="$dir/home"
+    route="$home/state/predecessor-route"
+    # shellcheck disable=SC2016
+    env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+      FM_HOME="$home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+        "$SEATS" reserve rl63 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+        (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl63\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
+        "$SEATS" dispatch rl63 --generation "$1" --route-file "$3" >/dev/null
+      ' _ "$old" "${kind/optout/ship}" "$route" || fail "could not dispatch the predecessor for $kind"
+    assert_equals reserved "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the fixture predecessor was already confirmed"
+    if [ "$kind" = optout ]; then
+      cp "$home/config/fleet-seats" "$dir/policy"
+      rm "$home/config/fleet-seats"
+    fi
+    out=$(run_control "$dir" rl63 relaunch --model pool-model-a --note "observed predecessor"); rc=$?
+    expect_code 0 "$rc" "observed $kind predecessor: $out"
+    gen=$(meta_field "$dir" rl63 spawn_gen)
+    assert_equals released "$(case_seats "$dir" show rl63 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the observed predecessor stayed counted"
+    assert_equals confirmed "$(case_seats "$dir" show rl63 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" "the successor did not confirm"
+    [ "$kind" != optout ] || cp "$dir/policy" "$home/config/fleet-seats"
+    out=$(run_control "$dir" rl63 relaunch --model pool-model-a --note "ordinary next relaunch"); rc=$?
+    expect_code 0 "$rc" "next $kind relaunch: $out"
+  done
+  pass "observed worker and unpooled supervisor predecessors confirm before stop, including policy opt-out handoffs"
+}
+
 test_pooled_relaunch_reserves_its_destination_before_stopping
 test_same_pool_relaunch_keeps_one_seat_through_the_handoff
 test_relaunch_rollback_releases_only_an_undelivered_candidate
@@ -3314,3 +3355,5 @@ test_unpooled_supervisor_spawn_keeps_prior_success_semantics
 test_unconfirmed_predecessor_prevents_control_launch
 
 test_host_relaunch_records_terminal_predecessor
+
+test_observed_predecessors_and_opt_out_successors
