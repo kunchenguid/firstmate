@@ -324,12 +324,15 @@ test_build_injects_binds_then_arms() {
   assert_present "$board" "build reported success without a board"
 
   # Round-trip: apart from the reconcile choice the build adds to every
-  # decision card, the payload extracted from the built page is the same JSON
-  # document, and the escaped </script> string can no longer terminate the
-  # data block.
+  # decision card and the generated report-preview map (empty here, since the
+  # payload names no report), the payload extracted from the built page is the
+  # same JSON document, and the escaped </script> string can no longer
+  # terminate the data block.
   extract_payload "$board" | jq -S . > "$home/extracted.json" \
     || fail "the built board does not carry parseable payload JSON"
-  jq -S '.captains_call = [.captains_call[]
+  jq -e '.report_previews == {}' "$home/extracted.json" >/dev/null \
+    || fail "a payload naming no report carried report previews"
+  jq -S 'del(.report_previews) | .captains_call = [.captains_call[]
       | .options = [.options[] | select(.value != "reconcile")]]' \
     "$home/extracted.json" > "$home/stripped.json"
   jq -S '.captains_call = [.captains_call[]

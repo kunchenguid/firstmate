@@ -79,6 +79,18 @@
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
 #
+# LINKS. The template renders every http(s) URL in board text as a link that
+# opens in a new tab. An absolute markdown path in board text (for example
+# /home/me/firstmate/data/<id>/report.md) links to a rendered preview when the
+# file exists: build snapshots each such report into
+# $FM_HOME/.lavish/bearings-board-reports/<hash>.html, beside the board, from
+# the shipped report-preview-template.html, and records the path-to-page map
+# as the generated `report_previews` field of the injected payload (any
+# composer value is replaced). Lavish serves the board directory, so the
+# relative link resolves on the same server; a Lavish page cannot read local
+# files or render raw markdown itself. Each rebuild replaces the whole preview
+# directory, so a preview shows the report as it was at the last build.
+#
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
 # session URL and the same canonical process-event source id. Injection escapes
@@ -94,6 +106,12 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
+PREVIEW_TEMPLATE="$SCRIPT_DIR/../.agents/skills/bearings/assets/report-preview-template.html"
+PREVIEW_PLACEHOLDER='__FM_BEARINGS_REPORT_DATA__'
+PREVIEW_DIR_NAME=bearings-board-reports
+# Same shape the template links: an absolute path ending in .md that starts
+# the text or follows whitespace or an opening bracket or quote.
+REPORT_PATH_RE='(?:^|[\s(\["'"'"'`])(/[^\s"'"'"'<>()\[\]`]+\.md)(?![A-Za-z0-9_])'
 BOARD_SCHEMA=fm-bearings-board.v1
 
 usage() {
@@ -337,6 +355,41 @@ effective_payload() {  # <data.json> <dest.json>
     ]' "$data" > "$dest" || return 1
 }
 
+# Render one report preview page: the shipped preview template with the
+# report's compact JSON injected, every `<` escaped so it stays inert.
+render_report_preview() {  # <report.md> <generated> <dest.html>
+  local json
+  json=$(jq -cn --rawfile md "$1" --arg path "$1" --arg generated "$2" \
+    '{schema: "fm-bearings-report-preview.v1", path: $path, generated: $generated, markdown: $md}' \
+    | sed 's/</\\u003c/g') || return 1
+  printf '%s\n' "$json" | perl -e '
+    my ($tpl, $ph) = @ARGV;
+    my $json = do { local $/; <STDIN> };
+    chomp $json;
+    open my $fh, "<", $tpl or die "cannot read $tpl\n";
+    my $html = do { local $/; <$fh> };
+    $html =~ s/^\Q$ph\E$/$json/m or die "no data slot in $tpl\n";
+    print $html;
+  ' "$PREVIEW_TEMPLATE" "$PREVIEW_PLACEHOLDER" > "$3"
+}
+
+# Snapshot every existing absolute markdown path the payload names into a
+# staged preview directory and record the path-to-page map in the payload.
+stage_report_previews() {  # <payload.json> <stage-dir>
+  local payload=$1 stage=$2 generated path name map='{}' tmp
+  [ -f "$PREVIEW_TEMPLATE" ] && [ ! -L "$PREVIEW_TEMPLATE" ] \
+    || { printf 'fm-bearings-board: report preview template is missing: %s\n' "$PREVIEW_TEMPLATE" >&2; return 1; }
+  generated=$(jq -r '.generated' "$payload") || return 1
+  while IFS= read -r path; do
+    [ -f "$path" ] && [ -r "$path" ] || continue
+    name=$(printf '%s' "$path" | shasum -a 256 | cut -c1-16).html
+    render_report_preview "$path" "$generated" "$stage/$name" || return 1
+    map=$(jq -c --arg path "$path" --arg href "$PREVIEW_DIR_NAME/$name" '.[$path] = $href' <<< "$map") || return 1
+  done < <(jq -r --arg re "$REPORT_PATH_RE" '[.. | strings | scan($re) | .[0]] | unique | .[]' "$payload")
+  tmp="$payload.previews"
+  jq --argjson map "$map" '.report_previews = $map' "$payload" > "$tmp" && mv -f -- "$tmp" "$payload"
+}
+
 # The OWNER column bin/fm-procevent.sh already publishes: live, none,
 # orphaned, or uncertain. Empty means the source is not registered at all.
 source_owner() {  # <source-id>
@@ -358,7 +411,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner
+  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner previews preview_dir
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -374,21 +427,28 @@ command_build() {
     rm -f -- "$effective"
     fail "cannot reconcile the board payload against landed work"
   fi
-  json=$(jq -c . "$effective") || { rm -f -- "$effective"; fail "cannot compact the board data"; }
+  board=$(board_path)
+  (umask 077; mkdir -p "${board%/*}") || { rm -f -- "$effective"; fail "cannot create ${board%/*}"; }
+  previews=$(umask 077; mktemp -d "${board%/*}/.reports.XXXXXX") \
+    || { rm -f -- "$effective"; fail "cannot stage the report previews"; }
+  if ! stage_report_previews "$effective" "$previews"; then
+    rm -rf -- "$previews" "$effective"
+    fail "cannot build the report previews"
+  fi
+  json=$(jq -c . "$effective") || { rm -rf -- "$previews" "$effective"; fail "cannot compact the board data"; }
   rm -f -- "$effective"
   # `<` never appears in JSON syntax outside strings, so escaping every
   # occurrence keeps the payload valid JSON while making </script> inert.
   json=${json//</\\u003c}
 
-  board=$(board_path)
-  (umask 077; mkdir -p "${board%/*}") || fail "cannot create ${board%/*}"
-  tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") || fail "cannot stage the board"
+  tmp=$(umask 077; mktemp "${board%/*}/.board.XXXXXX") \
+    || { rm -rf -- "$previews"; fail "cannot stage the board"; }
   if ! BOARD_JSON="$json" perl -pe "s/^\\Q$PLACEHOLDER\\E\$/\$ENV{BOARD_JSON}/" "$TEMPLATE" > "$tmp"; then
-    rm -f -- "$tmp"
+    rm -rf -- "$tmp" "$previews"
     fail "cannot inject the board data"
   fi
   if grep -qxF "$PLACEHOLDER" "$tmp"; then
-    rm -f -- "$tmp"
+    rm -rf -- "$tmp" "$previews"
     fail "the board data slot survived injection"
   fi
   # Round-trip the injected payload back out of the built page, so a board that
@@ -396,8 +456,14 @@ command_build() {
   extracted=$(sed -n '/<script id="bearings-data" type="application\/json">/,/<\/script>/p' "$tmp" \
     | sed '1d;$d')
   if ! printf '%s\n' "$extracted" | jq -e --arg schema "$BOARD_SCHEMA" '.schema == $schema' >/dev/null 2>&1; then
-    rm -f -- "$tmp"
+    rm -rf -- "$tmp" "$previews"
     fail "the built board does not carry a readable $BOARD_SCHEMA payload"
+  fi
+  # Previews land before the board that links them.
+  preview_dir=${board%/*}/$PREVIEW_DIR_NAME
+  if [ -L "$preview_dir" ] || ! { rm -rf -- "${preview_dir:?}" && mv -- "$previews" "$preview_dir"; }; then
+    rm -rf -- "$tmp" "$previews"
+    fail "cannot publish the report previews"
   fi
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
     rm -f -- "$tmp"

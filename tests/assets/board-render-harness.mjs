@@ -5,7 +5,8 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+//     charted:[{title,sub,badges,pickable,links}], empty, more, error }
+// where links is [{text,href,target,rel}] for every anchor in a row's text.
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -24,6 +25,9 @@ class Node {
     this.type = "";
     this.value = "";
     this.checked = false;
+    this.href = "";
+    this.target = "";
+    this.rel = "";
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
@@ -62,6 +66,7 @@ byId.set("bearings-data", dataNode);
 
 globalThis.document = {
   createElement: (tag) => new Node(tag),
+  createTextNode: (text) => { const n = new Node("#text"); n.textContent = text; return n; },
   // Lazily mint any element the page asks for: the shim tracks whatever ids
   // the shipped template actually uses instead of pinning a fixed list.
   getElementById: (id) => {
@@ -95,6 +100,11 @@ const stats = strip.children.map((t) => ({
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
 }));
 
+const linksOf = (node) =>
+  node.children.flatMap((c) => (c.tagName === "a"
+    ? [{ text: c.textContent, href: c.href, target: c.target, rel: c.rel }]
+    : linksOf(c)));
+
 const rowsOf = (container) =>
   container.children
     .filter((r) => r.className.split(/\s+/).includes("bb-row"))
@@ -105,6 +115,7 @@ const rowsOf = (container) =>
         sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
         badges: badgesOf(row),
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
+        links: main ? linksOf(main) : [],
       };
     });
 

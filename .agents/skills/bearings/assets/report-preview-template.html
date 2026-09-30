@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Report preview</title>
+<style>
+/* Report preview for the bearings board: one markdown report snapshot,
+   rendered with the board's palette. */
+:root {
+  --paper-100: #f6ecd3; --white: #fffdf7; --cream-line: #ddc89c; --paper-300: #e7d6ae;
+  --ink-900: #241c14; --ink-700: #3f3224; --ink-500: #6f5e46;
+  --ocean-600: #2f6688; --ocean-050: #e8f1f5; --paper-000: #fbf4e2;
+  --font-body: "Jost", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--paper-100); color: var(--ink-700); }
+body { font-family: var(--font-body); font-size: 16px; line-height: 1.6; }
+.rp-head { background: var(--white); border-bottom: 1px solid var(--cream-line); padding: 14px 16px; }
+.rp-head__inner, .rp-doc { max-width: 860px; margin: 0 auto; }
+.rp-path { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--ink-900); overflow-wrap: anywhere; }
+.rp-meta { font-size: 13px; color: var(--ink-500); margin-top: 2px; }
+.rp-doc { background: var(--white); border: 1px solid var(--cream-line); border-radius: 10px; padding: 8px 28px 24px; margin: 20px auto; }
+@media (max-width: 900px) { .rp-doc { margin: 16px; padding: 4px 16px 16px; } }
+.rp-doc h1, .rp-doc h2, .rp-doc h3, .rp-doc h4, .rp-doc h5, .rp-doc h6 { color: var(--ink-900); line-height: 1.25; margin: 1.3em 0 0.5em; }
+.rp-doc h1 { font-size: 1.8em; } .rp-doc h2 { font-size: 1.4em; border-bottom: 1px solid var(--paper-300); padding-bottom: 4px; }
+.rp-doc h3 { font-size: 1.15em; }
+.rp-doc a { color: var(--ocean-600); overflow-wrap: anywhere; }
+.rp-doc code { font-family: var(--font-mono); font-size: 0.88em; background: var(--paper-000); border: 1px solid var(--paper-300); border-radius: 4px; padding: 0 4px; overflow-wrap: anywhere; }
+.rp-doc pre { background: var(--paper-000); border: 1px solid var(--paper-300); border-radius: 6px; padding: 12px; overflow-x: auto; }
+.rp-doc pre code { border: none; padding: 0; background: none; overflow-wrap: normal; }
+.rp-doc blockquote { margin: 0; padding: 2px 14px; border-left: 3px solid var(--ocean-600); background: var(--ocean-050); }
+.rp-doc hr { border: none; border-top: 1px solid var(--cream-line); margin: 1.5em 0; }
+.rp-table { overflow-x: auto; }
+.rp-doc table { border-collapse: collapse; font-size: 14px; }
+.rp-doc th, .rp-doc td { border: 1px solid var(--cream-line); padding: 5px 9px; text-align: left; vertical-align: top; }
+.rp-doc th { background: var(--paper-000); color: var(--ink-900); }
+.rp-error { color: #a93a1f; font-weight: 600; }
+</style>
+</head>
+<body>
+<header class="rp-head"><div class="rp-head__inner">
+  <div class="rp-path" id="rp-path"></div>
+  <div class="rp-meta" id="rp-meta"></div>
+</div></header>
+<main class="rp-doc" id="rp-doc"></main>
+
+<script id="report-data" type="application/json">
+__FM_BEARINGS_REPORT_DATA__
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var doc = document.getElementById("rp-doc");
+  var data;
+  try {
+    data = JSON.parse(document.getElementById("report-data").textContent);
+  } catch (e) {
+    data = null;
+  }
+  if (!data || data.schema !== "fm-bearings-report-preview.v1" || typeof data.markdown !== "string") {
+    var err = document.createElement("p");
+    err.className = "rp-error";
+    err.textContent = "This report preview could not load - ask firstmate to rebuild the board.";
+    doc.appendChild(err);
+    return;
+  }
+  document.title = String(data.path).split("/").pop() + " - report preview";
+  document.getElementById("rp-path").textContent = data.path;
+  document.getElementById("rp-meta").textContent = "Snapshot taken when the board was built · " + data.generated;
+
+  /* A small markdown subset rendered straight into DOM nodes. Every piece of
+     report text reaches the page through textContent or text nodes, and only
+     http(s) targets become links, so report content is never parsed as HTML. */
+  function el(tag, text) {
+    var n = document.createElement(tag);
+    if (text != null) n.textContent = text;
+    return n;
+  }
+  function safeHref(u) { return /^https?:\/\//i.test(u) ? u : null; }
+  var INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>)"'`]+[^\s<>)"'`.,;:!?])/;
+  function inline(parent, text) {
+    /* a fresh matcher per call, because marks recurse into their own text */
+    var re = new RegExp(INLINE.source, "g"), last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+      if (m[1]) parent.appendChild(el("code", m[2].trim()));
+      else if (m[3] || m[4]) inline(parent.appendChild(el("strong")), m[3] || m[4]);
+      else if (m[5]) inline(parent.appendChild(el("em")), m[5]);
+      else if (m[6]) {
+        var href = safeHref(m[7]);
+        if (href) {
+          var a = parent.appendChild(el("a"));
+          a.href = href; a.target = "_blank"; a.rel = "noopener";
+          inline(a, m[6]);
+        } else {
+          parent.appendChild(document.createTextNode(m[6] + " (" + m[7] + ")"));
+        }
+      } else if (m[8]) {
+        var u = parent.appendChild(el("a", m[8]));
+        u.href = m[8]; u.target = "_blank"; u.rel = "noopener";
+      }
+      last = re.lastIndex;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    return parent;
+  }
+  function cells(line) {
+    return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(function (c) { return c.trim(); });
+  }
+
+  var lines = data.markdown.replace(/\r\n?/g, "\n").split("\n");
+  var i = 0;
+  var BLOCK_START = /^(#{1,6}\s|```|~~~|>|\s*([-*+]|\d+[.)])\s|\s*(-{3,}|\*{3,}|_{3,})\s*$)/;
+  while (i < lines.length) {
+    var line = lines[i];
+    var h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    var fence = /^(```|~~~)/.exec(line);
+    var list = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (!line.trim()) { i++; continue; }
+    if (fence) {
+      var code = [];
+      i++;
+      while (i < lines.length && lines[i].indexOf(fence[1]) !== 0) code.push(lines[i++]);
+      i++;
+      doc.appendChild(el("pre")).appendChild(el("code", code.join("\n")));
+    } else if (h) {
+      inline(doc.appendChild(el("h" + h[1].length)), h[2]);
+      i++;
+    } else if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      doc.appendChild(el("hr"));
+      i++;
+    } else if (/^>/.test(line)) {
+      var quote = [];
+      while (i < lines.length && /^>/.test(lines[i])) quote.push(lines[i++].replace(/^>\s?/, ""));
+      inline(doc.appendChild(el("blockquote")).appendChild(el("p")), quote.join(" "));
+    } else if (/\|/.test(line) && i + 1 < lines.length && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(lines[i + 1])) {
+      var wrap = doc.appendChild(el("div"));
+      wrap.className = "rp-table";
+      var table = wrap.appendChild(el("table"));
+      var tr = table.appendChild(el("thead")).appendChild(el("tr"));
+      cells(line).forEach(function (c) { inline(tr.appendChild(el("th")), c); });
+      var tbody = table.appendChild(el("tbody"));
+      i += 2;
+      while (i < lines.length && /\|/.test(lines[i]) && lines[i].trim()) {
+        var row = tbody.appendChild(el("tr"));
+        cells(lines[i++]).forEach(function (c) { inline(row.appendChild(el("td")), c); });
+      }
+    } else if (list) {
+      /* nesting follows indentation; a deeper item opens a child list */
+      var stack = [];
+      while (i < lines.length) {
+        var item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(lines[i]);
+        if (!item) {
+          if (lines[i].trim() && /^\s+/.test(lines[i]) && stack.length) {
+            var lastLi = stack[stack.length - 1].list.lastChild;
+            lastLi.appendChild(document.createTextNode(" "));
+            inline(lastLi, lines[i].trim());
+            i++;
+            continue;
+          }
+          break;
+        }
+        var indent = item[1].replace(/\t/g, "    ").length;
+        var ordered = /\d/.test(item[2]);
+        while (stack.length && indent < stack[stack.length - 1].indent) stack.pop();
+        if (!stack.length || indent > stack[stack.length - 1].indent) {
+          var listEl = el(ordered ? "ol" : "ul");
+          if (stack.length) stack[stack.length - 1].list.lastChild.appendChild(listEl);
+          else doc.appendChild(listEl);
+          stack.push({ indent: indent, list: listEl });
+        }
+        var li = stack[stack.length - 1].list.appendChild(el("li"));
+        var task = /^\[([ xX])\]\s+(.*)$/.exec(item[3]);
+        if (task) {
+          li.appendChild(document.createTextNode(task[1] === " " ? "☐ " : "☑ "));
+          inline(li, task[2]);
+        } else {
+          inline(li, item[3]);
+        }
+        i++;
+      }
+    } else {
+      var para = [];
+      while (i < lines.length && lines[i].trim() && !BLOCK_START.test(lines[i])) para.push(lines[i++].trim());
+      if (!para.length) para.push(lines[i++].trim());
+      inline(doc.appendChild(el("p")), para.join(" "));
+    }
+  }
+})();
+</script>
+</body>
+</html>
