@@ -2,15 +2,17 @@
 // Opt-in headless short jobs; read-only unless explicitly granted operations. CLI: models | submit <request.json> |
 // status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit> | settle-cleanup <id> <index> [--current-judgment /absolute/judgment.json].
 // Requires explicit FM_HOME.
-// MAIN recovery: FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-cleanup <short-id> <cleanup-step-index>.
-// Requires owning primary ancestry, unchanged request/result/intent/effect/output,
-// exact reservation and home/task/generation/copy/Git identity, a dead executor
-// and children, and the original unmanaged-path refusal after confirmed pane
-// absence. Existing reconcile/reservation/lease/meta/project locks arbitrate.
-// It publishes operation-N.preservation.json, retains the surviving copy, and
-// completes only remaining record/backlog bookkeeping. Original failure stays
-// immutable; no pane close, copy return, sync, or later operation is replayed.
-// Retry converges on the same proof, including an interrupted pending close.
+// MAIN recovery: FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-cleanup <short-id> <cleanup-step-index> [--current-judgment /absolute/judgment.json].
+// Without a current judgment, recovery requires the original unmanaged-path
+// refusal and confirmed pane absence, retains the surviving copy, and completes
+// only remaining record/backlog bookkeeping without replaying a close.
+// With a current judgment, MAIN separately accepts the current delivered state,
+// retains every copy, and may close the exact still-present owned endpoint once.
+// Both paths require owning primary ancestry, a dead executor and children, and
+// unchanged bound evidence and identities; neither rewrites the original result
+// or runs copy return, sync, later operations, or another uncertain close.
+// Existing reconcile/reservation/lease/meta/project locks arbitrate.
+// The CLI --help and fm-short-operations.mjs own the exact recovery contracts.
 // Request: {key, goal, acceptance, provider?, model?, materials:[absolute file], operations?}.
 // Legacy budget fields are accepted and ignored so old callers and v1 records remain readable.
 // Default openai-codex/gpt-5.6-luna; explicit overrides never fall back.
