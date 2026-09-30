@@ -64,6 +64,9 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
+#   A spawn over a ship or scout's existing task record, fresh or relaunched,
+#   keeps that record's pr= block as the republished record's tail, so a merge
+#   poll armed on the task still authenticates.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <entry>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -7203,10 +7206,24 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+# The task's pr= block (bin/fm-pr-lib.sh fm_pr_metadata_identity_parse) must
+# end the record, and an armed merge poll stays verifiable only while that
+# block names its PR. A relaunch carries it forward, and so does a fresh spawn
+# over a ship or scout's existing record: that task's PR is usually still open,
+# and a worker who opens another one re-arms the poll with bin/fm-pr-check.sh,
+# which replaces the block. A secondmate never carries a merge poll.
+SPAWN_PR_BLOCK_SOURCE=
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_PR_BLOCK_SOURCE=$RELAUNCH_META
+elif [ "$KIND" != secondmate ] && [ -e "$STATE/$ID.meta" ] \
+  && fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE"; then
+  # An unsafe existing record is refused by the publication below instead.
+  SPAWN_PR_BLOCK_SOURCE="$STATE/$ID.meta"
+fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential", keys, " ")
+      split("window endpoint_task_id worktree project harness hermes_profile hermes_home kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort opencode_version account account_provider omp_profile busy_gen spawn_gen approval_mode traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id paseo_terminal_id paseo_workspace_id rex_server rex_session_id rex_window_id rex_block_id t3_thread_id t3_project_id tern_session_id tern_tab_id tern_block_id hc_session hc_terminal home projects control_relaunch_tx polytoken_session polytoken_port polytoken_credential pr pr_head", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -7311,10 +7328,13 @@ preserve_relaunch_meta() {
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
-  # Preserved lines go last so nothing fm_pr_metadata_identity_parse
-  # (bin/fm-pr-lib.sh) refuses is written after an armed pr= identity region.
+  # Preserved lines go just ahead of the pr= block, which ends the record as
+  # fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) requires.
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta
+  fi
+  if [ -n "$SPAWN_PR_BLOCK_SOURCE" ]; then
+    fm_pr_metadata_block_print "$SPAWN_PR_BLOCK_SOURCE"
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
