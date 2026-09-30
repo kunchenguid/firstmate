@@ -155,6 +155,7 @@ command_fields=$(perl -MMIME::Base64=decode_base64 -e '
 IFS=$'\t' read -r command_name _command_action command_rel <<EOF
 $command_fields
 EOF
+[ -z "${FM_FAKE_SSH_VERBS:-}" ] || printf '%s %s\n' "$command_name" "$_command_action" >> "$FM_FAKE_SSH_VERBS"
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
   inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
@@ -1469,6 +1470,29 @@ remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
   || fail "bootstrap failed while repairing a preserved remote reply source"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" \
   "bootstrap did not repair reply registration after retirement rollback"
+# A pinned mate whose host does not answer retirement is not re-pinned by that
+# teardown: the re-pin could only wait out its own timeout on the same silent
+# host, and the preserved route lets the next pin pass re-apply it.
+resolve_ios_pending
+printf '3 ios Mac Power BI\n' > "$PARENT/config/pinned-agents"
+: > "$TMP_ROOT/ssh-verbs"
+if FM_FAKE_SSH_MODE=unreachable FM_FAKE_SSH_VERBS="$TMP_ROOT/ssh-verbs" \
+  remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-unreachable.out" 2>&1; then
+  fail "remote retirement succeeded against an unreachable host"
+fi
+rm -f "$PARENT/config/pinned-agents"
+assert_grep 'remote retirement completion is unknown' "$TMP_ROOT/teardown-unreachable.out" \
+  "an unreachable retirement did not report its unknown result"
+assert_equals "$(printf 'fm-remote-secondmate-control.sh unpin\nfm-remote-secondmate-control.sh retire')" \
+  "$(cat "$TMP_ROOT/ssh-verbs")" "an unreachable retirement contacted its silent host again to re-pin"
+assert_present "$REMOTE_HOME" "an unknown-result retirement removed the remote home"
+assert_present "$PARENT/state/ios.meta" "an unknown-result retirement removed parent metadata"
+assert_grep '- ios ' "$PARENT/data/secondmates.md" "an unknown-result retirement removed the route"
+remote_env "$ROOT/bin/fm-bootstrap.sh" >/dev/null \
+  || fail "bootstrap failed while repairing the reply source after an unknown-result retirement"
+assert_present "$PARENT/state/procevent/remote-reply-ios.source" \
+  "bootstrap did not repair reply registration after an unknown-result retirement"
+pass "a pinned mate whose host does not answer retirement is not re-pinned against that host"
 resolve_ios_pending
 rm -f "$REMOTE_HOME/state/child.meta"
 mkdir -p "$PARENT/data/handoff"

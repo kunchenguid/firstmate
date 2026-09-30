@@ -93,3 +93,6 @@ done < "$META"
 chmod 0600 "$META_TMP"
 mv -f -- "$META_TMP" "$META"
 fm_lock_release "$META_LOCK"
+# A relaunch can land the mate in a new pane; re-apply its opt-in Herdr pin
+# (bin/fm-herdr-pins.sh), best effort.
+"$SCRIPT_DIR/fm-herdr-pins.sh" sync "$ID" >/dev/null 2>&1 || true

@@ -3021,6 +3021,30 @@ test_secondmate_liveness_tick_relaunches_dead_endpoint_once() {
   pass "watch liveness: a dead secondmate is relaunched once, ledgered, and quiet afterwards"
 }
 
+# The opt-in Herdr pin pass is display-only, so a tick that wakes the captain
+# about a relaunch exits before it; the next quiet tick runs it instead.
+test_secondmate_liveness_tick_runs_herdr_pins_only_without_a_wake() {
+  local dir state pid
+  dir=$(make_secondmate_liveness_case liveness-pins)
+  state="$dir/state"
+  printf '1 sm1 Mac Mate\n' > "$dir/config/pinned-agents"
+
+  run_liveness_leg "$dir" pins-wake FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its auto-relaunch wake"
+  grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-pins-wake.out" >/dev/null \
+    || fail "the dead secondmate was not auto-relaunched: $(cat "$dir/watch-pins-wake.out" "$dir/watch-pins-wake.err")"
+  assert_absent "$state/.herdr-pins-tick" "a tick that wakes must not run the Herdr pin pass first"
+
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" pins-quiet FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  sleep 4
+  kill_liveness_leg "$pid"
+  [ -e "$state/.herdr-pins-tick" ] \
+    || fail "a quiet tick did not run the Herdr pin pass: $(cat "$dir/watch-pins-quiet.out" "$dir/watch-pins-quiet.err")"
+  pass "watch liveness: the Herdr pin pass runs only on ticks that do not wake"
+}
+
 test_secondmate_liveness_tick_relaunches_missing_endpoint() {
   local dir state pid out
   dir=$(make_secondmate_liveness_case liveness-missing)
@@ -3425,6 +3449,7 @@ test_interruption_before_and_after_raw_commit
 test_wake_queue_prune_task
 test_drain_rotates_orphaned_scratch
 test_secondmate_liveness_tick_relaunches_dead_endpoint_once
+test_secondmate_liveness_tick_runs_herdr_pins_only_without_a_wake
 test_secondmate_liveness_tick_relaunches_missing_endpoint
 test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
 test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched

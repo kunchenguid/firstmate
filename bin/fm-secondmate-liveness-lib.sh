@@ -253,6 +253,34 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   return 0
 }
 
+# fm_secondmate_liveness_pins <full|poll>
+#
+# Best-effort re-assert of the opt-in Herdr pins (bin/fm-herdr-pins.sh owns
+# the contract). Herdr drops pane tokens and the agent view on a server
+# restart even when an agent resumes natively without a relaunch, so the
+# session-start sweep (full) always re-applies them and the watcher tick
+# (poll) does so at most every FM_HERDR_PINS_SECS (default 300). The whole
+# pass is bounded to 120 seconds and never fails its caller; without
+# config/pinned-agents it costs one file test.
+fm_secondmate_liveness_pins() {  # <full|poll>
+  local mode=$1 config secs marker last now
+  config=${CONFIG:-${FM_CONFIG_OVERRIDE:-$FM_HOME/config}}
+  [ -f "$config/pinned-agents" ] || return 0
+  if [ "$mode" = poll ]; then
+    secs=${FM_HERDR_PINS_SECS:-}
+    case "$secs" in ''|*[!0-9]*|0) secs=300 ;; esac
+    marker="$STATE/.herdr-pins-tick"
+    now=$(date +%s)
+    last=$(cat "$marker" 2>/dev/null || true)
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ $((now - last)) -ge "$secs" ] || return 0
+    printf '%s\n' "$now" > "$marker" 2>/dev/null || return 0
+  fi
+  fm_run_timed 120 env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    FM_CONFIG_OVERRIDE="$config" "$FM_SM_LIVE_LIB_DIR/fm-herdr-pins.sh" sync >/dev/null 2>&1 || true
+  return 0
+}
+
 # fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
 #
 # Acts on a `relaunchable` probe verdict for <id>: kills a confirmed-dead local

@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [Calm preference](#calm-preference-configcalm), and [pinned Herdr agents](#pinned-herdr-agents-configpinned-agents) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -507,6 +507,50 @@ The setting is inherited into secondmate homes under the primary-authoritative c
 
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.
 Use the explicit guarded cleanup path described in [`docs/herdr-backend.md`](herdr-backend.md) instead of `herdr server stop`.
+
+### Pinned Herdr agents (config/pinned-agents)
+
+The optional local `config/pinned-agents` file pins the agents the captain talks to, such as this firstmate and its secondmates, at the top of Herdr's sidebar Agents panel across every saved machine.
+Without the file the feature is off and nothing changes.
+Herdr has no native pin, so Firstmate tags each pinned agent's pane with display tokens and installs one agent view, labeled "Pinned", that shows only tagged panes in rank order.
+
+Each non-blank line that does not start with `#` names one agent:
+
+```text
+# <rank> <id> <host> <label>
+1 self        VPS Firstmate
+2 legal-clerk Mac Legal Clerk
+3 machinist   Mac Machinist
+4 mac         Mac Mac
+5 pbi         WSL Power BI
+```
+
+- `rank` is 1 to 99 and sets the order; it becomes the two-digit `pin_rank` token.
+- `id` is `self` for the firstmate running this home, or the id of a secondmate this home launched.
+- `host` is required on every line and becomes the `pin_host` token: letters, digits, `.`, `_`, `@`, or `-`, up to 32 characters.
+  Herdr's built-in `machine` field cannot name the host, because it shows "Local" for whichever machine the viewer runs on.
+- `label` is the rest of the line, up to 48 characters, and becomes the `pin_label` token.
+
+A malformed line, a line without both a host and a label, or a repeated id is skipped.
+The file is per home and is not inherited into secondmate homes.
+
+Firstmate applies the pins at secondmate launch and relaunch, at primary session start, and on the secondmate liveness tick at most every `FM_HERDR_PINS_SECS`, because Herdr drops tokens and views on a server restart and a relaunch can move an agent to a new pane.
+Each pass reads the agent's current pane from its recorded endpoint.
+A Herdr restart ends the primary's own process, so the resumed primary's session start re-applies every pin; a home that pins only `self` needs no watcher for that.
+Pinning after a spawn runs detached, so a slow host never stretches the spawn past its time limit or changes its result.
+A remote secondmate is tagged on its own host.
+The view is installed only on the Herdr sessions that host a pinned agent: this home's own session when `self` or a local secondmate is pinned, and the `fm-remote` session on each pinned remote secondmate's host.
+No other session or server receives it.
+Retiring a pinned secondmate clears its tokens once retirement reaches the mate's endpoint, and re-pins it when that retirement refuses or leaves the endpoint alive.
+When a remote host does not answer the retirement, the re-pin is left to the next pass rather than waiting on that host again.
+Removing a line or the whole file stops re-applying those pins; tokens and views already applied stay until the agent retires or moves to a new pane, or until its Herdr server restarts.
+
+The passes are best effort and never fail a launch, relaunch, retirement, or supervision pass.
+An agent that is not on Herdr, an unreachable host, and a Herdr build without agent views are skipped silently.
+A host that does not answer is skipped for the rest of that pass, so its other pinned agents do not each wait out their own timeout.
+Herdr keeps one agent view per server, so a plugin that sets its own view competes with this one until the next pass.
+The captain's client decides how rows render and which keys jump to them, for example `$pin_label` and `$pin_host` in `[ui.sidebar.agents] rows` and `focus_agent`; Firstmate does not manage that client configuration.
+The [`bin/fm-herdr-pins.sh` header](../bin/fm-herdr-pins.sh) owns the commands and the tokens and view they write.
 
 ### Zellij sessions
 
@@ -2357,6 +2401,7 @@ FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each regist
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds bounding one watcher-driven relaunch, so a wedged spawn cannot stall the poll; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
+FM_HERDR_PINS_SECS=300   # minimum seconds between the watcher's re-asserts of the opt-in Herdr pins (config/pinned-agents); session start always re-asserts; zero or invalid values use 300
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
