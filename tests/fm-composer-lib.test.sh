@@ -1026,3 +1026,23 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# Real Gemini 0.58.0 layout captured on Herdr 0.7.4, 2026-09-30.
+test_gemini_halfblock_identity() {
+  local screen typed
+  screen=$'transcript\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n* '"${ESC}[38;2;92;99;112m Type your message or @path/to/file${ESC}[0m"$'\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto'
+  assert_screen "Gemini idle requires lazy identity" need-identity "$CAPS_STYLED" "$screen"
+  assert_screen "Gemini live done halfblock" empty "$CAPS_STYLED" "$screen" '' $'gemini\tdone'
+  assert_screen "Gemini idle halfblock" empty "$CAPS_STYLED" "$screen" '' $'gemini\tidle'
+  assert_screen "Gemini blocked modal refuses" unknown "$CAPS_STYLED" "$screen" '' $'gemini\tblocked'
+  assert_screen "Gemini working refuses exit" unknown "$CAPS_STYLED" "$screen" '' $'gemini\tworking'
+  assert_screen "wrong identity refuses asterisk" unknown "$CAPS_STYLED" "$screen" '' $'pi\tdone'
+  assert_screen "identity unavailable refuses" unknown "$CAPS_STYLED_NOID" "$screen"
+  typed=${screen/Type your message or @path\/to\/file/fix the tests}
+  # Typed input stays bright and cannot be erased as ghost placeholder text.
+  typed=${typed//38;2;92;99;112/38;2;171;178;191}
+  assert_screen "Gemini draft stays pending" pending "$CAPS_STYLED" "$typed" '' $'gemini\tdone'
+  assert_screen "Gemini stale box above shell" unknown "$CAPS_STYLED" "$screen"$'\n$ ' '' $'gemini\tdone'
+  pass "Gemini halfblock composer binds geometry, styling and native idle identity"
+}
+test_gemini_halfblock_identity

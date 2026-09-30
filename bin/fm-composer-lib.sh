@@ -1612,6 +1612,58 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# Gemini's half-block composer requires native identity as well as geometry.
+# The asterisk is not a generic agent glyph: accepting it globally would make
+# arbitrary transcript bullets injectable. Only the final three-row envelope
+# is eligible, with no lower prompt or structure; blocked/working identities
+# never authorize lifecycle text, even when the input region looks empty.
+_fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <identity> <cursor>
+  local screen=$1 plain=$2 styled=$3 has_identity=$4 identity=$5 cy=$6
+  local row=0 top=-1 input=-1 bottom=-1 line trimmed width=0 content agent status footer=0
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    case "$trimmed" in
+      ▄▄▄▄▄▄▄▄*)
+        if [ -z "${trimmed//▄/}" ]; then top=$row; width=${#trimmed}; input=-1; bottom=-1; fi
+        ;;
+      ▀▀▀▀▀▀▀▀*)
+        if [ "$top" -ge 0 ] && [ "$row" -eq "$((top + 2))" ] \
+           && [ -z "${trimmed//▀/}" ] && [ "${#trimmed}" -eq "$width" ]; then bottom=$row; fi
+        ;;
+      '* '*|'*')
+        [ "$top" -ge 0 ] && [ "$row" -eq "$((top + 1))" ] && input=$row
+        ;;
+    esac
+    if [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ]; then
+      if fm_composer_row_has_edge "$trimmed" \
+         || fm_composer_leading_prompt_glyph_var content "$trimmed"; then return 1; fi
+      if [ "$row" -eq "$((bottom + 1))" ]; then
+        case "$trimmed" in 'workspace (/directory)'*sandbox*'/model') footer=1 ;; *) return 1 ;; esac
+      elif [ "$footer" != 1 ] || [ "$row" -ne "$((bottom + 2))" ]; then
+        return 1
+      fi
+    fi
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+  [ "$input" -ge 0 ] && [ "$bottom" -ge 0 ] && [ "$((row - bottom))" -le 3 ] || return 1
+  [ -z "$cy" ] || [ "$cy" = "$input" ] || return 1
+  [ "$has_identity" = 1 ] || { printf unknown; return 0; }
+  [ -n "$identity" ] || { printf need-identity; return 0; }
+  agent=${identity%%$'\t'*}
+  status=${identity#*$'\t'}
+  [ "$agent" = gemini ] || { printf unknown; return 0; }
+  case "$status" in idle|done) ;; *) printf unknown; return 0 ;; esac
+  content=$(_fm_composer_row_content "$(_fm_composer_screen_row "$input" "$screen")" "$styled")
+  fm_composer_normalize_trim_var content
+  # Strip exactly the proven prompt, never a later asterisk in a draft.
+  case "$content" in '* '*|'*') content=${content#\*} ;; *) printf unknown; return 0 ;; esac
+  fm_composer_normalize_trim_var content
+  if [ -z "$content" ]; then printf empty; else printf pending; fi
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
@@ -1629,6 +1681,9 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  if _fm_composer_gemini_halfblock "$screen" "$plain" "$styled" "$has_identity" "$identity" "$cy"; then
+    return 0
+  fi
   _fm_composer_scan_screen "$plain" "$cy"
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
