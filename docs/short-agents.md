@@ -153,7 +153,7 @@ The command requires the original immutable grant and bindings, the preserved un
 It then performs only the official read-only Codebase status and detail reads, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
 It never issues a merge, runs later steps, changes the original terminal result, or reports the failed or timed-out model execution as successful.
 Repeated settlement converges on the same receipt and missing or ambiguous evidence leaves the reservations intact.
-For an attempted cleanup with an unmanaged Treehouse path refusal, the exact MAIN retained-copy recovery and invocation are owned by [`fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help`.
+For an attempted cleanup with an unmanaged Treehouse path refusal, or a separately judged current retirement that preserves historical uncertainty and every copy, exact MAIN recovery and invocation are owned by [`fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help`.
 It preserves the failed result and surviving copy while settling only that cleanup step's remaining bookkeeping; other uncertain effects remain reserved.
 A changed candidate, identity, or grant stops new writes.
 The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.

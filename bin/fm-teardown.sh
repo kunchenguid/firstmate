@@ -585,7 +585,8 @@ teardown_preserve_copy_recovery() (
   # shellcheck source=bin/fm-lease-lib.sh
   . "$SCRIPT_DIR/fm-lease-lib.sh"
   fm_refuse_if_gate_agent
-  export FM_SHORT_CLEANUP_GENERATION=$ENDPOINT_EXPECTED_GEN
+  # shellcheck disable=SC2030,SC2031 # Each separate recovery subshell binds its own generation.
+  local -x FM_SHORT_CLEANUP_GENERATION=$ENDPOINT_EXPECTED_GEN
   node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$ENDPOINT_EXPECTED_GEN" || exit 1
   fm_lease_guard "$ID" 'uncertain copy preservation' || exit $?
   lock=$(fm_meta_lock_path "$meta") || exit 1
@@ -659,7 +660,119 @@ teardown_preserve_copy_recovery() (
     teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
   fi
 )
-if [ "$PRESERVE_COPY_RECOVERY" = 1 ]; then teardown_preserve_copy_recovery; exit $?; fi
+# Current completed-task authority is distinct from the original uncertain
+# attempt. This path always retains the copy and never runs its disposal owner.
+teardown_current_copy_recovery() (
+  local meta="$STATE/$ID.meta" lock lifecycle generation proof readback request journal session_lock='' copy_lock=''
+  local project presence other marker count=0
+  local META=$meta COPY_REASON=copy-preserved-current-recovery
+  local ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
+  local ENDPOINT_SESSION ENDPOINT_PANE ENDPOINT_WORKSPACE ENDPOINT_TAB ENDPOINT_TERMINAL ENDPOINT_INSTANCE ENDPOINT_SHELL ENDPOINT_SHELL_START
+  # shellcheck source=bin/fm-lease-lib.sh
+  . "$SCRIPT_DIR/fm-lease-lib.sh"
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+  fm_refuse_if_gate_agent
+  # shellcheck disable=SC2030,SC2031 # Each separate recovery subshell binds its own generation.
+  local -x FM_SHORT_CLEANUP_GENERATION=$ENDPOINT_EXPECTED_GEN
+  node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$ENDPOINT_EXPECTED_GEN" || exit 1
+  fm_lease_guard "$ID" 'current completed-task retention' || exit $?
+  lock=$(fm_meta_lock_path "$meta") || exit 1
+  trap 'fm_lock_release "$session_lock"; fm_lock_release "$copy_lock"; fm_lock_release "$lock"; fm_lease_guard_release' EXIT
+  fm_lock_acquire_wait "$lock" || exit 1
+  lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+  generation=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
+  [ "$generation" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
+  request="$STATE/short-agents/$FM_SHORT_CLEANUP_RECOVERY/request.json"
+  project=$(jq -er --argjson i "$FM_SHORT_CLEANUP_STEP" '.operationBindings[$i].project' "$request") || exit 1
+  copy_lock=$(fm_treehouse_project_lock_path "$project") || exit 1
+  fm_lock_try_acquire "$copy_lock" || { echo 'REFUSED: another copy owner is active' >&2; copy_lock=''; exit 1; }
+  fm_backend_source herdr || exit 1
+  journal="$STATE/$ID.herdr-presentation"
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" && \
+    [ "$FM_BACKEND_HERDR_JOURNAL_HAS_LAUNCH_IDENTITY" = 1 ] && \
+    [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$(cd "$FM_HOME" && pwd -P)" ] && \
+    [ "$FM_BACKEND_HERDR_JOURNAL_SPAWN_GEN" = "$generation" ] || {
+    echo 'REFUSED: current cleanup has no exact launch-owner identity' >&2; exit 1;
+  }
+  ENDPOINT_SESSION=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  ENDPOINT_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+  ENDPOINT_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  ENDPOINT_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+  ENDPOINT_TERMINAL=$FM_BACKEND_HERDR_JOURNAL_TERMINAL_ID
+  ENDPOINT_INSTANCE=$FM_BACKEND_HERDR_JOURNAL_SESSION_INSTANCE
+  ENDPOINT_SHELL=$FM_BACKEND_HERDR_JOURNAL_SHELL_PID
+  ENDPOINT_SHELL_START=$FM_BACKEND_HERDR_JOURNAL_SHELL_START
+  jq -e --argjson i "$FM_SHORT_CLEANUP_STEP" --arg session "$ENDPOINT_SESSION" --arg pane "$ENDPOINT_PANE" \
+    --arg ws "$ENDPOINT_WORKSPACE" --arg tab "$ENDPOINT_TAB" \
+    '.operationBindings[$i] | .herdr_session==$session and .herdr_pane_id==$pane and .herdr_workspace_id==$ws and .herdr_tab_id==$tab' "$request" >/dev/null || exit 1
+  if [ -e "$meta" ] || [ -L "$meta" ]; then fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1; fi
+  for other in "$STATE"/*.meta; do
+    if [ "$other" = "$meta" ] || { [ ! -e "$other" ] && [ ! -L "$other" ]; }; then continue; fi
+    count=$((count + 1))
+    [ "$count" -le 1000 ] && [ -f "$other" ] && [ ! -L "$other" ] || exit 1
+    if [ "$(fm_meta_get "$other" herdr_session)" = "$ENDPOINT_SESSION" ] && \
+       [ "$(fm_meta_get "$other" herdr_pane_id)" = "$ENDPOINT_PANE" ]; then
+      echo 'REFUSED: current endpoint is claimed by another task' >&2; exit 1
+    fi
+  done
+  session_lock=$(fm_backend_herdr_presentation_session_lock_path "$ENDPOINT_SESSION") || exit 1
+  fm_lock_try_acquire "$session_lock" || { echo 'REFUSED: presentation owner is active' >&2; session_lock=''; exit 1; }
+  [ "$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION")" = "$ENDPOINT_INSTANCE" ] || {
+    echo 'REFUSED: current session identity changed' >&2; exit 1;
+  }
+  presence=$(fm_backend_herdr_pane_presence_state "$ENDPOINT_SESSION" "$ENDPOINT_PANE")
+  case "$presence" in
+    present)
+      # An uncertain close from this NEW transaction is never submitted again.
+      if [ -e "$STATE/$ID.cleanup.json" ] && \
+         jq -e '.phases.pane_close.state=="pending" or .phases.pane_close.state=="confirmed"' "$STATE/$ID.cleanup.json" >/dev/null; then
+        echo 'REFUSED: current recovery close is uncertain or endpoint reappeared' >&2; exit 1
+      fi
+      teardown_endpoint_process_identity || { echo 'REFUSED: current terminal/process identity changed' >&2; exit 1; }
+      fm_backend_herdr_projection_target_tab_mutation_allowed "$ENDPOINT_SESSION" "$ENDPOINT_TAB" || exit 1
+      ;;
+    dead) ;;
+    *) echo 'REFUSED: current endpoint presence is unknown' >&2; exit 1 ;;
+  esac
+  proof=$(node "$SCRIPT_DIR/fm-short-operations.mjs" prepare-current-cleanup "$ID" "$generation") || exit 1
+  if [ -e "$meta" ]; then fm_task_lifecycle completion-read "$ID" >/dev/null || exit 1; fi
+  fm_task_lifecycle cleanup-preserve "$ID" --record "$proof" >/dev/null || exit 1
+  ENDPOINT_GENERATION=$generation
+  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  if [ "$presence" = present ]; then
+    teardown_endpoint_receipt pane_close pending current-authorized-close || exit 1
+    node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$generation" || exit 1
+    teardown_endpoint_process_identity && \
+      [ "$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION")" = "$ENDPOINT_INSTANCE" ] || exit 1
+    fm_backend_herdr_projection_close_pane_focus_preserving "$ENDPOINT_SESSION" "$ENDPOINT_PANE" || exit 1
+  fi
+  [ "$(fm_backend_herdr_pane_presence_state "$ENDPOINT_SESSION" "$ENDPOINT_PANE")" = dead ] || exit 1
+  teardown_endpoint_receipt pane_close confirmed current-endpoint-absent || exit 1
+  fm_task_lifecycle cleanup-copy-read "$ID" >/dev/null || exit 1
+  node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$generation" || exit 1
+  if [ -e "$meta" ]; then
+    teardown_completed_bookkeeping "$meta" "$generation" retained-unverified
+  else
+    marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+    if [ -e "$marker" ]; then
+      fm_backlog_close_marker_validate "$marker" "$DATA" "$ID" "$STATE" || exit 1
+      [ "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" = "$generation" ] && \
+        [ "$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_DISPOSITION" = retained-unverified ] || exit 1
+      fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA" || exit 1
+    fi
+    lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+    printf '%s' "$lifecycle" | jq -e --arg gen "$generation" \
+      '[.owner_receipts.cleanup[]? | select(.execution_generation==$gen and .facts.taskRecordRemoved==true and .facts.endpointConfirmedGone==true and .facts.bookkeepingComplete==true and .facts.copyDisposition=="retained-unverified")] | length==1' >/dev/null || exit 1
+    teardown_endpoint_receipt record_close confirmed current-record-retired || exit 1
+  fi
+)
+
+if [ "$PRESERVE_COPY_RECOVERY" = 1 ]; then
+  if [ -n "${FM_SHORT_CLEANUP_JUDGMENT:-}" ]; then teardown_current_copy_recovery; else teardown_preserve_copy_recovery; fi
+  exit $?
+fi
 if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
 case "$(fm_task_lifecycle mode "$ID")" in
   accepted|archived) teardown_completed_task; exit $? ;;

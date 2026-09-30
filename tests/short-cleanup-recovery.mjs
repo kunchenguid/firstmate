@@ -167,3 +167,5 @@ for(const [name,bytes] of Object.entries(chainOriginal))assert.equal(fs.readFile
 assert.deepEqual(snap(chain),chainCopy);assert(!fs.existsSync(chain.marker));assert(!fs.existsSync(chain.home+'/state/task.meta'));assert.equal(chain.life('due').due,false);
 console.log(`PASS ${mode}: pre-preservation cleanup observation, exact original generation and step 1, changed facts/acceptance refusals`);
 console.log(`PASS ${mode}: alias return, exact pending preservation, unchanged failure/content, identity/live-child/lease/project-owner refusals, idempotent settlement and lifecycle completion`);
+const {currentCleanupCases}=await import('./short-cleanup-current.mjs');
+await currentCleanupCases({root,tmp,live,setup,run,snap,write,read,cmd,git,shellQuote,processIdentity,basePath});

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Opt-in headless short jobs; read-only unless explicitly granted operations. CLI: models | submit <request.json> |
-// status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit> | settle-cleanup <id> <index>.
+// status <id> | result <id> | cancel <id> | reconcile | settle-merge <id> <index>:<merge-commit> | settle-cleanup <id> <index> [--current-judgment /absolute/judgment.json].
 // Requires explicit FM_HOME.
 // MAIN recovery: FM_HOME=/absolute/home node bin/fm-short-agent.mjs settle-cleanup <short-id> <cleanup-step-index>.
 // Requires owning primary ancestry, unchanged request/result/intent/effect/output,
@@ -392,7 +392,7 @@ async function run(home, id) {
 async function main() {
   const [command, arg, id] = process.argv.slice(2);
   if (command === '_run') return run(arg, id);
-  if (command === '--help') { console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit|settle-cleanup id index\nRequest: key, goal, acceptance, optional provider/model (default openai-codex/gpt-5.6-luna), materials (canonical single-link regular files), and optional operations {authority, expiresAt, steps}: sync/recover-sync {project}, merge {task,url}, cleanup {task} (Herdr only), install-shellcheck {destination}; 1..4 ordered steps, canonical existing targets, primary lock ancestry and Linux /proc required. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. settle-cleanup is MAIN-owned exact recovery of a dead cleanup executor after an unmanaged-path refusal: it retains the bound surviving copy, confirms the pane is already absent, completes only remaining bookkeeping and publishes preservation evidence; no return/close/sync or original evidence overwrite, and no other job runs. Live executor/child, changed identity or concurrent owner refuses. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, replay, or arbitrary tools.'); return; }
+  if (command === '--help') { console.log('FM_HOME=/absolute/home node bin/fm-short-agent.mjs models|submit request.json|status id|result id|cancel id|reconcile|settle-merge id index:expected-merge-commit|settle-cleanup id index [--current-judgment /absolute/judgment.json]\nRequest: key, goal, acceptance, optional provider/model (default openai-codex/gpt-5.6-luna), materials (canonical single-link regular files), and optional operations {authority, expiresAt, steps}: sync/recover-sync {project}, merge {task,url}, cleanup {task} (Herdr only), install-shellcheck {destination}; 1..4 ordered steps, canonical existing targets, primary lock ancestry and Linux /proc required. Legacy budget fields are accepted but ignored. settle-merge is a MAIN-owned, readback-only recovery for a dead Codebase merge executor with an exact retained effect and reservations; it requires an independently observed merge commit and never runs later steps. settle-cleanup is MAIN-owned exact recovery of a dead cleanup executor after an unmanaged-path refusal: it retains the bound surviving copy, confirms the pane is already absent, completes only remaining bookkeeping and publishes preservation evidence; no return/close/sync or original evidence overwrite, and no other job runs. With --current-judgment, a separate current MAIN acceptance binds unchanged intent, generation, merge candidate, original failed bytes, current evidence and directory/Git identity. The existing owners assess that judgment, retain every copy unconditionally, verify the exact launch/current endpoint identity, close a present owned endpoint once, and finish bookkeeping. Its distinct receipt leaves the original attempt uncertain and result unchanged. An absent endpoint is never closed again; a pending close with a present endpoint refuses. The judgment JSON contract is in fm-short-operations.mjs. Live executor/child, changed identity or concurrent owner refuses. Firstmate applies no wall-clock, request, tool-call, captured-input, or output budget; provider and model context limits still apply. No terminal, worktree, replay, or arbitrary tools.'); return; }
   if (command === 'models') {
     await initializeNetwork();
     const sdk = await import(pathToFileURL(sdkEntry()).href), runtime = await sdk.ModelRuntime.create();
@@ -406,7 +406,9 @@ async function main() {
   else if (command === 'reconcile') result = { jobs: await service.reconcile() };
   else if (command === 'settle-cleanup') {
     if (!/^\d+$/.test(id ?? '')) throw Error('settle-cleanup requires the exact cleanup step index');
-    result = settleRetainedCleanup(service.home, arg, Number(id));
+    const extra=process.argv.slice(5);
+    if(extra.length && (extra.length!==2||extra[0]!=='--current-judgment'||!path.isAbsolute(extra[1]))) throw Error('settle-cleanup accepts only --current-judgment /absolute/judgment.json');
+    result = settleRetainedCleanup(service.home, arg, Number(id),extra[1]);
   }
   else if (command === 'settle-merge') {
     const match = /^(\d+):([a-f0-9]{40}|[a-f0-9]{64})$/.exec(id ?? '');
