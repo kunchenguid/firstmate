@@ -479,6 +479,47 @@ test_rebuild_is_idempotent_and_does_not_double_arm() {
   pass "rebuild refreshes the board in place without double-arming"
 }
 
+test_a_failed_board_publish_keeps_the_previews_the_old_board_links() {
+  local home data board report href rc
+  home=$(make_home preview-swap)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  report="$home/data/scout-1/report.md"
+  mkdir -p "${report%/*}"
+  printf '# First snapshot\n' > "$report"
+  write_valid_payload "$data"
+  jq --arg report "$report" '.charted[0].title = "Queued work, see " + $report' "$data" > "$data.tmp" \
+    && mv "$data.tmp" "$data"
+  run_board "$home" build "$data" >/dev/null || fail "the first build failed"
+  href=$(extract_payload "$board" | jq -r --arg report "$report" '.report_previews[$report]')
+  grep -q 'First snapshot' "$home/.lavish/$href" || fail "the first build did not preview the report at $href"
+
+  # Only the board publish fails; every other move in the build still works.
+  cat > "$home/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  */bearings-board.html) [ ! -e "$FM_HOME/fail-board-publish" ] || exit 1 ;;
+esac
+exec /bin/mv "$@"
+SH
+  chmod +x "$home/fakebin/mv"
+  : > "$home/fail-board-publish"
+  printf '# Second snapshot\n' > "$report"
+  jq '.generated = "2026-08-19T01:00Z"' "$data" > "$data.tmp" && /bin/mv "$data.tmp" "$data"
+  set +e; run_board "$home" build "$data" >/dev/null 2>"$home/build.err"; rc=$?; set -e
+  [ "$rc" -ne 0 ] || fail "the build reported success although the board publish failed"
+  grep -q "cannot publish the board" "$home/build.err" \
+    || fail "the build failed for a reason other than the board publish: $(cat "$home/build.err")"
+  extract_payload "$board" | jq -e --arg report "$report" --arg href "$href" \
+    '.generated == "2026-08-19T00:00Z" and .report_previews[$report] == $href' >/dev/null \
+    || fail "a failed board publish replaced the old board"
+  grep -q 'First snapshot' "$home/.lavish/$href" \
+    || fail "a failed board publish left the old board linking a missing or replaced preview"
+  [ -z "$(find "$home/.lavish" -maxdepth 1 -name '.reports*')" ] \
+    || fail "a failed board publish left staged preview directories behind: $(ls -A "$home/.lavish")"
+  pass "a failed board publish restores the previews the old board links"
+}
+
 test_build_refuses_a_template_without_exactly_one_slot() {
   local home data rc out
   home=$(make_home badslot)
@@ -779,6 +820,7 @@ test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm
+test_a_failed_board_publish_keeps_the_previews_the_old_board_links
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended
 test_build_reopens_when_an_opened_session_ends_before_listing

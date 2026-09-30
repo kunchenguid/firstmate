@@ -428,7 +428,7 @@ await_source_owner() {  # <source-id>
 }
 
 command_build() {
-  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner previews preview_dir
+  local data=${1-} board json tmp sid extracted effective owner version pre_reopen_owner previews preview_dir aside
   [ "$#" -eq 1 ] || { usage >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || fail "jq is required"
   [ -f "$data" ] || fail "board data does not exist: $data"
@@ -476,16 +476,36 @@ command_build() {
     rm -rf -- "$tmp" "$previews"
     fail "the built board does not carry a readable $BOARD_SCHEMA payload"
   fi
-  # Previews land before the board that links them.
+  # Previews land before the board that links them. The live previews are set
+  # aside, not deleted, until the new board is in place, so a failed board
+  # publish restores them and the old board keeps resolving its links.
   preview_dir=${board%/*}/$PREVIEW_DIR_NAME
-  if [ -L "$preview_dir" ] || ! { rm -rf -- "${preview_dir:?}" && mv -- "$previews" "$preview_dir"; }; then
+  if [ -L "$preview_dir" ]; then
+    rm -rf -- "$tmp" "$previews"
+    fail "cannot publish the report previews"
+  fi
+  aside=''
+  if [ -e "$preview_dir" ]; then
+    if ! { aside=$(umask 077; mktemp -d "${board%/*}/.reports-old.XXXXXX") \
+      && mv -- "$preview_dir" "$aside/live"; }; then
+      [ -z "$aside" ] || rm -rf -- "$aside"
+      rm -rf -- "$tmp" "$previews"
+      fail "cannot set the live report previews aside"
+    fi
+  fi
+  if ! mv -- "$previews" "$preview_dir"; then
+    [ -z "$aside" ] || { mv -- "$aside/live" "$preview_dir" && rm -rf -- "$aside"; }
     rm -rf -- "$tmp" "$previews"
     fail "cannot publish the report previews"
   fi
   if ! { chmod 0600 "$tmp" && mv -f -- "$tmp" "$board"; }; then
     rm -f -- "$tmp"
+    if [ -n "$aside" ]; then
+      rm -rf -- "${preview_dir:?}" && mv -- "$aside/live" "$preview_dir" && rm -rf -- "$aside"
+    fi
     fail "cannot publish the board"
   fi
+  [ -z "$aside" ] || rm -rf -- "$aside"
   printf 'board: %s\n' "$board"
 
   command -v lavish-axi >/dev/null 2>&1 || fail "lavish-axi is not installed"
