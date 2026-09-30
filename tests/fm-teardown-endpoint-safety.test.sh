@@ -53,11 +53,40 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
-run_case() {  # <case> <id>
+# A tmux stub whose session inventory holds only the named tasks' windows, and
+# whose pane reports a harness foreground command, so those windows' endpoints
+# read a genuine `alive` while every other recorded window reads `missing`.
+stub_tmux_alive_windows() {  # <case> <task-id>...
+  local dir=$1
+  shift
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) cat "${FM_RUNTIME_LOG%/*}/tmux-windows"; exit 0 ;;
+  display-message)
+    for arg in "$@"; do
+      [ "$arg" = '#{pane_current_command}' ] || continue
+      printf 'claude\n'
+      exit 0
+    done
+    exit 0
+    ;;
+esac
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  printf 'fm-%s\n' "$@" > "$dir/tmux-windows"
+}
+
+run_case() {  # <case> <id> [extra-arg...]
   local dir=$1 id=$2
+  shift 2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force
+    "$TEARDOWN" "$id" --force "$@"
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -983,6 +1012,402 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# The recurring deadlock: a finished scout's worker exited while its record was
+# kept, so the pool handed its slot to a later spawn, and each record's teardown
+# refused on the other's. The stale record is named by the slot claim, or with no
+# claim by the records' spawn stamps corroborated by their endpoint states, so
+# both clean up. A stamp on its own never decides, in either direction.
+test_shared_slot_records_resolve_by_handout_order() {
+  local dir old=old-scout new=new-scout
+
+  dir=$(make_case slot-shared-unclaimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the later spawn on a shared slot refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$new.meta" "the slot holder's record was not removed"
+  assert_present "$dir/home/state/$old.meta" "the holder's teardown removed the stale record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the slot holder's teardown did not return its slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$old" "the warning should name the stale record"
+
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the stale record on a shared slot refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$old.meta" "the stale record was not removed"
+
+  # Stale record torn down first: with the later record's endpoint reading alive
+  # and its own reading missing, it leaves the slot alone for the holder.
+  dir=$(make_case slot-shared-stale-first)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$new"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the stale record refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$old.meta" "the stale record was not removed"
+  assert_present "$dir/home/state/$new.meta" "the stale teardown removed the holder's record"
+  assert_present "$dir/worktree/sentinel" "the stale teardown reset the holder's slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the stale record's teardown returned the holder's slot"
+  assert_contains "$(cat "$dir/stderr")" "$new" "the warning should name the holder"
+  assert_contains "$(cat "$dir/stderr")" "left untouched" \
+    "the stale record's teardown should report the slot as the holder's"
+
+  # Without a claim, spawn order alone never authorizes the destructive slot
+  # steps: an earlier record whose endpoint reads alive keeps the refusal.
+  dir=$(make_case slot-shared-unclaimed-live)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "unclaimed shared slot whose earlier record is live"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the earlier record"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the earlier record"
+
+  # An endpoint that cannot be read proves nothing either way, so it refuses too:
+  # the window is present but its foreground command is unreadable.
+  dir=$(make_case slot-shared-unclaimed-unreadable)
+  mark_case_as_treehouse_pool "$dir"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) printf 'fm-old-scout\n'; exit 0 ;;
+  display-message) exit 0 ;;
+esac
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "unclaimed shared slot whose earlier endpoint is unreadable"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the earlier record"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the earlier record"
+
+  # spawn_gen is an incarnation stamp, not a handout order: the pool handed the
+  # slot to $new, then $old was relaunched into its still-recorded worktree and
+  # re-stamped, so $old now carries the LATER stamp while $new is the live
+  # holder. $new's teardown must refuse rather than call its own slot reassigned
+  # and walk away from it.
+  dir=$(make_case slot-shared-relaunched)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old" "$new"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790600000.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record was relaunched later"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the other record"
+  ! grep -Fq "left untouched" "$dir/stderr" \
+    || fail "a re-stamped relaunch was reported as a slot handed to the other task: $(cat "$dir/stderr")"
+
+  # A record carrying two spawn stamps proves no order, so it refuses too.
+  dir=$(make_case slot-shared-two-stamps)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "spawn_gen=s1790600000.1.1" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record has two spawn stamps"
+  assert_refused_without_mutation "$dir" "$old" "a record with two spawn stamps on a shared slot"
+
+  # The holder's claim settles it even when the stale record has no stamp.
+  dir=$(make_case slot-shared-claimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$new"
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the claimed holder refused: $(cat "$dir/stderr")"
+  assert_present "$dir/home/state/$old.meta" "the holder's teardown removed the stale record"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the unstamped stale record refused after the holder left: $(cat "$dir/stderr")"
+
+  # A slot taken before spawn stamps existed leaves an unstamped record and no
+  # claim. With exactly one record unstamped and its endpoint gone, that record
+  # is the stale side: the stamped record's teardown proceeds as the holder.
+  dir=$(make_case slot-shared-unstamped-holder)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the stamped record beside an unstamped one refused: $(cat "$dir/stderr")"
+  assert_present "$dir/home/state/$old.meta" "the holder's teardown removed the unstamped record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the holder's teardown did not return its slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$old" "the warning should name the unstamped stale record"
+
+  # The same pair in the other direction: the unstamped record's own teardown
+  # leaves every slot step to the stamped record and cleans only its own records.
+  dir=$(make_case slot-shared-unstamped-stale)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "teardown of the unstamped stale record refused: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$old.meta" "the unstamped stale record was not removed"
+  assert_present "$dir/home/state/$new.meta" "the unstamped teardown removed the stamped record"
+  assert_present "$dir/worktree/sentinel" "the unstamped teardown reset the stamped record's slot"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the unstamped record's teardown returned the stamped record's slot"
+  assert_contains "$(cat "$dir/stderr")" "left untouched" \
+    "the unstamped record's teardown should report the slot as the other task's"
+
+  # Neither record stamped proves no order at all, so the pair still refuses.
+  dir=$(make_case slot-shared-both-unstamped)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot where neither record carries a spawn stamp"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the other unstamped record"
+
+  # An unstamped record whose endpoint reads alive is no evidence either, in
+  # either direction.
+  dir=$(make_case slot-shared-unstamped-live)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old" "$new"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose unstamped record is live"
+  assert_refused_without_mutation "$dir" "$old" "live unstamped record on a shared slot"
+
+  # An endpoint reading is only evidence when the record it came from provably
+  # names its own endpoint. A hand-appended second window= line makes the last
+  # value win, so the reading would be 'missing' for a task that is alive under
+  # its real window - the slot must not be returned out from under it.
+  dir=$(make_case slot-shared-other-window-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "window=firstmate:fm-$old-ghost" \
+    "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record names two windows"
+  assert_present "$dir/home/state/$old.meta" "the refused teardown removed the ambiguous record"
+
+  # Same rule for a binding that names another task: the reading proves nothing
+  # about the record that carries it.
+  dir=$(make_case slot-shared-other-binding-foreign)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=someone-else" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record is bound to a third task"
+
+  # The unstamped direction reads the same evidence, so it is gated the same way.
+  dir=$(make_case slot-shared-unstamped-window-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$old"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "window=firstmate:fm-$old-ghost" \
+    "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose unstamped record names two windows"
+
+  # A record that does not state exactly one kind cannot be typed out of the
+  # collision either: the last-value read would call a secondmate a scout.
+  dir=$(make_case slot-shared-other-kind-ambiguous)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=secondmate" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot whose other record states two kinds"
+
+  # An appended path line can add a slot a record names, never erase one. The
+  # operator "reconciling" the other record by appending a corrected worktree=
+  # line must not make this teardown see a sole-record slot and return it.
+  dir=$(make_case slot-shared-other-worktree-appended)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/elsewhere"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "worktree=$dir/elsewhere" \
+    "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot the other record still names in an earlier worktree line"
+  assert_present "$dir/worktree/sentinel" "the hidden collision let the slot be reset"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded worktree" \
+    "the refusal should name the record that still points at the slot"
+
+  # Same rule for the home= field, which the header promises always refuses.
+  dir=$(make_case slot-shared-other-home-appended)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/elsewhere"
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "home=$dir/worktree" "home=$dir/elsewhere" \
+    "worktree=$dir/elsewhere" "project=$dir/project" "kind=secondmate"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$new" "shared slot the other record still names in an earlier home line"
+  assert_contains "$(cat "$dir/stderr")" "is also task $old's recorded home" \
+    "the refusal should name the home collision"
+
+  # Both endpoints gone and no claim: the pair is only clearable later-record
+  # first, so the earlier record's refusal must say which one to tear down.
+  dir=$(make_case slot-shared-both-gone-earlier-first)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" someone-else
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$old" "earlier-stamped record on a shared slot whose endpoints are both gone"
+  assert_contains "$(cat "$dir/stderr")" "tear $new down first" \
+    "the refusal should name the later-stamped record to tear down first"
+  # And that order does clear the pair, exactly as the refusal advises.
+  run_case "$dir" "$new" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the advised order refused: $(cat "$dir/stderr")"
+  run_case "$dir" "$old" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "the earlier record still refused after the advised order: $(cat "$dir/stderr")"
+
+  pass "fm-teardown: two task records on one pool slot resolve by handout order instead of refusing each other"
+}
+
+# Forced secondmate cleanup removes one child record per iteration, so a
+# determination re-derived inside that loop would read a record set the loop has
+# already pruned: the holder is processed first (glob order), and the stale child
+# would then find no other record naming its slot and return the holder's slot a
+# second time. The verdicts come from the preflight, taken before any removal.
+# A legacy record can be accepted (no spawn_gen, endpoint confirmed gone) and
+# have its slot left to the task it was reassigned to, on the same two facts.
+# The completion line must then report the slot as left behind, never as this
+# task's worktree.
+test_legacy_acceptance_still_reports_the_slot_it_left_behind() {
+  local dir old=legacy-ship new=new-scout out
+
+  dir=$(make_case slot-shared-legacy-completion)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" someone-else
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$dir/home/data/backlog.md"
+  tasks-axi add "$old" "legacy slot fixture" --kind ship \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  tasks-axi start "$old" --file "$dir/home/data/backlog.md" >/dev/null
+  fm_write_meta "$dir/home/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=local-only"
+  fm_write_meta "$dir/home/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+
+  out=$(run_case "$dir" "$old" --legacy-record 2> "$dir/stderr") \
+    || fail "teardown of the accepted legacy record refused: $(cat "$dir/stderr")"
+  assert_contains "$out" "pool slot $dir/worktree left to task $new" \
+    "the completion line did not report the slot as left to the other task"
+  assert_contains "$out" "legacy record accepted without spawn_gen" \
+    "the completion line dropped the legacy acceptance detail"
+  ! printf '%s\n' "$out" | grep -Fq ", worktree $dir/worktree" \
+    || fail "the completion line still claimed the reassigned slot as its worktree: $out"
+  assert_present "$dir/worktree/sentinel" "the reassigned slot was reset anyway"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "the reassigned slot was returned anyway: $(cat "$dir/runtime.log")"
+  assert_absent "$dir/home/state/$old.meta" "the legacy record was not removed"
+  assert_present "$dir/home/state/$new.meta" "the holder's record was removed"
+
+  pass "fm-teardown: an accepted legacy record still reports the pool slot it left to another task"
+}
+
+test_forced_child_slot_verdicts_survive_sibling_record_removal() {
+  local dir mate parent=mate-task old=old-scout new=new-scout rc returns
+  dir=$(make_case secondmate-child-shared-slot)
+  mark_case_as_treehouse_pool "$dir"
+  stub_tmux_alive_windows "$dir" "$new"
+  mate="$dir/mate"
+  make_home "$mate"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  write_local_parent_record "$mate" "$dir/home"
+  printf '%s\n' "- $parent - fixture (home: $mate; scope: test; projects: project; added 2026-01-01)" \
+    > "$dir/home/data/secondmates.md"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$old.meta" \
+    "window=firstmate:fm-$old" "endpoint_task_id=$old" "spawn_gen=s1790221863.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "harness=echo"
+  fm_write_meta "$mate/state/$new.meta" \
+    "window=firstmate:fm-$new" "endpoint_task_id=$new" "spawn_gen=s1790490802.1.1" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" "harness=echo"
+
+  set +e
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "forced secondmate cleanup of two children on one slot refused: $(cat "$dir/stderr")"
+  returns=$(grep -Fc "treehouse <return>" "$dir/runtime.log" || true)
+  [ "$returns" = 1 ] \
+    || fail "the shared pool slot was returned $returns times instead of once: $(cat "$dir/runtime.log")"
+  assert_absent "$mate/state/$old.meta" "the stale child's record survived forced cleanup"
+  assert_absent "$mate/state/$new.meta" "the holder child's record survived forced cleanup"
+
+  pass "fm-teardown: forced child cleanup keeps the preflight's slot verdict after a sibling record is removed"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1403,6 +1828,9 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_shared_slot_records_resolve_by_handout_order
+test_forced_child_slot_verdicts_survive_sibling_record_removal
+test_legacy_acceptance_still_reports_the_slot_it_left_behind
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
