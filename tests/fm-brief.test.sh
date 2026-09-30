@@ -194,6 +194,25 @@ EOF
 # against any *new* unescaped apostrophe or unbalanced quote later added to
 # one of these DOD blocks, since a broken heredoc corrupts or empties the
 # generated brief content, not just the script's own syntax.
+test_unterminated_steering_message_round_trips_through_reader() {
+  local state message expected actual
+  state="$TMP_ROOT/unterminated-steer/state"
+  mkdir -p "$state"
+  message='single-line steering message without a final newline'
+  expected="$TMP_ROOT/unterminated-steer/expected"
+  actual="$TMP_ROOT/unterminated-steer/actual"
+  printf '%s' "$message" > "$expected"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    rec=$(fm_task_inbox_write "$2" t1 "$3") || exit
+    fm_task_inbox_body "$rec"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" "$message" > "$actual" \
+    || fail "unterminated steering message could not be written and read"
+  cmp -s "$expected" "$actual" \
+    || fail "EOF-safe inbox read did not return the complete unterminated steering message"
+  pass "fm-brief.sh: unterminated steering messages round-trip through the inbox reader"
+}
+
 test_ship_modes_generate_clean_briefs() {
   local home id mode brief status
   home="$TMP_ROOT/ship-home"
@@ -213,6 +232,10 @@ test_ship_modes_generate_clean_briefs() {
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
+    assert_grep "read the complete contents of each message file (including its final line)" "$brief" \
+      "$id: brief must require reading the complete steering record"
+    assert_grep "Do not use a line-reading loop that can discard an unterminated final line." "$brief" \
+      "$id: brief must warn against dropping an unterminated final line"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -1329,6 +1352,7 @@ test_crewmate_scaffolds_forbid_pool_administration() {
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
+test_unterminated_steering_message_round_trips_through_reader
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry

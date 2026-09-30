@@ -132,7 +132,7 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 }
 
 test_write_is_durable_and_exact() {
-  local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 text
+  local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 text last_byte line last_line
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
   text=$'line one\nline two with  spaces\n/slash body\n\n'
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
@@ -151,6 +151,13 @@ test_write_is_durable_and_exact() {
     || fail "record body did not preserve trailing and blank-line bytes"
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "no trailing newline") \
     || fail "second inbox write failed"
+  last_byte=$(tail -c 1 "$rec2" | od -An -t x1 | tr -d ' \n')
+  [ "$last_byte" = 0a ] \
+    || fail "a record without a final message newline must still end with a record newline"
+  last_line=
+  while IFS= read -r line; do last_line=$line; done < "$rec2"
+  [ "$last_line" = "no trailing newline" ] \
+    || fail "a line reader must see the complete single-line steer as the final record line"
   expected2="$state/expected-no-newline.body"
   actual2="$state/actual-no-newline.body"
   printf '%s' "no trailing newline" > "$expected2"
@@ -181,6 +188,36 @@ test_write_is_durable_and_exact() {
 # The doorbell may land in a pane whose agent has exited, where it is a shell
 # command line. Execute the real line in real shells and assert it is inert:
 # exit 0, no output, and nothing in the inbox touched.
+test_legacy_unterminated_record_body_remains_readable() {
+  local state rec actual expected
+  state="$TMP_ROOT/legacy/state"
+  mkdir -p "$state/t1.inbox"
+  rec="$state/t1.inbox/001.msg"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-28T00:00:00Z\n--\nlegacy message without final newline' > "$rec"
+  actual="$state/actual.body"
+  expected="$state/expected.body"
+  printf '%s' 'legacy message without final newline' > "$expected"
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" \
+    || fail "legacy record without body-bytes metadata could not be read"
+  cmp -s "$expected" "$actual" \
+    || fail "legacy record body bytes changed while reading"
+  pass "inbox: legacy records without a record terminator remain byte-readable"
+}
+
+test_truncated_body_bytes_are_refused_without_partial_output() {
+  local state rec actual rc
+  state="$TMP_ROOT/truncated-body/state"
+  mkdir -p "$state/t1.inbox"
+  rec="$state/t1.inbox/001.msg"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-28T00:00:00Z\nbody-bytes=12\n--\nshort' > "$rec"
+  actual="$state/actual.body"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a body shorter than its recorded byte count must fail"
+  [ ! -s "$actual" ] || fail "a truncated body must not emit partial message content"
+  pass "inbox: truncated body-byte records fail without exposing partial message content"
+}
+
 test_doorbell_is_a_shell_noop() {
   local state task rec doorbell sh out before after marker
   state="$TMP_ROOT/noop/state"
@@ -801,6 +838,8 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 }
 
 test_write_is_durable_and_exact
+test_legacy_unterminated_record_body_remains_readable
+test_truncated_body_bytes_are_refused_without_partial_output
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent

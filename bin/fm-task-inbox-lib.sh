@@ -35,6 +35,7 @@
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
+#   body-bytes=<byte count>   exact payload length, including embedded newlines
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -145,16 +146,19 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
-  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
+  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0 body_bytes
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
+  body_bytes=$(LC_ALL=C printf '%s' "$text" | wc -c | tr -d '[:space:]')
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
+    printf 'body-bytes=%s\n' "$body_bytes"
     printf -- '--\n'
     printf '%s' "$text"
+    printf '\n'
   } > "$tmp" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
@@ -240,13 +244,27 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
 
 # The exact enqueued text back out of a record.
 fm_task_inbox_body() {  # <record-path>
-  local line
+  local line body_bytes='' has_body_bytes=0 body LC_ALL=C
   [ -f "$1" ] || return 1
   while IFS= read -r line; do
-    if [ "$line" = -- ]; then
-      cat
-      return 0
-    fi
+    case "$line" in
+      body-bytes=*) body_bytes=${line#body-bytes=}; has_body_bytes=1 ;;
+      --)
+        if [ "$has_body_bytes" -eq 0 ]; then
+          cat
+          return 0
+        fi
+        case "$body_bytes" in
+          0|[1-9]|[1-9][0-9]*) ;;
+          *) return 1 ;;
+        esac
+        body=$(head -c "$body_bytes"; printf '\001') || return 1
+        body=${body%$'\001'}
+        [ "${#body}" = "$body_bytes" ] || return 1
+        printf '%s' "$body"
+        return 0
+        ;;
+    esac
   done < "$1"
   return 1
 }
