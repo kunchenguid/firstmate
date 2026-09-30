@@ -79,6 +79,11 @@ fm_lock_try_acquire() {
     write_v1 "$ID" ZzYyXxWwVvUuTtSsRrQqPp
     rm -f "$FIXTURE_DIR/rewrite-journal-on-lock"
   fi
+  if [ "$1" = "$TMP_ROOT/presentation.lock" ] && [ -e "$FIXTURE_DIR/rewrite-v3-home-on-lock" ]; then
+    mkdir -p "$TMP_ROOT/other-home"
+    write_v3 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
+    rm -f "$FIXTURE_DIR/rewrite-v3-home-on-lock"
+  fi
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
@@ -222,6 +227,18 @@ write_v2() { # <home> <workspace> <tab> <pane>
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
+write_v3() { # <home> <workspace> <tab> <pane>
+  write_v2 "$@"
+  sed -i 's/^version=2$/version=3/' "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+  {
+    printf 'spawn_gen=1\n'
+    printf 'terminal_id=terminal-1\n'
+    printf 'session_instance=session-1\n'
+    printf 'shell_pid=67\n'
+    printf 'shell_start=Wed Sep 30 08:00:00 2026\n'
+  } >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
 write_cross_home_v2() {
   mkdir -p "$TMP_ROOT/other-home"
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
@@ -334,6 +351,9 @@ reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserv
 reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
 reset_fixture; : > "$FIXTURE_DIR/inject-duplicate-on-lock"; assert_preserved "new conflicting journal under lock"
 reset_fixture; : > "$FIXTURE_DIR/rewrite-journal-on-lock"; assert_preserved "changed journal bytes under lock"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FIXTURE_DIR/rewrite-v3-home-on-lock"
+assert_preserved "changed v3 home under lock"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
 reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
 reset_fixture; write_v2 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v2 tab binding mismatch"
@@ -343,6 +363,14 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v3 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v3 cleanup did not close exactly once"
+pass "v3 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; mkdir -p "$TMP_ROOT/other-home"
+write_v3 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
+assert_preserved "cross-home v3 journal"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"

@@ -14,7 +14,7 @@
 # the named-session snapshot, exactly one matching home-local journal, one tab,
 # one pane, absent task metadata, no registered agent, and a process proof that
 # the pane contains only one idle recognized shell with no child process. A
-# version 2 journal must also bind the exact workspace, tab, and pane.
+# version 2 or 3 journal must also bind the exact workspace, tab, and pane.
 # Topology is first checked from one locked API snapshot, then every mutation
 # prerequisite is immediately rechecked before the existing exact-pane
 # focus-preserving close helper is called.
@@ -75,15 +75,17 @@ fm_herdr_cleanup_journal_index() { # <session> <home-real>
     bound_workspace=-
     bound_tab=-
     bound_pane=-
-    if [ "$version" = 2 ]; then
-      journal_home=$(fm_backend_herdr_projection_home_identity \
-        "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
-      [ "$journal_home" = "$home_real" ] \
-        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
-      bound_workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
-      bound_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-      bound_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-    fi
+    case "$version" in
+      2|3)
+        journal_home=$(fm_backend_herdr_projection_home_identity \
+          "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
+        [ "$journal_home" = "$home_real" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
+        bound_workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+        bound_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+        bound_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+        ;;
+    esac
     title=$(fm_backend_herdr_projection_workspace_label \
       "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -119,12 +121,14 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
     id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
     fm_task_id_creation_valid "$id" || continue
     fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
-    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
-      journal_home=$(fm_backend_herdr_projection_home_identity \
-        "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
-      [ "$journal_home" = "$home_real" ] \
-        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
-    fi
+    case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+      2|3)
+        journal_home=$(fm_backend_herdr_projection_home_identity \
+          "$FM_BACKEND_HERDR_JOURNAL_HOME" 2>/dev/null) || continue
+        [ "$journal_home" = "$home_real" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] || continue
+        ;;
+    esac
     expected=$(fm_backend_herdr_projection_workspace_label \
       "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
     [ "$expected" = "$title" ] || continue
@@ -156,11 +160,13 @@ fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
     "$FM_HERDR_CLEANUP_JOURNAL" "$FM_HERDR_CLEANUP_ID" || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
   FM_HERDR_CLEANUP_VERSION=$FM_BACKEND_HERDR_JOURNAL_VERSION
-  if [ "$FM_HERDR_CLEANUP_VERSION" = 2 ]; then
-    FM_HERDR_CLEANUP_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
-    FM_HERDR_CLEANUP_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-    FM_HERDR_CLEANUP_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-  fi
+  case "$FM_HERDR_CLEANUP_VERSION" in
+    2|3)
+      FM_HERDR_CLEANUP_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+      FM_HERDR_CLEANUP_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+      FM_HERDR_CLEANUP_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+      ;;
+  esac
 }
 
 fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token> <bound-workspace> <bound-tab> <bound-pane>
@@ -258,14 +264,17 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real> <journal> <
   fm_task_id_creation_valid "$id" || return 0
   [ "$journal" = "$STATE/$id$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX" ] || return 0
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 0
-  if [ "$version" = 1 ]; then
-    bound_workspace=
-    bound_tab=
-    bound_pane=
-  else
-    [ "$version" = 2 ] || return 0
-    [ "$bound_workspace" != - ] && [ "$bound_tab" != - ] && [ "$bound_pane" != - ] || return 0
-  fi
+  case "$version" in
+    1)
+      bound_workspace=
+      bound_tab=
+      bound_pane=
+      ;;
+    2|3)
+      [ "$bound_workspace" != - ] && [ "$bound_tab" != - ] && [ "$bound_pane" != - ] || return 0
+      ;;
+    *) return 0 ;;
+  esac
   # Most journals still belong to a current task. Reject those before taking
   # locks or reparsing any journal; the same fact is checked again under both
   # locks before a mutation can occur.
