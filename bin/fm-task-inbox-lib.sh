@@ -47,8 +47,10 @@
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
 # attempt may ring or be skipped to protect another draft in a proven pending
-# composer; an unsubmitted copy of this doorbell is retried. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
+# composer; an unsubmitted copy of this doorbell is retried. A grok suggestion
+# popup that consumed Enter is dismissed with Escape first, and only when the
+# task's recorded harness is grok (fm_task_inbox_ring).
+# After FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
@@ -270,6 +272,46 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
+# Recorded harness from the task metadata next to this inbox record, the same
+# source fm-control reads. Empty when the record has no sibling meta.
+_fm_task_inbox_recorded_harness() {  # <record-path>
+  local rec=$1 dir task state
+  dir=${rec%/*}
+  dir=${dir%/handled}
+  task=${dir##*/}
+  task=${task%.inbox}
+  state=${dir%/*}
+  [ -n "$task" ] && [ -f "$state/$task.meta" ] || return 1
+  fm_meta_get "$state/$task.meta" harness
+}
+
+# Escape recovery is grok-only: on other harnesses a single Escape cancels a
+# live turn. Match the recorded spawn harness, including a grok-* pin.
+_fm_task_inbox_harness_is_grok() {  # <record-path>
+  local harness
+  harness=$(_fm_task_inbox_recorded_harness "$1") || return 1
+  case "$harness" in
+    grok|grok-*) return 0 ;;
+  esac
+  return 1
+}
+
+# Recover a grok composer whose only pending text is this inbox's own doorbell
+# line, typically left behind when a grok suggestion popup consumed Enter.
+# Sends Escape to dismiss the popup, then re-reads. Returns 0 only when the
+# composer is then proven empty; a still-sitting doorbell is the caller's
+# Enter-submit path, and any other pending text still refuses.
+_fm_task_inbox_recover_own_doorbell() {  # <backend> <target> <label> <doorbell>
+  local backend=$1 target=$2 label=$3 doorbell=$4
+  local state
+  [ -n "$doorbell" ] || return 1
+  fm_task_inbox_composer_holds "$backend" "$target" "$doorbell" "$label" || return 1
+  fm_backend_send_key "$backend" "$target" Escape "$label" 2>/dev/null || return 1
+  sleep 0.3
+  state=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || return 1
+  [ "$state" = empty ]
+}
+
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
@@ -285,9 +327,11 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
 # A pending composer holding exactly our own doorbell line is a previous ring
-# whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. On both paths
-# a lost first Enter gets one confirmed retry.
+# whose Enter never landed. On a grok task that is not reported busy, Escape
+# dismisses a popup that would swallow Enter; if that clears the composer, a
+# fresh doorbell is typed. Every other harness, and a grok composer that still
+# holds the line, submits with Enter rather than skipping. On both paths a
+# lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -302,11 +346,18 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      sleep 0.3
-      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
-      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
-      return 0
+      if _fm_task_inbox_harness_is_grok "$rec" \
+         && _fm_task_inbox_recover_own_doorbell "$backend" "$target" "$label" "$line"; then
+        :
+      elif fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label"; then
+        fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+        sleep 0.3
+        fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+        fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+        return 0
+      else
+        return 1
+      fi
       ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
