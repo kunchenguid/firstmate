@@ -295,7 +295,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-omp=/Users/u/.local/bin/omp
+omp='/Users/u/.local/bin/omp'
 comm=$omp
 [ "${FM_TEST_OMP_SHAPE:-macos}" = macos ] || comm=omp
 case "$pid:$field" in
@@ -316,7 +316,9 @@ case "$pid:$field" in
   1:ppid=) printf '%s\n' 0 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' "${FM_TEST_FOREIGN:+500}"; [ -n "${FM_TEST_FOREIGN:-}" ] || printf '%s\n' 36954 ;;
+  *:ppid=)
+    if [ -n "${FM_TEST_FOREIGN:-}" ]; then printf '%s\n' 500; else printf '%s\n' 36954; fi
+    ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -336,7 +338,7 @@ SH
 
   # Linux procps reports the bare executable name in comm while args retains
   # the full executable path, including spaces.
-  sed -i.bak 's#^omp=/Users/u/.local/bin/omp$#omp=/Users/u/Install With Spaces/omp#' "$fakebin/ps"
+  sed -i.bak "s|^omp='/Users/u/.local/bin/omp'$|omp='/Users/u/Install With Spaces/omp'|" "$fakebin/ps"
   rm -f "$fakebin/ps.bak"
   FM_TEST_OMP_SHAPE=linux lib_eval "$fakebin" 'fm_harness_ancestry_pids' >/dev/null \
     || fail "a spaced omp install path hid the worker broker"

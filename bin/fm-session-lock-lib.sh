@@ -64,19 +64,12 @@ fm_harness_path_name() {  # <path>
 # it reparented to pid 1. The marker is argv[1] exactly, never a substring,
 # because a session's own argv can quote a helper name inside its prompt.
 fm_harness_is_omp_worker_helper() {  # <comm> <args>
-  local comm=$1 args=$2 rest
+  local comm=$1 args=$2
   [ "${comm##*/}" = omp ] || return 1
-  if [ "$comm" = omp ] && [[ "$args" == */omp\ * ]]; then
-    args=${args#*/omp }
-    case "$args" in __omp_worker_*) return 0 ;; esac
-    return 1
-  fi
   case "$args" in
-    "$comm "*) rest=${args#"$comm "} ;;
-    *' '*) rest=${args#* } ;;
-    *) return 1 ;;
+    "$comm __omp_worker_"*) return 0 ;;
+    */omp\ __omp_worker_*) return 0 ;;
   esac
-  case "$rest" in __omp_worker_*) return 0 ;; esac
   return 1
 }
 
