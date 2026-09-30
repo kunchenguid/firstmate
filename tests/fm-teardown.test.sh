@@ -4503,7 +4503,7 @@ test_lavish_inventory_resolution_in_manual_mode() {
     printf 'manual\n' > "$case_dir/config/backlog-backend"
     printf '%s\n' 'decisions_reviewed=1' 'decision_keys=held-q' >> "$case_dir/state/task-x1.meta"
     held_id=held-q
-    [ "$variant" != legacy ] || held_id=task-x1-decision-held-q
+    [ "$variant" != legacy ] || held_id="task-x1-decision-held-q"
     if [ "$variant" != missing ]; then
       FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
         "$ROOT/bin/fm-captain-hold.sh" hold "$held_id" --title question --reason waiting >/dev/null \
@@ -4713,12 +4713,12 @@ test_teardown_preserves_lavish_boards_owned_by_another_home() {
       land_lavish_case "$case_dir"
       lavish_board_fixture "$case_dir"
       home=$case_dir
-      task=task-x1
+      task="task-x1"
       if [ "$caller" = child ]; then
         write_meta "$case_dir" local-only secondmate
         configure_secondmate_with_tmux_children "$case_dir"
         home="$case_dir/secondmate-home"
-        task=child-a
+        task="child-a"
         cp -R "$ROOT/bin" "$home/bin"
       fi
       mkdir -p "$home/data/$task"
