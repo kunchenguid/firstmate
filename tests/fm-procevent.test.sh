@@ -3393,6 +3393,7 @@ EOF
 out=$(read_out) || fail "read failed on a short expanded-list capture"
 assert_contains "$out" "declared_items: 2" "a short expanded-list capture lost its declared count"
 assert_contains "$out" "presented_items: 1" "a short expanded-list capture miscounted its items"
+assert_contains "$out" "malformed_items: 0" "a short expanded-list capture counted a missing item as malformed"
 assert_contains "$out" "complete: no" "a short expanded-list capture was certified as complete"
 pass "read never certifies a short expanded-list capture as complete"
 

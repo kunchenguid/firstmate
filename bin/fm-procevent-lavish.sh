@@ -782,8 +782,6 @@ cmd_read() {
       }
       push @parsed, \%f;
     }
-    $malformed += $want - @items
-      if defined $shape && $shape eq "list" && @items < $want;
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
