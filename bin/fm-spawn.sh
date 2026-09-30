@@ -4519,17 +4519,35 @@ EOF
     ;;
   opencode*)
     mkdir -p "$WT/.opencode/plugins"
+    # OpenCode 2 plugin contract, verified 2026-09-30 against OpenCode 2.0.20
+    # by running real sessions. Three things changed and each one is load-bearing,
+    # so none of the v1 spellings survive:
+    #   - the module default-exports a definition with an id and setup(ctx); a
+    #     named export returning a hooks object is rejected at load, which is
+    #     exactly how every firstmate plugin failed after the 2.0.20 upgrade;
+    #   - the event subscription is the whole server's stream, so every event is
+    #     filtered to this plugin instance's own location before it can act, and
+    #     payloads are read from `data` rather than `properties`;
+    #   - OpenCode 2 delivers no `session.status` and no `session.idle` to a
+    #     plugin subscription at all (verified across repeated real sessions),
+    #     so the semantic source is re-derived onto the step events: a step
+    #     starting means busy, a step ending without asking for more tools means
+    #     the turn ended and the worker is idle.
+    # The contract helper is imported by absolute path from the firstmate
+    # checkout rather than inlined, so the event-shape rules stay owned in one
+    # place; a generated file in a task worktree cannot reach a relative import.
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
-// reports activity (the worker's main session - a subagent child session can
-// only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
-// watcher's wake NOTIFICATION, never current-state truth.
+// Semantic state comes from OpenCode's step events: a step starting is active
+// work, and a step ending without asking for further tools is the turn ending.
+// Scoping latches the first session that reports activity (the worker's main
+// session - a subagent child session can only start while the main session is
+// already busy) and ignores other sessions until the latched session settles,
+// so a child's turn end can never clear the worker's busy state. The turn-end
+// touch stays the watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+import { subscribeOwnEvents, turnEndedSessionID } from "$FM_ROOT/.opencode/plugins/lib/fm-opencode-contract.js";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4537,35 +4555,28 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
-  let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
-        }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
+export default {
+  id: "firstmate.busy-state",
+  setup(ctx) {
+    let activeSession = null;
+    return subscribeOwnEvents(ctx, async (event) => {
+      if (event.type === "session.step.started") {
+        const sessionID = event.data.sessionID;
+        if (activeSession === null) activeSession = sessionID;
+        if (sessionID === activeSession) await busyEvent("busy", "session-step-started");
         return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
+      const ended = turnEndedSessionID(event);
+      if (!ended) return;
+      if (ended === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-step-ended");
       }
-    },
-  };
+      await new Promise((resolve) => {
+        execFile("touch", ["$TURNEND"], () => resolve());
+      });
+    });
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
