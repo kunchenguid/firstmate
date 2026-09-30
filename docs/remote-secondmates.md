@@ -656,6 +656,7 @@ Move a live remote second mate onto a newly pinned harness, model, or effort wit
 When fleet seat pools are configured, this wrapper is the required path: the host refuses a supervisor relaunch that does not carry the primary's seat operation.
 A persist-before-restart request binds to the host's recorded launch generation as well as the primary's route.
 The wrapper forwards that expected generation into host control, which compares it inside the host lifecycle episode before stopping anything.
+Host-local launch, relaunch, and disposition acquire or adopt the same episode even when no seat pools or parent operation are present.
 A missing binding or newer incarnation takes the re-read nudge path.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 

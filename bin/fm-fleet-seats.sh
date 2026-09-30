@@ -323,6 +323,8 @@ resolve_authority() {
 
 # --- the holder ledger ---------------------------------------------------------
 
+MODEL_NORMALIZATION='def seat_model: if . == "" or . == "default" or . == "-" then null else . end;'
+normalize_model() { jq -nr --arg m "$1" "$MODEL_NORMALIZATION \$m | seat_model // \"\""; }
 holder_path() { printf '%s/holders/%s.json\n' "$LEDGER" "$(seat_name "$1" "$2")"; }
 
 # holder_validate <file> <state-dir> <task>: the record is a well-formed v2
@@ -353,19 +355,21 @@ holder_load() {
   fi
   [ -f "$HOLDER_FILE" ] && [ ! -L "$HOLDER_FILE" ] || return 1
   holder_validate "$HOLDER_FILE" "$1" "$2" || return 1
-  HOLDER_JSON=$(cat "$HOLDER_FILE") || return 1
+  HOLDER_JSON=$(jq -c "$MODEL_NORMALIZATION .incarnations[].model |= seat_model" "$HOLDER_FILE") || return 1
 }
 
 # holder_publish <json>: atomically replace HOLDER_FILE with <json>, which the
 # caller built from HOLDER_JSON with its revision already advanced.
 holder_publish() {
-  local tmp
+  local tmp json
+  json=$(printf '%s\n' "$1" | jq -c "$MODEL_NORMALIZATION .incarnations[].model |= seat_model") || return 1
   mkdir -p "$LEDGER/holders" || return 1
   tmp="$HOLDER_FILE.tmp.$$"
-  if ! { (umask 077 && printf '%s\n' "$1" > "$tmp") && mv -f "$tmp" "$HOLDER_FILE"; }; then
+  if ! { (umask 077 && printf '%s\n' "$json" > "$tmp") && mv -f "$tmp" "$HOLDER_FILE"; }; then
     rm -f "$tmp"
     return 1
   fi
+  HOLDER_JSON=$json
 }
 
 # holder_mutate <jq-filter> [jq-args...]: apply <filter> to HOLDER_JSON (which
@@ -375,7 +379,6 @@ holder_mutate() {
   shift
   out=$(printf '%s\n' "$HOLDER_JSON" | jq -c "$@" "$filter | .revision += 1") || return 1
   holder_publish "$out" || return 1
-  HOLDER_JSON=$out
 }
 
 inc_get() {  # <generation> <jq-expression-on-incarnation>
@@ -408,7 +411,7 @@ ledger_scan() {
       LEDGER_ERROR="holder record $f is malformed or names another holder"
       return 1
     fi
-    jq -r '. as $h | .incarnations[] | [$h.state_dir, $h.task, .generation, .lifecycle,
+    jq -r "$MODEL_NORMALIZATION"'.incarnations[].model |= seat_model | . as $h | .incarnations[] | [$h.state_dir, $h.task, .generation, .lifecycle,
       (.model // "-"), .kind, .launch_phase, ((.owner_pid // "-") | tostring),
       (.route.placement // "-"), (.previous_generation // "-")] | @tsv' "$f" >> "$TMPD/ledger" || return 1
   done
@@ -462,7 +465,7 @@ import_legacy_v1() {
           legacy: {source: "v1", fingerprint: $fp}}]}') || return 1
     holder_publish "$json" || return 1
     holder_load "$st" "$task" || return 1
-    [ "$(inc_get "$gen" '.model // ""')" = "$model" ] || { LEDGER_ERROR="imported seat for $task did not read back"; return 1; }
+    [ "$(inc_get "$gen" '.model // ""')" = "$(normalize_model "$model")" ] || { LEDGER_ERROR="imported seat for $task did not read back"; return 1; }
     rm -f "$f" || return 1
   done
 }
@@ -472,6 +475,7 @@ import_legacy_v1() {
 meta_generation() {  # <meta>
   local g
   g=$(record_field "$1" fleet_seat_generation)
+  [ -n "$g" ] || g=$(record_field "$1" remote_spawn_gen)
   [ -n "$g" ] || g=$(record_field "$1" spawn_gen)
   printf '%s' "$g"
 }
@@ -637,7 +641,7 @@ root_holders() {
         continue
       fi
       jq -r --slurpfile m <(jq -R . "$models" | jq -s .) \
-        '.holders[] | select(.model == null or (.model as $x | $m[0] | index($x))) | "\(.state_dir)\t\(.task)"' \
+        "$MODEL_NORMALIZATION"'.holders[] | .model |= seat_model | select(.model == null or (.model as $x | $m[0] | index($x))) | "\(.state_dir)\t\(.task)"' \
         "$CERT_FILE" | while IFS=$'\t' read -r st task; do
           printf 'remote:%s:%s\t%s\n' "$id" "$st" "$task"
         done
@@ -926,14 +930,15 @@ fi
 # new incarnation, under the ledger lock with HOLDER_JSON loaded. Prints
 # "existing" for an idempotent retry.
 reserve_apply() {
-  local existing_model others identity
+  local existing_model others identity model
+  model=$(normalize_model "$MODEL") || unavailable "cannot resolve the seat model for $TASK"
   if inc_exists "$GEN"; then
     case "$(inc_get "$GEN" .lifecycle)" in
       reserved|confirmed) ;;
       *) refuse "generation $GEN of $TASK is already terminal; a new episode needs a new generation" ;;
     esac
     existing_model=$(inc_get "$GEN" '.model // ""')
-    [ "$existing_model" = "$MODEL" ] \
+    [ "$existing_model" = "$model" ] \
       || refuse "generation $GEN of $TASK is already reserved for model ${existing_model:-unresolved}, not $MODEL"
     RESERVE_EXISTING=1
     return 0
@@ -954,7 +959,7 @@ reserve_apply() {
       policy_digest_at_reserve: $d, lifecycle: "reserved", launch_phase: "prepared",
       owner_pid: ($o | tonumber), owner_pid_identity: $i, route: null,
       startup_confirmed: false, disposition: null}]' \
-    --arg g "$GEN" --arg p "$PREV_GEN" --arg k "$KIND" --arg m "$MODEL" --arg d "$DIGEST" \
+    --arg g "$GEN" --arg p "$PREV_GEN" --arg k "$KIND" --arg m "$model" --arg d "$DIGEST" \
     --arg o "$HOLDER" --arg i "$identity" || unavailable "cannot write the seat holder record for $TASK"
   RESERVE_EXISTING=0
 }
@@ -1098,17 +1103,14 @@ apply_remote_disposition() {
 if [ "$CMD" = reserve ] && [ "$OPT_OUT" -eq 1 ]; then
   load_or_refuse
   [ -n "$HOLDER_JSON" ] || exit 0
-  if ! inc_exists "$GEN"; then
-    inc_exists "$PREV_GEN" || exit 0
-    case "$(inc_get "$PREV_GEN" .lifecycle)" in reserved|confirmed) ;; *) exit 0 ;; esac
-  fi
   fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running process"
   [ "$KIND" != secondmate ] || lifecycle_join "$HOLDER_STATE" "$TASK"
   lock_or_refuse "$LOCK"
   declared && unavailable "the fleet seat policy returned before the successor was recorded; retry admission"
   load_or_refuse
-  if ! inc_exists "$GEN"; then
-    case "$(inc_get "$PREV_GEN" .lifecycle)" in reserved|confirmed) ;; *) unavailable "the predecessor ended before its opt-out successor was recorded" ;; esac
+  if ! inc_exists "$GEN" && [ "$PREV_GEN" = - ]; then
+    PREV_GEN=$(printf '%s\n' "$HOLDER_JSON" | jq -r '.incarnations | last | select(.lifecycle == "released" or .lifecycle == "reclaimed") | .generation // "-"')
+    [ -n "$PREV_GEN" ] || PREV_GEN=-
   fi
   DIGEST=$(policy_digest <(printf '{"pools":[]}\n'))
   reserve_apply
@@ -1344,7 +1346,10 @@ if [ "$CMD" = reconcile ]; then
   import_legacy_v1 || unavailable "${LEDGER_ERROR:-the legacy seat records cannot be imported}"
   ledger_scan || unavailable "${LEDGER_ERROR:-the seat ledger cannot be read}"
   unlock
-  awk -F '\t' '$4 == "reserved" || $4 == "confirmed"' "$TMPD/ledger" > "$TMPD/candidates"
+  awk -F '\t' -v tick="$(($(date +%s) / 30))" '
+    $4 == "reserved" || $4 == "confirmed" { rows[++n] = $0 }
+    END { if (n) for (i = 0; i < n; i++) print rows[(tick + i) % n + 1] }
+  ' "$TMPD/ledger" > "$TMPD/candidates"
   tried=0
   while IFS=$'\t' read -r st task gen lifecycle _model kind phase owner placement _prev; do
     [ "$tried" -lt "$LIMIT" ] || break
@@ -1564,7 +1569,7 @@ EOF_ALLOW
   granted() {
     holder_load "$HOLDER_STATE" "$TASK" || return 1
     inc_exists "$GEN" && [ "$(inc_get "$GEN" .lifecycle)" = reserved ] \
-      && [ "$(inc_get "$GEN" '.model // ""')" = "$MODEL" ]
+      && [ "$(inc_get "$GEN" '.model // ""')" = "$(normalize_model "$MODEL")" ]
   }
 
   print_grant() {

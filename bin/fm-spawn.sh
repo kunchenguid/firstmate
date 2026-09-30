@@ -3575,6 +3575,12 @@ if [ -z "$SPAWN_REMOTE_OPERATION" ]; then
     'fleet-seats: reserved '*) SPAWN_SEAT_TRACKED=1; SPAWN_SEAT_POOLED=1 ;;
     'fleet-seats: recorded '*) SPAWN_SEAT_TRACKED=1 ;;
   esac
+  if [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_SEAT_TRACKED" = 1 ] && [ "$SPAWN_SEAT_PREV" != - ]; then
+    spawn_seats release "$ID" --generation "$SPAWN_SEAT_PREV" --reason replaced || {
+      echo "error: spawn refused - $ID's predecessor is not proven stopped; no replacement was launched" >&2
+      exit 1
+    }
+  fi
 fi
 
 secondmate_registry_value() {

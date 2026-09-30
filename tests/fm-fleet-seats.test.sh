@@ -1523,6 +1523,88 @@ test_opt_out_records_only_existing_holder_successors() {
   pass "policy opt-out preserves existing holder handoffs and leaves new admissions untracked"
 }
 
+test_terminal_holders_survive_opt_out_readmission() {
+  local home route model n=0 out gen file digest cert
+  new_holder
+  for route in local remote; do
+    for model in default - ''; do
+      n=$((n + 1))
+      home="$TMP_ROOT/terminal-optout-$n"
+      make_home "$home"
+      pools "$home" 1
+      reserve_gen "$home" original old - pool-model-a >/dev/null || fail "historical holder"
+      seats "$home" release original --generation old --reason prelaunch >/dev/null || fail "terminal predecessor"
+      rm "$home/config/fleet-seats"
+      if [ "$route" = remote ]; then
+        printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=primary\n' > "$home/.fm-secondmate-parent"
+        printf '{"pools":[]}\n' > "$home/state/fleet-seats/policy.json"
+      fi
+      gen="new$n"
+      out=$(reserve_gen "$home" original "$gen" - "$model") || fail "terminal opt-out readmission: $out"
+      assert_contains "$out" "recorded id=original" "a historical holder silently opted out"
+      assert_equals reserved "$(lifecycle_of "$home" original "$gen")" "readmission did not record its generation"
+      assert_equals true "$(seats "$home" show original | jq --arg g "$gen" 'any(.incarnations[]; .generation == $g and .previous_generation == "old" and .model == null)')" "the successor lost its predecessor or unresolved model"
+      reserve_gen "$home" original "$gen" - default >/dev/null || fail "equivalent unresolved model retry"
+      out=$(reserve_gen "$home" original old - pool-model-a 2>&1)
+      expect_code 5 "$?" "opt-out revived a terminal generation: $out"
+      if [ "$route" = local ]; then
+        task_record "$home" original default ship "spawn_gen=$gen"
+      else
+        task_record "$home" original default ship "remote_spawn_gen=$gen"
+      fi
+      printf '{"pools":[{"name":"one","capacity":1,"models":["pool-model-a"]},{"name":"two","capacity":1,"models":["pool-model-b"]}]}\n' > "$home/config/fleet-seats"
+      if [ "$route" = remote ]; then
+        digest=$(jq -cS . "$home/config/fleet-seats" | cksum | awk '{print $1 "-" $2}')
+        cert=$(seats "$home" serve --digest "$digest" --epoch optout.1 --allowance one=1 --allowance two=1 < "$home/config/fleet-seats") || fail "restored remote certificate"
+        assert_equals true "$(printf '%s\n' "$cert" | jq --arg g "$gen" 'any(.holders[]; .generation == $g and .model == null)')" "remote certificate hid its opt-out generation"
+      else
+        for model in pool-model-a pool-model-b; do
+          out=$(reserve_gen "$home" contender other - "$model" 2>&1)
+          expect_code 4 "$?" "unresolved successor did not consume $model: $out"
+        done
+      fi
+      for file in "$home/state/fleet-seats/holders/"*.json; do
+        assert_equals true "$(jq --arg g "$gen" 'all(.incarnations[] | select(.generation == $g); .model == null)' "$file")" "persisted holder retained a harness-default spelling"
+      done
+    done
+  done
+  pass "terminal holders record local and remote opt-out readmissions without reviving old generations or undercounting defaults"
+}
+
+test_bounded_reconciliation_progresses_past_uncertain_holders() {
+  local base="$TMP_ROOT/reconcile-progress" home fakebin out file task gen tick n
+  home="$base/home"
+  make_home "$home"
+  pools "$home" 20
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  printf 'fm-uncertain\n' > "$base/tmux/endpoint/windows"
+  for n in $(seq 1 9); do
+    task="sm$n"
+    PATH="$fakebin:$PATH" owner_launch "$home" "$task" "g$n" - secondmate firstmate:fm-uncertain "$base/ready$n"
+    kill "$OWNER_PID"
+    wait "$OWNER_PID" 2>/dev/null
+  done
+  for file in "$home/state/fleet-seats/holders/"*.json; do task=$(jq -r .task "$file"); done
+  gen=$(jq -r '.incarnations[0].generation' "$file")
+  jq '.incarnations[0] |= (.route = null | .launch_phase = "prepared")' "$file" > "$file.prepared"
+  mv "$file.prepared" "$file"
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = +%s ]; then printf '%s\n' "$FM_TEST_TICK"; else exec /bin/date "$@"; fi
+SH
+  chmod +x "$fakebin/date"
+  for tick in $(seq 0 9); do
+    out=$(FM_TEST_TICK=$((tick * 30)) PATH="$fakebin:$PATH" seats "$home" reconcile --limit 1 2>&1) || fail "bounded reconciliation: $out"
+    assert_equals 1 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "maintenance exceeded its one-probe bound"
+  done
+  assert_equals reclaimed "$(lifecycle_of "$home" "$task" "$gen")" "an uncertain prefix starved a reclaimable holder"
+  for n in $(seq 1 9); do
+    [ "sm$n" != "$task" ] || continue
+    assert_equals reserved "$(lifecycle_of "$home" "sm$n" "g$n")" "rotation released an uncertain candidate"
+  done
+  pass "bounded reconciliation rotates across watcher ticks and retains every uncertain launch"
+}
+
 test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
@@ -1564,3 +1646,6 @@ test_serve_delivery_releases_fleet_lock
 test_unpooled_grants_exist_before_certificate_publication
 test_remote_descendants_use_one_authority
 test_opt_out_records_only_existing_holder_successors
+
+test_terminal_holders_survive_opt_out_readmission
+test_bounded_reconciliation_progresses_past_uncertain_holders

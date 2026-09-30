@@ -3216,7 +3216,12 @@ test_unconfirmed_predecessor_prevents_control_launch() {
   assert_contains "$out" "no replacement was launched" "control did not stop at the predecessor-release refusal"
   assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "control released the buffered predecessor"
   assert_no_grep 'encode launch-brief' "$dir/fake/literal" "control delivered a replacement over the buffered predecessor"
-  pass "manual control refuses to launch while its unconfirmed predecessor remains executable"
+  out=$(run_spawn "$dir" sm61 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "standalone relaunch beside an executable buffered predecessor: $out"
+  assert_contains "$out" "no replacement was launched" "standalone spawn ignored predecessor uncertainty"
+  assert_equals reserved "$(case_seats "$dir" show sm61 | jq -r '.incarnations[] | select(.generation=="g-sm-old") | .lifecycle')" "standalone spawn freed the buffered predecessor"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" "standalone spawn delivered over the buffered predecessor"
+  pass "manual and standalone relaunches retain an executable buffered predecessor"
 }
 
 test_observed_predecessors_and_opt_out_successors() {
@@ -3258,6 +3263,50 @@ test_observed_predecessors_and_opt_out_successors() {
     expect_code 0 "$rc" "next $kind relaunch: $out"
   done
   pass "observed worker and unpooled supervisor predecessors confirm before stop, including policy opt-out handoffs"
+}
+
+test_standalone_relaunch_completes_the_predecessor_handoff() {
+  local dir kind old gen model out rc route
+  for kind in ship scout secondmate; do
+    dir=$(new_case "standalone-$kind" rl64)
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl64
+      old=g-sm-old
+    else
+      add_ship_task "$dir" rl64 claude
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl64.meta"
+    fi
+    mkdir -p "$dir/home/config"
+    pool_case "$dir" rl64 || fail "standalone pool fixture"
+    perl -pi -e "s/^spawn_gen=.*/spawn_gen=$old/" "$dir/home/state/rl64.meta"
+    route="$dir/home/state/old-route"
+    env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+      PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" FM_HOME="$dir/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+      "$SEATS" reserve rl64 --generation "$1" --kind "$2" --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+      (umask 077 && printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"fmses:fm-rl64\",\"spawn_gen\":\"%s\"}\n" "$1" > "$3")
+      "$SEATS" dispatch rl64 --generation "$1" --route-file "$3" >/dev/null || exit 1
+      "$SEATS" confirm rl64 --generation "$1" >/dev/null
+    ' _ "$old" "$kind" "$route" || fail "could not confirm the standalone predecessor"
+    for model in pool-model-b pool-model-a; do
+      out=$(run_control "$dir" rl64 exit); rc=$?
+      expect_code 0 "$rc" "stop before standalone $kind relaunch: $out"
+      out=$(FM_CONTROL_LAUNCH_WAIT=0.1 run_spawn "$dir" rl64 --relaunch --harness claude --model "$model"); rc=$?
+      expect_code 0 "$rc" "standalone $kind handoff: $out"
+      gen=$(meta_field "$dir" rl64 spawn_gen)
+      assert_equals released "$(case_seats "$dir" show rl64 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "standalone spawn stranded its predecessor"
+      assert_equals 1 "$(case_seats "$dir" show rl64 | jq '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | length')" "standalone spawn left multiple generations counted"
+      if [ "$model" = pool-model-b ]; then
+        out=$(probe_seat "$dir" pool-model-a); rc=$?
+        expect_code 0 "$rc" "the old pool stayed occupied: $out"
+      fi
+      out=$(probe_seat "$dir" "$model"); rc=$?
+      expect_code 4 "$rc" "standalone replacement lost its seat: $out"
+      case_seats "$dir" confirm rl64 --generation "$gen" >/dev/null || fail "observing the running replacement"
+      old=$gen
+    done
+  done
+  pass "standalone worker and supervisor relaunches release exact predecessors before replacement delivery"
 }
 
 test_pooled_relaunch_reserves_its_destination_before_stopping
@@ -3357,3 +3406,5 @@ test_unconfirmed_predecessor_prevents_control_launch
 test_host_relaunch_records_terminal_predecessor
 
 test_observed_predecessors_and_opt_out_successors
+
+test_standalone_relaunch_completes_the_predecessor_handoff

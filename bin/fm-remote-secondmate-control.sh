@@ -355,20 +355,17 @@ seat_decide() {
 seat_enter() {
   local id=$1 verb=$2 receipt
   SEAT_LIFECYCLE_ID=$id
-  if [ -z "$SEAT_OP" ]; then
-    if host_pools_enabled; then
-      prelaunch_die "this home has fleet seat pools, so a supervisor $verb must come from the parent's seat operation (bin/fm-remote-secondmate-relaunch.sh or fm-spawn); nothing was changed"
-    fi
-    [ -n "$EXPECT_GENERATION" ] || return 0
-  fi
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA" 2>/dev/null \
     || prelaunch_die "remote endpoint directories could not be created"
-  if ! fm_supervisor_lifecycle_acquire "$CONTROL_STATE" "$id" 30; then
+  if ! fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 30; then
     # Another episode may be running this very token; never call it refused.
     seat_emit unknown false false
     die "another lifecycle episode for remote secondmate $id is running on this host"
   fi
   trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  if [ -z "$SEAT_OP" ] && host_pools_enabled; then
+    prelaunch_die "this home has fleet seat pools, so a supervisor $verb must come from the parent's seat operation (bin/fm-remote-secondmate-relaunch.sh or fm-spawn); nothing was changed"
+  fi
   [ -n "$SEAT_OP" ] || return 0
   receipt=$(receipt_path "$id")
   if [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(receipt_field "$receipt" operation)" = "$SEAT_OP" ]; then
@@ -638,7 +635,7 @@ cmd_disposition() {
     seat_emit unknown false false
     return 0
   fi
-  if [ ! -d "$CONTROL_STATE" ] || ! fm_supervisor_lifecycle_acquire "$CONTROL_STATE" "$id" 0; then
+  if [ ! -d "$CONTROL_STATE" ] || ! fm_supervisor_lifecycle_enter "$CONTROL_STATE" "$id" 0; then
     seat_emit unknown false false
     return 0
   fi

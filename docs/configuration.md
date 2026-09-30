@@ -2110,7 +2110,9 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A ship or scout on a pooled model holds a seat from spawn until cleanup releases exactly its generation, including while it waits for review or merge.
 - A relaunch reserves the replacement before the old agent is touched: on the same pool it keeps one seat even when the pool is full, and onto another pool it needs a destination seat first and frees the old seat only after the old agent's stop is proven.
 - An exact predecessor observed alive is confirmed before control stops it, including workers and unpooled supervisors whose initial spawn needed no startup wait.
-- Removing the declaration opts new admissions out, while an existing holder's relaunch still records its successor and releases its proven predecessor, so restoring the declaration preserves the handoff.
+- Removing the declaration opts new holder keys out, while a previously recorded task still records each new generation, including a restart after its predecessor was released or reclaimed.
+- Standalone `fm-spawn.sh <id> --relaunch` releases its exact, proven-stopped predecessor before replacement delivery, just as control-driven relaunch does.
+- An unresolved holder model occupies one seat in every declared pool until the actual model is recorded.
 - Every live secondmate supervisor on a pooled model holds a seat, even when its busy record says idle.
 - This strict capacity choice reserves room for its next turn.
 - A pooled secondmate spawn succeeds only once its exact endpoint reads alive, within the control launch wait (90 seconds by default); an unconfirmed startup fails the spawn and keeps the seat counted with its endpoint recorded for recovery.
@@ -2149,6 +2151,7 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - A running agent, including a primary that starts while the pool is full, is never refused or preempted; new pooled launches refuse until the count is back under capacity.
 - No refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
 - A reservation whose launching process died is resolved by the watcher's periodic seat maintenance once evidence proves it never launched or its endpoint is gone; until then it stays counted, so an orphan can briefly hold capacity.
+- Bounded maintenance rotates its starting holder every 30 seconds so uncertain or busy launches do not permanently prevent later holders from being reconciled.
 - A live task record is never reclaimed.
 
 **Delivery**
