@@ -424,7 +424,7 @@ ledger_scan() {
 # already present for the key takes precedence. The source is deleted only
 # after the imported record reads back with its key and model.
 import_legacy_v1() {
-  local f st task model pid identity fp gen meta meta_gen route kind json
+  local f st task model pid identity fp gen meta meta_gen route kind json host root home backend target reg
   for f in "$LEDGER"/*/*.seat "$LEDGER"/.[!.]*/*.seat "$LEDGER"/..?*/*.seat; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
     st=$(record_field "$f" state)
@@ -448,11 +448,35 @@ import_legacy_v1() {
     route=null
     kind=ship
     if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-      meta_gen=$(record_field "$meta" spawn_gen)
-      [ -z "$(record_field "$meta" fleet_seat_generation)" ] || meta_gen=$(record_field "$meta" fleet_seat_generation)
+      cp "$meta" "$TMPD/legacy.meta" || return 1
+      meta="$TMPD/legacy.meta"
+      meta_gen=$(meta_generation "$meta")
       kind=$(record_field "$meta" kind)
       case "$kind" in ship|scout|secondmate) ;; *) kind=ship ;; esac
-      [ "$(record_field "$meta" model)" != "$model" ] || { gen_ok "$meta_gen" && gen=$meta_gen; }
+      if [ "$(normalize_model "$(record_field "$meta" model)")" = "$(normalize_model "$model")" ] && gen_ok "$meta_gen"; then
+        gen=$meta_gen
+        host=$(fm_backend_meta_exact_value "$meta" remote_host 2>/dev/null || true)
+        if [ -n "$host" ] && [ "$kind" = secondmate ]; then
+          root=$(fm_backend_meta_exact_value "$meta" remote_root 2>/dev/null || true)
+          home=$(fm_backend_meta_exact_value "$meta" home 2>/dev/null || true)
+          backend=$(fm_backend_meta_exact_value "$meta" remote_backend 2>/dev/null || true)
+          target=$(fm_backend_meta_exact_value "$meta" remote_target 2>/dev/null || true)
+          reg="${st%/state}/data/secondmates.md"
+          [ "$st" != "$CALLER_STATE" ] || reg="$DATA/secondmates.md"
+          if [ "$backend" = herdr ] && secondmate_registry_line_for_id "$reg" "$task" \
+            && [ "$SECONDMATE_REGISTRY_REMOTE" = 1 ] && [ "$SECONDMATE_REGISTRY_HOST" = "$host" ] \
+            && [ "$SECONDMATE_REGISTRY_ROOT" = "$root" ] && [ "$SECONDMATE_REGISTRY_HOME" = "$home" ] \
+            && [ "$(fm_backend_meta_exact_value "$meta" window 2>/dev/null || true)" = "remote:$task" ] \
+            && [ "$(fm_backend_meta_exact_value "$meta" endpoint_task_id 2>/dev/null || true)" = "$task" ]; then
+            route=$(jq -cn --arg b "$backend" --arg t "$target" --arg h "$home" --arg host "$host" --arg r "$root" --arg g "$gen" \
+              '{placement:"remote", backend:$b, target:(if $t == "" then null else $t end), home:$h, host:$host, remote_root:$r, spawn_gen:$g, operation:$g}') || return 1
+          fi
+        elif [ -z "$host" ] && fm_backend_validate_task_endpoint "$meta" "$task" >/dev/null 2>&1; then
+          home=$(record_field "$meta" home)
+          route=$(jq -cn --arg b "$FM_BACKEND_VALIDATED_BACKEND" --arg t "$FM_BACKEND_VALIDATED_TARGET" --arg h "$home" --arg g "$gen" \
+            '{placement:"local", backend:$b, target:$t, home:(if $h == "" then null else $h end), host:null, remote_root:null, spawn_gen:$g, operation:null}') || return 1
+        fi
+      fi
     fi
     json=$(jq -cn --arg s "$st" --arg t "$task" --arg g "$gen" --arg m "$model" \
       --arg k "$kind" --arg p "$pid" --arg i "$identity" --arg fp "$fp" --argjson r "$route" \
@@ -1003,9 +1027,9 @@ apply_remote_disposition() {
   local resp=$1 op disposition actual prev_resp prev old_stopped actual_model requested_model route
   op=$(inc_get "$GEN" '.route.operation // empty')
   [ -n "$op" ] || refuse "generation $GEN of $TASK has no dispatched remote operation"
-  jq -e --arg schema "$OPERATION_SCHEMA" --arg t "$TASK" --arg op "$op" --arg g "$GEN" '
+  jq -e --arg schema "$OPERATION_SCHEMA" --arg t "$TASK" --arg op "$op" '
     .schema == $schema and .complete == true and .task == $t and .operation == $op
-    and .requested_generation == $g
+    and .requested_generation == $op
     and (.disposition | IN("prelaunch", "started", "existing", "cancelled", "dead-after-start", "unknown"))
     and (.actual_generation == null or (.actual_generation | type == "string" and test("^[A-Za-z0-9._-]+$")))
     and (.previous_generation == null or (.previous_generation | type == "string"))
@@ -1038,6 +1062,39 @@ apply_remote_disposition() {
         ;;
     esac
   }
+  if { [ "$disposition" = existing ] || [ "$disposition" = dead-after-start ]; } && [ "$actual" != "$GEN" ]; then
+    [ "$GEN" = "$op" ] && [ "$(inc_get "$GEN" .lifecycle)" = reserved ] \
+      && [ -n "$actual" ] && [ "$route" != null ] && [ "$(jq -r .startup_confirmed "$resp")" = true ] \
+      || uncertain "the host's disposition for $TASK does not bind a confirmed existing generation to its candidate"
+    [ "$old_stopped" = false ] || uncertain "an existing disposition cannot report a stopped predecessor"
+    if inc_exists "$actual"; then
+      case "$(inc_get "$actual" .lifecycle)" in
+        reserved|confirmed)
+          holder_mutate '(.incarnations[] | select(.generation == $g)) |= (.route = $r
+              | if $am != "" then .model = $am else . end)' \
+            --arg g "$actual" --argjson r "$route" --arg am "$actual_model" || unavailable "cannot record $TASK's existing route"
+          set_confirmed "$actual" || unavailable "cannot confirm $TASK's existing generation"
+          ;;
+        *) [ "$disposition" = dead-after-start ] || refuse "the host reports generation $actual of $TASK alive, but it is already terminal here; reconcile the route by hand" ;;
+      esac
+    else
+      holder_mutate '.incarnations += [{generation: $a, previous_generation: null, kind: "secondmate",
+          model: (if $am == "" then null else $am end), policy_digest_at_reserve: null,
+          lifecycle: "confirmed", launch_phase: "started", owner_pid: null, owner_pid_identity: "",
+          route: $r, startup_confirmed: true, disposition: null}]' \
+        --arg a "$actual" --arg am "$actual_model" --argjson r "$route" || unavailable "cannot import $TASK's existing generation"
+    fi
+    set_terminal "$GEN" released prelaunch reconcile-remote || unavailable "cannot release $TASK's unsubmitted candidate"
+    if [ "$disposition" = dead-after-start ]; then
+      case "$(inc_get "$actual" .lifecycle)" in
+        reserved|confirmed) set_terminal "$actual" reclaimed dead-after-start reconcile-remote || unavailable "cannot reclaim $TASK's existing generation" ;;
+      esac
+      echo "fleet-seats: reclaimed id=$TASK generation=$actual (candidate $GEN released)"
+    else
+      echo "fleet-seats: existing id=$TASK generation=$actual (candidate $GEN released)"
+    fi
+    return 0
+  fi
   case "$disposition" in
     prelaunch)
       [ "$(inc_get "$GEN" .lifecycle)" = reserved ] || refuse "generation $GEN of $TASK is not a pending candidate"
@@ -1045,9 +1102,11 @@ apply_remote_disposition() {
       set_terminal "$GEN" released prelaunch reconcile-remote || unavailable "cannot release $TASK's refused candidate"
       echo "fleet-seats: released id=$TASK generation=$GEN reason=prelaunch"
       ;;
-    started)
+    started|existing)
       [ "$actual" = "$GEN" ] && [ "$(jq -r .startup_confirmed "$resp")" = true ] && [ "$route" != null ] \
-        || uncertain "the host's started disposition for $TASK does not name generation $GEN with a confirmed startup"
+        || uncertain "the host's $disposition disposition for $TASK does not name generation $GEN with a confirmed startup"
+      [ "$disposition" != existing ] || { [ "$GEN" != "$op" ] && [ "$old_stopped" = false ]; } \
+        || uncertain "the host's existing disposition for $TASK does not bind its observing operation"
       case "$(inc_get "$GEN" .lifecycle)" in reserved|confirmed) ;; *) refuse "generation $GEN of $TASK is already terminal" ;; esac
       holder_mutate '(.incarnations[] | select(.generation == $g)) |= (.route = $r
           | if $am != "" and $am != (.model // "") then .requested_model = .model | .model = $am else . end)' \
@@ -1058,26 +1117,6 @@ apply_remote_disposition() {
       if [ -n "$actual_model" ] && [ "$actual_model" != "$requested_model" ]; then
         echo "fleet-seats: model-mismatch id=$TASK requested=${requested_model:-unresolved} actual=$actual_model (counted on the actual model; admission to a full pool refuses until it resolves)" >&2
       fi
-      ;;
-    existing)
-      [ -n "$actual" ] && [ "$actual" != "$GEN" ] && [ "$route" != null ] \
-        || uncertain "the host's existing disposition for $TASK names no earlier generation"
-      [ "$old_stopped" = false ] || uncertain "an existing disposition cannot report a stopped predecessor"
-      if inc_exists "$actual"; then
-        case "$(inc_get "$actual" .lifecycle)" in
-          reserved) set_confirmed "$actual" || unavailable "cannot confirm $TASK's existing generation" ;;
-          confirmed) ;;
-          *) refuse "the host reports generation $actual of $TASK alive, but it is already terminal here; reconcile the route by hand" ;;
-        esac
-      else
-        holder_mutate '.incarnations += [{generation: $a, previous_generation: null, kind: "secondmate",
-            model: (if $am == "" then null else $am end), policy_digest_at_reserve: null,
-            lifecycle: "confirmed", launch_phase: "started", owner_pid: null, owner_pid_identity: "",
-            route: $r, startup_confirmed: true, disposition: null}]' \
-          --arg a "$actual" --arg am "$actual_model" --argjson r "$route" || unavailable "cannot import $TASK's existing generation"
-      fi
-      set_terminal "$GEN" released prelaunch reconcile-remote || unavailable "cannot release $TASK's unsubmitted candidate"
-      echo "fleet-seats: existing id=$TASK generation=$actual (candidate $GEN released)"
       ;;
     cancelled)
       case "$(inc_get "$GEN" .lifecycle)" in reserved) ;; *) refuse "generation $GEN of $TASK is not a pending candidate" ;; esac

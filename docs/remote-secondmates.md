@@ -658,6 +658,8 @@ A persist-before-restart request binds to the host's recorded launch generation 
 The wrapper forwards that expected generation into host control, which compares it inside the host lifecycle episode before stopping anything.
 Host-local launch, relaunch, and disposition acquire or adopt the same episode even when no seat pools or parent operation are present.
 A missing binding or newer incarnation takes the re-read nudge path.
+When a launch reuses an existing generation, its receipt binds the request token to that actual generation.
+Later disposition reads probe that generation’s endpoint again, and a terminal outcome preserves the binding for delayed retries.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence

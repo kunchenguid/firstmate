@@ -1605,6 +1605,46 @@ SH
   pass "bounded reconciliation rotates across watcher ticks and retains every uncertain launch"
 }
 
+test_legacy_routes_support_recovery_and_retain_invalid_endpoints() {
+  local base="$TMP_ROOT/legacy-routes" home fakebin st name out shape
+  fakebin=$(endpoint_fakebin "$base/tmux")
+  for shape in valid invalid; do
+    home="$base/$shape"
+    make_home "$home"
+    pools "$home" 1
+    st=$(cd "$home/state" && pwd -P)
+    task_record "$home" sm pool-model-a secondmate "spawn_gen=legacy-gen
+window=firstmate:fm-sm
+endpoint_task_id=sm
+worktree=$home
+project=$home"
+    [ "$shape" != invalid ] || printf 'endpoint_task_id=another\n' >> "$st/sm.meta"
+    name=$(printf '%s\t%s' "$st" sm | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+    mkdir -p "$st/fleet-seats/legacy"
+    printf 'state=%s\ntask=sm\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
+    new_holder
+    out=$(reserve "$home" other pool-model-a 2>&1)
+    expect_code 4 "$?" "a contender beside an imported legacy route: $out"
+    assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy import did not consume its source"
+    if [ "$shape" = invalid ]; then
+      assert_equals true "$(seats "$home" show sm | jq 'all(.incarnations[]; .route == null and .startup_confirmed == false)')" "invalid endpoint metadata became a trusted route"
+      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1)
+      expect_code 3 "$?" "invalid legacy route was reclaimed: $out"
+      assert_equals reserved "$(lifecycle_of "$home" sm legacy-gen)" "invalid legacy evidence freed its seat"
+    else
+      assert_equals true "$(seats "$home" show sm | jq 'any(.incarnations[]; .route.placement == "local" and .route.spawn_gen == .generation and .route.target == "firstmate:fm-sm")')" "import discarded the exact local route"
+      printf 'fm-sm\n' > "$base/tmux/endpoint/windows"
+      printf 'claude\n' > "$base/tmux/endpoint/command"
+      PATH="$fakebin:$PATH" seats "$home" confirm sm --generation legacy-gen >/dev/null || fail "confirming a live legacy endpoint"
+      printf 'bash\n' > "$base/tmux/endpoint/command"
+      out=$(PATH="$fakebin:$PATH" seats "$home" reclaim sm --generation legacy-gen 2>&1) || fail "legacy supervisor recovery: $out"
+      assert_equals reclaimed "$(lifecycle_of "$home" sm legacy-gen)" "a proven-dead legacy supervisor could not recover"
+      reserve "$home" other pool-model-a >/dev/null || fail "legacy recovery did not return its seat"
+    fi
+  done
+  pass "validated legacy routes confirm and recover, while invalid endpoint evidence stays counted"
+}
+
 test_no_pool_configured_is_off
 test_pool_names_do_not_escape_the_seat_directory
 test_legacy_unresolved_models_count_in_every_pool
@@ -1649,3 +1689,5 @@ test_opt_out_records_only_existing_holder_successors
 
 test_terminal_holders_survive_opt_out_readmission
 test_bounded_reconciliation_progresses_past_uncertain_holders
+
+test_legacy_routes_support_recovery_and_retain_invalid_endpoints

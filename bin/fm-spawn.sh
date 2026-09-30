@@ -8144,12 +8144,13 @@ fi
 if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
   spawn_startup_state=unverified
   if fm_control_backend_state_verified "$BACKEND"; then
-    spawn_startup_deadline=$((SECONDS + ${FM_CONTROL_LAUNCH_WAIT:-90}))
+    spawn_startup_elapsed=0
     while :; do
       spawn_startup_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
       [ "$spawn_startup_state" != alive ] || break
-      [ "$SECONDS" -lt "$spawn_startup_deadline" ] || break
+      awk -v e="$spawn_startup_elapsed" -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN{exit !(e < t)}' || break
       sleep "${FM_CONTROL_POLL:-0.5}"
+      spawn_startup_elapsed=$(awk -v e="$spawn_startup_elapsed" -v p="${FM_CONTROL_POLL:-0.5}" 'BEGIN{printf "%.3f", e + p}')
     done
   fi
   if [ "$spawn_startup_state" != alive ]; then

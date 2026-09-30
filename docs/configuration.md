@@ -2120,6 +2120,8 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - Its seat frees only when startup is confirmed and the agent later dies, or when that exact endpoint is proven destroyed; nothing is ever stopped to free a seat.
 - Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
 - Ambiguous liveness, a transport failure, or a timeout keeps the seat counted.
+- The startup wait accepts fractional `FM_CONTROL_LAUNCH_WAIT` and `FM_CONTROL_POLL` values, matching the control plane.
+- A v1 seat matching a task’s model and generation keeps its validated endpoint route on import; missing route evidence leaves the imported seat counted and uncertain.
 - The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
 - While any pool is configured, every launch needs an explicit, verified `--model`. A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably. With no declaration, those launches behave as before.
 

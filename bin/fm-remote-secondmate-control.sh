@@ -260,7 +260,8 @@ seat_decide() {
   verb=$(receipt_field "$receipt" verb)
   [ "$(receipt_field "$receipt" old_stopped)" != true ] || old_stopped=true
   [ "$(receipt_field "$receipt" old_destroyed)" != true ] || SEAT_OLD_DESTROYED=true
-  gen=$SEAT_OP
+  gen=$(receipt_field "$receipt" actual_generation)
+  [ -n "$gen" ] || gen=$SEAT_OP
   meta_gen=
   model=
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
@@ -269,11 +270,6 @@ seat_decide() {
   fi
   backend=$(receipt_field "$receipt" route_backend)
   target=$(receipt_field "$receipt" route_target)
-  if [ "$phase" = existing ]; then
-    SEAT_DECIDED=existing
-    seat_emit existing true false "$(receipt_field "$receipt" actual_generation)" "$backend" "$target" "$(receipt_field "$receipt" actual_model)"
-    return 0
-  fi
   if [ "$verb" = relaunch ]; then
     journal="$CONTROL_STATE/$id.control-relaunch"
     jop=$(sed -n 's/^seat_operation=//p' "$journal" 2>/dev/null | tail -1)
@@ -326,13 +322,20 @@ seat_decide() {
         seat_emit prelaunch false false
       fi
       ;;
-    dispatched|started)
+    existing|dispatched|started)
       state=$(seat_endpoint_state "$backend" "$target")
       if [ "$state" = alive ] && [ "$meta_gen" = "$gen" ]; then
-        seat_receipt_set phase=started "actual_generation=$gen" "actual_model=$model" 2>/dev/null || true
-        SEAT_DECIDED=started
-        seat_emit started true "$old_stopped" "$gen" "$backend" "$target" "$model"
-      elif [ "$phase" = started ] && { [ "$state" = dead ] || [ "$state" = gone ]; }; then
+        if [ "$phase" = existing ]; then
+          SEAT_DECIDED=existing
+          seat_emit existing true false "$gen" "$backend" "$target" "$model"
+        else
+          seat_receipt_set phase=started "actual_generation=$gen" "actual_model=$model" 2>/dev/null || true
+          SEAT_DECIDED=started
+          seat_emit started true "$old_stopped" "$gen" "$backend" "$target" "$model"
+        fi
+      elif { [ "$phase" = existing ] || [ "$phase" = started ]; } \
+        && { { [ "$state" = dead ] && [ "$meta_gen" = "$gen" ]; } || [ "$state" = gone ]; }; then
+        seat_receipt_set phase=dead-after-start "actual_generation=$gen" 2>/dev/null || true
         SEAT_DECIDED=dead-after-start
         seat_emit dead-after-start true "$old_stopped" "$gen" "$backend" "$target" "$model"
       elif [ "$phase" = dispatched ] && [ "$state" = gone ]; then
