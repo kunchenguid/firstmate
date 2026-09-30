@@ -387,8 +387,10 @@ seeded_origin_url() {
   normalize_origin_url "$dst" "$url"
 }
 
-acquire_treehouse_home() {
-  local id=$1 home
+acquire_treehouse_home() (
+  local id=$1 home allocation_lock
+  fm_treehouse_allocation_begin "$FM_ROOT" allocation_lock || return 1
+  trap 'fm_lock_release "$allocation_lock"' EXIT
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
@@ -399,7 +401,7 @@ acquire_treehouse_home() {
   }
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
-}
+)
 
 ensure_home() {
   local id=$1 requested=$2 home

@@ -22,7 +22,9 @@ Its unowned control transitions from `in-use` to `available` and reproduces reus
 Separate retained-record and retained-claim cases refuse before process exit, preserve the unlanded detached HEAD and exact reflog, and refuse again after exit.
 Allocation fails closed while any pool slot retains a task record or claim, including occupied slots; guarded teardown must release that ownership before another allocation.
 This deliberately limits concurrent allocation in a pool with retained process-backed task slots rather than relying on process liveness to preserve ownership.
-The shared preflight applies before the tmux, Herdr, Zellij, and cmux allocation paths; harness launch behavior and Orca's separate allocator are unchanged.
+The shared allocation boundary in `fm_treehouse_allocation_begin` acquires the project lock and runs the ownership preflight for both worker spawning and secondmate-home seeding.
+Worker spawning holds that lock through task metadata publication; home seeding holds it until Treehouse has recorded its durable lease.
+This covers the tmux, Herdr, Zellij, and cmux worker allocation paths and `fm-home-seed.sh <id> - --no-projects`; harness launch behavior and Orca's separate allocator are unchanged.
 
 Focused verification command and exact output:
 
@@ -32,6 +34,34 @@ Treehouse v2.1.0 control: in-use -> available -> same-slot reset
 Treehouse v2.1.0 record: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
 Treehouse v2.1.0 claim: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
 ok - real Treehouse process-exit allocation preserves retained cross-home task work
+```
+
+The shared home-seeding boundary was verified on 2026-09-30 with Treehouse v2.1.0 using disposable Firstmate repositories and two local operational homes.
+The successful control reproduces home seeding's same-slot reset when no ownership is retained, then publishes the new home with a durable lease.
+Retained records and claims refuse before allocation, and the live-record case additionally proves that refusal leaves the worker running and remains effective after its process exits.
+The contention case holds the same shared allocation boundary from another process and proves that home seeding refuses without changing the pool.
+Each refusal preserves the exact detached HEAD, reflog, serialized `treehouse-state.json` allocation state, and parent registry.
+The focused command exited 0:
+
+```sh
+FM_TEST_TREEHOUSE_SEED_ONLY=1 bash tests/fm-secondmate-safety.test.sh && FM_TEST_TREEHOUSE_RACE_ONLY=1 bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 seed control: same-slot reset; home published; durable lease retained
+Treehouse v2.1.0 seed record: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed claim: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed live-record: refused; HEAD, reflog, pool state and registry preserved
+Treehouse v2.1.0 seed contention: refused; HEAD, reflog, pool state and registry preserved
+ok - real Treehouse home seeding honors shared locks and retained cross-home task ownership
+leased worktree for dash
+ok - home seeding durably leases treehouse-acquired dash homes under the secondmate id
+ok - home seeding returns rejected acquired homes through treehouse
+ok - home seed rollback warns when treehouse-acquired return fails
+ok - home seeding leaves unsafe acquired active homes untouched
+Treehouse v2.1.0 control: in-use -> available -> same-slot reset
+Treehouse v2.1.0 record: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+Treehouse v2.1.0 claim: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+ok - real Treehouse process-exit allocation preserves retained cross-home task work
+ok - a remote-seeded secondmate home allocates and launches from its Treehouse pool
+ok - a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort
 ```
 
 Refresh the evidence with:

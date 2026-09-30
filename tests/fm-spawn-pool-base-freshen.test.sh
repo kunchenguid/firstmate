@@ -860,6 +860,8 @@ test_real_treehouse_retained_owner_process_exit() (
 
 test_real_treehouse_retained_owner_process_exit
 if [ "${FM_TEST_TREEHOUSE_RACE_ONLY:-0}" = 1 ]; then
+  test_remote_seeded_home_spawns_from_treehouse_pool
+  test_pool_slot_claim_follows_the_spawn_outcome
   exit 0
 fi
 

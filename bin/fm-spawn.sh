@@ -2994,17 +2994,6 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
-    echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
-    exit 1
-  }
-  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
-    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
-    exit 1
-  fi
-  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
-fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
@@ -3489,7 +3478,8 @@ else
 fi
 
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  fm_treehouse_allocation_preflight "$PROJ_ABS" || exit 1
+  fm_treehouse_allocation_begin "$PROJ_ABS" SPAWN_TREEHOUSE_PROJECT_LOCK || exit 1
+  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then

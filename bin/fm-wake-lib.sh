@@ -1524,6 +1524,26 @@ fm_treehouse_allocation_preflight() {  # <project-dir>
   done <<< "$paths"
 }
 
+fm_treehouse_allocation_begin() {
+  local fm_allocation_project=$1 fm_allocation_lock
+  fm_allocation_lock=$(fm_treehouse_project_lock_path "$fm_allocation_project") || {
+    echo "error: could not resolve the shared Treehouse project lock for $fm_allocation_project" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$fm_allocation_lock"; then
+    echo "error: another Treehouse slot allocation or return is in progress for $fm_allocation_project; refusing to race it" >&2
+    return 1
+  fi
+  if ! fm_treehouse_allocation_preflight "$fm_allocation_project"; then
+    fm_lock_release "$fm_allocation_lock"
+    return 1
+  fi
+  printf -v "$2" '%s' "$fm_allocation_lock" || {
+    fm_lock_release "$fm_allocation_lock"
+    return 1
+  }
+}
+
 fm_treehouse_collect_local_states() {
   local record_state=$1 root home reg line child known existing i=0
   local -a homes

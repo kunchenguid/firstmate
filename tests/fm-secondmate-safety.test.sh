@@ -3027,6 +3027,121 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+
+test_real_treehouse_seed_preserves_retained_task_slots() (
+  local treehouse_bin version kind dir root home owner slot sha reflog pool_state registry status out rc i pid=''
+  treehouse_bin=$(command -v treehouse || true)
+  if [ -z "$treehouse_bin" ]; then
+    [ "${FM_TEST_TREEHOUSE_SEED_ONLY:-0}" != 1 ] || fail "Treehouse is required for the focused seeding check"
+    printf 'skip - real Treehouse home-seeding check (treehouse not installed)\n'
+    return 0
+  fi
+  version=$("$treehouse_bin" --version)
+  trap '[ -z "$pid" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }' EXIT
+  for kind in control record claim live-record contention; do
+    dir="$TMP_ROOT/real-seed-$kind"
+    root="$dir/code"
+    home="$dir/home"
+    owner="$dir/owner-home"
+    make_firstmate_git_root "$root"
+    git -C "$root" branch -M main
+    printf 'data/\nstate/\nconfig/\nprojects/\n.fm-*\n' > "$root/.gitignore"
+    git -C "$root" add .gitignore
+    git -C "$root" -c user.name=test -c user.email=test@example.invalid commit -qm fixture-ignore
+    mkdir -p "$home/state" "$home/data" "$owner/state" "$owner/data" "$dir/user/.config/treehouse"
+    mark_firstmate_home "$owner"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" > "$owner/.fm-secondmate-parent"
+    printf '%s\n' "- oldmate - fixture (home: $owner; scope: test; projects: ; added 2026-01-01)" > "$home/data/secondmates.md"
+    scaffold_secondmate_charter "$home" new-home 'fixture domain' --no-projects \
+      || fail "could not scaffold the disposable seed charter"
+    printf 'root = "%s"\n' "$dir/pools" > "$dir/user/.config/treehouse/config.toml"
+    export HOME="$dir/user" TREEHOUSE_NO_UPDATE_CHECK=1
+    slot=$(cd "$root" && "$treehouse_bin" get --lease 2> "$dir/get.stderr") \
+      || fail "could not allocate the disposable Firstmate task slot"
+    (cd "$root" && "$treehouse_bin" return "$slot" </dev/null) > "$dir/return.stdout" 2> "$dir/return.stderr" \
+      || fail "could not release the clean disposable setup lease"
+    printf 'retained detached task work\n' > "$slot/unlanded.txt"
+    git -C "$slot" add unlanded.txt
+    git -C "$slot" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded
+    sha=$(git -C "$slot" rev-parse HEAD)
+    reflog=$(git -C "$slot" reflog)
+    case "$kind" in
+      record|live-record) fm_write_meta "$owner/state/old-task.meta" "worktree=$slot" "project=$root" "kind=ship" ;;
+      claim) printf 'task=old-task\nhome=%s\n' "$owner" > "$(dirname "$slot")/.fm-slot-owner" ;;
+    esac
+    if [ "$kind" = live-record ]; then
+      bash -c 'cd "$1" && exec sleep 120' _ "$slot" &
+      pid=$!
+      status=''
+      for i in $(seq 1 30); do
+        status=$(cd "$root" && "$treehouse_bin" status --json | jq -r --arg slot "$slot" '.[] | select(.path == $slot) | .status')
+        [ "$status" != in-use ] || break
+        sleep 0.1
+      done
+      [ "$status" = in-use ] || fail "Treehouse $version did not observe the disposable live task"
+    fi
+    pool_state=$(cat "$(dirname "$(dirname "$slot")")/treehouse-state.json")
+    registry=$(cat "$home/data/secondmates.md")
+    if [ "$kind" = contention ]; then
+      FM_HOME="$home" FM_ROOT_OVERRIDE="$root" bash -c '
+        . "$1/bin/fm-wake-lib.sh"
+        fm_treehouse_allocation_begin "$2" held || exit 1
+        "$1/bin/fm-home-seed.sh" new-home - --no-projects > "$3" 2>&1 && rc=0 || rc=$?
+        fm_lock_release "$held"
+        [ "$rc" -ne 0 ]
+      ' _ "$ROOT" "$root" "$dir/seed.output" || fail "home seeding bypassed the shared allocation lock"
+      out=$(cat "$dir/seed.output")
+      rc=1
+      assert_contains "$out" 'another Treehouse slot allocation or return' "home seeding did not report allocation contention"
+    else
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-home-seed.sh" new-home - --no-projects 2>&1) && rc=0 || rc=$?
+    fi
+    if [ "$kind" = control ]; then
+      expect_code 0 "$rc" "unowned control seeding failed: $out"
+      [ "$(git -C "$slot" rev-parse HEAD)" != "$sha" ] || fail "control did not reproduce the home-seeding detached HEAD reset"
+      [ "$(cat "$slot/.fm-secondmate-home")" = new-home ] || fail "control did not seed the same slot"
+      status=$(cd "$root" && "$treehouse_bin" status --json | jq -r --arg slot "$slot" '.[] | select(.path == $slot) | .status')
+      [ "$status" = leased ] || fail "successful seeding did not preserve its durable lease: $status"
+      printf 'Treehouse %s seed control: same-slot reset; home published; durable lease retained\n' "$version"
+      continue
+    fi
+    [ "$rc" -ne 0 ] || fail "$kind home seeding accepted a protected task slot"
+    case "$kind" in
+      record|live-record) assert_contains "$out" old-task "seeding refusal lost the retained task identity" ;;
+      claim) assert_contains "$out" 'retains an ownership claim' "seeding refusal lost the retained claim evidence" ;;
+    esac
+    [ "$(git -C "$slot" rev-parse HEAD)" = "$sha" ] || fail "$kind home seeding displaced the retained HEAD"
+    [ "$(git -C "$slot" reflog)" = "$reflog" ] || fail "$kind home seeding changed the retained reflog"
+    [ -f "$slot/unlanded.txt" ] || fail "$kind home seeding removed retained work"
+    [ "$(cat "$(dirname "$(dirname "$slot")")/treehouse-state.json")" = "$pool_state" ] || fail "$kind refusal changed persisted Treehouse allocation state"
+    [ "$(cat "$home/data/secondmates.md")" = "$registry" ] || fail "$kind refusal changed the home registry"
+    [ ! -e "$slot/.fm-secondmate-home" ] || fail "$kind refusal published a secondmate identity"
+    if [ "$kind" = live-record ]; then
+      kill -0 "$pid" || fail "home seeding interrupted the live task process"
+      kill "$pid" || fail "could not stop the disposable process"
+      wait "$pid" 2>/dev/null || true
+      pid=''
+      status=$(cd "$root" && "$treehouse_bin" status --json | jq -r --arg slot "$slot" '.[] | select(.path == $slot) | .status')
+      [ "$status" = available ] || fail "disposable process exit did not release its process-backed slot"
+      out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-home-seed.sh" new-home - --no-projects 2>&1) && rc=0 || rc=$?
+      [ "$rc" -ne 0 ] || fail "home seeding reused retained work after process exit"
+      [ "$(git -C "$slot" rev-parse HEAD)" = "$sha" ] || fail "retry displaced the retained task HEAD"
+      [ "$(git -C "$slot" reflog)" = "$reflog" ] || fail "retry changed the retained task reflog"
+    fi
+    printf 'Treehouse %s seed %s: refused; HEAD, reflog, pool state and registry preserved\n' "$version" "$kind"
+  done
+  pass "real Treehouse home seeding honors shared locks and retained cross-home task ownership"
+)
+
+test_real_treehouse_seed_preserves_retained_task_slots
+if [ "${FM_TEST_TREEHOUSE_SEED_ONLY:-0}" = 1 ]; then
+  test_home_seed_uses_treehouse_acquired_home
+  test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
+  test_home_seed_warns_when_acquired_home_return_fails
+  test_home_seed_does_not_return_unsafe_acquired_home
+  exit 0
+fi
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
