@@ -3129,6 +3129,13 @@ test_real_treehouse_seed_preserves_retained_task_slots() (
       [ "$(git -C "$slot" reflog)" = "$reflog" ] || fail "retry changed the retained task reflog"
     fi
     printf 'Treehouse %s seed %s: refused; HEAD, reflog, pool state and registry preserved\n' "$version" "$kind"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '$ FM_HOME=%s bin/fm-home-seed.sh new-home - --no-projects\n%s\n' "$home" "$out"
+      printf 'HEAD before=%s after=%s\npreserved task output: ' "$sha" "$(git -C "$slot" rev-parse HEAD)"
+      cat "$slot/unlanded.txt"
+      printf 'preserved home registry:\n'; cat "$home/data/secondmates.md"
+      printf 'preserved Treehouse allocation state:\n'; cat "$(dirname "$(dirname "$slot")")/treehouse-state.json"
+    fi
   done
   pass "real Treehouse home seeding honors shared locks and retained cross-home task ownership"
 )

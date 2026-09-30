@@ -136,6 +136,16 @@ SH
     [ "$(git -C "$slot" rev-parse HEAD)" = "$before" ] || fail "old cleanup moved the new HEAD"
     assert_present "$slot/new-work" "old cleanup discarded unlanded work"
     assert_present "$second_home/state/$other.meta" "old cleanup removed the new task"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# foreign-clone cleanup after failed return (%s)\n' "$spelling"
+      printf '$ FM_HOME=%s bin/fm-teardown.sh %s --force\n' "$dir/home" "$id"
+      cat "$dir/stdout" "$dir/stderr"
+      printf 'surviving worker pid=%s; branch=%s; HEAD before=%s after=%s\n' \
+        "$worker" "$(git -C "$slot" symbolic-ref --short HEAD)" "$before" "$(git -C "$slot" rev-parse HEAD)"
+      printf 'preserved unlanded output: '; cat "$slot/new-work"
+      printf 'preserved successor task record:\n'; cat "$second_home/state/$other.meta"
+      printf 'preserved slot claim:\n'; cat "$dir/pool/1/.fm-slot-owner"
+    fi
     kill "$worker" 2>/dev/null || true
     wait "$worker" 2>/dev/null || true
     assert_contains "$(cat "$dir/stderr")" "$other" "collision refusal did not name the new worker"
@@ -1061,6 +1071,14 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   [ "$rc" -eq 0 ] || fail "teardown of a clean ship task whose slot was reassigned failed: $(cat "$dir/stderr")"
   kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the clean reassigned pool slot"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "clean reassigned slot without --force"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# finished ship cleanup with a successor owning its former slot\n'
+    printf '$ FM_HOME=%s bin/fm-teardown.sh %s\n' "$dir/home" "$id"
+    cat "$dir/stdout" "$dir/stderr"
+    printf 'successor worker pid=%s remains alive; old task record removed\n' "$worker"
+    printf 'successor slot claim:\n'; cat "$dir/pool/1/.fm-slot-owner"
+    printf 'runtime calls (no slot return):\n'; cat "$dir/runtime.log"
+  fi
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
