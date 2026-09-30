@@ -984,6 +984,52 @@ test_home_seed_preserves_dashed_project_posture() {
   pass "home seeding carries a dashed project's registry entry and posture into the secondmate home"
 }
 
+# A registered name may be a leading prefix of another registered name followed
+# by " - " ("foo bar" and "foo bar - baz"). Reseeding one must never drop the
+# other's entry or posture (bin/fm-project-registry-lib.sh removal rule).
+test_home_seed_reseed_keeps_dashed_prefix_sibling_entry() {
+  local home subhome short_line long_line err out
+  home="$TMP_ROOT/dashed-sibling-home"
+  subhome="$TMP_ROOT/dashed-sibling-subhome"
+  err="$TMP_ROOT/dashed-sibling.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/foo bar"
+  fm_git_add_origin "$home/projects/foo bar" "$TMP_ROOT/remotes/dashed-sibling-short.git"
+  fm_git_init_commit "$home/projects/foo bar - baz"
+  fm_git_add_origin "$home/projects/foo bar - baz" "$TMP_ROOT/remotes/dashed-sibling-long.git"
+  short_line='- foo bar [direct-PR branch=me/] - short project (added 2026-09-30)'
+  long_line='- foo bar - baz [direct-PR +yolo branch=baz/] - long project (added 2026-09-30)'
+  printf '%s\n' "$short_line" "$long_line" > "$home/data/projects.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar' 'foo bar - baz' >/dev/null 2>&1 \
+    || fail "seed refused two projects whose names share a dashed prefix"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='design for foo bar' FM_SECONDMATE_SCOPE='design for foo bar' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" 'foo bar - baz' >/dev/null 2>&1 \
+    || fail "reseeding the longer project failed"
+  [ "$(cat "$subhome/data/projects.md")" = "$(printf '%s\n' "$short_line" "$long_line")" ] \
+    || fail "reseeding foo bar - baz did not keep the foo bar entry and replace its own: $(cat "$subhome/data/projects.md")"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar' 2>/dev/null)" = "direct-PR off" ] \
+    || fail "reseeding foo bar - baz lost the foo bar posture"
+  [ "$(FM_HOME="$subhome" "$ROOT/bin/fm-project-mode.sh" 'foo bar - baz' 2>/dev/null)" = "direct-PR on" ] \
+    || fail "reseeding foo bar - baz lost its own posture"
+
+  # Removing "foo bar" keeps the "foo bar - baz" line: silently when that longer
+  # name is known, with a warning naming the line when it is not.
+  # shellcheck source=bin/fm-project-registry-lib.sh
+  . "$ROOT/bin/fm-project-registry-lib.sh"
+  out=$(printf '%s\n' "$short_line" "$long_line" | fm_project_registry_without - 'foo bar - baz' 'foo bar' 2>"$err")
+  [ "$out" = "$long_line" ] || fail "removing foo bar did not keep the known foo bar - baz entry: $out"
+  [ ! -s "$err" ] || fail "removing foo bar warned about a line owned by a known name: $(cat "$err")"
+  out=$(printf '%s\n' "$short_line" "$long_line" | fm_project_registry_without - '' 'foo bar' 2>"$err")
+  [ "$out" = "$long_line" ] || fail "removing foo bar dropped an ambiguous foo bar - baz entry: $out"
+  grep -F "warning: keeping registry line" "$err" | grep -F -- "$long_line" >/dev/null \
+    || fail "removal kept an ambiguous line without naming it: $(cat "$err")"
+  out=$(printf '%s\n' '- foo bar - cloned project (added 2026-09-30)' | fm_project_registry_without - '' 'foo bar' 2>"$err")
+  [ -z "$out" ] || fail "removing foo bar kept its default dashed entry: $out"
+  pass "reseeding a project keeps a dashed-prefix sibling's registry entry and posture"
+}
+
 test_home_seed_projectless_refusal_names_spaced_registry_entry() {
   local home sub err
   home="$TMP_ROOT/no-projects-spaced-home"
@@ -3137,6 +3183,7 @@ test_home_seed_refuses_local_only_project
 test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_preserves_spaced_project_posture
 test_home_seed_preserves_dashed_project_posture
+test_home_seed_reseed_keeps_dashed_prefix_sibling_entry
 test_home_seed_projectless_refusal_names_spaced_registry_entry
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root

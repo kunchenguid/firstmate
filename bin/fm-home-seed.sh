@@ -697,12 +697,16 @@ EOF
 }
 
 sync_project_registry() {
-  local home=$1 sub_reg tmp project line today
+  local home=$1 sub_reg tmp project project_path known='' line today
   shift
   sub_reg="$home/data/projects.md"
   tmp="$sub_reg.tmp.$$"
   if [ -f "$sub_reg" ]; then
-    fm_project_registry_without "$sub_reg" "$@" > "$tmp"
+    for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
+      [ -e "$project_path" ] || [ -L "$project_path" ] || continue
+      known="$known${project_path##*/}"$'\n'
+    done
+    fm_project_registry_without "$sub_reg" "$known" "$@" > "$tmp"
   else
     : > "$tmp"
   fi

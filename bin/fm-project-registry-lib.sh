@@ -20,6 +20,18 @@
 #   ...") matches that longer row, and the enumeration lists such a name only up
 #   to its first " - " ("Acme").
 #
+#   Removal (a reseed dropping the entries for selected names): removal never
+#   deletes a line that may belong to another project, because a duplicate line
+#   is recoverable and a lost registration or posture is not. A line matching a
+#   selected name n under the lookup rule is kept when (1) a longer known name
+#   (the caller passes the home's clone names and the names being seeded) also
+#   matches it, since the line is that name's entry; or (2) the text after n
+#   starts with " - " and a " [" follows later ("- foo bar - baz [local-only]
+#   ..." for n "foo bar"), since the dashed part may belong to a longer name;
+#   that line is kept with a warning on stderr. Otherwise (the text after n is
+#   empty, starts with " [", or starts with " - " with no later " [") the line
+#   is removed.
+#
 # Sourced, not executed. It defines:
 #   FM_PROJECT_REGISTRY_AWK   awk source to prepend to an awk program:
 #                             fm_registry_match(line, n) returns 1 when line is
@@ -31,9 +43,12 @@
 #                                               status 1 when there is none
 #   fm_project_registry_names <file|->          print every registered name, one
 #                                               per line
-#   fm_project_registry_without <file|-> <name>...
+#   fm_project_registry_without <file|-> <known> <name>...
 #                                               print the input minus the entries
-#                                               for the given names
+#                                               for the given names under the
+#                                               removal rule; <known> is a
+#                                               newline-separated list of other
+#                                               known project names
 
 # shellcheck disable=SC2016 # awk source, expanded by awk rather than the shell
 FM_PROJECT_REGISTRY_AWK='
@@ -69,12 +84,23 @@ fm_project_registry_names() {  # <file|->
   ' "$1"
 }
 
-fm_project_registry_without() {  # <file|-> <name>...
-  local file=$1 names
-  shift
+fm_project_registry_without() {  # <file|-> <known> <name>...
+  local file=$1 known=$2 names
+  shift 2
   names=$(printf '%s\n' "$@" | awk '{ printf "%s%s", sep, $0; sep="\034" }')
-  awk -v names="$names" "$FM_PROJECT_REGISTRY_AWK"'
-    BEGIN { k = split(names, a, "\034") }
-    { for (i = 1; i <= k; i++) if (fm_registry_match($0, a[i])) next; print }
+  known=$(printf '%s\n' "$known" | awk 'NF { printf "%s%s", sep, $0; sep="\034" }')
+  awk -v names="$names" -v known="$known" "$FM_PROJECT_REGISTRY_AWK"'
+    BEGIN { k = split(names, a, "\034"); kk = split(known, m, "\034"); for (i = 1; i <= k; i++) m[++kk] = a[i] }
+    function fm_registry_owned(line, n,   after, j) {
+      if (!fm_registry_match(line, n)) return 0;
+      after = FM_REG_AFTER;
+      if (substr(after, 1, 3) != " - ") return 1;
+      for (j = 1; j <= kk; j++)
+        if (length(m[j]) > length(n) && fm_registry_match(line, m[j])) return 0;
+      if (!index(substr(after, 4), " [")) return 1;
+      print "warning: keeping registry line that may belong to a longer project name than " n ": " line > "/dev/stderr";
+      return 0;
+    }
+    { for (i = 1; i <= k; i++) if (fm_registry_owned($0, a[i])) next; print }
   ' "$file"
 }
