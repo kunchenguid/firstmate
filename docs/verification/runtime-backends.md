@@ -1685,7 +1685,8 @@ The Herdr refusal when a shell accepts the command but does not move is not exer
 
 Measured 2026-09-30 on macOS aarch64 against Herdr 0.9.1 in an isolated `fm-lab-` session, with no agent launched.
 Teardown lets a completed scout whose record still names a proved persistent secondmate home skip the duplicate-record refusal only when `fm_backend_agent_state` reads its exact recorded pane `dead` or `missing`.
-A process whose argv0 is `claude` stands in for a harness, and `herdr pane report-agent` registers it.
+A process whose argv0 is `claude` stands in for a harness, and `herdr pane report-agent` registers it with `idle` for the live case and `unknown` for the unreadable case.
+Without a report, Herdr's own screen detection records such a pane `unknown` and settles it on `idle` about 4 seconds later, while a reported `unknown` held for the full 30-second sample, so only the report makes the unreadable case deterministic.
 Refresh with:
 
 ```sh
@@ -1695,7 +1696,7 @@ tests/fm-teardown-persistent-slot-herdr-e2e.test.sh
 Observed 2026-09-30:
 
 ```text
-evidence: herdr 0.9.1 endpoint states: shell-only=dead closed=missing registered-claude=alive unregistered-claude=unreadable
+evidence: herdr 0.9.1 endpoint states: shell-only=dead closed=missing registered-claude=alive unknown-status-claude=unreadable
 ok - real Herdr: a live or unreadable old endpoint keeps the duplicate-record refusal on a reconciled persistent home
 ok - real Herdr: completed scouts whose endpoints are dead or missing finish without touching the reconciled persistent home
 ```

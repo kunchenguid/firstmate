@@ -5,8 +5,8 @@
 # when the recovery-grade classifier reads its exact recorded endpoint dead or
 # missing, so the endpoints here are real panes in an isolated named lab
 # session: a shell-only pane (dead), a closed pane (missing), a registered
-# agent over a claude-named process (alive), and that process unregistered
-# (unreadable). The test drives the real bin/fm-home-seed.sh claim-slot and
+# agent over a claude-named process (alive), and that process reported with
+# the undetermined `unknown` status (unreadable). The test drives the real bin/fm-home-seed.sh claim-slot and
 # bin/fm-teardown.sh. Every adapter call goes through the guarded lab helper,
 # and Treehouse is a logging stub that refuses, so a pool operation against the
 # seeded home fails the test instead of running. No agent is launched and no
@@ -173,7 +173,7 @@ write_scout old-scout-d "$TAB_D" "$PANE_D"
 
 # old-scout-a: a shell-only pane. old-scout-b: its pane is closed.
 # old-scout-c: a claude-named process under a registered agent.
-# old-scout-d: the same process with no registration.
+# old-scout-d: the same process whose agent status is undetermined.
 lab pane close "$PANE_B" >/dev/null || fail "could not close old-scout-b's pane"
 lab pane run "$PANE_C" "(exec -a claude sleep 600)" >/dev/null || fail "could not start old-scout-c's process"
 lab pane run "$PANE_D" "(exec -a claude sleep 600)" >/dev/null || fail "could not start old-scout-d's process"
@@ -184,15 +184,18 @@ for _ in $(seq 1 50); do
 done
 lab pane report-agent --source fm-test --agent claude --state idle "$PANE_C" >/dev/null \
   || fail "could not register old-scout-c's agent"
-# Herdr detects the claude-named process on its own; classify only once it has,
-# so a slow detection cannot read as an agent-free pane.
+# Herdr's own screen detection reads an unreported claude-named pane `unknown`
+# for only a few seconds before settling on `idle`, so old-scout-d's status is
+# pinned by an explicit report, which makes the reporter the status authority.
+lab pane report-agent --source fm-test --agent claude --state unknown "$PANE_D" >/dev/null \
+  || fail "could not report old-scout-d's undetermined status"
 for _ in $(seq 1 100); do
   lab agent get "$PANE_C" 2>/dev/null | jq -e '.result.agent' >/dev/null 2>&1 \
-    && lab agent get "$PANE_D" 2>/dev/null | jq -e '.result.agent' >/dev/null 2>&1 && break
+    && lab agent get "$PANE_D" 2>/dev/null | jq -e '.result.agent.agent_status == "unknown"' >/dev/null 2>&1 && break
   sleep 0.2
 done
-lab agent get "$PANE_D" 2>/dev/null | jq -e '.result.agent' >/dev/null 2>&1 \
-  || fail "Herdr never detected old-scout-d's claude-named process"
+lab agent get "$PANE_D" 2>/dev/null | jq -e '.result.agent.agent_status == "unknown"' >/dev/null 2>&1 \
+  || fail "Herdr never recorded old-scout-d's undetermined status"
 
 run_teardown() {  # <id>
   : > "$RUNTIME_LOG"
@@ -230,12 +233,12 @@ STATE_A=$(endpoint_state "$PANE_A")
 STATE_B=$(endpoint_state "$PANE_B")
 STATE_C=$(endpoint_state "$PANE_C")
 STATE_D=$(endpoint_state "$PANE_D")
-printf 'evidence: %s endpoint states: shell-only=%s closed=%s registered-claude=%s unregistered-claude=%s\n' \
+printf 'evidence: %s endpoint states: shell-only=%s closed=%s registered-claude=%s unknown-status-claude=%s\n' \
   "$("$FAKEBIN/herdr" --version --session "$HERDR_LAB_SESSION" 2>/dev/null | head -1)" "$STATE_A" "$STATE_B" "$STATE_C" "$STATE_D"
 [ "$STATE_A" = dead ] || fail "a shell-only pane classified '$STATE_A', want dead"
 [ "$STATE_B" = missing ] || fail "a closed pane classified '$STATE_B', want missing"
 [ "$STATE_C" = alive ] || fail "a registered claude process classified '$STATE_C', want alive"
-[ "$STATE_D" = unreadable ] || fail "an unregistered claude process classified '$STATE_D', want unreadable"
+[ "$STATE_D" = unreadable ] || fail "a claude process with an undetermined status classified '$STATE_D', want unreadable"
 
 assert_refused_untouched old-scout-c "$PANE_C" "live old endpoint"
 assert_contains "$(cat "$TMP_ROOT/old-scout-c.err")" "is also task" \
