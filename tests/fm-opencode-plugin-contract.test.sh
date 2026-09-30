@@ -137,8 +137,14 @@ if (process.env.CTX_MODE === "seatbelt") {
   }
 }
 
-if (typeof cleanup === "function") await cleanup();
-console.log(JSON.stringify({ id: definition.id, results, prompted }));
+// Cleanup is part of the contract under test: setup may return a cleanup
+// function, and for the watch-arm adapter that cleanup retires a child process.
+let cleaned = false;
+if (typeof cleanup === "function") {
+  await cleanup();
+  cleaned = true;
+}
+console.log(JSON.stringify({ id: definition.id, results, prompted, cleaned }));
 EOF
 }
 
@@ -338,6 +344,63 @@ DRIVER
   pass "the contract helpers classify v2 turn ends and location scoping correctly"
 }
 
+# An unloading watch-arm adapter must not leave a successor armed. Its cleanup
+# retires the live arm child, and that child's own close handler reads the signal
+# as a watcher failure, so without a shutdown marker the plugin would schedule
+# another arm that nothing owns once it is gone.
+test_watch_arm_cleanup_does_not_rearm_after_unload() {
+  local repo home out
+  repo="$TMP_ROOT/cleanup-primary"
+  home="$TMP_ROOT/cleanup-home"
+  make_primary_fixture "$repo"
+  mkdir -p "$home/state" "$home/config"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+# Answer the readiness probe, then linger until this arm is retired, so cleanup
+# is the only thing that can end it.
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.05; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+
+  out=$(FM_OPENCODE_PLUGIN_HOST="$ROOT/tests/assets/fm-opencode-plugin-host.mjs" \
+    PLUGIN="$PLUGIN_DIR/fm-primary-watch-arm.js" REPO="$repo" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_ARM_LOG="$TMP_ROOT/cleanup-arm.log" FM_STOP_FILE="$TMP_ROOT/cleanup.stop" \
+    FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 \
+    node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const { loadPlugin } = await import(process.env.FM_OPENCODE_PLUGIN_HOST);
+
+const repo = process.env.REPO;
+const hooks = await loadPlugin(process.env.PLUGIN, { directory: repo, onPrompt: async () => {} });
+// The arm checks session-lock ownership at launch, so this process must own the
+// lock before the turn ends, exactly as a real primary session does.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.turnEnd("ses_cleanup");
+for (let i = 0; i < 300 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("the arm never started");
+
+await hooks.cleanup();
+// The retired child closes on the cleanup SIGTERM. Its close handler must see
+// the shutdown and not schedule a successor, so give it well past the retry
+// backoff before counting the arms.
+await new Promise((resolve) => setTimeout(resolve, 1200));
+const arms = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean).length;
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+if (arms !== 1) throw new Error(`expected exactly one arm, got ${arms}`);
+console.log(`arms=${arms}`);
+EOF
+  ) || fail "watch-arm cleanup drive failed: $out"
+  printf '%s' "$out" | grep -q "arms=1" \
+    || fail "the plugin armed a successor after unloading: $out"
+  pass "the watch-arm plugin does not re-arm after its cleanup retires the arm child"
+}
+
 PRIMARY="$TMP_ROOT/primary"
 make_primary_fixture "$PRIMARY"
 
@@ -348,3 +411,4 @@ test_cd_seatbelt_denies_stray_persistent_cd
 test_root_resolution_follows_the_instance_location
 test_event_handling_is_scoped_to_this_location
 test_contract_helpers_classify_turn_end
+test_watch_arm_cleanup_does_not_rearm_after_unload
