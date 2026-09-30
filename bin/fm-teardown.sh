@@ -361,7 +361,7 @@ teardown_completed_task() (
   local WT PROJ KIND MODE PR_URL dirty generation backlog_status=0 captain_status=0 captain_out marker
   local copy_lock='' copy_lock_held=0
   local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
-  local -a BACKLOG_DONE_ARGS=() BACKLOG_TRANSITION_FLAGS=()
+  local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
   lock=$(fm_meta_lock_path "$meta") || exit 1
   fm_lock_acquire_wait "$lock"
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
@@ -474,7 +474,7 @@ teardown_completed_task() (
       FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" 2>&1) || captain_status=$?
     case "$captain_status" in
-      0) BACKLOG_TRANSITION=retain; BACKLOG_TRANSITION_FLAGS=(--retain) ;;
+      0) BACKLOG_TRANSITION=retain; TASK_COMPLETED_TRANSITION_FLAGS=(--retain) ;;
       1) ;;
       *)
         echo "error: completed cleanup could not determine whether $ID's backlog item is held for the captain" >&2
@@ -486,18 +486,19 @@ teardown_completed_task() (
       echo "error: completed cleanup could not record $ID's deliverable" >&2
       exit 1
     }
+    TASK_COMPLETED_DONE_ARGS=("${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}")
     marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
     fm_backlog_close_marker_write "$STATE" "$ID" "$DATA" "$generation" \
       --cleanup-disposition "$disposition" \
-      "${BACKLOG_TRANSITION_FLAGS[@]+"${BACKLOG_TRANSITION_FLAGS[@]}"}" \
-      "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+      "${TASK_COMPLETED_TRANSITION_FLAGS[@]+"${TASK_COMPLETED_TRANSITION_FLAGS[@]}"}" \
+      "${TASK_COMPLETED_DONE_ARGS[@]+"${TASK_COMPLETED_DONE_ARGS[@]}"}" || {
         echo "error: completed cleanup could not record its pending backlog $BACKLOG_TRANSITION ($FM_BACKLOG_TRANSITION_ERROR)" >&2
         exit 1
       }
     BACKLOG_CLOSED=1
     fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
     fm_backlog_replay_transition "$BACKLOG_TRANSITION" "$marker" "$DATA" "$ID" "$STATE" \
-      "$generation" "$disposition" "${BACKLOG_DONE_ARGS[@]+"${BACKLOG_DONE_ARGS[@]}"}" || {
+      "$generation" "$disposition" "${TASK_COMPLETED_DONE_ARGS[@]+"${TASK_COMPLETED_DONE_ARGS[@]}"}" || {
         echo "error: completed cleanup finished endpoint and copy handling, but its backlog $BACKLOG_TRANSITION remains pending ($FM_BACKLOG_TRANSITION_ERROR)" >&2
         exit 1
       }

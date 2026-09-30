@@ -1864,7 +1864,7 @@ test_completed_cleanup_bookkeeping_retry_preserves_resources() {
   printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$home/state/$id.meta"
   pane=$(sed -n 's/^herdr_pane_id=//p' "$home/state/$id.meta")
   marker="$home/state/$id.backlog-close"
-  break_verb "$case_dir" done
+  break_verb "$case_dir" "done"
   out=$(run_teardown "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "completed cleanup reported success while bookkeeping failed"
   assert_present "$marker" "completed cleanup lost its replayable backlog close"
