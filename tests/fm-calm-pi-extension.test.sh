@@ -569,6 +569,8 @@ function makeSession({ missing = [], rejectPrompt = false } = {}) {
 }
 
 function makeHost(session) {
+  // The InteractiveMode.agent getter reads session.agent on older Pi installs.
+  session.agent = session;
   const host = Object.create(InteractiveMode.prototype);
   const children = [];
   Object.assign(host, {
@@ -2506,11 +2508,19 @@ test_queued_operational_escape_e2e() {
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
   cat >"$project/queued-escape-e2e.ts" <<'TS'
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { InteractiveMode, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
+
+// The status may disappear on Pi's next repaint; observe the live call without
+// changing its display behavior.
+const showStatus = InteractiveMode.prototype.showStatus;
+InteractiveMode.prototype.showStatus = function (message: string) {
+  appendFileSync(process.env.QUEUED_ESCAPE_STATUS_LOG as string, `${message}\n`);
+  return showStatus.call(this, message);
+};
 
 let label = "";
 
@@ -2589,7 +2599,7 @@ TS
     printf '%s\n' "$calm_state" >"$home/config/calm"
     mkdir -p "$sessions/$label"
     tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 160 -y 36 \
-      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
+      "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' QUEUED_ESCAPE_HELD='$held' QUEUED_ESCAPE_STATUS_LOG='$sessions/$label/status.log' PI_OFFLINE=1 pi --approve --no-context-files --no-skills --no-prompt-templates --no-extensions -e ./.pi/extensions/fm-calm.ts -e ./queued-escape-e2e.ts --session-dir '$sessions/$label'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 20"
     wait_for_text "$TMP_ROOT/queued-escape-pane" 'queued-escape-e2e.ts' \
       || fail "Pi queued-row $label case did not reach the ready composer"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/queued-escape-e2e $label"
@@ -2634,7 +2644,12 @@ TS
       pane=$(cat "$TMP_ROOT/queued-escape-pane")
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi Calm exposed a hidden notification after Escape"
       assert_not_contains "$pane" "FIRSTMATE_OP" "Pi Calm exposed operational text after Escape"
-      assert_contains "$pane" "Firstmate supervision continues in a new turn." "Pi Calm restarted a turn silently after Escape"
+      # Pi before 0.87 drains the retained queue in its own aborted-run loop;
+      # only newer Pi needs Calm to start and announce a replacement turn.
+      if node -e 'const v=process.argv[1].match(/(\d+)\.(\d+)\.(\d+)/); process.exit(v && (+v[1]>0 || +v[2]>87 || (+v[2]===87 && +v[3]>=1)) ? 0 : 1)' "$version"; then
+        grep -Fxq 'Firstmate supervision continues in a new turn.' "$sessions/$label/status.log" \
+          || fail "Pi Calm restarted a turn without announcing it after Escape"
+      fi
       if [ "$captain_queued" = yes ]; then
         [ "$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" | grep -c "^CAPTAIN_QUEUED_$label *\$")" -eq 1 ] \
           || fail "Pi Calm did not return the captain's queued text to the editor on Escape"
@@ -2670,7 +2685,7 @@ JS
   run_queued_escape_case on queued_on no
   run_queued_escape_case on queued_mixed yes
   run_queued_escape_case off queued_off no
-  pass "Pi $version with Calm on keeps a queued Firstmate notification unlisted, out of the editor on Escape, and delivers it once in a new announced turn, while Calm off stays stock"
+  pass "Pi $version with Calm on hides and retains queued Firstmate input through Escape, delivers it once, and leaves Calm off stock"
 }
 
 test_hidden_block_geometry_e2e() {
@@ -4382,19 +4397,79 @@ JS
     || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
   chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
     || fail "could not render calm-mode HTML export DOM: $chrome_report"
+  # Pi 0.99 renders display:false custom messages into the conversation
+  # column as hook-message-hidden and hides them with CSS until the viewer
+  # asks to show hidden messages. Pi 0.87 omitted those rows from the column
+  # entirely. The boundary is the visible conversation: a synthetic row may
+  # sit in a hidden hook message, and nowhere a reader sees by default.
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
 const tree = dom.match(/<div[^>]*id="tree-container"[^>]*>([\s\S]*?)<div[^>]*id="tree-status"/)?.[1];
-if (!messages || !tree) process.exit(1);
-if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) process.exit(1);
-if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
-if (messages.includes('<div class="hook-message"')) process.exit(1);
-if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
-for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
-  if (!messages.includes(current)) process.exit(1);
+if (!messages || !tree) throw new Error("export DOM is missing the messages column or the session tree");
+if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./.test(messages)) {
+  throw new Error("genuine user prompt is missing from the conversation column");
 }
-if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
+if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) {
+  throw new Error("genuine assistant reply is missing from the conversation column");
+}
+if (/<body[^>]*show-hidden-messages/.test(dom)) {
+  throw new Error("export opened with hidden messages shown");
+}
+const rendersHiddenRows = /<div[^>]*class="[^"]*\bhook-message-hidden\b/.test(messages);
+if (rendersHiddenRows && !/body:not\(\.show-hidden-messages\)\s+\.hook-message-hidden\s*\{[^}]*display:\s*none/.test(dom)) {
+  throw new Error("export no longer hides terminal-hidden custom messages by default");
+}
+function stripHiddenHookMessages(html) {
+  const marker = "<div";
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const start = html.indexOf(marker, i);
+    if (start < 0) { out += html.slice(i); break; }
+    const tagEnd = html.indexOf(">", start);
+    if (tagEnd < 0) throw new Error("unclosed tag in the conversation column");
+    const tag = html.slice(start, tagEnd + 1);
+    const classes = tag.match(/class="([^"]*)"/)?.[1].split(/\s+/) ?? [];
+    const hiddenHook = classes.includes("hook-message") && classes.includes("hook-message-hidden");
+    if (!hiddenHook) {
+      out += html.slice(i, start + marker.length);
+      i = start + marker.length;
+      continue;
+    }
+    out += html.slice(i, start);
+    let depth = 0;
+    let j = start;
+    while (j < html.length) {
+      const nextOpen = html.indexOf("<div", j);
+      const nextClose = html.indexOf("</div>", j);
+      if (nextClose < 0) throw new Error("unclosed hidden hook message");
+      if (nextOpen >= 0 && nextOpen < nextClose) {
+        depth += 1;
+        j = nextOpen + 4;
+      } else {
+        depth -= 1;
+        j = nextClose + 6;
+        if (depth === 0) break;
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+const visible = stripHiddenHookMessages(messages);
+if (visible.includes('<div class="hook-message"') || visible.includes("hook-message")) {
+  throw new Error("a visible hook message leaked into the conversation column");
+}
+if (visible.includes("[firstmate-synthetic-input]") || visible.includes("/tmp/probe.status")) {
+  throw new Error("a synthetic Firstmate row is visible in the conversation column");
+}
+for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_FROM_FIRSTMATE_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
+  if (!visible.includes(current)) throw new Error(`operational input ${current} is missing from the conversation column`);
+}
+if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) {
+  throw new Error("the session tree lost the synthetic row");
+}
 JS
   # Calm returns the transcript to its own presentation once the export has been
   # rendered. That repaint runs on the macrotask right after Pi prints the export

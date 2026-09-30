@@ -446,7 +446,7 @@ install_autoarm_scripts() {
   # The fixture arm written here stands in for the watcher arm, so the home opts out
   # of the supervision host a Claude home otherwise runs by default.
   mkdir -p "$dir/config"
-  printf 'off\n' > "$dir/config/supervision-host"
+  : > "$dir/config/supervision-host-off"
   cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"

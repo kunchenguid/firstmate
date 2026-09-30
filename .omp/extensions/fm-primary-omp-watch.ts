@@ -25,7 +25,7 @@
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //   - Supervision host: a home opted in with config/supervision-host
 //     (docs/configuration.md "Supervision host" owns the gate, which
-//     bin/fm-supervision-engine-lib.sh enabled answers; an `off` file opts out) spawns
+//     bin/fm-supervision-engine-lib.sh enabled answers; config/supervision-host-off opts out) spawns
 //     bin/fm-supervision-host.sh park --restart in the arm's place, which
 //     takes away-posture wakes itself and closes only when main is needed; its
 //     header owns the output read here. A "supervision-host:" line is

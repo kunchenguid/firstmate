@@ -7,7 +7,7 @@
 # Usage:
 #   fm-live-lab.sh up --harness claude|pi [--mate] [--worker]
 #                     [--model <m>] [--effort <e>]
-#                     [--supervision-host <line>|none] [--expect-host yes|no]
+#                     [--supervision-host <line>|none|off] [--expect-host yes|no]
 #                     [--source <repo>] [--ref <rev>] [--timeout <seconds>]
 #                     [<lab-root>]
 #   fm-live-lab.sh check <lab-root>
@@ -32,7 +32,9 @@
 #                    primary checkout, with FM_HOME at its root.
 #   config/          backend tmux, Claude crews and second mates, and
 #                    supervision-host <line> (default claude on Claude, absent
-#                    on Pi; none leaves the file absent).
+#                    on Pi; none leaves the file absent; off writes the
+#                    inherited supervision-host-off opt-out instead, so the
+#                    mate spawn inherits it).
 #   tmux server      private, through the lab home's bin/fm-lab-home.sh
 #                    tmux-dir, with no user tmux config (its plugins never run
 #                    in a lab), started from an empty environment so no inherited
@@ -81,13 +83,16 @@
 #   extensions    Pi: the watcher, turn-end guard, and branch extensions are
 #                 loaded by the process holding the lab session lock, at the
 #                 current on-disk builds.
-#   host          Claude: with --expect-host yes (the default on Claude) the
-#                 supervision host runs; with no, none runs. Skipped when the
-#                 lab has no mate or worker, since an empty fleet arms nothing.
+#   host          Claude: with --expect-host yes (the default on Claude unless
+#                 --supervision-host off) the supervision host runs; with no,
+#                 none runs. Skipped when the lab has no mate or worker, since
+#                 an empty fleet arms nothing.
 #   watcher       a live watcher with a fresh beacon holds this home's lock
 #                 (skipped on an empty fleet).
 #   mate          --mate: its window is alive and its own session lock names a
-#                 live process, so it got past trust into its charter.
+#                 live process, so it got past trust into its charter. With
+#                 --supervision-host off, its inherited flag and disabled host
+#                 gate are also required.
 #   worker        --worker: its current crew state is paused on the gate.
 #   treehouse     ~/.treehouse gained no entry since up began.
 #
@@ -140,6 +145,7 @@ load_lab() {  # <root>: refuse anything up did not build, then load its record
   LAB=$(rec_get "$ROOT" home)
   TMUX_DIR=$(rec_get "$ROOT" tmux_dir)
   EXPECT_HOST=$(rec_get "$ROOT" expect_host)
+  HOST_OFF=$(rec_get "$ROOT" host_off)
   WANT_MATE=$(rec_get "$ROOT" mate)
   WANT_WORKER=$(rec_get "$ROOT" worker)
   NONCE=$(rec_get "$ROOT" nonce)
@@ -310,10 +316,17 @@ check_watcher() {
 }
 
 check_mate() {
-  local pid
+  local pid gate_rc
   window_alive mate || { echo "fail mate: the $MATE_ID window is not running"; return 1; }
   pid=$(sed -n 1p "$ROOT/mate/state/.lock" 2>/dev/null)
   pid_alive "$pid" || { echo "fail mate: the mate holds no session lock yet (wedged before its charter?)"; return 1; }
+  if [ "$HOST_OFF" = yes ]; then
+    [ -f "$ROOT/mate/config/supervision-host-off" ] \
+      || { echo "fail mate: the inherited supervision-host-off flag is missing"; return 1; }
+    bash "$ROOT/mate/bin/fm-supervision-engine-lib.sh" enabled "$ROOT/mate/config" claude
+    gate_rc=$?
+    [ "$gate_rc" -eq 1 ] || { echo "fail mate: the supervision-host gate did not read off (exit $gate_rc)"; return 1; }
+  fi
   echo "ok mate: $MATE_ID pid $pid in $ROOT/mate"
 }
 
@@ -462,9 +475,11 @@ cmd_up() {
   done
   case "$harness" in claude|pi) ;; *) die "--harness must be claude or pi" ;; esac
   case "$timeout" in ''|*[!0-9]*) die "--timeout takes seconds" ;; esac
-  [ -n "$expect_host" ] || { [ "$harness" = claude ] && expect_host=yes || expect_host=no; }
+  [ -n "$expect_host" ] || { [ "$harness" = claude ] && [ "$host_line" != off ] && expect_host=yes || expect_host=no; }
   case "$expect_host" in yes|no) ;; *) die "--expect-host takes yes or no" ;; esac
   [ "$host_line" != __default__ ] || { [ "$harness" = claude ] && host_line=claude || host_line=none; }
+  HOST_OFF=no
+  [ "$host_line" != off ] || HOST_OFF=yes
   [ -n "$model" ] || { [ "$harness" = claude ] && model=sonnet || model=openai-codex/gpt-6-luna; }
   CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-}
   case "$CLAUDE_DIR" in ''|/*) ;; *) die "CLAUDE_CONFIG_DIR must be an absolute path" ;; esac
@@ -492,6 +507,7 @@ cmd_up() {
     echo "harness=$harness"
     echo "home=$LAB"
     echo "expect_host=$expect_host"
+    if [ "$host_line" = off ]; then echo 'host_off=yes'; else echo 'host_off=no'; fi
     echo "mate=$mate"
     echo "worker=$worker"
     echo "nonce=$NONCE"
@@ -516,7 +532,11 @@ cmd_up() {
   printf 'claude\n' > "$LAB/config/crew-harness"
   printf 'claude sonnet low\n' > "$LAB/config/secondmate-harness"
   printf 'auto\n' > "$LAB/config/claude-permission-mode"
-  [ "$host_line" = none ] || printf '%s\n' "$host_line" > "$LAB/config/supervision-host"
+  case "$host_line" in
+    none) ;;
+    off) : > "$LAB/config/supervision-host-off" ;;
+    *) printf '%s\n' "$host_line" > "$LAB/config/supervision-host" ;;
+  esac
   echo "tree: $(git -C "$LAB" rev-parse HEAD) from $source"
 
   TMUX_DIR=$("$LAB_HOME_HELPER" tmux-dir "$LAB") || die "cannot create the private tmux directory"
