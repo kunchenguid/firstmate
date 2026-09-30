@@ -123,16 +123,19 @@
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's, so teardown warns,
-# names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
-# that slot is skipped: no process kill under it, no dirty or landed-work
-# inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
-# task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
-# unconditionally, so there is no line an operator could clear to get past it.
+# proof of reassignment, never proof that this task's work landed or disappeared.
+# The only recovery exception is records-only retirement after the recorded
+# endpoint is authoritatively missing (not merely agent-less). Under the existing
+# lifecycle/meta locks, move the exact metadata bytes to state/<id>.reassigned-record
+# through the existing atomic record publisher, then exit before all process,
+# endpoint, slot, claim, tasktmp, and backlog mutations. Preserve every other
+# artifact and backlog item for operator reconciliation; this does not declare
+# the work complete. The archive must not already exist and state must resolve
+# outside the slot. Unsupported or ambiguous endpoint probes refuse. Inspect the
+# archive and retained task data before reconciling the backlog or reusing the id;
+# do not restore the stale worktree assignment over a successor's live claim.
+# Forced whole-home retirement refuses reassigned child slots: recover the child
+# individually first, because deleting its home cannot preserve these artifacts.
 # Identical task ids in different homes refuse rather than closing a possibly
 # shared endpoint; home aliases are compared physically.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
@@ -427,8 +430,6 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   echo "error: forced teardown refused - the supervision branch cannot discard work" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
-fm_lease_guard "$ID" "teardown (fm-teardown)"
-
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -443,17 +444,30 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+    TEARDOWN_LOCK_SLOT=$(CDPATH='' cd -- "$TEARDOWN_LOCK_WT" && pwd -P) || exit 1
+    TEARDOWN_LOCK_STATE=$(CDPATH='' cd -- "$STATE" && pwd -P) || exit 1
+    case "$TEARDOWN_LOCK_STATE/" in
+      "${TEARDOWN_LOCK_SLOT%/*}/"*)
+        echo "REFUSED: task state resolves inside its recorded pool slot; no slot cleanup or records-only recovery is safe." >&2
+        exit 1
+        ;;
+    esac
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
       echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
       exit 1
     }
-    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
-      echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
-      exit 1
-    }
-    TREEHOUSE_PROJECT_LOCK_HELD=1
   fi
+fi
+# Containment is read-only and precedes even the lease guard's state lock.
+fm_lease_guard "$ID" "teardown (fm-teardown)"
+if [ "$TREEHOUSE_SLOT_LOCK_REQUIRED" = 1 ]; then
+  fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+    fm_lease_guard_release
+    echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
+    exit 1
+  }
+  TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
@@ -2351,7 +2365,7 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree> [home]
         echo "REFUSED: slot $worktree is claimed by task $record_id in another home ($FM_TREEHOUSE_SLOT_OWNER_HOME); endpoint identity is ambiguous, so nothing was changed." >&2
         return 1
       fi
-      echo "warning: task $record_id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; that slot is no longer $record_id's, so its processes, copy, and claim are left untouched and only $record_id's own cleanup runs." >&2
+      echo "warning: task $record_id's recorded worktree $worktree was reassigned to task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}, which claimed that pool slot after this record was written; that slot is no longer $record_id's; only records-only retirement with a proven missing endpoint may proceed." >&2
       return "$TEARDOWN_SLOT_REASSIGNED_RC"
       ;;
   esac
@@ -2912,7 +2926,10 @@ preflight_descendant_treehouse_slots() {
     require_owned_worktree_slot_record "$task_id" "$worktree" "${state%/state}" || owner_rc=$?
     case "$owner_rc" in
       0) fm_treehouse_return_preflight "$project" "$worktree" || return 1 ;;
-      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC")
+        echo "REFUSED: child $task_id has a reassigned slot; recover its stale record individually before retiring this home." >&2
+        return 1
+        ;;
       *) return 1 ;;
     esac
   done
@@ -3258,8 +3275,42 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+# This terminal path is deliberately before the ordinary cleanup sequence.
+# A retained archive is evidence, not a second ownership record or a completion
+# marker; allocation and destructive cleanup still use the strict shared scan.
+retire_reassigned_task_record() {
+  local slot state_real slot_root endpoint archive="$STATE/$ID.reassigned-record"
+  slot=$(canonical_existing_dir "$WT") || return 1
+  slot_root=${slot%/*}
+  state_real=$(canonical_existing_dir "$STATE") || return 1
+  case "$state_real/" in
+    "$slot_root/"*)
+      echo "REFUSED: task state resolves inside the reassigned slot; records-only retirement cannot preserve it." >&2
+      return 1
+      ;;
+  esac
+  if [ -e "$archive" ] || [ -L "$archive" ]; then
+    echo "REFUSED: retained reassignment record already exists at $archive; reconcile it before retiring another incarnation." >&2
+    return 1
+  fi
+  endpoint=$(fm_backend_agent_state "$BACKEND" "$T") || endpoint=unreadable
+  if [ "$endpoint" != missing ]; then
+    echo "REFUSED: reassigned task $ID's endpoint is $endpoint, not proven missing; no process or slot action is permitted." >&2
+    return 1
+  fi
+  fm_backlog_atomic_transition publish "$META" "$archive" "reassigned task record" "$STATE" || {
+    echo "REFUSED: cannot preserve task $ID's metadata ($FM_BACKLOG_TRANSITION_ERROR)." >&2
+    return 1
+  }
+  printf 'Retired stale record for %s to %s; all other task state, backlog, processes, and reassigned slot remain untouched. Reconcile the retained work before closing the backlog or reusing the task id.\n' "$ID" "$archive"
+}
+
 require_owned_task_worktree_slot || exit 1
+if ! teardown_owns_worktree; then
+  retire_reassigned_task_record || exit 1
+  exit 0
+fi
+require_exclusive_task_worktree_slot || exit 1
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -d "$WT" ] && teardown_owns_worktree; then
   fm_treehouse_return_preflight "$PROJ" "$WT" || exit 1
 fi

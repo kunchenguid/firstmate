@@ -348,9 +348,10 @@ INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
 # scaffold kind. The record format, doorbell line, and re-ring ladder are
-# owned by bin/fm-task-inbox-lib.sh; the doorbell itself is self-describing,
-# so this section is reinforcement for the natural-checkpoint habit, not the
-# only carrier of the instruction.
+# owned by bin/fm-task-inbox-lib.sh. The doorbell names the inbox as
+# "$FM_TASK_INBOX", which bin/fm-spawn.sh exports into every launch; the full
+# path here remains the fallback for a worker launched without that export,
+# plus the natural-checkpoint habit.
 IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.

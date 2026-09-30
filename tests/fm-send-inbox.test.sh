@@ -7,6 +7,7 @@
 # drive the real fm-send executable over a stubbed tmux and pin:
 #   1. The payload is durably recorded and never typed; only the doorbell
 #      crosses the terminal, and the send exits 0 at enqueue.
+#      The doorbell names the inbox once and never grows with the home's depth.
 #   2. Multi-line steers are legal and round-trip byte-exact.
 #   3. A re-send enqueues a NEW sequence and still never retypes a payload,
 #      so the terminal can never truncate, garble, or duplicate a steer.
@@ -129,12 +130,53 @@ test_text_steer_rides_inbox() {
   body=$(record_body _ "$rec")
   [ "$body" = "please rebase onto main" ] || fail "the recorded body differs: $body"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "Firstmate instruction waiting: list '$dir/home/state/t1.inbox'/*.msg" \
+  assert_contains "$typed" "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
   *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
   esac
   pass "fm-send inbox: the payload is recorded durably and only the doorbell is typed"
+}
+
+# A home nested deep must not lengthen the doorbell: a long line wraps past
+# what a composer read can prove, so a Herdr submit reports it never reached
+# the pane and every re-ring fails the same way.
+test_deep_home_doorbell_stays_short() {
+  local shallow deep home err rest typed shallow_typed found
+  shallow=$(setup_case shallow-home)
+  run_send "$shallow" "$shallow/send.err" -- t1 "please continue" || fail "the shallow-home send failed"
+  shallow_typed=$(cat "$shallow/send.log")
+  deep="$TMP_ROOT/deep-home"
+  home="$deep/one/two/three/four/five/six/seven/eight-secondmate-homes-nest-under-long-worktree-paths"
+  mkdir -p "$home/state"
+  make_stubs "$deep" >/dev/null
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  err="$deep/send.err"
+  env PATH="$deep/fakebin:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$deep/send.log" \
+    FM_SEND_SETTLE=0 "$SEND" t1 "please continue" >/dev/null 2>"$err" ||
+    fail "the deep-home send failed: $(cat "$err")"
+  [ -f "$home/state/t1.inbox/001.msg" ] || fail "the deep-home steer was not durably recorded"
+  typed=$(cat "$deep/send.log")
+  [ "$typed" = "$shallow_typed" ] ||
+    fail "the doorbell should not depend on the home's depth:"$'\n'"shallow: $shallow_typed"$'\n'"deep:    $typed"
+  [ "${#typed}" -le 200 ] || fail "the doorbell should stay under 200 characters, got ${#typed}: $typed"
+  case "$typed" in
+  *"$deep"* | *"$TMP_ROOT"*) fail "the doorbell should not carry the home's absolute path: $typed" ;;
+  esac
+  rest=${typed#*t1.inbox}
+  [ "$rest" != "$typed" ] || fail "the doorbell should name the inbox: $typed"
+  case "$rest" in
+  *t1.inbox*) fail "the doorbell should name the inbox once: $typed" ;;
+  esac
+  found=$(cd / && FM_TASK_INBOX="$home/state/t1.inbox" bash -c 'ls "$FM_TASK_INBOX"/*.msg') ||
+    fail "a shell with FM_TASK_INBOX exported could not list the deep inbox"
+  [ "$found" = "$home/state/t1.inbox/001.msg" ] ||
+    fail "the doorbell's list instruction did not resolve the deep inbox from an unrelated cwd: $found"
+  (cd / && FM_TASK_INBOX="$home/state/t1.inbox" bash -c 'mv "$FM_TASK_INBOX"/001.msg "$FM_TASK_INBOX"/handled/') ||
+    fail "the doorbell's mv instruction did not acknowledge through FM_TASK_INBOX"
+  [ -f "$home/state/t1.inbox/handled/001.msg" ] || fail "the acknowledged record did not land in handled/"
+  pass "fm-send inbox: a deep home rings the same short doorbell naming the inbox once"
 }
 
 test_multiline_steer_is_legal() {
@@ -412,6 +454,7 @@ test_empty_message_refused() {
 }
 
 test_text_steer_rides_inbox
+test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
