@@ -76,6 +76,7 @@ For a historical cleanup observation recorded before retained-copy preservation 
 Present preservation fields, every other fact in the cleanup observation and each separately assessed evidence item remain bound, so this compatibility does not admit changed evidence.
 Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
+When a ship retains multiple merge receipts from its current execution generation, completion requires exactly one receipt matching the task metadata's current PR URL and head; absent, duplicate or conflicting identity refuses without pruning history.
 Open goals, unmerged required delivery and incomplete scout decision inventories refuse that closure.
 If tasks-axi has already pruned the exact Done row, the existing backlog-close owner can acknowledge bookkeeping from the configured Done archive only with matching terminal execution generation and preserved delivery reference.
 A missing, ambiguous, conflicting or unapplied archive reference keeps the close marker pending; recovery neither recreates the business task nor repeats endpoint/copy effects.

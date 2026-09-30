@@ -62,6 +62,18 @@ def assess(task, disposition='accepted', authority=None, gap=''):
         authority_ref=authority, evidence=refs)))
 
 
+def merge_receipt(task, url, head, generation='g1'):
+    run(sys.executable, lib, 'owner-receipt', task, '--kind', 'merge',
+        '--execution-generation', generation,
+        '--facts', json.dumps(dict(url=url, head=head)))
+
+
+def completion_refuses(task, message):
+    before = (home / 'data' / task / 'lifecycle.json').read_bytes()
+    output = run(sys.executable, lib, 'completion-read', task, ok=False)
+    assert message in output and (home / 'data' / task / 'lifecycle.json').read_bytes() == before
+
+
 def preserved(task):
     folder = home / 'data' / task
     return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in
@@ -82,13 +94,77 @@ assert 'merge receipt' in output and 'state: in_flight' in state('unmerged')
 assert preserved('unmerged') == before
 print('ok - open goals and accepted but unmerged ships cannot be falsely closed')
 
+# One guarded owner can retain more than one delivery from the same execution
+# generation. Completion selects the exact current metadata identity rather than
+# rejecting retained history or assuming that the newest receipt is current.
+old_url = 'https://code.byted.org/fixture/firstmate/merge_requests/115'
+current_url = 'https://code.byted.org/fixture/firstmate/merge_requests/116'
+old_head, current_head = 'a' * 40, 'b' * 40
+setup('multi-delivery', 'ship')
+assess('multi-delivery')
+merge_receipt('multi-delivery', old_url, old_head)
+merge_receipt('multi-delivery', current_url, current_head)
+with (home / 'state/multi-delivery.meta').open('a') as stream:
+    stream.write(f'pr={current_url}\npr_head={current_head}\n')
+record = home / 'data/multi-delivery/lifecycle.json'
+before = record.read_bytes()
+receipts = json.loads(before)['owner_receipts']['merge']
+run(sys.executable, lib, 'completion-read', 'multi-delivery')
+assert record.read_bytes() == before
+run(retire, 'multi-delivery', '--complete-only')
+assert 'state: done' in state('multi-delivery') and current_url in backlog.read_text()
+assert json.loads(record.read_text())['owner_receipts']['merge'] == receipts
+print('ok - exact current delivery completes among retained same-generation merge history')
+
+for task, metadata, message in (
+        ('multi-absent', [], 'multiple merge receipts need one current delivery identity'),
+        ('multi-ambiguous', [f'pr={old_url}', f'pr={current_url}', f'pr_head={current_head}'],
+         'ambiguous current delivery metadata'),
+        ('multi-conflict', [f'pr={current_url}', f'pr_head={old_head}'],
+         'current delivery identity conflicts with merge receipts')):
+    setup(task, 'ship')
+    assess(task)
+    merge_receipt(task, old_url, old_head)
+    merge_receipt(task, current_url, current_head)
+    if metadata:
+        with (home / 'state' / f'{task}.meta').open('a') as stream:
+            stream.write('\n'.join(metadata) + '\n')
+    completion_refuses(task, message)
+print('ok - absent, ambiguous and conflicting current delivery identity fail closed without rewriting history')
+
+setup('single-ambiguous', 'ship')
+assess('single-ambiguous')
+merge_receipt('single-ambiguous', current_url, current_head)
+with (home / 'state/single-ambiguous.meta').open('a') as stream:
+    stream.write(f'pr={current_url}\npr={current_url}\npr_head={current_head}\n')
+completion_refuses('single-ambiguous', 'ambiguous current delivery metadata')
+print('ok - duplicate current metadata cannot hide behind an otherwise unique receipt')
+
+setup('wrong-generation', 'ship')
+merge_receipt('wrong-generation', old_url, old_head)
+folder = home / 'data/wrong-generation'
+(folder / 'authority-2.md').write_text('Authorize replacement delivery\n')
+(folder / 'brief.md').write_text('Complete replacement delivery\n')
+(home / 'state/wrong-generation.meta').write_text(
+    f'kind=ship\nspawn_gen=g2\npr={old_url}\npr_head={old_head}\n')
+refs = ['data/wrong-generation/authority-2.md', 'data/wrong-generation/report.md']
+basis = call('wrong-generation', 'inspect', *[arg for ref in refs for arg in ('--evidence', ref)])['basis']
+call('wrong-generation', 'assess', '--basis', basis, '--judgment', json.dumps(dict(
+    disposition='open', outcome='Replacement authorized', remaining_gap='Deliver replacement',
+    authority_ref=refs[0], evidence=[refs[1]], intent_changed=True)))
+basis = call('wrong-generation', 'inspect', *[arg for ref in refs for arg in ('--evidence', ref)])['basis']
+call('wrong-generation', 'assess', '--basis', basis, '--judgment', json.dumps(dict(
+    disposition='accepted', outcome='Replacement delivered', remaining_gap='',
+    authority_ref=refs[0], evidence=[refs[1]])))
+completion_refuses('wrong-generation', 'required delivery has no confirmed merge receipt')
+print('ok - a current metadata identity cannot promote a wrong-generation merge receipt')
+
 # An actual guarded refusal precedes completion. It preserves uncertain endpoint
 # identity; the completion path must never attempt a provider/window call.
 setup('delivered', 'ship')
 assess('delivered')
 url = 'https://code.byted.org/fixture/firstmate/merge_requests/1'
-run(sys.executable, lib, 'owner-receipt', 'delivered', '--kind', 'merge', '--execution-generation', 'g1',
-    '--facts', json.dumps(dict(url=url, head='b' * 40)))
+merge_receipt('delivered', url, 'b' * 40)
 before = preserved('delivered')
 run(root / 'bin/fm-teardown.sh', 'delivered', '--endpoint-only', '--expect-spawn-gen', 'g1', ok=False)
 assert 'state: in_flight' in state('delivered') and preserved('delivered') == before

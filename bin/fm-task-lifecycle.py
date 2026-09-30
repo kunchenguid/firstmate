@@ -1641,8 +1641,9 @@ class Task:
                         'cleanup facts changed')
                 continue
             self.reference(item['ref'], item['sha256'])
-        meta = dict(line.split('=', 1) for line in
-                    regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line)
+        meta_fields = [line.split('=', 1) for line in
+                       regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line]
+        meta = dict(meta_fields)
         kind = self.task_kind()
         report = self.directory / 'report.md'
         if kind == 'scout':
@@ -1659,9 +1660,21 @@ class Task:
         else:
             proofs = [p for p in record.get('owner_receipts', {}).get('merge', [])
                       if p['execution_generation'] == record['execution_generation']]
-            require(len(proofs) == 1 and text(proofs[0]['facts'].get('head')) and
-                    text(proofs[0]['facts'].get('url')), 'required delivery has no confirmed merge receipt')
-            require(not meta.get('pr') or meta['pr'] == proofs[0]['facts']['url'], 'delivery URL conflicts with merge receipt')
+            require(proofs and all(text(p['facts'].get('head')) and text(p['facts'].get('url')) for p in proofs),
+                    'required delivery has no confirmed merge receipt')
+            pr = [value for key, value in meta_fields if key == 'pr']
+            head = [value for key, value in meta_fields if key == 'pr_head']
+            require(len(pr) <= 1 and len(head) <= 1, 'ambiguous current delivery metadata')
+            if len(proofs) == 1:
+                proof = proofs[0]
+            else:
+                require(len(pr) == len(head) == 1 and text(pr[0]) and text(head[0]),
+                        'multiple merge receipts need one current delivery identity')
+                current = [p for p in proofs if p['facts'] == {'url': pr[0], 'head': head[0]}]
+                require(len(current) == 1, 'current delivery identity conflicts with merge receipts')
+                proof = current[0]
+            require(not meta.get('pr') or meta['pr'] == proof['facts']['url'], 'delivery URL conflicts with merge receipt')
+            require(not meta.get('pr_head') or meta['pr_head'] == proof['facts']['head'], 'delivery head conflicts with merge receipt')
         return record
 
     def due(self, record):
