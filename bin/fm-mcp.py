@@ -14,13 +14,13 @@ Usage:
 
 Tools:
   firstmate_send_note      fm-inbox.sh note --request-id <id> --json -  (the only write)
-  firstmate_note_replies   fm-inbox.sh receipts
+  firstmate_note_replies   fm-inbox.sh receipts [--after <cursor>]
   firstmate_status         fm-inbox.sh status + fm-inbox.sh ready
   firstmate_home_summary   state/home-summary.json
   firstmate_backlog_list   fm-tasks-axi.sh list
   firstmate_backlog_show   fm-tasks-axi.sh show <id> --full
   firstmate_crew_state     fm-crew-state.sh <id>
-  firstmate_crew_report    data/<id>/report.md
+  firstmate_crew_report    data/<id>/report.md (never through a symlink)
 
 Environment:
   FM_HOME  firstmate's operational home (default: this script's repo root,
@@ -38,7 +38,6 @@ import os
 import re
 import subprocess
 import sys
-import uuid
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
@@ -100,24 +99,27 @@ def valid_id(value):
     return value
 
 
-def send_note(message, request_id=None):
+def send_note(message, request_id):
     if not message.strip():
         raise ToolError("message is empty")
-    return run("fm-inbox.sh", "note", "--request-id", request_id or f"mcp-{uuid.uuid4().hex}", "--json", "-", stdin=f"{MARKER}\n{message}")
+    return run("fm-inbox.sh", "note", "--request-id", request_id, "--json", "-", stdin=f"{MARKER}\n{message}")
 
 
 def note_replies(note_id=None, after=None):
     if note_id is None:
-        receipts = json.loads(run("fm-inbox.sh", "receipts", *(["--after", after] if after else ["--all-replies"])))
+        # No cursor: start REPLIES below the durable reply sequence, so the
+        # script serializes only the newest page instead of the whole history.
+        # ponytail: a note replied to twice leaves a sequence gap, so this page
+        # can hold fewer than REPLIES; the older ones stay reachable by note_id.
+        cursor = after or newest_page_cursor()
+        receipts = json.loads(run("fm-inbox.sh", "receipts", *(["--after", cursor] if cursor else [])))
         for entry in receipts["omitted"]:
             if entry["reveal"] == "pass --all-replies":
                 entry["reveal"] = "call again with after set to reply_cursor"
             elif entry["reveal"].startswith("pass --all-"):
                 entry["reveal"] = "pass note_id to read one note"
-        older = len(receipts["replies"]) - REPLIES
-        if not after and older > 0:
-            receipts["replies"] = receipts["replies"][-REPLIES:]
-            receipts["omitted"].append({"surface": f"older replies omitted: {older}",
+        if cursor and not after:
+            receipts["omitted"].append({"surface": "older replies omitted",
                                         "reveal": "pass note_id to read one note's reply"})
         return json.dumps(receipts)
     receipts = json.loads(run("fm-inbox.sh", "receipts", "--all-pending", "--all-handled"))
@@ -127,12 +129,24 @@ def note_replies(note_id=None, after=None):
     raise ToolError(f"no note with id {note_id!r}")
 
 
+def newest_page_cursor():
+    try:
+        seq = int((home() / "state" / "inbox" / ".replies" / ".seq").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return "%012d" % (seq - REPLIES) if seq > REPLIES else None
+
+
 def status():
     return run("fm-inbox.sh", "status") + "\n--- firstmate readiness ---\n" + run("fm-inbox.sh", "ready")
 
 
 def home_file(*parts, missing):
-    path = home().joinpath(*parts)
+    root = home()
+    path = root.joinpath(*parts)
+    links = [root.joinpath(*parts[:i]) for i in range(1, len(parts) + 1)]
+    if any(p.is_symlink() for p in links) or not path.resolve().is_relative_to(root.resolve()):
+        raise ToolError(f"refusing a symlinked or out-of-home path: {'/'.join(parts)}")
     if not path.is_file():
         raise ToolError(missing)
     return path.read_text()
@@ -175,12 +189,13 @@ TOOLS = {
         " approvals, steering a crew, merges, cancellations. The note is only a request;"
         " this tool itself never spawns, steers, merges, tears down, or edits backlog or state -"
         " firstmate reads the note and its own rules decide what happens.\n"
-        "Returns JSON with the note id and request_id. If a call fails or times out, retry"
-        " with the SAME request_id: a repeat returns the original note instead of a duplicate."
+        "Returns JSON with the note id and request_id. Choose a fresh request_id for each new note;"
+        " if a call fails or times out, retry with the SAME request_id: a repeat returns the"
+        " original note instead of a duplicate."
         " Check for firstmate's answer later with firstmate_note_replies(note_id).",
         {"message": param("The note for firstmate"),
-         "request_id": param("Idempotency key; reuse it when retrying the same note")},
-        ["message"],
+         "request_id": param("Idempotency key, unique per note; reuse it when retrying the same note")},
+        ["message", "request_id"],
         {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
     "firstmate_note_replies": (

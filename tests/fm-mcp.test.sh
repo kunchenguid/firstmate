@@ -78,9 +78,9 @@ assert_equals \
 assert_equals '["firstmate_send_note"]' \
   "$(line 3 | jq_py '[t["name"] for t in r["result"]["tools"] if not t["annotations"]["readOnlyHint"]]')" \
   "send_note is the only tool not annotated read-only"
-assert_equals '["message"]' \
+assert_equals '["message", "request_id"]' \
   "$(line 3 | jq_py '[t for t in r["result"]["tools"] if t["name"] == "firstmate_send_note"][0]["inputSchema"]["required"]')" \
-  "send_note requires a message"
+  "send_note requires a message and a client request_id"
 assert_equals "-32601" "$(line 4 | jq_py 'r["error"]["code"]')" "an unsupported method is method-not-found"
 assert_equals "-32602" "$(line 5 | jq_py 'r["error"]["code"]')" "an unknown tool is invalid-params, not a silent success"
 assert_equals "-32700" "$(line 6 | jq_py 'r["error"]["code"]')" "a malformed line is a parse error and the session survives"
@@ -101,10 +101,6 @@ assert_equals "replay $note_id" "$(printf '%s' "$replay" | jq_py '"%s %s" % (r["
 pending=$(ok_text "note_replies pending" "$(call firstmate_note_replies "{\"note_id\":\"$note_id\"}")")
 assert_equals "false null" "$(printf '%s' "$pending" | jq_py '"%s %s" % (json.dumps(r["acknowledged"]), json.dumps(r["reply"]))')" "an unhandled note has no reply yet"
 assert_equals "[via firstmate MCP]|please build X" "$(printf '%s' "$pending" | jq_py '"|".join(r["body"].strip().splitlines())')" "a client request_id still gets the MCP provenance line"
-auto=$(ok_text "send_note auto id" "$(call firstmate_send_note '{"message":"no id given"}')")
-auto_body=$(ok_text "auto body" "$(call firstmate_note_replies "{\"note_id\":\"$(printf '%s' "$auto" | jq_py 'r["id"]')\"}")" | jq_py 'r["body"].splitlines()[0]')
-assert_equals "[via firstmate MCP]" "$auto_body" "an auto request_id note gets the MCP provenance line"
-"$ROOT/bin/fm-inbox.sh" drain --ack "$(printf '%s' "$auto" | jq_py 'r["id"]')" >/dev/null || fail "could not ack the auto note"
 assert_contains "$(ok_text "status" "$(call firstmate_status)")" "1 note(s) waiting" "status counts the waiting note"
 
 "$ROOT/bin/fm-inbox.sh" drain --ack "$note_id" >/dev/null || fail "firstmate could not ack the note"
@@ -128,16 +124,36 @@ assert_equals "answer 6" "$(ok_text "note_replies after" "$(call firstmate_note_
 assert_equals "[]" "$(ok_text "note_replies head" "$(call firstmate_note_replies "{\"after\":\"$(printf '%s' "$latest" | jq_py 'r["reply_cursor"]')\"}")" | jq_py 'r["replies"]')" "the newest reply_cursor has nothing newer"
 pass "note_replies: newest replies first page, after cursor pages forward"
 
-is_error "empty note" "$(call firstmate_send_note '{"message":"   "}')"
+is_error "empty note" "$(call firstmate_send_note '{"message":"   ","request_id":"req-2"}')"
+is_error "no request_id" "$(call firstmate_send_note '{"message":"no id given"}')"
 is_error "unknown note" "$(call firstmate_note_replies '{"note_id":"nope"}')"
 is_error "missing argument" "$(call firstmate_backlog_show)"
 is_error "extra argument" "$(call firstmate_status '{"force":"yes"}')"
-is_error "non-string argument" "$(call firstmate_send_note '{"message":42}')"
+is_error "non-string argument" "$(call firstmate_send_note '{"message":42,"request_id":"req-3"}')"
 pass "bad input is a tool error, never a note"
 
 # --- reads ------------------------------------------------------------------
 
-wakes=$(grep -c . "$H/state/.wake-queue")
+# A report reached through a symlink, at the file or a directory, is refused.
+printf 'secret\n' >"$TMP_ROOT/outside.md"
+mkdir -p "$H/data/filelink"
+ln -s "$TMP_ROOT/outside.md" "$H/data/filelink/report.md"
+mkdir -p "$TMP_ROOT/outside-dir"
+cp "$TMP_ROOT/outside.md" "$TMP_ROOT/outside-dir/report.md"
+ln -s "$TMP_ROOT/outside-dir" "$H/data/dirlink"
+
+# home_sum : one digest over every path and file byte under the home.
+home_sum() {
+  python3 -c 'import hashlib,os,sys
+h=hashlib.sha256()
+for d,ds,fs in os.walk(sys.argv[1]):
+    ds.sort()
+    for n in [d]+sorted(os.path.join(d,f) for f in fs):
+        h.update(n.encode()+b"\0")
+        if n!=d and not os.path.islink(n): h.update(open(n,"rb").read())
+print(h.hexdigest())' "$H"
+}
+before=$(home_sum)
 
 st=$(ok_text "status" "$(call firstmate_status)")
 assert_contains "$st" "demo" "status lists in-flight work"
@@ -155,10 +171,17 @@ is_error "traversal" "$traversal"
 assert_contains "$traversal" "invalid task id" "a path-shaped id is refused before any read"
 is_error "option-shaped id" "$(call firstmate_crew_state '{"task_id":"--help"}')"
 is_error "missing report" "$(call firstmate_crew_report '{"task_id":"nosuch"}')"
+for id in filelink dirlink; do
+  linked=$(call firstmate_crew_report "{\"task_id\":\"$id\"}")
+  is_error "symlinked report $id" "$linked"
+  assert_not_contains "$linked" "secret" "a symlinked report ($id) is not read"
+done
+pass "ids and symlinks cannot escape the home"
+
+# The reads above changed nothing anywhere in the home.
+assert_equals "$before" "$(home_sum)" "no tool but send_note wrote to the home"
+pass "authority boundary: reads leave the home byte-identical"
+
 rm "$H/state/home-summary.json"
 is_error "missing summary" "$(call firstmate_home_summary)"
-pass "ids cannot escape the home, and missing files are errors"
-
-# The reads above changed nothing: every wake is a note's own.
-assert_equals "$wakes" "$(grep -c . "$H/state/.wake-queue")" "no tool but send_note appended a wake"
-pass "authority boundary: reads append no wake"
+pass "missing files are errors"

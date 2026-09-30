@@ -8,12 +8,13 @@ It uses only the Python standard library, so the `python3` a firstmate home alre
 
 The server never spawns, steers, merges, tears down, or edits backlog or state.
 `firstmate_send_note` is its only write: it queues an inbox note through `fm-inbox.sh note` and wakes firstmate, and firstmate's own rules decide what happens next.
-Every note it queues starts with the fixed first line `[via firstmate MCP]`, including when the client supplies its own `request_id`, so firstmate can tell an MCP note from one the captain typed.
+Every note it queues starts with the fixed first line `[via firstmate MCP]`, so firstmate can tell an MCP note from one the captain typed.
 Every other tool is a read of status, readiness, receipts, the home summary, the backlog, a crew's current state, or a crew's report.
+A home file is never read through a symlink or from outside `FM_HOME`, so a symlinked `data/<id>/report.md` is refused.
 The script header lists each tool and the command or file it wraps.
 
-A note is idempotent per `request_id`, so a client retrying a failed call with the same id still produces exactly one note.
-Replies arrive asynchronously through `fm-inbox.sh reply` and are read back with `firstmate_note_replies`; without a `note_id` or `after` cursor it returns the newest 20 replies, and each call's `reply_cursor` passed back as `after` returns only newer ones.
+`request_id` is required and chosen by the client, one per note, so a client retrying a failed or timed-out call with the same id still produces exactly one note.
+Replies arrive asynchronously through `fm-inbox.sh reply` and are read back with `firstmate_note_replies`; without a `note_id` or `after` cursor it asks `fm-inbox.sh receipts` for only the newest 20 replies (fewer when a re-answered note left a gap in the reply sequence), and each call's `reply_cursor` passed back as `after` returns only newer ones.
 
 ## Setup
 
@@ -46,4 +47,4 @@ Desktop logs each connection to `~/Library/Logs/Claude/mcp-server-firstmate.log`
 
 ## Verification
 
-`tests/fm-mcp.test.sh` drives every tool over the real stdio protocol against a temporary home and firstmate's real scripts, and asserts that the note is the only write.
+`tests/fm-mcp.test.sh` drives every tool over the real stdio protocol against a temporary home and firstmate's real scripts, and asserts that the note is the only write: the read tools leave the whole home byte-identical.
