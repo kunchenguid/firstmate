@@ -69,8 +69,8 @@
 # the due action is `retry`: once the worker has no open decision of its own,
 # the watcher rings once more and spends the mark
 # whatever the result, so the record never rings a third time and never
-# escalates. Waiting workers do not list the inbox unprompted (bin/fm-brief.sh),
-# so without this retry the record could sit unread until a checkpoint. A pending ordinary record's
+# escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
+# without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
 # acknowledged record drops its mark. The remote steer leg has no watcher
 # ladder and owes no retry.
