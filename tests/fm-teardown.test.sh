@@ -4133,6 +4133,18 @@ test_missing_startup_source_refuses_before_cleanup() {
   pass "a missing teardown startup source refuses before cleanup"
 }
 
+test_missing_gemini_adapter_refuses_before_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case missing-gemini-adapter)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-composer-gemini-0.62.0.sh"
+  rc=0
+  run_copied_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_source_refusal_preserved_state "$case_dir" "missing-gemini-adapter" "required source fm-composer-gemini-0.62.0.sh"
+  pass "a missing Gemini adapter refuses explicitly before teardown cleanup"
+}
+
 test_unreadable_startup_source_refuses_before_cleanup() {
   local case_dir rc
   case_dir=$(make_case unreadable-startup-source)
@@ -4245,6 +4257,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 }
 
 test_missing_startup_source_refuses_before_cleanup
+test_missing_gemini_adapter_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup

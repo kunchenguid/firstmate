@@ -1071,7 +1071,9 @@ test_gemini_live_guard_read_only() {
   mkdir -p "$fixture/bin"
   cat > "$fixture/bin/gemini" <<'SH'
 #!/usr/bin/env bash
-if [ "$GUARD_MODE" = unsupported-version ]; then printf '0.62.1\n'; else printf '0.62.0\n'; fi
+printf 'called\n' >> "$GUARD_GEMINI_LOG"
+if [ "$GUARD_MODE" = local-unavailable ]; then exit 1; fi
+printf '0.62.1\n'
 SH
   cat > "$fixture/bin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -1099,23 +1101,22 @@ case "$1 $2" in
  esac
 SH
   chmod +x "$fixture/bin/gemini" "$fixture/bin/herdr"
-  for mode in alive stopped unknown capture-failed changed absent unsupported-version; do
+  for mode in alive stopped unknown capture-failed changed absent local-upgraded local-unavailable; do
     : > "$fixture/commands"
+    : > "$fixture/gemini-commands"
     rm -f "$fixture/captured"
     rc=0
     out=$(PATH="$fixture/bin:$PATH" FM_GEMINI_COMPOSER_LIVE=1 \
       FM_GEMINI_COMPOSER_TARGET=fixture:w1:p1 \
       FM_BACKEND_HERDR_BIN="$fixture/bin/herdr" FM_BACKEND_HERDR_CLIENT_SESSION=fixture \
-      GUARD_LOG="$fixture/commands" GUARD_CAPTURED="$fixture/captured" GUARD_MODE="$mode" \
+      GUARD_GEMINI_LOG="$fixture/gemini-commands" GUARD_LOG="$fixture/commands" GUARD_CAPTURED="$fixture/captured" GUARD_MODE="$mode" \
       bash "$ROOT/tests/fm-gemini-composer-live-e2e.test.sh" 2>&1) || rc=$?
-    if [ "$mode" = alive ]; then
+    if [ "$mode" = alive ] || [ "$mode" = local-upgraded ] || [ "$mode" = local-unavailable ]; then
       [ "$rc" -eq 0 ] || fail "live guard rejected idle fixture: $out"
     else
       [ "$rc" -ne 0 ] || fail "live guard accepted $mode server/identity"
     fi
-    if [ "$mode" = unsupported-version ]; then
-      [ ! -s "$fixture/commands" ] || fail "unsupported Gemini version reached Herdr"
-    fi
+    [ ! -s "$fixture/gemini-commands" ] || fail "guard queried a local binary unrelated to the endpoint"
     while IFS= read -r operation; do
       case "$operation" in
         'agent get w1:p1 --session fixture'|'status --json --session fixture'|\
