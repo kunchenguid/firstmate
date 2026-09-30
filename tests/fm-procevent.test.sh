@@ -3334,6 +3334,25 @@ assert_not_contains "$out" "Context data:" "a choice note surfaced the machine-g
 assert_not_contains "$out" $'\nprompt:\n' "a choice note was presented as a freeform comment"
 pass "read presents a choice's typed note"
 
+# A board-generated choice prompt whose Context data has no note is not a
+# captain note, even when its prose differs from the element text.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "9","Dispatch order - start this queued work now: task-a, task-b\n\nContext data:\n{\n  \"question\": \"dispatch.charted\",\n  \"answer\": \"task-a,task-b\"\n}","div#dispatch-bar",choice,"Dispatch: task-a, task-b"
+  "10","Captain's Call answer - Pick host: opt-a - go\n\nContext data:\n{\n  \"question\": \"pick-host\",\n  \"answer\": \"opt-a\"\n}","section#call > form",choice,"Pick host: opt-a"
+EOF
+out=$(read_out) || fail "read failed on choices whose Context data has no note"
+assert_contains "$out" "presented_items: 2" "a choice without a note was not presented"
+assert_contains "$out" $'| Dispatch: task-a, task-b\nANNOTATION 2 of 2' \
+  "a board-generated dispatch prompt was presented as a typed note"
+assert_contains "$out" $'| Pick host: opt-a\nEND ANNOTATIONS' \
+  "a legacy choice prompt was presented as a typed note"
+assert_not_contains "$out" $'\nnote:\n' "a choice without a Context note invented a note field"
+pass "read presents no note for a choice whose Context data has none"
+
 # Lavish can also frame queued items as an expanded list of objects rather
 # than tabular rows; an element annotation may nest a `target` object.
 cat > "$READ" <<'EOF'

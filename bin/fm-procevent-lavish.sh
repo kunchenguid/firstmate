@@ -31,8 +31,8 @@
 #            freeform comment (`prompt`) is printed as its own field even when
 #            a selector is also present and even when that comment matches the
 #            element text, so typed words are never dropped. Choice Context
-#            data is not a comment, but a choice's typed note is printed as its
-#            own `note` field.
+#            data is not a comment, but its `note` field, the captain's typed
+#            note, is printed as its own `note` field.
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
@@ -834,27 +834,16 @@ cmd_read() {
       return if !@lines || (@lines == 1 && $lines[0] eq "");
       print "| $_\n" for @lines;
     }
-    # A choice prompt is `<label>[ - note: <note>]` followed by Context data.
-    # The note field of that data is authoritative; without one, any prose the
-    # captain typed beyond the label is still the note, so it is never dropped.
+    # A choice prompt ends in Context data; the typed note of the captain is
+    # only its `note` field. The prose before it is board-generated, never a note.
     sub choice_note {
-      my ($prompt, $label) = @_;
-      my ($prose, $ctx) = ($prompt, undef);
-      if ($prompt =~ /\A(.*?)\s*Context data:\s*(\{.*\})\s*\z/s) {
-        ($prose, $ctx) = ($1, $2);
-      }
-      if (defined $ctx) {
-        my $data = eval { JSON::PP::decode_json($ctx) };
-        if (ref($data) eq "HASH" && defined $data->{note} && !ref $data->{note}) {
-          my $note = $data->{note};
-          utf8::encode($note);
-          return $note;
-        }
-      }
-      $prose =~ s/\A\s+|\s+\z//g;
-      return "" if $prose eq "" || $prose eq $label;
-      $prose =~ s/\A\Q$label\E - note: //;
-      return $prose;
+      my ($prompt) = @_;
+      return "" unless $prompt =~ /Context data:\s*(\{.*\})\s*\z/s;
+      my $data = eval { JSON::PP::decode_json($1) };
+      return "" unless ref($data) eq "HASH" && defined $data->{note} && !ref $data->{note};
+      my $note = $data->{note};
+      utf8::encode($note);
+      return $note;
     }
     if (@messages) {
       my $message_label = $session_ended =~ /^(?:true|True|TRUE)$/
@@ -902,7 +891,7 @@ cmd_read() {
           print "prompt:\n";
           emit_body($comment);
         } elsif ($tag eq "choice") {
-          my $note = choice_note($comment, $elem);
+          my $note = choice_note($comment);
           if (length $note) {
             print "note:\n";
             emit_body($note);
