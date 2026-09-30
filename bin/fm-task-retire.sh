@@ -82,7 +82,7 @@ if [ "${2:-}" = --complete-only ]; then
   args=()
   report="$DATA/$ID/report.md"
   if [ -f "$report" ] && [ ! -L "$report" ]; then args=(--report "data/$ID/report.md"); fi
-  delivery=$(printf '%s' "$lifecycle" | jq -r '.owner_receipts.merge[-1].facts.url // empty')
+  delivery=$(printf '%s' "$lifecycle" | jq -r '.completion_delivery.facts.url // empty')
   case "$delivery" in
     https://*) args=(--pr "$delivery") ;;
     local:*) args=(--note 'local main') ;;

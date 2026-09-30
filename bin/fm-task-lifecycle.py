@@ -1675,6 +1675,7 @@ class Task:
                 proof = current[0]
             require(not meta.get('pr') or meta['pr'] == proof['facts']['url'], 'delivery URL conflicts with merge receipt')
             require(not meta.get('pr_head') or meta['pr_head'] == proof['facts']['head'], 'delivery head conflicts with merge receipt')
+            return dict(record, completion_delivery=proof)
         return record
 
     def due(self, record):

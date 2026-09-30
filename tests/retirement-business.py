@@ -102,17 +102,34 @@ current_url = 'https://code.byted.org/fixture/firstmate/merge_requests/116'
 old_head, current_head = 'a' * 40, 'b' * 40
 setup('multi-delivery', 'ship')
 assess('multi-delivery')
-merge_receipt('multi-delivery', old_url, old_head)
 merge_receipt('multi-delivery', current_url, current_head)
+merge_receipt('multi-delivery', old_url, old_head)
 with (home / 'state/multi-delivery.meta').open('a') as stream:
     stream.write(f'pr={current_url}\npr_head={current_head}\n')
 record = home / 'data/multi-delivery/lifecycle.json'
 before = record.read_bytes()
 receipts = json.loads(before)['owner_receipts']['merge']
-run(sys.executable, lib, 'completion-read', 'multi-delivery')
+completion = json.loads(run(sys.executable, lib, 'completion-read', 'multi-delivery'))
+assert completion['completion_delivery'] == receipts[0]
+assert completion['owner_receipts']['merge'] == receipts
 assert record.read_bytes() == before
+multi_fakebin = home / 'multi-fakebin'
+multi_fakebin.mkdir()
+multi_wrapper = multi_fakebin / 'tasks-axi'
+multi_wrapper.write_text('#!/usr/bin/env python3\nimport subprocess,sys\n'
+                         'if sys.argv[1]=="done": sys.exit(73)\n'
+                         f'sys.exit(subprocess.run([{shutil.which("tasks-axi")!r}]+sys.argv[1:]).returncode)\n')
+multi_wrapper.chmod(0o755)
+multi_env = dict(env, PATH=str(multi_fakebin) + os.pathsep + env['PATH'])
+run(retire, 'multi-delivery', '--complete-only', ok=False, custom_env=multi_env)
+multi_marker = home / 'state/multi-delivery.backlog-close'
+assert f'arg={current_url}\n' in multi_marker.read_text()
+assert old_url not in multi_marker.read_text()
+assert 'state: in_flight' in state('multi-delivery')
 run(retire, 'multi-delivery', '--complete-only')
-assert 'state: done' in state('multi-delivery') and current_url in backlog.read_text()
+done = state('multi-delivery')
+assert 'state: done' in done and current_url in done and old_url not in done
+assert not multi_marker.exists()
 assert json.loads(record.read_text())['owner_receipts']['merge'] == receipts
 print('ok - exact current delivery completes among retained same-generation merge history')
 
