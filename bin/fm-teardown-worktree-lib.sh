@@ -4,6 +4,45 @@
 # the ordinary teardown path refuses the whole destructive transaction.
 TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED=3
 
+# Resolve Treehouse's exact managed spelling for an existing directory.
+# `test -ef` compares the followed directory device and inode, so it accepts both
+# symlink-prefix and bind-mount aliases without accepting lexical resemblance.
+# The public status/enter interface exists in the pinned Treehouse 2.0.1 build.
+TREEHOUSE_MANAGED_RETURN_PATH=
+treehouse_managed_return_path_for_identity() {  # <recorded-dir> <project-dir> [include-recorded: 0|1]
+  local dir=$1 cd_dir=$2 include_recorded=${3:-0} status line name candidate matches=0 matched=
+  TREEHOUSE_MANAGED_RETURN_PATH=
+  [ -d "$dir" ] || return 1
+  status=$( ( cd "$cd_dir" && treehouse status ) 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      ''|[[:space:]]*) continue ;;
+    esac
+    name=${line%%[[:space:]]*}
+    case "$name" in
+      ''|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    candidate=$( ( cd "$cd_dir" && treehouse enter --print-path "$name" ) 2>/dev/null) || continue
+    case "$candidate" in
+      /*) ;;
+      *) continue ;;
+    esac
+    case "$candidate" in
+      *$'\n'*|*$'\r'*|*$'\t'*) continue ;;
+    esac
+    [ "$include_recorded" = 1 ] || [ "$candidate" != "$dir" ] || continue
+    [ -d "$candidate" ] || continue
+    if [ "$candidate" -ef "$dir" ]; then
+      matches=$((matches + 1))
+      matched=$candidate
+    fi
+  done <<EOF
+$status
+EOF
+  [ "$matches" -eq 1 ] || return 1
+  TREEHOUSE_MANAGED_RETURN_PATH=$matched
+}
+
 default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
@@ -277,7 +316,7 @@ validate_worktree_teardown_safety() {
 # cleanup receipt, and records phase postconditions through the endpoint receipt
 # owner. No endpoint, process, backlog, metadata or business effects occur here.
 teardown_completed_copy() { # <canonical-copy> <project> <generation>
-  local copy=$1 project=$2 generation=$3 candidate other field dirty copy_readback
+  local copy=$1 project=$2 generation=$3 candidate other field dirty copy_readback managed_copy=$1
   copy_readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || return 1
   if [ "$(printf '%s' "$copy_readback" | jq -r '.phase.state')" = pending ]; then
     echo 'REFUSED: copy disposal may have happened; exact effect readback required' >&2; return 1
@@ -329,12 +368,17 @@ teardown_completed_copy() { # <canonical-copy> <project> <generation>
   if ! validate_worktree_teardown_safety completed; then
     COPY_DISPOSITION=retained-unlanded; COPY_REASON="content-not-proved-in-default"; return 0
   fi
+  if fm_treehouse_pool_slot "$project" "$copy"; then
+    COPY_REASON="treehouse-managed-path-unproved"
+    treehouse_managed_return_path_for_identity "$copy" "$project" 1 || return 0
+    managed_copy=$TREEHOUSE_MANAGED_RETURN_PATH
+  fi
   # Revalidate inode/path identity immediately before the first disposal effect.
   fm_task_lifecycle cleanup-copy-read "$ID" >/dev/null || { COPY_REASON="copy-identity-changed"; return 0; }
   teardown_endpoint_receipt directory_return pending copy-disposal-attempt || return 1
   COPY_REASON="copy-disposal-uncertain"
   if fm_treehouse_pool_slot "$project" "$copy"; then
-    if (cd "$project" && treehouse return --force "$copy"); then
+    if (cd "$project" && treehouse return --force "$managed_copy"); then
       fm_treehouse_slot_owner_release "$copy" "$ID" "$generation"
     else return 1
     fi

@@ -354,6 +354,7 @@ const replayLifecycle=JSON.parse(execFileSync('python3',[path.join(root,'bin/fm-
 replayLifecycle.disposition='accepted';replayLifecycle.assessment.remaining_gap='';
 const replayAccepted=path.join(recoveryRoot,'accepted.json');fs.writeFileSync(replayAccepted,JSON.stringify(replayLifecycle),{mode:0o600});
 execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',replayTask,'--expected-revision','1','--record',replayAccepted],{env:replayEnv});
+execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'owner-receipt',replayTask,'--execution-generation',replayGeneration,'--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',replayProject,'rev-parse','HEAD')})],{env:replayEnv});
 fs.writeFileSync(path.join(recoveryBin,'tasks-axi'),`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(tasksLog)}\nif [ "\${1:-}" = done ] && [ ! -e ${JSON.stringify(tasksFailure)} ]; then : > ${JSON.stringify(tasksFailure)}; exit 1; fi\nexec ${JSON.stringify(realTasksAxi)} "$@"\n`,{mode:0o755});
 const replayService=new ShortAgents(replayHome,root),replayInput=req('cleanup-backlog-replay',[{action:'cleanup',task:replayTask}]),priorPath=process.env.PATH;
 process.env.PATH=recoveryBin+path.delimiter+priorPath;
@@ -388,6 +389,7 @@ try {
   boundaryLifecycle.disposition='accepted';boundaryLifecycle.assessment.remaining_gap='';
   const boundaryAccepted=path.join(recoveryRoot,'boundary-accepted.json');fs.writeFileSync(boundaryAccepted,JSON.stringify(boundaryLifecycle),{mode:0o600});
   execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',boundaryTask,'--expected-revision','1','--record',boundaryAccepted],{env:replayEnv});
+  execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'owner-receipt',boundaryTask,'--execution-generation',boundaryGeneration,'--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',replayProject,'rev-parse','HEAD')})],{env:replayEnv});
   const realPython=execFileSync('which',['python3'],{env:{...replayEnv,PATH:priorPath},encoding:'utf8'}).trim(),receiptFailure=path.join(recoveryRoot,'receipt-failed');
   fs.writeFileSync(path.join(recoveryBin,'python3'),`#!/usr/bin/env bash\nif [ "\${2:-}" = owner-receipt ] && [ ! -e ${JSON.stringify(receiptFailure)} ]; then : > ${JSON.stringify(receiptFailure)}; kill -KILL "\$\$"; fi\nexec ${JSON.stringify(realPython)} "$@"\n`,{mode:0o755});
   const boundaryInput=req('cleanup-success-boundary',[{action:'cleanup',task:boundaryTask}]),boundaryOperation=replayService.submit(boundaryInput);let boundaryResult;
@@ -429,6 +431,7 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   initial.disposition='accepted';initial.assessment.remaining_gap='';
   const acceptedFile=path.join(tmp,'accepted-live.json');fs.writeFileSync(acceptedFile,JSON.stringify(initial),{mode:0o600});
   execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',liveTask,'--expected-revision','1','--record',acceptedFile],{env:liveEnv});
+  execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'owner-receipt',liveTask,'--execution-generation',liveGeneration,'--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',project,'rev-parse','HEAD')})],{env:liveEnv});
   herdrLive('pane','run',livePaneId,'traex -y');
   const probe=()=>execFileSync('bash',['-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "$2:$3"; fm_backend_herdr_composer_state "$2:$3"','fixture',root,target.session,livePaneId],{env:liveEnv,encoding:'utf8'}).trim();
   let liveState;
@@ -455,6 +458,8 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
     record.disposition='accepted';record.assessment.remaining_gap='';
     const file=path.join(tmp,task+'-accepted.json');fs.writeFileSync(file,JSON.stringify(record),{mode:0o600});
     execFileSync('bash',[path.join(root,'bin/fm-task-state.sh'),'reconcile',task,'--expected-revision','1','--record',file],{env:liveEnv});
+    const targetProject=meta.split('\n').find(line=>line.startsWith('project=')).slice(8);
+    execFileSync('python3',[path.join(root,'bin/fm-task-lifecycle.py'),'owner-receipt',task,'--execution-generation',record.execution_generation,'--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',targetProject,'rev-parse','HEAD')})],{env:liveEnv});
   };
   const copySnapshot=copy=>({
     head:git('-C',copy,'rev-parse','HEAD'),branch:git('-C',copy,'rev-parse','--abbrev-ref','HEAD'),status:git('-C',copy,'status','--porcelain'),

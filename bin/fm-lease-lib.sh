@@ -179,7 +179,7 @@ fm_lease_guard() {
   local task=$1 action=$2 actor lock lease_actor active=0
   fm_lease_valid_id "$task" || return 0
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ]; then
+  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ] && ! fm_lease_cleanup_recovery_allowed "$task"; then
     echo "error: $action refused - task '$task' has a pending short-operation receipt" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   fi
@@ -195,7 +195,7 @@ fm_lease_guard() {
     fm_lock_acquire_wait "$lock"
     FM_LEASE_GUARD_LOCK=$lock
   fi
-  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ]; then
+  if [ "$actor" != short ] && [ -e "$STATE/.short-operation-$task.json" ] && ! fm_lease_cleanup_recovery_allowed "$task"; then
     fm_lease_guard_release
     echo "error: $action refused - task '$task' acquired a pending short-operation receipt while waiting" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
@@ -213,6 +213,13 @@ fm_lease_guard() {
     echo "error: $action refused - task '$task' is leased to the $lease_actor supervision actor (state/.lease-$task); retry after that actor releases it" >&2
     exit "$FM_LEASE_REFUSE_EXIT"
   fi
+}
+
+# One exception for the authenticated MAIN preservation owner, never an actor
+# string override. It rechecks the immutable failed grant and dead executor.
+fm_lease_cleanup_recovery_allowed() {
+  [ "${FM_SUPERVISION_ACTOR:-main}" = main ] && [ -n "${FM_SHORT_CLEANUP_RECOVERY:-}" ] || return 1
+  node "$FM_LEASE_LIB_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$1" "${FM_SHORT_CLEANUP_GENERATION:-}"
 }
 
 # Release the claim/guard serialization lock retained by fm_lease_guard.

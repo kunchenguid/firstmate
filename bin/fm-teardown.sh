@@ -147,6 +147,10 @@
 # current sharing/pool ownership/content checks precede disposal. It never
 # recreates metadata or repeats endpoint/business effects. Missing historical
 # bindings and uncertain attempts require readback; no path override or force.
+# Exact uncertain-return preservation is invoked only by ShortTask's
+# `settle-cleanup` owner; --preserve-copy-recovery is its private entrypoint.
+# It verifies the already-absent pane and retains the bound surviving copy,
+# finishes only remaining bookkeeping, and never closes or returns anything.
 #   --force skips ordinary-task dirty and landed-work checks and skips scout
 #   report checks. Only use it when the captain has explicitly said to discard
 #   the work.
@@ -285,6 +289,7 @@ FORCE=
 LEGACY_RECORD_GIVEN=0
 ENDPOINT_ONLY=0
 COPY_ONLY=0
+PRESERVE_COPY_RECOVERY=0
 ENDPOINT_EXPECTED_GEN=
 shift
 while [ "$#" -gt 0 ]; do
@@ -293,6 +298,7 @@ while [ "$#" -gt 0 ]; do
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     --endpoint-only) ENDPOINT_ONLY=1 ;;
     --copy-only) COPY_ONLY=1 ;;
+    --preserve-copy-recovery) PRESERVE_COPY_RECOVERY=1 ;;
     --expect-spawn-gen) [ "$#" -ge 2 ] || exit 2; ENDPOINT_EXPECTED_GEN=$2; shift ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -303,6 +309,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$ENDPOINT_ONLY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
 [ "$COPY_ONLY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ "$ENDPOINT_ONLY" = 0 ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
+[ "$PRESERVE_COPY_RECOVERY" != 1 ] || { [ -n "$ENDPOINT_EXPECTED_GEN" ] && [ "$COPY_ONLY" = 0 ] && [ "$ENDPOINT_ONLY" = 0 ] && [ -z "$FORCE" ] && [ "$LEGACY_RECORD_GIVEN" = 0 ]; } || exit 2
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -445,6 +452,21 @@ teardown_completed_task() (
   else
     teardown_endpoint_receipt directory_return confirmed copy-already-absent || exit 1
   fi
+  teardown_completed_bookkeeping "$meta" "$generation" "$disposition"
+
+)
+teardown_completed_bookkeeping() {
+  local meta=$1 generation=$2 disposition=$3 facts marker captain_out captain_status=0 backlog_status=0
+  local KIND MODE PR_URL WT PROJ
+  local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
+  local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
+  KIND=$(fm_meta_get "$meta" kind)
+  MODE=$(fm_meta_get "$meta" mode)
+  PR_URL=$(fm_meta_get "$meta" pr)
+  WT=$(fm_meta_get "$meta" worktree)
+  PROJ=$(fm_meta_get "$meta" project)
+  [ -n "$KIND" ] || KIND=ship
+  [ -n "$MODE" ] || MODE=no-mistakes
   if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     if ! fm_backlog_meta_spawn_gen "$meta" "$STATE"; then
       echo "error: completed cleanup could not bind $ID's backlog transition to its task generation ($FM_BACKLOG_TRANSITION_ERROR)" >&2
@@ -506,7 +528,8 @@ teardown_completed_task() (
     FM_SHORT_OWNER_ARGS=("$ID")
     fm_short_owner_receipt "$facts"
   fi
-)
+}
+
 teardown_retained_copy() (
   local lock copy project generation lifecycle readback phase absent
   local ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT COPY_DISPOSITION COPY_REASON
@@ -526,6 +549,10 @@ teardown_retained_copy() (
   generation=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
   [ "$generation" = "$ENDPOINT_EXPECTED_GEN" ] || { echo 'REFUSED: retained copy generation conflict' >&2; exit 1; }
   readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || exit 1
+  if [ -n "$(printf '%s' "$lifecycle" | jq -r '.cleanup_ref // empty')" ] && \
+     fm_task_lifecycle cleanup-read "$ID" | jq -e '.preservation_ref!=null' >/dev/null; then
+    echo 'retained copy preservation settled; no disposal replay'; exit 0
+  fi
   phase=$(printf '%s' "$readback" | jq -r '.phase.state')
   [ "$phase" != confirmed ] || { echo 'retained copy already disposed; no effects repeated'; exit 0; }
   absent=$(printf '%s' "$readback" | jq -r '.absent')
@@ -549,6 +576,90 @@ teardown_retained_copy() (
   fi
   printf 'copy-only %s: %s (%s); business disposition and endpoint unchanged\n' "$ID" "$COPY_DISPOSITION" "$COPY_REASON"
 )
+teardown_preserve_copy_recovery() (
+  local meta="$STATE/$ID.meta" lock lifecycle generation readback proof copy project session pane facts
+  local copy_lock='' copy_lock_held=0 disposition=retained-unverified COPY_REASON=copy-preserved-after-uncertain-return
+  local WT PROJ KIND MODE PR_URL ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
+  local BACKLOG_CLOSED=0 BACKLOG_TRANSITION=close BACKLOG_SKIP_REASON=''
+  local -a TASK_COMPLETED_DONE_ARGS=() TASK_COMPLETED_TRANSITION_FLAGS=()
+  # shellcheck source=bin/fm-lease-lib.sh
+  . "$SCRIPT_DIR/fm-lease-lib.sh"
+  fm_refuse_if_gate_agent
+  export FM_SHORT_CLEANUP_GENERATION=$ENDPOINT_EXPECTED_GEN
+  node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$ENDPOINT_EXPECTED_GEN" || exit 1
+  fm_lease_guard "$ID" 'uncertain copy preservation' || exit $?
+  lock=$(fm_meta_lock_path "$meta") || exit 1
+  trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi; fm_lease_guard_release' EXIT
+  fm_lock_acquire_wait "$lock" || exit 1
+  lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+  generation=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
+  [ "$generation" = "$ENDPOINT_EXPECTED_GEN" ] || { echo 'REFUSED: preservation generation changed' >&2; exit 1; }
+  readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || exit 1
+  [ "$(printf '%s' "$readback" | jq -r '.absent')" = false ] || { echo 'REFUSED: preservation requires the surviving copy' >&2; exit 1; }
+  copy=$(printf '%s' "$readback" | jq -r '.binding.copy.path')
+  project=$(printf '%s' "$readback" | jq -r '.binding.project.path')
+  copy_lock=$(fm_treehouse_project_lock_path "$project") || exit 1
+  fm_lock_try_acquire "$copy_lock" || { echo 'REFUSED: another copy owner is active' >&2; exit 1; }
+  copy_lock_held=1
+  # The immutable grant retains the exact endpoint even after record removal.
+  local request="$STATE/short-agents/$FM_SHORT_CLEANUP_RECOVERY/request.json" other
+  session=$(jq -er --argjson index "$FM_SHORT_CLEANUP_STEP" '.operationBindings[$index].herdr_session' "$request") || exit 1
+  pane=$(jq -er --argjson index "$FM_SHORT_CLEANUP_STEP" '.operationBindings[$index].herdr_pane_id' "$request") || exit 1
+  for other in "$STATE"/*.meta; do
+    [ "$other" != "$meta" ] && [ -f "$other" ] && [ ! -L "$other" ] || continue
+    if [ "$(fm_meta_get "$other" herdr_session)" = "$session" ] && \
+       [ "$(fm_meta_get "$other" herdr_pane_id)" = "$pane" ]; then
+      echo 'REFUSED: preserved endpoint is claimed by another task' >&2; exit 1
+    fi
+  done
+  fm_backend_source herdr || exit 1
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ] || {
+    echo 'REFUSED: preservation requires an already absent pane' >&2; exit 1;
+  }
+  ENDPOINT_GENERATION=$generation
+  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
+  # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+  . "$SCRIPT_DIR/fm-teardown-endpoint-lib.sh"
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
+    lifecycle=$(fm_task_lifecycle completion-read "$ID") || exit 1
+    KIND=$(fm_meta_get "$meta" kind)
+    MODE=$(fm_meta_get "$meta" mode)
+    PR_URL=$(fm_meta_get "$meta" pr)
+    [ -n "$MODE" ] || MODE=no-mistakes
+    WT=$copy PROJ=$project
+    # Read managed alias identity only; no return, reset or copy removal.
+    treehouse_managed_return_path_for_identity "$copy" "$project" 1 || {
+      echo 'REFUSED: preserved Treehouse copy management is unproved' >&2; exit 1;
+    }
+    proof=$(node "$SCRIPT_DIR/fm-short-operations.mjs" preserve-cleanup-evidence "$ID" "$generation") || exit 1
+    fm_task_lifecycle cleanup-copy-read "$ID" >/dev/null || exit 1
+    fm_task_lifecycle cleanup-preserve "$ID" --record "$proof" >/dev/null || exit 1
+    node "$SCRIPT_DIR/fm-short-operations.mjs" verify-cleanup-recovery "$ID" "$generation" || exit 1
+    teardown_completed_bookkeeping "$meta" "$generation" "$disposition"
+  else
+    [ ! -e "$meta" ] && [ ! -L "$meta" ] || exit 1
+    # Only the existing generation-bound close marker may resume bookkeeping.
+    proof=$(node "$SCRIPT_DIR/fm-short-operations.mjs" preserve-cleanup-evidence "$ID" "$generation") || exit 1
+    fm_task_lifecycle cleanup-preserve "$ID" --record "$proof" >/dev/null || exit 1
+    local marker
+    marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
+    if [ -e "$marker" ]; then
+      fm_backlog_close_marker_validate "$marker" "$DATA" "$ID" "$STATE" || exit 1
+      [ "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" = "$generation" ] && \
+        [ "$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_DISPOSITION" = retained-unverified ] || exit 1
+      fm_backlog_close_marker_replay "$STATE" "$marker" "$DATA" || exit 1
+    fi
+    lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+    printf '%s' "$lifecycle" | jq -e --arg gen "$generation" \
+      '[.owner_receipts.cleanup[]? | select(.execution_generation==$gen and .facts.taskRecordRemoved==true and .facts.endpointConfirmedGone==true and .facts.bookkeepingComplete==true and .facts.copyDisposition=="retained-unverified")] | length==1' >/dev/null || {
+      echo 'REFUSED: preservation has no completed bookkeeping proof' >&2; exit 1;
+    }
+    teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
+  fi
+)
+if [ "$PRESERVE_COPY_RECOVERY" = 1 ]; then teardown_preserve_copy_recovery; exit $?; fi
 if [ "$COPY_ONLY" = 1 ]; then teardown_retained_copy; exit $?; fi
 case "$(fm_task_lifecycle mode "$ID")" in
   accepted|archived) teardown_completed_task; exit $? ;;
@@ -946,45 +1057,6 @@ treehouse_return_is_index_lock_error() {
 treehouse_return_is_unmanaged_error() {
   local text=$1 dir=$2
   printf '%s\n' "$text" | grep -Fq "worktree $dir is not managed by treehouse"
-}
-
-# Resolve Treehouse's exact managed spelling for an existing directory.
-# `test -ef` compares the followed directory device and inode, so it accepts both
-# symlink-prefix and bind-mount aliases without accepting lexical resemblance.
-# The public status/enter interface exists in the pinned Treehouse 2.0.1 build.
-TREEHOUSE_MANAGED_RETURN_PATH=
-treehouse_managed_return_path_for_identity() {  # <recorded-dir> <project-dir>
-  local dir=$1 cd_dir=$2 status line name candidate matches=0 matched=
-  TREEHOUSE_MANAGED_RETURN_PATH=
-  [ -d "$dir" ] || return 1
-  status=$( ( cd "$cd_dir" && treehouse status ) 2>/dev/null) || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      ''|[[:space:]]*) continue ;;
-    esac
-    name=${line%%[[:space:]]*}
-    case "$name" in
-      ''|*[!A-Za-z0-9._-]*) continue ;;
-    esac
-    candidate=$( ( cd "$cd_dir" && treehouse enter --print-path "$name" ) 2>/dev/null) || continue
-    case "$candidate" in
-      /*) ;;
-      *) continue ;;
-    esac
-    case "$candidate" in
-      *$'\n'*|*$'\r'*|*$'\t'*) continue ;;
-    esac
-    [ "$candidate" != "$dir" ] || continue
-    [ -d "$candidate" ] || continue
-    if [ "$candidate" -ef "$dir" ]; then
-      matches=$((matches + 1))
-      matched=$candidate
-    fi
-  done <<EOF
-$status
-EOF
-  [ "$matches" -eq 1 ] || return 1
-  TREEHOUSE_MANAGED_RETURN_PATH=$matched
 }
 
 # The lock-staleness proof (lsof holder check, mtime age, fail-safe defaults)

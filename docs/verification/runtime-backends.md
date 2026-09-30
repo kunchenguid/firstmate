@@ -1236,6 +1236,12 @@ The 2026-09-30 completed-task candidate was exercised through the real ShortTask
 The same accepted-task fixture with a live TraeX window reproduces the old `short actor lacks a current bound operation` refusal before effects; the candidate closes that exact window, retires resource metadata and preserves the report with an owner receipt.
 The installed guard retains dirty, unmerged, pushed-but-unmerged, shared and primary copies while closing their completed windows; it removes an exclusive clean integrated linked worktree and returns a clean landed Treehouse copy.
 Its helper verifies the default fleet session is unchanged after teardown.
+The same 2026-09-30 guard was extended and passed on Herdr 0.8.0 / protocol 20 and Treehouse 2.1.1 for a managed-path alias and exact retained-copy recovery.
+Refresh it with `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`; the portable counterpart is `bin/fm-test-run.sh tests/fm-short-operations.test.sh`.
+The added guard printed `PASS live: alias return, exact pending preservation, unchanged failure/content, identity/live-child/lease/project-owner refusals, idempotent settlement and lifecycle completion`.
+It verifies no additional pane close, return, or sync on recovery, unchanged failed-result bytes and dirty/shared/unmerged content, interrupted bookkeeping convergence, and refusal of changed identity, live executor or orphan child, foreign lease, and concurrent recovery locks.
+The pending-return fixture injects the historical unmanaged-path refusal; the ordinary alias-return control uses real Treehouse allocation and return.
+Recovery uses Linux kernel identity and the existing primary lock ancestry, independent of Pi, Codex, or TraeX rendered output; it is the same owner CLI for all supported primary harnesses.
 No production task or remote research provider participates; the ShortTask model is a deterministic fixture and the worker window runs a real TraeX process.
 `tests/fm-teardown-endpoint-safety.test.sh` also exercises the public endpoint-only form: obsolete, missing and malformed journals do not block completed window cleanup, while a foreign task identity, stale explicit generation or shared endpoint refuses without closing the target.
 Its open-goal and legacy preservation checks remain separate.
