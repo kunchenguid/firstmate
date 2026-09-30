@@ -714,7 +714,7 @@ _fm_recovery_marker_write_locked() {
 # next restart does not reopen that same unwatched stretch all over again.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
-  local lock saved_token generation='' status=pending previous_append_token=''
+  local lock saved_token generation='' status=pending previous_append_token='' fresh_episode=0
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$source" in watcher|close|append) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
@@ -753,6 +753,8 @@ _fm_recovery_marker_publish() {
           if [ "$source" != append ]; then
             generation=${FM_RECOVERY_MARKER_TOKEN##*:}
             status=announced
+          else
+            fresh_episode=1
           fi
           ;;
         acked:downtime:*)
@@ -769,6 +771,9 @@ _fm_recovery_marker_publish() {
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
     return 1
+  fi
+  if [ "$fresh_episode" = 1 ]; then
+    rm -f -- "${marker}.reopen-count" 2>/dev/null || true
   fi
   if [ -n "$previous_append_token" ] \
     && [ "$previous_append_token" != "$FM_RECOVERY_MARKER_WRITTEN_TOKEN" ]; then
@@ -985,8 +990,9 @@ _fm_recovery_marker_arm_check() {
 # queue is non-empty: its queued rows stay durable for the next session's
 # drain, while a genuinely acked episode with queued rows still resurfaces.
 # A real acknowledgement
-# (_fm_recovery_marker_ack) or arm-check minting a fresh episode from a missing
-# or invalid marker both clear the counter, so this bound never shortens the
+# (_fm_recovery_marker_ack), arm-check minting a fresh episode from a missing
+# or invalid marker, and a durable append minting a fresh episode from an
+# announced one all clear the counter, so this bound never shortens the
 # once-per-genuine-generation resurface a live, attentive session relies on.
 FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-1}
 case "$FM_RECOVERY_REOPEN_LIMIT" in ''|*[!0-9]*) FM_RECOVERY_REOPEN_LIMIT=1 ;; esac

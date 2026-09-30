@@ -1549,6 +1549,41 @@ test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling() {
   pass "watch-arm: a settled recovery episode with queued rows keeps the watcher up and leaves the rows for the next drain"
 }
 
+# A durable append that mints a fresh episode from an announced one starts that
+# episode with the full reopen budget instead of inheriting the old count.
+test_append_fresh_episode_resets_reopen_budget() {
+  local dir home state fakebin
+  local FM_RECOVERY_REOPEN_LIMIT=1
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case append-resets-reopen-budget)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
+
+  append_wake "$state" check fresh-episode 'check: fresh episode row' \
+    || fail "the producer could not append its wake"
+  [ ! -e "$state/.watcher-down.reopen-count" ] \
+    || fail "an append that minted a fresh episode kept the old reopen count"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/announce-arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "the fresh episode was not announced: $(cat "$dir/announce-arm.out")"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/reopen-arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "the fresh episode settled without its own reopen: $(cat "$dir/reopen-arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/reopen-arm.out" >/dev/null \
+    || fail "the fresh episode's first reopen did not resurface: $(cat "$dir/reopen-arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:*) ;;
+    *) fail "the fresh episode's first reopen left an unexpected marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: an append that mints a fresh episode resets the reopen budget"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1562,6 +1597,7 @@ test_genuinely_acked_recovery_with_queued_row_still_resurfaces
 test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row
 test_stale_zero_row_ack_keeps_bound_settle
 test_invalid_reopen_limit_falls_back_to_default
+test_append_fresh_episode_resets_reopen_budget
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
