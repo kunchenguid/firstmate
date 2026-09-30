@@ -567,6 +567,14 @@ host_control() {  # <args...>
     "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
 }
 
+host_parent_record() {  # <operation> [previous]: dispatched holder protocol input
+  jq -cn --arg g "$1" --arg p "${2:--}" --arg home "$HOST_HOME" --arg state "$HOME_DIR/state" '
+    {schema:"fm-fleet-seat-holder.v2", state_dir:$state, task:"ios", revision:2,
+     incarnations:[{generation:$g, previous_generation:(if $p == "-" then null else $p end),
+       kind:"secondmate", model:"pool-model-a", lifecycle:"reserved", launch_phase:"dispatching",
+       route:{placement:"remote", operation:$g, home:$home}}]}'
+}
+
 host_disposition() {  # <operation>: the disposition word the host reports
   host_control disposition ios --operation "$1" | sed -n 's/^seat_disposition=//p' | tail -1 | jq -r '.disposition + " " + (.old_stopped | tostring)'
 }
@@ -671,6 +679,56 @@ assert_equals "op9 prelaunch" "$(printf '%s\n' "$DISP" | jq -r '.operation + " "
 printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
 pass "a pooled host refuses unaccounted relaunches and binds its refusals to the operation"
 
+cp "$HOST_HOME/state/parent-route/ios.meta" "$TMP/before-forged.meta"
+for VERB in launch relaunch; do
+  HOST_ARGS=("$VERB" ios claude pool-model-a medium)
+  [ "$VERB" != launch ] || HOST_ARGS+=(herdr)
+  OUT=$(host_control "${HOST_ARGS[@]}" --operation forged < /dev/null); RC=$?
+  [ "$RC" -ne 0 ] || fail "a forged $VERB operation succeeded"
+  assert_contains "$OUT" 'no verified dispatched parent reservation' "the host accepted an invented token"
+  assert_absent "$HOST_HOME/state/parent-route/ios.seat-operation.forged" "a forged token opened a receipt"
+  assert_absent "$HOST_HOME/state/parent-route/ios.seat-reservation.forged" "a forged token gained a reservation"
+  cmp -s "$TMP/before-forged.meta" "$HOST_HOME/state/parent-route/ios.meta" || fail "a forged token changed the host incarnation"
+  OUT=$(FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" "$ROOT/bin/fm-on.sh" ios \
+    fm-remote-secondmate-control.sh "${HOST_ARGS[@]}" --operation forged 2>&1); RC=$?
+  [ "$RC" -ne 0 ] || fail "the transport accepted an invented $VERB operation"
+  assert_contains "$OUT" 'not a dispatched parent reservation' "the transport failed to verify its authoritative ledger"
+done
+pass "host and parent transport refuse invented launch and relaunch tokens before lifecycle effects"
+
+for RECEIPT_DAMAGE in lost wrong; do
+  OP="receipt.$RECEIPT_DAMAGE"
+  OUT=$(host_control launch ios claude pool-model-a medium herdr --operation "$OP" \
+    <<< "$(host_parent_record "$OP")"); RC=$?
+  expect_code 0 "$RC" "a verified launch observing the existing host generation: $OUT"
+  RECEIPT="$HOST_HOME/state/parent-route/ios.seat-operation.$OP"
+  if [ "$RECEIPT_DAMAGE" = lost ]; then
+    rm "$RECEIPT"
+  else
+    perl -pi -e 's/^operation=.*/operation=another.operation/' "$RECEIPT"
+    cp "$RECEIPT" "$TMP/wrong-receipt"
+  fi
+  cp "$HOST_HOME/state/parent-route/ios.meta" "$TMP/before-retry.meta"
+  cp "$HOST_HOME/state/parent-route/ios.control-relaunch" "$TMP/before-retry.journal"
+  for VERB in launch relaunch; do
+    HOST_ARGS=("$VERB" ios claude pool-model-a medium)
+    [ "$VERB" != launch ] || HOST_ARGS+=(herdr)
+    OUT=$(host_control "${HOST_ARGS[@]}" --operation "$OP" <<< "$(host_parent_record "$OP")"); RC=$?
+    [ "$RC" -ne 0 ] || fail "$RECEIPT_DAMAGE receipt repeated $VERB"
+    assert_contains "$OUT" 'already handled' "the damaged receipt opened another lifecycle episode"
+    DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
+    assert_equals unknown "$(printf '%s\n' "$DISP" | jq -r .disposition)" "a damaged receipt was reported as settled"
+    cmp -s "$TMP/before-retry.meta" "$HOST_HOME/state/parent-route/ios.meta" || fail "a retry changed the endpoint generation"
+    cmp -s "$TMP/before-retry.journal" "$HOST_HOME/state/parent-route/ios.control-relaunch" || fail "a retry entered the stop transaction"
+    if [ "$RECEIPT_DAMAGE" = lost ]; then
+      assert_absent "$RECEIPT" "a lost receipt was silently recreated"
+    else
+      cmp -s "$TMP/wrong-receipt" "$RECEIPT" || fail "a foreign receipt was overwritten"
+    fi
+  done
+done
+pass "lost and foreign receipts remain unknown across launch and relaunch retries without repeating effects"
+
 # The parent wrapper joins the mate's one lifecycle episode: while a recovery
 # episode holds it, a manual relaunch neither reserves nor reaches the host.
 reset_meta
@@ -690,7 +748,8 @@ cmp -s "$TMP/ios-before-episode.meta" "$HOME_DIR/state/ios.meta" || fail "a refu
 pass "a manual remote relaunch waits out, then refuses, a running recovery episode"
 
 for n in 1 2 3 4 5; do
-  OUT=$(host_control relaunch ios notaharness pool-model-a medium --operation "history$n"); RC=$?
+  OUT=$(host_control relaunch ios notaharness pool-model-a medium --operation "history$n" \
+    <<< "$(host_parent_record "history$n")"); RC=$?
   [ "$RC" -ne 0 ] || fail "unverified harness operation succeeded"
 done
 assert_present "$HOST_HOME/state/parent-route/ios.seat-operation.history1" "successive operations deleted an older receipt"
@@ -743,7 +802,8 @@ EOF
 OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
 expect_code 6 "$RC" "host generation mismatch without pools: $OUT"
 assert_grep 'spawn_gen=host-new' "$HOST_HOME/state/parent-route/ios.meta" "the mismatch changed the host incarnation"
-OUT=$(host_control relaunch ios claude pool-model-a medium --operation hostfence --previous host-old --expect-generation host-old); RC=$?
+OUT=$(host_control relaunch ios claude pool-model-a medium --operation hostfence --previous host-old --expect-generation host-old \
+  <<< "$(host_parent_record hostfence host-old)"); RC=$?
 expect_code 6 "$RC" "tracked host generation mismatch: $OUT"
 DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
 assert_equals 'prelaunch false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the host mismatch authorized a predecessor stop"

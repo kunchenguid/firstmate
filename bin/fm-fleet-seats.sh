@@ -1433,6 +1433,13 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
     [ "$(policy_digest "$TMPD/delivered")" = "$DIGEST_ARG" ] || unavailable "the delivered policy does not match digest $DIGEST_ARG"
     ISSUER=${EPOCH_ARG%.*}
     SEQ=${EPOCH_ARG##*.}
+    # Replay identity uses effective allowances: absent pools get zero and the
+    # final declaration wins, just as the grant loop below consumes them.
+    SERVE_ALLOWANCES=$(jq -cn --slurpfile policy "$TMPD/delivered" --arg a "$ALLOWANCES" '
+      ($a | split("\n") | map(select(length > 0) | split("=") |
+        {key: .[0], value: (.[1] | tonumber)}) | from_entries) as $given |
+      $policy[0].pools | map({key: .name, value: ($given[.name] // 0)}) | from_entries
+    ') || unavailable "cannot normalize serve allowances"
     lock_or_refuse "$LOCK"
     SERVED=$LEDGER/served.json
     if [ -e "$SERVED" ] || [ -L "$SERVED" ]; then
@@ -1447,6 +1454,8 @@ if [ "$ROOT_REMOTE" -eq 1 ]; then
         unavailable "serve epoch $EPOCH_ARG is older than the applied epoch $last_issuer.$last_seq"
       elif [ "$SEQ" -eq "$last_seq" ]; then
         [ "$(jq -r .digest "$SERVED")" = "$DIGEST_ARG" ] || unavailable "serve epoch $EPOCH_ARG was already applied to another policy"
+        jq -e --argjson a "$SERVE_ALLOWANCES" '.allowances == $a' "$SERVED" >/dev/null \
+          || unavailable "serve epoch $EPOCH_ARG was already applied with different allowances"
         jq -c .response "$SERVED"
         exit 0
       fi
@@ -1578,8 +1587,8 @@ EOF_ALLOW
        holders: [inputs | split("\t") | {state_dir: .[0], task: .[1], generation: .[2],
          model: (if .[3] == "-" then null else .[3] end), lifecycle: .[4]}]}' < "$TMPD/rows") \
       || unavailable "cannot build the serve certificate"
-    { jq -cn --arg i "$ISSUER" --argjson s "$SEQ" --arg d "$DIGEST_ARG" --argjson r "$response" \
-      '{issuer: $i, seq: $s, digest: $d, response: $r}' > "$SERVED.tmp.$$" \
+    { jq -cn --arg i "$ISSUER" --argjson s "$SEQ" --arg d "$DIGEST_ARG" --argjson r "$response" --argjson a "$SERVE_ALLOWANCES" \
+      '{issuer: $i, seq: $s, digest: $d, allowances: $a, response: $r}' > "$SERVED.tmp.$$" \
       && mv -f "$SERVED.tmp.$$" "$SERVED"; } || unavailable "cannot record serve epoch $EPOCH_ARG"
     printf '%s\n' "$response"
     exit 0

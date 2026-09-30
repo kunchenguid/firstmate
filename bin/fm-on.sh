@@ -14,7 +14,9 @@
 # fm-remote-entrypoint.sh. The remote command's stdin is /dev/null by default,
 # because remote staging captures stdin to EOF and an open caller stream would
 # block staging indefinitely; a payload caller passes --stdin to forward its
-# own stream as the job's bounded input. stdout and stderr remain separate, and
+# own stream as the job's bounded input. Parent-accounted supervisor launch or
+# relaunch input is the matching dispatched holder read from the seat owner,
+# instead of caller stdin. stdout and stderr remain separate, and
 # ssh's exit status is returned unchanged. OpenSSH never receives an auto-retry
 # instruction here. Exit 255 therefore means unavailable transport or unknown
 # remote completion and must be reconciled by the semantic caller, never
@@ -103,6 +105,42 @@ done
 ROOT_B64=$(printf '%s' "$ROOT" | encode_base64)
 HOME_B64=$(printf '%s' "$HOME_PATH" | encode_base64)
 ARGV_B64=$(printf '%s\0' "$COMMAND" "$@" | encode_base64)
+# A parent-accounted launch carries the authoritative holder, not a caller's
+# assertion that a nonempty token was reserved. Host control validates this
+# generation-bound record before opening its operation receipt.
+SEAT_RECORD=
+if [ "$COMMAND" = fm-remote-secondmate-control.sh ]; then
+  case "${1:-}" in
+    launch|relaunch)
+      SEAT_OPERATION=
+      SEAT_TASK=${2:-}
+      SEAT_PREVIOUS=-
+      SEAT_ARG_PREVIOUS=
+      for SEAT_ARG in "$@"; do
+        case "$SEAT_ARG_PREVIOUS" in
+          --operation) SEAT_OPERATION=$SEAT_ARG ;;
+          --previous) SEAT_PREVIOUS=$SEAT_ARG ;;
+        esac
+        SEAT_ARG_PREVIOUS=$SEAT_ARG
+      done
+      if [ -n "$SEAT_OPERATION" ]; then
+        [ "$STDIN_MODE" = closed ] || die "a seat operation owns the remote command input"
+        SEAT_RECORD=$("$SCRIPT_DIR/fm-fleet-seats.sh" show "$SEAT_TASK") \
+          || die "cannot read the parent seat operation for $SEAT_TASK"
+        printf '%s\n' "$SEAT_RECORD" | jq -e --arg g "$SEAT_OPERATION" --arg p "$SEAT_PREVIOUS" \
+          --arg t "$SEAT_TASK" --arg h "$HOST" --arg r "$ROOT" --arg home "$HOME_PATH" --arg m "${4:-}" '
+          .schema == "fm-fleet-seat-holder.v2" and .task == $t and
+          any(.incarnations[]; .generation == $g and .kind == "secondmate"
+            and .lifecycle == "reserved" and .launch_phase == "dispatching"
+            and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+            and (.previous_generation // "-") == $p
+            and .route.placement == "remote" and .route.operation == $g
+            and .route.host == $h and .route.remote_root == $r and .route.home == $home)
+        ' >/dev/null || die "operation $SEAT_OPERATION is not a dispatched parent reservation for $SEAT_TASK"
+      fi
+      ;;
+  esac
+fi
 SSH_BIN=${FM_SSH_BIN:-ssh}
 ALIVE_INTERVAL=${FM_SSH_ALIVE_INTERVAL:-15}
 ALIVE_COUNT_MAX=${FM_SSH_ALIVE_COUNT_MAX:-3}
@@ -121,5 +159,9 @@ SSH_ARGS=(
 )
 if [ "$STDIN_MODE" = caller ]; then
   exec "$SSH_BIN" "${SSH_ARGS[@]}"
+fi
+if [ -n "$SEAT_RECORD" ]; then
+  "$SSH_BIN" "${SSH_ARGS[@]}" <<< "$SEAT_RECORD"
+  exit $?
 fi
 exec "$SSH_BIN" "${SSH_ARGS[@]}" < /dev/null

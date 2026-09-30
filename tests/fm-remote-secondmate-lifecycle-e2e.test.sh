@@ -157,6 +157,11 @@ command_fields=$(perl -MMIME::Base64=decode_base64 -e '
 IFS=$'\t' read -r command_name _command_action command_rel seat_op <<EOF
 $command_fields
 EOF
+# Launch-response overrides must preserve the host's predecessor evidence.
+case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$_command_action" in
+  launch-*:fm-remote-secondmate-control.sh:disposition)
+    exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+esac
 # fake_seat_disposition <disposition> <startup> [actual]: an operation-bound host answer.
 fake_seat_disposition() {
   local actual=null route=null
@@ -265,19 +270,14 @@ case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
     ;;
   launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
-    printf 'schema=fm-remote-secondmate-control.v1\n'
-    printf 'backend=tmux\n'
-    printf 'target=firstmate:fm-ios\n'
-    printf 'harness=codex\n'
+    route_out=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@") || exit $?
+    printf '%s\n' "$route_out" | sed 's/^backend=.*/backend=tmux/; s/^target=.*/target=firstmate:fm-ios/'
     exit 0
     ;;
   launch-default-session-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
-    printf 'schema=fm-remote-secondmate-control.v1\n'
-    printf 'backend=herdr\n'
-    printf 'target=default:w1:p2\n'
-    printf 'herdr_session=default\n'
-    printf 'harness=codex\n'
+    route_out=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@") || exit $?
+    printf '%s\n' "$route_out" | sed 's/^target=.*/target=default:w1:p2/; s/^herdr_session=.*/herdr_session=default/'
     exit 0
     ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
@@ -1059,19 +1059,21 @@ rm -f "$PARENT/config/fleet-seats"
 remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null \
   || fail "the cleared seat policy could not be delivered"
 pass "remote initial launch accounts started, refused, unconfirmed, and republished generations exactly"
-cp "$PARENT/state/ios.meta" "$TMP_ROOT/ios-before-default-retry.meta" \
-  || fail "could not preserve the explicit-model parent route"
+default_parent="$TMP_ROOT/default-parent"
+mkdir -p "$default_parent/state"
+cp -R "$PARENT/config" "$PARENT/data" "$default_parent/"
+cp "$PARENT/state/ios.meta" "$default_parent/state/ios.meta"
+cp "$PARENT/state/.remote-inherit-ios.generation" "$default_parent/state/.remote-inherit-ios.generation"
 default_route_target=$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta")
-if ! default_out=$(FM_FAKE_ROUTE_TARGET="$default_route_target" FM_FAKE_SSH_MODE=launch-default-model \
+if ! default_out=$(PARENT="$default_parent" FM_FAKE_ROUTE_TARGET="$default_route_target" FM_FAKE_SSH_MODE=launch-default-model \
   remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
   fail "an undeclared unpinned remote spawn was refused: $default_out"
 fi
 assert_not_contains "$default_out" 'requested model' \
   "equivalent default spellings were reported as a model mismatch"
-assert_equals '' "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" \
+assert_equals '' "$(sed -n 's/^model=//p' "$default_parent/state/ios.meta")" \
   "an unpinned remote route gained an explicit model"
-cp "$TMP_ROOT/ios-before-default-retry.meta" "$PARENT/state/ios.meta" \
-  || fail "could not restore the explicit-model parent route"
+cp "$default_parent/state/.remote-inherit-ios.generation" "$PARENT/state/.remote-inherit-ios.generation"
 pass "undeclared unpinned remote spawn preserves default-model behavior"
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"

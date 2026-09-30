@@ -66,10 +66,12 @@
 # dead-after-start | unknown. A same-token retry reports the durable episode
 # and never launches twice; `disposition` rereads it (a busy mutex or an absent
 # or foreign receipt is unknown, never a refusal). While this home has seat
-# pools, a launch or relaunch with no operation refuses before touching
-# anything: the parent wrapper must account for it. Each operation keeps its
-# own receipt; opening a new one preserves earlier receipts. An `existing`
-# receipt binds its request token to the actual generation it observed, so
+# pools, a launch or relaunch without a verified parent reservation refuses
+# before touching anything: the parent wrapper must account for it. Each
+# operation keeps its own receipt and an immutable .seat-reservation.<gen> holder record
+# received from fm-on's ledger-verified input. Losing its mutable receipt is
+# unknown and never permits opening another episode for that token.
+# An `existing` receipt binds its request token to the actual generation it observed, so
 # disposition and predecessor readiness resolve evidence through that binding,
 # not just a receipt filename equal to the generation. Replacement preserves
 # matching receipts' request identities when recording terminal outcomes.
@@ -250,12 +252,15 @@ seat_endpoint_state() {
 # endpoint observation. The caller holds the host lifecycle mutex. Sets
 # SEAT_DECIDED to the disposition.
 seat_decide() {
-  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback exit_result previous_phase prior_receipt prior_op prior_phase old_stopped=false
+  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback exit_result previous_phase _prior_receipt _prior_op prior_phase old_stopped=false
   receipt=$(receipt_path "$id")
   meta=$(meta_path "$id")
   SEAT_DECIDED=unknown
   SEAT_OLD_DESTROYED=false
-  if [ ! -f "$receipt" ] || [ -L "$receipt" ] || [ "$(receipt_field "$receipt" operation)" != "$SEAT_OP" ]; then
+  if [ ! -f "$receipt" ] || [ -L "$receipt" ] \
+    || [ "$(receipt_field "$receipt" schema)" != fm-remote-seat-receipt.v1 ] \
+    || [ "$(receipt_field "$receipt" operation)" != "$SEAT_OP" ] \
+    || [ "$(receipt_field "$receipt" requested_generation)" != "$SEAT_OP" ]; then
     seat_emit unknown false false
     return 0
   fi
@@ -281,7 +286,7 @@ seat_decide() {
     rollback=$(sed -n 's/^rollback=//p' "$journal" 2>/dev/null | tail -1)
     exit_result=$(sed -n 's/^exit_result=//p' "$journal" 2>/dev/null | tail -1)
     previous_phase=
-    while IFS=$'\t' read -r prior_receipt prior_op prior_phase; do
+    while IFS=$'\t' read -r _prior_receipt _prior_op prior_phase; do
       case "$prior_phase" in existing|started|dead-after-start) previous_phase=started ;; esac
     done < <(fm_remote_seat_receipts_for_generation "$CONTROL_STATE" "$id" "$SEAT_PREV")
     if [ "$jop" = "$SEAT_OP" ]; then
@@ -363,7 +368,7 @@ seat_decide() {
 # episode, answer a same-token retry from its durable episode (returns 3), or
 # open a fresh receipt (returns 0). Refuses a pooled launch with no operation.
 seat_enter() {
-  local id=$1 verb=$2 receipt
+  local id=$1 verb=$2 model=$3 receipt reservation record
   SEAT_LIFECYCLE_ID=$id
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA" 2>/dev/null \
     || prelaunch_die "remote endpoint directories could not be created"
@@ -378,10 +383,29 @@ seat_enter() {
   fi
   [ -n "$SEAT_OP" ] || return 0
   receipt=$(receipt_path "$id")
-  if [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(receipt_field "$receipt" operation)" = "$SEAT_OP" ]; then
+  reservation="$CONTROL_STATE/$id.seat-reservation.$SEAT_OP"
+  if [ -e "$receipt" ] || [ -L "$receipt" ] || [ -e "$reservation" ] || [ -L "$reservation" ] \
+    || [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen 2>/dev/null || true)" = "$SEAT_OP" ] \
+    || [ "$(receipt_field "$CONTROL_STATE/$id.control-relaunch" seat_operation)" = "$SEAT_OP" ]; then
     seat_decide "$id"
     return 3
   fi
+  record=$(cat) || prelaunch_die "the parent seat reservation could not be read"
+  if ! printf '%s\n' "$record" | jq -e --arg t "$id" --arg g "$SEAT_OP" \
+    --arg p "$SEAT_PREV" --arg home "$TARGET_HOME" --arg m "$model" '
+      .schema == "fm-fleet-seat-holder.v2" and .task == $t
+      and (.state_dir | type == "string" and startswith("/"))
+      and any(.incarnations[]; .generation == $g and .kind == "secondmate"
+        and .lifecycle == "reserved" and .launch_phase == "dispatching"
+        and .model == (if $m == "-" or $m == "default" or $m == "" then null else $m end)
+        and (.previous_generation // "-") == $p
+        and .route.placement == "remote" and .route.operation == $g
+        and .route.home == $home)
+    ' >/dev/null 2>&1; then
+    prelaunch_die "operation $SEAT_OP has no verified dispatched parent reservation; nothing was changed"
+  fi
+  (umask 077; set -C; printf '%s\n' "$record" > "$reservation") \
+    || { seat_emit unknown false false; die "the seat operation was already claimed or could not be retained"; }
   seat_receipt_open "$id" "$verb" || prelaunch_die "the seat operation receipt could not be written"
   return 0
 }
@@ -493,7 +517,7 @@ cmd_launch() {
   validate_id "$id"
   SEAT_LIFECYCLE_ID=$id
   ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
-  seat_enter "$id" launch || enter_rc=$?
+  seat_enter "$id" launch "$model" || enter_rc=$?
   if [ "$enter_rc" -eq 3 ]; then
     case "$SEAT_DECIDED" in
       started|existing) remote_endpoint_load "$id" && print_route "$id"; return 0 ;;
@@ -583,7 +607,7 @@ cmd_relaunch() {
   validate_id "$id"
   SEAT_LIFECYCLE_ID=$id
   ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
-  seat_enter "$id" relaunch || enter_rc=$?
+  seat_enter "$id" relaunch "$model" || enter_rc=$?
   if [ "$enter_rc" -eq 3 ]; then
     case "$SEAT_DECIDED" in
       started) remote_endpoint_load "$id" && print_route "$id"; return 0 ;;
