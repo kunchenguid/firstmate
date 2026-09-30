@@ -3686,6 +3686,7 @@ test_opencode_primary_watch_plugin_runs_the_supervision_host() {  # [away|quiet]
     : > "$home/state/.afk-contract"
   fi
   : > "$home/config/supervision-host"
+  cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$repo/bin/"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then

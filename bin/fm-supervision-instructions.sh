@@ -2,11 +2,14 @@
 # Render the primary-harness supervision operating block for session start and
 # the short repair line used by guards and turn-end hooks. On a non-Pi primary
 # with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
-# home opted into the supervision host (config/supervision-host), the block
+# home runs the supervision host (fm_supervision_host_enabled in
+# bin/fm-supervision-engine-lib.sh: by default on Claude, by
+# config/supervision-host elsewhere, never with config/supervision-host-off), the block
 # adds one state line and the host's main-side protocol
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
 # "{<harness>,...} " render only for the listed harnesses), and Grok's arm
-# command becomes the host; without that file the output is unchanged.
+# command becomes the host; on a home that does not run it the output is
+# unchanged.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,7 +110,9 @@ HOST_SNIPPET=
 grok_arm='bin/fm-watch-arm.sh'
 case "$HARNESS" in
   claude|cursor|opencode|omp|grok|codex)
-    if [ -f "$CONFIG/supervision-host" ]; then
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+    if fm_supervision_host_enabled "$CONFIG" "$HARNESS"; then
       HOST_SNIPPET="$DOC_DIR/supervision-host.md"
       grok_arm='bin/fm-supervision-host.sh park'
     fi

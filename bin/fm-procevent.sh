@@ -29,7 +29,10 @@
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
 #            acknowledges nonterminal captured rounds without touching the
-#            source claim. Terminal rounds are concluded with `handled`.
+#            source claim. Terminal rounds are concluded with `handled`. A
+#            staged `--agent-reply-file` is handed to the adapter's
+#            `deliver-reply` under the source lock once the task is eligible,
+#            so a refused arm never posts it and a failed post publishes no registration.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -551,8 +554,8 @@ cmd_register() {
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
-  local pending_rounds=0
-  local -a argv=()
+  local pending_rounds=0 delivered
+  local -a argv=() kept=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
@@ -641,6 +644,30 @@ cmd_register_task() {
       [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
       fm_procevent_source_lock_release "$id"
       die "cannot read the registration this re-arm replaces: $id"
+    fi
+  fi
+  if [ -n "$reply_dest" ]; then
+    delivered=0
+    "$(adapter_script "$adapter")" deliver-reply "${argv[@]:1}" || delivered=$?
+    if [ "$delivered" -eq 0 ]; then
+      rm -f -- "$reply_dest"
+      reply_dest=''
+      kept=()
+      i=0
+      while [ "$i" -lt "${#argv[@]}" ]; do
+        if [ "${argv[$i]}" = --agent-reply-file ]; then
+          i=$((i + 2))
+        else
+          kept+=("${argv[$i]}")
+          i=$((i + 1))
+        fi
+      done
+      argv=("${kept[@]}")
+    elif [ "$delivered" -ne 3 ]; then
+      [ -z "$prior_record" ] || rm -f -- "$prior_record"
+      rm -f -- "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot arm source $id: its staged reply was not delivered"
     fi
   fi
   if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then

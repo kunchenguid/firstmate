@@ -3,7 +3,8 @@
 # rely on background-task completion to wake the model.
 #
 # SUPERVISION HOST. A home opted in with config/supervision-host
-# (docs/configuration.md "Supervision host" owns the opt-in) runs
+# (docs/configuration.md "Supervision host" owns the gate;
+# config/supervision-host-off opts out, and a Codex home without the file does not run the host) runs
 # bin/fm-supervision-host.sh in the watcher's place for the checkpoint's bound,
 # as the host's park boundary; the host takes away-posture wakes itself and
 # returns only when main is needed (its header owns the output read here).
@@ -13,8 +14,8 @@
 # so a parked main is not woken every few minutes; an engine turn that starts
 # before the bound may finish after it. A close that carries a wake or a
 # "supervision-host:" line other than the park boundary passes through as a
-# wake; the boundary alone is the ordinary quiet checkpoint. Without the file
-# nothing below changes.
+# wake; the boundary alone is the ordinary quiet checkpoint. On a home that
+# does not run the host nothing below changes.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,7 +113,9 @@ positive_or() {  # <value> <default>
   case "$1" in ''|0*|*[!0-9]*) printf '%s\n' "$2" ;; *) printf '%s\n' "$1" ;; esac
 }
 
-if [ -f "$CONFIG/supervision-host" ]; then
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+if fm_supervision_host_enabled "$CONFIG" codex; then
   BOUND=$SECONDS_ARG
   if [ -f "$STATE/.afk-contract" ] \
     && [ "$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" mode 2>/dev/null)" != quiet ]; then

@@ -55,9 +55,9 @@
 #   - Guard semantics (fm_lease_guard): no lease, a same-actor lease, or a
 #     provably stale lease passes; a live lease held by the OTHER actor
 #     refuses with exit FM_LEASE_REFUSE_EXIT. Whenever the guard engages - a
-#     supervision context (Pi, or an explicit actor), a home opted into the
-#     supervision host (config/supervision-host, whose host can claim a task
-#     that has no lease yet), or any lease file for the task - it retains the
+#     supervision context (Pi, or an explicit actor), a home that runs the
+#     supervision host (fm_supervision_host_enabled, whose host can claim a
+#     task that has no lease yet), or any lease file for the task - it retains the
 #     lease-command lock until fm_lease_guard_release, so the other actor
 #     cannot claim between the check and the guarded mutation, including the
 #     first claim of a task no one has leased. An unmarked caller in any other
@@ -112,6 +112,16 @@ fm_lease_lock_helpers() {
   # recursively duplicate that large graph for every lease-lib consumer.
   # shellcheck source=/dev/null
   . "$FM_LEASE_LIB_DIR/fm-wake-lib.sh"
+}
+
+# fm_lease_home_runs_host: 0 iff this home runs the supervision host
+# (fm_supervision_host_enabled owns the gate).
+fm_lease_home_runs_host() {
+  if ! command -v fm_supervision_host_enabled >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-supervision-engine-lib.sh
+    . "$FM_LEASE_LIB_DIR/fm-supervision-engine-lib.sh"
+  fi
+  fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$STATE/..}/config}"
 }
 
 # fm_lease_actor: print the current actor after validating it. Returns 1 (with
@@ -202,9 +212,7 @@ fm_lease_guard() {
   case "${PI_CODING_AGENT:-}:${FM_SUPERVISION_ACTOR:-}" in
     true:*|*:main|*:branch) ;;
     *)
-      [ -e "$(fm_lease_path "$task")" ] \
-        || [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-$STATE/..}/config}/supervision-host" ] \
-        || return 0
+      [ -e "$(fm_lease_path "$task")" ] || fm_lease_home_runs_host || return 0
       ;;
   esac
   fm_lease_lock_helpers

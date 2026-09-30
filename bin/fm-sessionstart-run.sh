@@ -42,6 +42,9 @@
 # preflight. A lock another live session holds and a truncated digest are
 # reported inside the digest, while broken GitHub auth arrives through the
 # deferred network result inline or as a wake, for exactly that reason.
+# A fresh clone has no gitignored state dir yet; a root that otherwise
+# qualifies as primary gets one created here before the scope check runs, so
+# the first session takes the helm without a manual `mkdir state`.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +90,13 @@ stand_down() {
 # they do not own. Pi's preflight-only status preserves that intentional silence
 # without mistaking it for a failed eligible attempt that needs the manual nudge.
 fm_is_gate_agent "$FM_ROOT" && stand_down
+if [ ! -d "$STATE" ] && fm_primary_root_matches "$FM_ROOT"; then
+  if ! MKDIR_ERR=$(mkdir -p "$STATE" 2>&1); then
+    printf 'fm-sessionstart-run: startup could not create the state directory %s: %s\n' \
+      "$STATE" "${MKDIR_ERR##*: }" >&2
+    stand_down
+  fi
+fi
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || stand_down
 
 session_start_completed() {

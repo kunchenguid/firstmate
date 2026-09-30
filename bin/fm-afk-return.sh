@@ -402,7 +402,7 @@ engine_snapshot() {  # <evidence-file> <since-epoch>
   IFS='|' read -r errors trip last cooldown recovered episode_count <<EOF
 ${summary%%$'\n'*}
 EOF
-  if fm_supervision_host_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" \
+  if fm_supervision_host_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$(fm_supervision_host_primary)" \
     && retry=$(fm_supervision_host_paused_until "$STATE") \
     && { [ -z "$recovered" ] || [ "$retry" -gt "$recovered" ]; }; then
     paused=1
@@ -665,7 +665,7 @@ EOF
 
   # 6. handled while away. Every outcome the away session recorded in the
   # store during the window counts as handled. On Pi the supervision branch,
-  # and on an opted-in home the supervision host (docs/supervision-host.md), took
+  # and on a home that runs it the supervision host (docs/supervision-host.md), took
   # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'

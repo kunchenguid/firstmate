@@ -19,12 +19,13 @@
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. The same holds for away mode (not quiet
 # mode) on a claude, cursor, opencode, omp, grok, or codex primary whose home
-# opted into the supervision host (config/supervision-host), where the host
-# runs the away session; `enter` there adds one line when the host has no
+# runs the supervision host (fm_supervision_host_enabled: by default on
+# Claude, by config/supervision-host elsewhere), where the host runs the away
+# session; `enter` there adds one line when the host has no
 # engine, because every away wake then reaches main. Every other harness still
 # runs the daemon for now, so `start` and `start-native` require the record
 # `enter` wrote before they launch the daemon.
-# QUIET MODE on a home that opted into the supervision host needs nothing
+# QUIET MODE on a home that runs the supervision host needs nothing
 # where the attended host runs (docs/supervision-host.md "Quiet mode"): its
 # primary is attended-ready (fm_supervision_host_attended_ready: engine, tools,
 # and a verified dialog-mirror writer), the main session can be identified,
@@ -94,7 +95,7 @@
 #                              above): exit 0 with one line when it needs
 #                              nothing; exit 1 when quiet mode enters through
 #                              `enter` and the daemon, with one line naming why
-#                              only on a home that opted in; exit 2 with one
+#                              only on a home that runs the host; exit 2 with one
 #                              line naming a live away record on that home.
 #
 # Supported backends: herdr, tmux. Others (zellij, orca, cmux) have no verified
@@ -106,9 +107,8 @@
 # override the captured captain pane/backend (an isolated lab pane in tests).
 # FM_AFK_MODE (away|quiet, default away) declares which mode an `enter` writes;
 # with it unset, a daemon start/refresh uses the record's mode.
-# FM_TEST_HARNESS pins only this launch path's primary harness when
-# FM_TEST_SEAM=1 and its value is a known harness token; otherwise detection
-# remains real. tests/lib.sh arms the marker for isolated suites.
+# FM_TEST_HARNESS pins the primary harness this launch path judges, through
+# fm_supervision_host_primary (bin/fm-supervision-engine-lib.sh owns the seam).
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,7 +157,7 @@ set +e
 # shellcheck source=bin/fm-afk-contract.sh
 . "$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
-# The supervision host's opt-in parse and attended readiness check.
+# The supervision host's home gate and attended readiness check.
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervision-engine-lib.sh"
 
@@ -224,21 +224,11 @@ fm_afk_launch_usage() {
 }
 
 fm_afk_launch_primary_harness() {
-  # Keep the test pin local to this launch path; fm-harness.sh's production
-  # detect_own precedence never reads either variable (see header).
-  if [ "${FM_TEST_SEAM:-}" = 1 ]; then
-    case "${FM_TEST_HARNESS:-}" in
-      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | unknown)
-        printf '%s' "$FM_TEST_HARNESS"
-        return
-        ;;
-    esac
-  fi
-  "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
+  fm_supervision_host_primary
 }
 
 # The primary harnesses whose arm owner runs the supervision host when the
-# home opted in (docs/supervision-host.md).
+# home runs it (docs/supervision-host.md).
 fm_afk_launch_host_primary() {  # <harness>
   case "$1" in
     claude|cursor|opencode|omp|grok|codex) return 0 ;;
@@ -262,17 +252,18 @@ fm_afk_launch_requested_mode() {
 }
 
 # Whether /quiet needs anything here (the header's QUIET MODE): 0 when it needs
-# nothing; 2 while an away record is live on a home that opted in; otherwise
-# 1, with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host lacks on a
-# home that opted in, or empty where quiet mode is the daemon's as it is
-# without the host (no opt-in, another primary, or quiet mode already entered).
+# nothing; 2 while an away record is live on a home that runs the host;
+# otherwise 1, with FM_AFK_LAUNCH_QUIET_WHY naming what the attended host
+# lacks on a home that runs it, or empty where quiet mode is the daemon's as
+# it is without the host (no host, another primary, or quiet mode already
+# entered).
 fm_afk_launch_quiet_needs_nothing() {
   local harness config
   FM_AFK_LAUNCH_QUIET_WHY=
   harness=$(fm_afk_launch_primary_harness)
   fm_afk_launch_host_primary "$harness" || return 1
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-  fm_supervision_host_enabled "$config" || return 1
+  fm_supervision_host_enabled "$config" "$harness" || return 1
   if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
     fm_afk_launch_record_quiet || return 2
     return 1
@@ -314,7 +305,7 @@ fm_afk_launch_quiet_check() {
 }
 
 # The away daemon is no longer launched on Pi, nor for away mode on a primary
-# whose home opted into the supervision host (config/supervision-host,
+# whose home runs the supervision host (fm_supervision_host_enabled,
 # docs/supervision-host.md): the posture record is the whole entry there and
 # the ordinary supervision session runs in both postures. Quiet mode runs the
 # daemon on that home only where a quiet `enter` found the attended host
@@ -329,24 +320,23 @@ fm_afk_launch_daemon_allowed() {
       return 1 ;;
   esac
   fm_afk_launch_host_primary "$harness" || return 0
-  [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
+  fm_supervision_host_enabled "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$harness" || return 0
   mode=$(fm_afk_launch_requested_mode)
   if [ -z "$mode" ] && [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]; then
     mode=$(head -n 1 "$FM_AFK_LAUNCH_STATE/.afk" 2>/dev/null || true)
   fi
   [ "$mode" != quiet ] || return 0
-  fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (config/supervision-host); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
+  fm_afk_launch_log "the away daemon is not launched on this $harness home, which runs the supervision host (docs/supervision-host.md); the away-posture record is the posture here (run bin/fm-afk-launch.sh enter and stop)"
   return 1
 }
 
 # One line for the entry when this home runs the supervision host but the host
-# has no engine (bin/fm-supervision-engine-lib.sh owns the opt-in parse), so
+# has no engine (bin/fm-supervision-engine-lib.sh owns the home gate), so
 # the away posture would hand every wake to main.
 fm_afk_launch_host_engine_note() {
   local harness config
   [ "${FM_AFK_MODE:-}" != quiet ] || return 0
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
-  [ -f "$config/supervision-host" ] || return 0
   harness=$(fm_afk_launch_primary_harness)
   fm_afk_launch_host_primary "$harness" || return 0
   fm_supervision_host_config "$config" "$harness" || return 0

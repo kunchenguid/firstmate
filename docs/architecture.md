@@ -148,7 +148,7 @@ On a Pi primary, supervision is default-on: the watcher extension can hand eligi
 The branch handles those rows, stores the outcome durably, and merges it back into main.
 A captain-facing outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which only main's sequence-bound acknowledgement closes.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, deterministic outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty.
-For the opt-in supervision host that runs the same branch contract beside a non-Pi primary, away and on Claude and Cursor also attended, see [supervision-host.md](supervision-host.md).
+For the supervision host that runs the same branch contract beside a non-Pi primary (by default on Claude), away and on Claude and Cursor also attended, see [supervision-host.md](supervision-host.md).
 
 ### Registered secondmate current state
 
@@ -170,7 +170,7 @@ That block owns the live wait shape for the running primary harness: Claude's St
 The arm layer records one bounded lifecycle row per observed cycle in `state/.watch-cycle-exits.log`; `state/.watch-triage.log` remains exclusively the absorbed-wake debug log.
 Pi, omp, and OpenCode verify session-lock ownership and launch one singleton successor from their child-close handlers before delivering an actionable wake prompt, with bounded exponential retry for failed restoration.
 Pi additionally retains an established predecessor across ordinary same-process session shutdown until the replacement generation commits its tracked arm, and its active-versus-handoff generation marker prevents an absent replacement extension from satisfying the fresh-beacon handoff tolerance.
-Claude's `bin/fm-claude-stop-autoarm.sh` hook fires on every Stop and, when the home is eligible and still needs supervision, claims one home-scoped cycle, foregrounds the arm wrapper (or the [opt-in supervision host](supervision-host.md)), and translates actionable closes into exit-2 rewakes.
+Claude's `bin/fm-claude-stop-autoarm.sh` hook fires on every Stop and, when the home is eligible and still needs supervision, claims one home-scoped cycle, foregrounds the arm wrapper (or the [supervision host](supervision-host.md), which runs by default on Claude), and translates actionable closes into exit-2 rewakes.
 It suppresses failed-looking closes when the same identity-matched watcher is healthy, retries genuine failures within a bound, and coordinates exhausted failure episodes with the Claude turn-end guard as documented in [`turnend-guard.md`](turnend-guard.md).
 [`watcher-continuity.md`](watcher-continuity.md) owns Claude's residual active-turn coverage and watcher-status command-gating boundary.
 Cursor's `bin/fm-turnend-guard-cursor.sh` hook is the same between-turns shape in one synchronous step: it parks the awaited `stop` hook on the arm wrapper and translates an actionable close into one `followup_message`, with a generation baton that makes an older park still running after the next `stop` claim stand down instead of leaking a stale duplicate wake.
@@ -194,7 +194,7 @@ The watcher and daemon recheck captain-held work in quiet mode as they do while 
 The record's mode distinguishes away from quiet on every harness; `bin/fm-afk-launch.sh` owns entry and exit, and `bin/fm-afk-return.sh` archives the record and owns the return brief's ordered sections, including landed live task records that still owe cleanup, rendered from durable state; persistent secondmates are excluded from that cleanup section even if an older record carries a child's merged PR.
 While the away record exists neither supervisor rechecks an item held for the captain, and a declared external wait names when it clears with `until` for a condition-aware recheck in both postures that occurs at the declared time or the hours-long `FM_PAUSE_RESURFACE_SECS` bound, whichever comes first.
 On Pi and pi-signed the away daemon is no longer launched: the ordinary supervision session continues under the record with main parked, so the supervision branch takes every actionable wake, captain outcomes accumulate for the return brief, and main's standing authority relocates to the branch through the guarded scripts, each keeping its own gate ([`pi-supervision-branch.md`](pi-supervision-branch.md#postures)); a wake the branch cannot take and a watcher failure still reach main.
-On an opted-in non-Pi home, the [supervision host](supervision-host.md) runs the away session instead of the daemon.
+On a non-Pi home that runs the [supervision host](supervision-host.md), the host runs the away session instead of the daemon.
 A presence-gated sub-supervisor (`bin/fm-supervise-daemon.sh`) still extends walk-away supervision on the remaining harnesses: the `/afk` skill starts it through the tracked foreground helper `bin/fm-afk-start.sh` once the record exists, after which the watcher reverts to daemon-managed one-shot mode and the daemon self-handles routine wakes in bash.
 The watcher and daemon share `bin/fm-classify-lib.sh` for captain-relevant status verbs, declared-wait vocabulary (a `paused:` external wait and a verified `captain-held` transfer alike, through one combined predicate), and status-scan primitives.
 Terminal verbs remain captain-relevant, while a nonterminal progress verb cannot become terminal merely because its prose contains a legacy free-text token such as `merged`; bare legacy free-text lines remain compatible.
@@ -508,4 +508,4 @@ Use `/stow` before an intentional reset when the conversation may hold durable k
 ## Development notes
 
 The current watcher reliability work combines always-on bash triage with a durable queue for actionable wakes, generation-bound post-handling acknowledgement, deterministic re-arm recovery after watcher downtime, a race-proof singleton lock, duplicate self-eviction, drain-time liveness assertion, and a self-verifying tracked-child arm wrapper.
-The away posture is the record `bin/fm-afk-contract.sh` owns; see [supervision-host.md](supervision-host.md) for the opt-in non-Pi away session and the `/afk` skill for the remaining daemon-backed harnesses.
+The away posture is the record `bin/fm-afk-contract.sh` owns; see [supervision-host.md](supervision-host.md) for the non-Pi away session and the `/afk` skill for the remaining daemon-backed harnesses.
