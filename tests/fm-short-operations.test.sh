@@ -8,4 +8,5 @@ set -eu
 TMP_ROOT=${FM_SHORT_OPERATION_EVIDENCE:-$(fm_test_tmproot fm-short-operations)}
 mkdir -p "$TMP_ROOT"
 node "$ROOT/tests/fm-short-operations-cases.mjs" "$ROOT" "$TMP_ROOT"
+node "$ROOT/tests/short-cleanup-recovery.mjs" "$ROOT" "$TMP_ROOT/cleanup-recovery"
 pass 'short operation grants, real sync/recovery effects, receipts and refusals'

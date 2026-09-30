@@ -38,6 +38,10 @@ paths, directory and Git owner identities in the existing cleanup receipt before
 metadata removal. cleanup-copy-read verifies this immutable home/task/generation
 binding for the teardown owner's copy-only path; it never recreates metadata.
 Missing historical identity and attempted disposal require exact readback.
+cleanup-preserve is private teardown-owner bookkeeping after the exact MAIN
+ShortTask recovery in fm-short-agent.mjs. It binds a distinct preservation proof
+to the immutable failed attempt and surviving copy, never disposal success.
+cleanup_complete recognizes that proof only with completed cleanup-owner facts.
 link-cleanup owns cleanup_observation_key in this same record: phase state/reason
 and identity bindings, excluding presentation clocks and additive diagnostics.
 The due reader also recognizes assessed historical ShortTask results through
@@ -385,7 +389,7 @@ def complete_cleanup_facts(facts):
 def cleanup_observation(receipt):
     """Retained resource facts, excluding business close and presentation data."""
     result = {key: receipt.get(key) for key in
-              ('task_id', 'spawn_gen', 'goal_revision', 'journal_sha256', 'launch_binding', 'copy_binding')}
+              ('task_id', 'spawn_gen', 'goal_revision', 'journal_sha256', 'launch_binding', 'copy_binding', 'preservation_ref', 'preservation_sha256')}
     phases = receipt.get('phases', {})
     require(isinstance(phases, dict), 'invalid cleanup phases')
     require(all(isinstance(phase, dict) for phase in phases.values()), 'invalid cleanup phase')
@@ -1749,8 +1753,10 @@ class Task:
                 if receipt.get('copy_binding'):
                     receipt = self.cleanup_read()
                     if receipt['phases'].get('directory_return', {}).get('state') != 'confirmed':
-                        return False
-            except (Refusal, OSError, ValueError):
+                        if receipt['phases'].get('directory_return') != dict(state='retained', reason_code='copy-preserved-after-uncertain-return'):
+                            return False
+                        self.cleanup_preservation_read(receipt)
+            except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
                 return False
         if any(proof['execution_generation'] == record['execution_generation'] and
                complete_cleanup_facts(proof['facts'])
@@ -1890,6 +1896,56 @@ class Task:
                         common_stat.st_ino == git_identity['inode'], 'copy Git owner changed')
         return dict(binding=binding, phase=phase, absent=False)
 
+    def cleanup_preservation_read(self, receipt):
+        """Bind acknowledgement of an uncertain return to its unchanged failure."""
+        ref = Path(receipt.get('preservation_ref', ''))
+        require(ref.is_absolute() and ref.parent.parent == self.state / 'short-agents' and
+                re.fullmatch(r'short-[a-f0-9]{64}', ref.parent.name) and
+                re.fullmatch(r'operation-\d+\.preservation\.json', ref.name), 'invalid cleanup preservation reference')
+        require(ref.resolve(strict=True) == ref, 'unsafe cleanup preservation path')
+        proof = load(ref)
+        require(digest(regular(ref, True)) == receipt.get('preservation_sha256'), 'cleanup preservation evidence changed')
+        index = proof.get('index')
+        require(proof.get('schema') == 'fm-cleanup-preservation.v1' and proof.get('home') == str(self.home.resolve()) and
+                proof.get('task') == self.id and proof.get('spawn_gen') == receipt['spawn_gen'] and
+                proof.get('id') == ref.parent.name and type(index) is int and index >= 0 and
+                ref.name == f'operation-{index}.preservation.json', 'cleanup preservation identity conflict')
+        original = proof.get('original_cleanup', {})
+        require(original.get('task_id') == self.id and original.get('spawn_gen') == receipt['spawn_gen'] and
+                original.get('goal_revision') == receipt['goal_revision'] and
+                original.get('copy_binding') == receipt.get('copy_binding') and
+                original.get('phases', {}).get('pane_close', {}).get('state') == 'confirmed' and
+                original.get('phases', {}).get('directory_return') == dict(state='pending', reason_code='copy-disposal-attempt'),
+                'cleanup preservation original attempt conflict')
+        names = {'request.json', 'result.json', f'operation-{index}.intent.json',
+                 f'operation-{index}.effect.json', f'operation-{index}.output.json'}
+        require(set(proof.get('hashes', {})) == names, 'incomplete cleanup preservation evidence')
+        for name in names:
+            require(digest(regular(ref.parent / name, True)) == proof['hashes'][name], 'cleanup original failure evidence changed')
+        request = load(ref.parent / 'request.json')
+        require(request.get('id') == proof['id'] and request.get('nonce') == proof.get('nonce') and
+                request['input']['operations']['steps'][index] == dict(action='cleanup', task=self.id) and
+                request['operationBindings'][index].get('spawn_gen') == receipt['spawn_gen'], 'cleanup preservation grant conflict')
+        return proof
+
+    def cleanup_preserve(self, args):
+        """Private teardown owner writes preservation, never successful disposal."""
+        receipt = self.cleanup_read()
+        ref = Path(args.record)
+        candidate = dict(receipt, preservation_ref=str(ref), preservation_sha256=digest(regular(ref, True)))
+        self.cleanup_preservation_read(candidate)
+        if receipt.get('preservation_ref'):
+            require(receipt.get('preservation_ref') == str(ref) and
+                    receipt.get('preservation_sha256') == candidate['preservation_sha256'], 'cleanup preservation binding changed')
+        readback = self.cleanup_copy_read()
+        require(not readback['absent'], 'cleanup preservation requires the surviving bound copy')
+        require(readback['phase'] in (dict(state='pending', reason_code='copy-disposal-attempt'),
+                dict(state='retained', reason_code='copy-preserved-after-uncertain-return')), 'cleanup preservation phase conflict')
+        candidate['phases'] = dict(candidate['phases'], directory_return=dict(state='retained', reason_code='copy-preserved-after-uncertain-return'))
+        if candidate != receipt:
+            self.write_cleanup_receipt(self.state / (self.id + '.cleanup.json'), candidate)
+        return self.link_cleanup()
+
     def cleanup_binding(self, args):
         """Validate or persist an immutable binding before endpoint effects.
 
@@ -1976,7 +2032,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -2054,6 +2110,9 @@ def main():
             result = task.cleanup_copy_bind()
         elif args.operation == 'cleanup-copy-read':
             result = task.cleanup_copy_read()
+        elif args.operation == 'cleanup-preserve':
+            require(args.record, 'cleanup preservation needs owner evidence')
+            result = task.cleanup_preserve(args)
         elif args.operation == 'cleanup-binding':
             task.cleanup_binding(args)
             return
