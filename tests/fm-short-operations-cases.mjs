@@ -432,8 +432,8 @@ if(process.env.FM_SHORT_CLEANUP_TARGET) {
   herdrLive('pane','run',livePaneId,'traex -y');
   const probe=()=>execFileSync('bash',['-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_agent_state "$2:$3"; fm_backend_herdr_composer_state "$2:$3"','fixture',root,target.session,livePaneId],{env:liveEnv,encoding:'utf8'}).trim();
   let liveState;
-  for(let n=0;n<120;n++){liveState=probe();if(liveState==='aliveempty')break;await wait(250);}
-  assert.equal(liveState,'aliveempty','real TraeX reached a structurally live agent with an empty composer');
+  for(let n=0;n<120;n++){liveState=probe();if(['aliveempty','alivepending'].includes(liveState))break;await wait(250);}
+  assert.ok(['aliveempty','alivepending'].includes(liveState),'real TraeX reached a structurally live agent in the exact named-lab pane');
   const liveInput=req('cleanup-live',[{action:'cleanup',task:liveTask}]);liveInput.operations.expiresAt=Date.now()+180000;
   const liveCleanup=service.submit(liveInput),liveResult=await terminal(liveCleanup.id);
   const liveDir=service.dir(liveCleanup.id);

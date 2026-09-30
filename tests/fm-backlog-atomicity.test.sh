@@ -209,7 +209,9 @@ make_tasks_axi_incompatible() {  # <case-dir>
   real=$(command -v tasks-axi)
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" != --version ] || exit 1
+if { [ "\${1:-}" = update ] || [ "\${1:-}" = mv ]; } && [ "\${2:-}" = --help ]; then
+  exit 1
+fi
 exec "$real" "\$@"
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
@@ -3045,8 +3047,8 @@ test_dispatch_and_completion_are_structural() {
   pass "dispatch and completion transition structurally with evidence"
 }
 
-test_refused_directory_cleanup_keeps_the_goal_closed() {
-  local case_dir home id out rc=0
+test_unlanded_copy_is_retained_while_completed_cleanup_finishes() {
+  local case_dir home id out
   id=fm-structural-refusal-b15
   case_dir=$(make_home structural-refusal "$id")
   home=$(home_of "$case_dir")
@@ -3060,19 +3062,19 @@ test_refused_directory_cleanup_keeps_the_goal_closed() {
     commit -q -m "unlanded fixture work"
   fm_test_archive_goal "$home" "$id"
   fixture_closed_endpoint "$case_dir" "$id"
-  out=$(run_teardown "$case_dir" "$id") || rc=$?
+  out=$(run_teardown "$case_dir" "$id") \
+    || fail "completed cleanup was blocked by unlanded work: $out"
 
-  [ "$rc" -ne 0 ] || fail "teardown accepted unlanded work"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
-    || fail "refused directory cleanup reopened an explicitly archived goal"
+    || fail "completed cleanup reopened an explicitly archived goal"
   jq -e '.disposition=="archived"' "$home/data/$id/lifecycle.json" >/dev/null \
-    || fail 'refused directory cleanup changed explicit archive'
-  jq -e '.phases.pane_close.state=="confirmed" and .phases.directory_return.state=="retained"' \
-    "$home/state/$id.cleanup.json" >/dev/null || fail 'unlanded directory cleanup obligation was lost'
-  assert_present "$case_dir/wt/unlanded.txt" 'refused cleanup discarded unlanded content'
-  assert_present "$home/state/$id.meta" \
-    "refused teardown removed the live task record"
-  pass "refused directory cleanup retains unlanded work and cleanup receipts without reopening the archived goal"
+    || fail 'completed cleanup changed explicit archive'
+  jq -e '.owner_receipts.cleanup[-1].facts.copyDisposition=="retained-unlanded"' \
+    "$home/data/$id/lifecycle.json" >/dev/null || fail 'completed cleanup lost the retained-unlanded disposition'
+  assert_present "$case_dir/wt/unlanded.txt" 'completed cleanup discarded unlanded content'
+  assert_absent "$home/state/$id.meta" \
+    "completed cleanup retained the retired task record"
+  pass "completed cleanup retains unlanded work while retiring its window and task record"
 }
 
 test_environment_selected_adapter_is_not_forced_to_markdown() {
@@ -3125,7 +3127,7 @@ if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
   test_failed_launch_delivery_does_not_confirm_goal_action
   test_home_without_a_backlog_dispatches_and_completes
   test_dispatch_and_completion_are_structural
-  test_refused_directory_cleanup_keeps_the_goal_closed
+  test_unlanded_copy_is_retained_while_completed_cleanup_finishes
   test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog
   exit 0
 fi
@@ -3229,6 +3231,6 @@ test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
 test_dispatch_and_completion_are_structural
-test_refused_directory_cleanup_keeps_the_goal_closed
+test_unlanded_copy_is_retained_while_completed_cleanup_finishes
 test_environment_selected_adapter_is_not_forced_to_markdown
 test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog

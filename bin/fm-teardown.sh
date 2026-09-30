@@ -325,6 +325,31 @@ backlog_done_args() {
   esac
 }
 
+# Closing the backlog item is this script's own last act on the record, not a
+# printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
+# invariant). This prints what already happened, so the follow-up wording stays
+# only where a human still owes the edit.
+backlog_refresh_reminder() {
+  local backlog_display root backend=markdown
+  if root=$(fm_backlog_root "$DATA"); then
+    backend=$(fm_tasks_axi_backend "$root") || return 2
+  fi
+  if [ "$backend" != markdown ]; then
+    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
+  elif backlog_display=$(fm_backlog_file "$DATA"); then
+    :
+  else
+    backlog_display="${DATA%/}/backlog.md"
+  fi
+  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
+    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
+  elif [ "$BACKLOG_CLOSED" = 1 ]; then
+    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
+  else
+    printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
+  fi
+}
+
 # Completed goals retire their recorded endpoint independently of disposable
 # copy removal. No historical journal, agent UI, continuation or operation
 # binding is an admission gate here. Shared, dirty or unlanded copies stay.
@@ -489,6 +514,7 @@ teardown_completed_task() (
   fm_task_lifecycle_owner_receipt "$ID" "$generation" cleanup "$facts" locked || \
     echo 'warning: cleanup completed; lifecycle evidence could not be recorded' >&2
   printf 'teardown %s complete (exact pane absent; copy=%s; report retained)\n' "$ID" "$disposition"
+  backlog_refresh_reminder
   if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
     # Postcondition evidence only: no pre-effect short-actor admission check.
     # shellcheck source=bin/fm-short-owner-lib.sh
@@ -853,31 +879,6 @@ remove_pr_poll_artifacts() {
   rm -f "$state_dir/$id.check.sh" "$state_dir/$id.pr-poll" \
     "$state_dir/$id.pr-poll-registration" "$state_dir/$id.pr-poll-retirement" \
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
-}
-
-# Closing the backlog item is this script's own last act on the record, not a
-# printed instruction for a later turn (bin/fm-backlog-transition-lib.sh owns the
-# invariant). This prints what already happened, so the follow-up wording stays
-# only where a human still owes the edit.
-backlog_refresh_reminder() {
-  local backlog_display root backend=markdown
-  if root=$(fm_backlog_root "$DATA"); then
-    backend=$(fm_tasks_axi_backend "$root") || return 2
-  fi
-  if [ "$backend" != markdown ]; then
-    backlog_display="this home's configured tasks-axi backend (data directory $DATA)"
-  elif backlog_display=$(fm_backlog_file "$DATA"); then
-    :
-  else
-    backlog_display="${DATA%/}/backlog.md"
-  fi
-  if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" = retain ]; then
-    printf '%s\n' "Backlog: $ID stays open in $backlog_display, still held for the captain with its deliverable recorded. Relay the question and close it only with bin/fm-captain-hold.sh answer."
-  elif [ "$BACKLOG_CLOSED" = 1 ]; then
-    printf '%s\n' "Backlog: $ID is closed in $backlog_display. Run bin/fm-tasks-axi.sh ready for dependency-cleared candidates, check date gates, and dispatch only work whose blockers are gone and date is due."
-  else
-    printf '%s\n' "Backlog: $ID just finished ($BACKLOG_SKIP_REASON). Update $backlog_display - move $ID to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due."
-  fi
 }
 
 inspectable_git_worktree() {
