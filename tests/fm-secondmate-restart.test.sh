@@ -477,6 +477,9 @@ case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
+  route)
+    printf 'schema=fm-remote-secondmate-control.v1\nspawn_gen=%s\n' "${FM_FAKE_HOST_GENERATION:-g-initial}"
+    ;;
   send|send-stdin)
     if [ "${FM_FAKE_CHANGE_GENERATION:-}" = 1 ]; then
       perl -pi -e 's/^remote_spawn_gen=.*/remote_spawn_gen=g-new/' "$FM_FAKE_REMOTE_META"
@@ -534,7 +537,7 @@ test_remote_mate_restarts_over_the_transport_hop() {
     "a remote restart should be reported with its host and the parent's pinned runtime"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
   [ -n "$relaunch_line" ] || fail "no relaunch crossed the transport hop"$'\n'"$(cat "$dir/ssh.log")"
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high --expect-generation g-initial" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
   [ "$(grep -n '^fm-remote-secondmate-control.sh send-stdin' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
@@ -623,6 +626,18 @@ test_remote_restart_refuses_an_unreadable_per_mate_pin() {
 }
 
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
+test_remote_restart_refuses_a_stale_host_binding() {
+  local dir out rc
+  dir=$(new_case stale-host-binding)
+  setup_remote_case "$dir" sm2 ok
+  out=$(FM_FAKE_HOST_GENERATION=g-host-new run_restart "$dir" fm-sm2); rc=$?
+  expect_code 3 "$rc" "stale parent generation at the host: $out"
+  assert_contains "$out" "nudged: sm2" "the newer host incarnation was not nudged"
+  assert_no_grep 'fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" "a stale host binding opened a relaunch"
+  assert_no_grep 'open records written down' "$dir/home/state/sm2.status" "a stale binding requested persistence"
+  pass "remote restart verifies the host incarnation before requesting persistence"
+}
+
 test_unreachable_host_is_reported_unknown() {
   local dir out rc
   dir=$(new_case unreachable)
@@ -679,7 +694,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   unset FM_FAKE_ANSWER_STATUS
   expect_code 0 "$rc" "native remote restart failed: $out"
   relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
-  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra --expect-generation g-initial" ] \
     || fail "remote restart dropped native profile: $relaunch_line"
   pass "native Ultra survives local restart and the remote restart transport"
 }
@@ -1051,7 +1066,7 @@ test_remote_generation_change_nudges() {
   unset FM_FAKE_ANSWER_STATUS FM_FAKE_REMOTE_META FM_FAKE_CHANGE_GENERATION
   expect_code 3 "$rc" "a remote persistence acknowledgement after recovery: $out"
   assert_contains "$out" 'belonged to generation g-initial' "remote restart ignored its generation"
-  assert_no_grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" "an old acknowledgement relaunched the successor"
+  assert_no_grep 'fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" "an old acknowledgement relaunched the successor"
   pass "unpooled remote persistence acknowledgements are generation fenced"
 }
 
@@ -1086,3 +1101,5 @@ echo "# all fm-secondmate-restart tests passed"
 test_missing_generation_nudges_without_persistence
 
 test_remote_generation_change_nudges
+
+test_remote_restart_refuses_a_stale_host_binding

@@ -3,7 +3,7 @@
 #
 # Usage:
 #   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent] [--operation <gen> --previous <gen|->]
-#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|-> [--operation <gen> --previous <gen|->]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|-> [--operation <gen> --previous <gen|->] [--expect-generation <gen>]
 #   fm-remote-secondmate-control.sh disposition <id> --operation <gen>
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -121,6 +121,7 @@ fi
 # Seat operation of the running launch/relaunch, when the parent passed one.
 SEAT_OP=
 SEAT_PREV=-
+EXPECT_GENERATION=
 SEAT_LIFECYCLE_ID=
 prelaunch_die() {
   if [ -n "$SEAT_OP" ]; then
@@ -176,6 +177,12 @@ seat_parse_operation() {
     case "$1" in
       --operation) [ "$#" -ge 2 ] || usage; SEAT_OP=$2; shift 2 ;;
       --previous) [ "$#" -ge 2 ] || usage; SEAT_PREV=$2; shift 2 ;;
+      --expect-generation)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "error: missing expected generation; nothing was changed" >&2; exit 6; }
+        EXPECT_GENERATION=$2
+        case "$EXPECT_GENERATION" in *[!A-Za-z0-9._-]*) die "invalid expected generation" ;; esac
+        shift 2
+        ;;
       *) SEAT_ARGS+=("$1"); shift ;;
     esac
   done
@@ -352,7 +359,7 @@ seat_enter() {
     if host_pools_enabled; then
       prelaunch_die "this home has fleet seat pools, so a supervisor $verb must come from the parent's seat operation (bin/fm-remote-secondmate-relaunch.sh or fm-spawn); nothing was changed"
     fi
-    return 0
+    [ -n "$EXPECT_GENERATION" ] || return 0
   fi
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA" 2>/dev/null \
     || prelaunch_die "remote endpoint directories could not be created"
@@ -362,6 +369,7 @@ seat_enter() {
     die "another lifecycle episode for remote secondmate $id is running on this host"
   fi
   trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  [ -n "$SEAT_OP" ] || return 0
   receipt=$(receipt_path "$id")
   if [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(receipt_field "$receipt" operation)" = "$SEAT_OP" ]; then
     seat_decide "$id"
@@ -584,11 +592,20 @@ cmd_relaunch() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
       || prelaunch_die "remote secondmate native effort validation failed"
   fi
+  if [ -n "$EXPECT_GENERATION" ] && [ "$(fm_meta_get "$(meta_path "$id")" spawn_gen)" != "$EXPECT_GENERATION" ]; then
+    if [ -n "$SEAT_OP" ]; then
+      seat_receipt_set phase=prelaunch || die "could not record the generation mismatch"
+      seat_emit prelaunch false false
+    fi
+    echo "error: generation-mismatch: the host incarnation is not $EXPECT_GENERATION; nothing was changed" >&2
+    exit 6
+  fi
   remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
   seat_predecessor_ready
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
+  [ -z "$EXPECT_GENERATION" ] || control_args+=(--expect-generation "$EXPECT_GENERATION")
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
   # the dedicated fm-remote session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this

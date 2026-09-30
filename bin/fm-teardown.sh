@@ -549,22 +549,51 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # shellcheck source=bin/fm-secondmate-liveness-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 
-# teardown_release_seat <state-dir> <home> <config> <data> <id> <generation>: after this
-# cleanup removed the task record, release exactly that generation's fleet
-# seat through its owner (bin/fm-fleet-seats.sh). A stale generation never
-# releases a successor, and a release that cannot be proven keeps the seat
-# counted and says so.
 teardown_release_seat() {
-  local seat_state=$1 seat_home=$2 seat_config=$3 seat_data=$4 seat_id=$5 seat_gen=$6
-  [ -n "$seat_gen" ] || return 0
-  if [ ! -d "$seat_state" ]; then
-    echo "warning: $seat_id's fleet seat generation $seat_gen stays counted: its state directory is gone, so the release cannot be recorded" >&2
-    return 0
+  local seat_state=$1 seat_home=$2 seat_config=$3 seat_data=$4 seat_id=$5
+  local ledger generations gen meta="$1/$5.meta" backup='' carrier lock rc=0
+  [ -d "$seat_state" ] || return 1
+  lock=$(fm_supervisor_lifecycle_lock_path "$seat_state" "$seat_id") || return 1
+  local FM_SUPERVISOR_LIFECYCLE_CARRIER=${TEARDOWN_LIFECYCLE_CARRIER:-}
+  for carrier in "${DESCENDANT_EPISODE_CARRIERS[@]+"${DESCENDANT_EPISODE_CARRIERS[@]}"}"; do
+    case "$carrier" in "$lock|"*) FM_SUPERVISOR_LIFECYCLE_CARRIER=$carrier ;; esac
+  done
+  export FM_SUPERVISOR_LIFECYCLE_CARRIER
+  ledger=$(FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" show "$seat_id") || return 1
+  if [ -n "$ledger" ]; then
+    generations=$(printf '%s\n' "$ledger" | jq -r '.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed") | .generation') || return 1
+  else
+    generations=$(fm_meta_get "$meta" fleet_seat_generation)
+    [ -n "$generations" ] || generations=$(fm_meta_get "$meta" spawn_gen)
   fi
-  FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
-    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" release "$seat_id" \
-    --generation "$seat_gen" --reason teardown >/dev/null \
-    || echo "warning: $seat_id's fleet seat generation $seat_gen could not be released and stays counted until reconciliation" >&2
+  [ -n "$generations" ] || return 0
+  if [ -n "$ledger" ] && [ "${TEARDOWN_ENDPOINT_CLOSE_FAILED:-0}" = 1 ]; then
+    echo "error: $seat_id's endpoint was not closed; preserving its counted generations and recovery route" >&2
+    return 1
+  fi
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    backup=$(umask 077; mktemp "$seat_state/.seat-retire-$seat_id.XXXXXX") || return 1
+    cp -p "$meta" "$backup" || { rm -f "$backup"; return 1; }
+    if ! { { grep -Ev '^(fleet_seat_generation|spawn_gen|remote_spawn_gen)=' "$backup" > "$backup.unbound" || [ "$?" -eq 1 ]; } \
+        && chmod 0600 "$backup.unbound" && mv -f "$backup.unbound" "$meta"; }; then
+      rm -f "$backup" "$backup.unbound"
+      return 1
+    fi
+  fi
+  while IFS= read -r gen; do
+    if ! FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+      FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" release "$seat_id" \
+      --generation "$gen" --reason teardown >/dev/null; then
+      echo "error: $seat_id's fleet seat generation $gen stays counted; preserving its recovery route and home" >&2
+      rc=1
+      break
+    fi
+  done <<EOF_GENERATIONS
+$generations
+EOF_GENERATIONS
+  [ -z "$backup" ] || mv -f "$backup" "$meta" || return 1
+  return "$rc"
 }
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
@@ -613,6 +642,8 @@ SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
+DESCENDANT_EPISODE_CARRIERS=()
+TEARDOWN_LIFECYCLE_CARRIER=
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
@@ -624,7 +655,13 @@ teardown_release_locks() {
     teardown_release_herdr_locks || true
   fi
   for ((i=${#DESCENDANT_LOCK_PATHS[@]} - 1; i >= 0; i--)); do
-    fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true
+    case "${DESCENDANT_LOCK_PATHS[$i]}" in
+      */.secondmate-liveness-*.lock)
+        local episode_id=${DESCENDANT_LOCK_PATHS[$i]##*/.secondmate-liveness-}
+        fm_supervisor_lifecycle_release "${DESCENDANT_LOCK_PATHS[$i]%/*}" "${episode_id%.lock}" || true
+        ;;
+      *) fm_lock_release "${DESCENDANT_LOCK_PATHS[$i]}" || true ;;
+    esac
   done
   DESCENDANT_LOCK_PATHS=()
   if [ -n "${HANDOFF_WAKE_RETIRE_LOCK:-}" ]; then
@@ -706,10 +743,7 @@ if [ "$TEARDOWN_META_KIND" = secondmate ] && [ -z "$SM_LIVENESS_LOCK" ]; then
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
-# The fleet seat generation this cleanup ends (the parent-owned generation for
-# a remote route, else the recorded spawn_gen).
-TEARDOWN_SEAT_GEN=$(fm_meta_get "$META" fleet_seat_generation)
-[ -n "$TEARDOWN_SEAT_GEN" ] || TEARDOWN_SEAT_GEN=$(fm_meta_get "$META" spawn_gen)
+TEARDOWN_LIFECYCLE_CARRIER=${FM_SUPERVISOR_LIFECYCLE_CARRIER:-}
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -1244,13 +1278,13 @@ remote_secondmate_teardown() {
     || { echo "error: remote pending-reply cleanup failed; preserving the local route for retry" >&2; return 1; }
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
+  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || return 1
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   teardown_retire_status "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
-  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" "$TEARDOWN_SEAT_GEN"
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
     "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
     "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
@@ -3110,6 +3144,16 @@ collect_descendant_task_locks() {
   # without ever having been lifecycle-locked (bin/fm-wake-lib.sh's
   # fm_task_set_lock_path owns why). Taken per home, parent before child, and
   # held until this teardown exits.
+  for child_meta in "$sub_state"/*.meta; do
+    [ -f "$child_meta" ] && [ "$(meta_value "$child_meta" kind)" = secondmate ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    if ! fm_supervisor_lifecycle_acquire "$sub_state" "$child_id" 0; then
+      echo "REFUSED: descendant secondmate $child_id has a lifecycle episode in flight; forced teardown changed nothing" >&2
+      return 1
+    fi
+    DESCENDANT_EPISODE_CARRIERS+=("$FM_SUPERVISOR_LIFECYCLE_CARRIER")
+    DESCENDANT_LOCK_PATHS+=("$(fm_supervisor_lifecycle_lock_path "$sub_state" "$child_id")")
+  done
   task_set_lock=$(fm_task_set_lock_path "$sub_state") || {
     echo "REFUSED: secondmate home $home has an invalid task-set lock path; forced teardown changed nothing" >&2
     return 1
@@ -3136,6 +3180,14 @@ collect_descendant_task_locks() {
     [ -n "$child_kind" ] || child_kind=ship
     child_home=
     if [ "$child_kind" = secondmate ]; then
+      local episode_carrier found_episode=0
+      for episode_carrier in "${DESCENDANT_EPISODE_CARRIERS[@]+"${DESCENDANT_EPISODE_CARRIERS[@]}"}"; do
+        if FM_SUPERVISOR_LIFECYCLE_CARRIER=$episode_carrier fm_supervisor_lifecycle_adopt "$sub_state" "$child_id"; then
+          found_episode=1
+          break
+        fi
+      done
+      [ "$found_episode" -eq 1 ] || { echo "REFUSED: descendant secondmate $child_id changed during episode acquisition" >&2; return 1; }
       child_wt=$(meta_value "$child_meta" worktree)
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3468,6 +3520,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   local subject=$1 backend=$2 target=$3 honors_force=$4
   echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
   if [ "$honors_force" = 1 ] && [ "$FORCE" = "--force" ]; then
+    TEARDOWN_ENDPOINT_CLOSE_FAILED=1
     echo "error: --force authorizes continuing past a close that failed, so this cleanup proceeds toward removing the task's records; reconcile $target yourself, because nothing here can still be relied on to name it." >&2
     return 0
   fi
@@ -3534,6 +3587,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     teardown_export_records "$sub_state" "$child_id" || return 1
+    teardown_release_seat "$sub_state" "$home" "$home/config" "$home/data" "$child_id" || return 1
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3600,10 +3654,7 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
-    child_seat_gen=$(meta_value "$child_meta" fleet_seat_generation)
-    [ -n "$child_seat_gen" ] || child_seat_gen=$(meta_value "$child_meta" spawn_gen)
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
-    teardown_release_seat "$sub_state" "${sub_state%/state}" "${sub_state%/state}/config" "${sub_state%/state}/data" "$child_id" "$child_seat_gen"
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -4072,6 +4123,7 @@ if [ "$KIND" != secondmate ]; then
   fi
 fi
 teardown_export_records "$STATE" "$ID" || exit 1
+teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
@@ -4204,7 +4256,6 @@ else
     exit 1
   fi
 fi
-teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" "$TEARDOWN_SEAT_GEN"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

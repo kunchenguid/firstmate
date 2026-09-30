@@ -324,14 +324,26 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   fi
 
   GENERATION[i]=$(sed -n 's/^remote_spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
-  if [ "${PLACEMENT[i]}" != remote ]; then
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    host_route=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-on.sh" \
+      "$id" fm-remote-secondmate-control.sh route "$id" </dev/null 2>/dev/null) || host_route=
+    host_generation=$(printf '%s\n' "$host_route" | sed -n 's/^spawn_gen=//p' | tail -1)
+    if [ "$(printf '%s\n' "$host_route" | sed -n 's/^schema=//p' | tail -1)" != fm-remote-secondmate-control.v1 ] \
+      || [ -z "$host_generation" ] || [ "$host_generation" != "${GENERATION[i]}" ]; then
+      REASON[i]="its host launch generation does not match the recorded route, so an answer cannot safely authorize a restart"
+      i=$((i + 1))
+      continue
+    fi
+  else
     GENERATION[i]=$(sed -n 's/^spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
   fi
-  if [ -z "${GENERATION[i]}" ]; then
-    REASON[i]="its launch generation is missing, so an answer cannot safely authorize a restart"
-    i=$((i + 1))
-    continue
-  fi
+  case "${GENERATION[i]}" in
+    ''|-|*[!A-Za-z0-9._-]*)
+      REASON[i]="its launch generation is missing or invalid, so an answer cannot safely authorize a restart"
+      i=$((i + 1))
+      continue
+      ;;
+  esac
   if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
     "$FM_SECONDMATE_PERSIST_REQUEST"); then
     REASON[i]="its answer about the open work cannot be tracked, so a clean reload could not be proven"

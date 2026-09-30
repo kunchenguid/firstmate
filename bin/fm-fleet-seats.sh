@@ -311,7 +311,6 @@ resolve_authority() {
     fm_secondmate_parent_record_parse "$root/.fm-secondmate-parent" || return 1
     [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ] || return 1
     ROOT_REMOTE=1
-    return 0
   fi
   ROOT_HOME=$root
   if [ "$root" = "$home_canon" ]; then
@@ -652,15 +651,17 @@ root_holders() {
 
 # remote_home_holders <models-file>: a remote home's own holders for one pool.
 remote_home_holders() {
-  local models=$1 own rc
+  local models=$1 home_state rc
   CONFLICT=
-  own=$(canon_dir "$STATE") || return 1
+  registry_homes || return 1
   ledger_scan || return 1
   {
     ledger_pool_holders "$models"
-    pooled_records "$own" "$models" || { rc=$?; return "$rc"; }
+    while IFS= read -r home_state; do
+      pooled_records "$home_state" "$models" || { rc=$?; [ "$rc" -ne 4 ] || return 4; return 1; }
+    done < "$TMPD/local-homes"
   } > "$TMPD/holders.raw" || return $?
-  sort -u "$TMPD/holders.raw"
+  LC_ALL=C sort -u "$TMPD/holders.raw"
 }
 
 lock_or_refuse() {  # <lock>
@@ -842,12 +843,12 @@ fi
 
 # The ledger this home's operations act on, and the policy that governs it.
 if [ "$ROOT_REMOTE" -eq 1 ]; then
-  LEDGER_STATE=$STATE
-  DELIVERED=$STATE/fleet-seats/policy.json
+  LEDGER_STATE=$ROOT_STATE
+  DELIVERED=$ROOT_STATE/fleet-seats/policy.json
   if [ -e "$DELIVERED" ] || [ -L "$DELIVERED" ]; then
     POLICY=$DELIVERED
   else
-    POLICY=$CONFIG/fleet-seats
+    POLICY=$ROOT_CONFIG/fleet-seats
   fi
 else
   LEDGER_STATE=$ROOT_STATE
@@ -867,8 +868,9 @@ declared() {
 }
 
 # Reserve opts out without a declaration; existing ledger transitions remain available.
+OPT_OUT=0
 case "$CMD" in
-  reserve) declared || exit 0 ;;
+  reserve) declared || { [ -d "$LEDGER/holders" ] || exit 0; OPT_OUT=1; } ;;
   dispatch|confirm|release|reclaim|reconcile-remote|show)
     declared || [ -d "$LEDGER/holders" ] || exit 0
     ;;
@@ -1092,6 +1094,27 @@ apply_remote_disposition() {
       ;;
   esac
 }
+
+if [ "$CMD" = reserve ] && [ "$OPT_OUT" -eq 1 ]; then
+  load_or_refuse
+  [ -n "$HOLDER_JSON" ] || exit 0
+  if ! inc_exists "$GEN"; then
+    inc_exists "$PREV_GEN" || exit 0
+    case "$(inc_get "$PREV_GEN" .lifecycle)" in reserved|confirmed) ;; *) exit 0 ;; esac
+  fi
+  fm_pid_alive "$HOLDER" || unavailable "holder pid $HOLDER is not a running process"
+  [ "$KIND" != secondmate ] || lifecycle_join "$HOLDER_STATE" "$TASK"
+  lock_or_refuse "$LOCK"
+  declared && unavailable "the fleet seat policy returned before the successor was recorded; retry admission"
+  load_or_refuse
+  if ! inc_exists "$GEN"; then
+    case "$(inc_get "$PREV_GEN" .lifecycle)" in reserved|confirmed) ;; *) unavailable "the predecessor ended before its opt-out successor was recorded" ;; esac
+  fi
+  DIGEST=$(policy_digest <(printf '{"pools":[]}\n'))
+  reserve_apply
+  echo "fleet-seats: recorded id=$TASK generation=$GEN (existing holder successor during policy opt-out)"
+  exit 0
+fi
 
 # --- lifecycle verbs -------------------------------------------------------------
 
@@ -1326,7 +1349,7 @@ if [ "$CMD" = reconcile ]; then
   while IFS=$'\t' read -r st task gen lifecycle _model kind phase owner placement _prev; do
     [ "$tried" -lt "$LIMIT" ] || break
     # A home below the root reconciles only its own holders in the shared ledger.
-    [ "$ROOT_SELF" -eq 1 ] || [ "$ROOT_REMOTE" -eq 1 ] || [ "$st" = "$CALLER_STATE" ] || continue
+    [ "$ROOT_SELF" -eq 1 ] || [ "$st" = "$CALLER_STATE" ] || continue
     fm_pid_alive "$owner" && continue
     if [ "$lifecycle:$kind" = confirmed:secondmate ] && [ -f "$st/$task.meta" ] \
       && [ "$(meta_generation "$st/$task.meta")" = "$gen" ]; then
@@ -1465,17 +1488,33 @@ EOF_ALLOW
         rm -f "$f"
         continue
       fi
-      { printf 'nonce=%s\n' "$(record_field "$f" nonce)" > "${f%.req}.approved.tmp.$$" \
-        && mv -f "${f%.req}.approved.tmp.$$" "${f%.req}.approved"; } \
-        || unavailable "cannot confirm an unpooled model"
+      st=$(record_field "$f" state)
+      task=$(record_field "$f" task)
+      gen=$(record_field "$f" nonce)
+      if [ -z "$st" ] || ! id_ok "$task" || ! gen_ok "$gen"; then
+        unavailable "the unpooled seat request is malformed"
+      fi
+      HOLDER_STATE=$st TASK=$task GEN=$gen PREV_GEN=$(record_field "$f" previous) KIND=$(record_field "$f" kind)
+      MODEL=$(record_field "$f" model) HOLDER=$(record_field "$f" pid) DIGEST=$DIGEST_ARG
+      [ -n "$PREV_GEN" ] || PREV_GEN=-
+      case "$KIND" in ship|scout|secondmate) ;; *) KIND=ship ;; esac
+      holder_load "$st" "$task" || unavailable "the seat holder record for $task is malformed"
+      if ! ( reserve_apply ) > "$TMPD/grant.out" 2>&1; then
+        { printf 'nonce=%s\nreason=%s\n' "$gen" "$(tail -1 "$TMPD/grant.out")" > "${f%.req}.rejected.tmp.$$" \
+          && mv -f "${f%.req}.rejected.tmp.$$" "${f%.req}.rejected"; } \
+          || unavailable "cannot reject an unpooled seat request"
+      fi
       rm -f "$f"
     done
     # The certificate: every reserved or confirmed generation this home holds,
     # plus its unmanaged pooled records.
     ledger_scan || unavailable "${LEDGER_ERROR:-the seat ledger cannot be read}"
     jq -r '[.pools[].models[]] | .[]' "$DELIVERED" > "$TMPD/all-models"
-    own=$(canon_dir "$STATE") || unavailable "this home's state directory is missing"
-    pooled_records "$own" "$TMPD/all-models" > "$TMPD/unmanaged" || unavailable "${CONFLICT:-the task records of this home cannot be read}"
+    registry_homes || unavailable "${REGISTRY_ERROR:-the secondmate registry cannot be read}"
+    : > "$TMPD/unmanaged"
+    while IFS= read -r home_state; do
+      pooled_records "$home_state" "$TMPD/all-models" >> "$TMPD/unmanaged" || unavailable "${CONFLICT:-the task records of this home cannot be read}"
+    done < "$TMPD/local-homes"
     {
       awk -F '\t' '$4 == "reserved" || $4 == "confirmed" { print $1 "\t" $2 "\t" $3 "\t" $5 "\t" $4 }' "$TMPD/ledger"
       while IFS=$'\t' read -r st task; do
@@ -1521,7 +1560,6 @@ EOF_ALLOW
   REQ=$REQDIR/$NAME.req
   DENIED=$REQDIR/$NAME.denied
   REJECTED=$REQDIR/$NAME.rejected
-  APPROVED=$REQDIR/$NAME.approved
 
   granted() {
     holder_load "$HOLDER_STATE" "$TASK" || return 1
@@ -1529,10 +1567,18 @@ EOF_ALLOW
       && [ "$(inc_get "$GEN" '.model // ""')" = "$MODEL" ]
   }
 
+  print_grant() {
+    if [ "$POOL" = @checks ]; then
+      echo "fleet-seats: recorded id=$TASK generation=$GEN (model $MODEL is in no pool)"
+    else
+      echo "fleet-seats: reserved pool=$POOL id=$TASK generation=$GEN ($1 by the fleet root)"
+    fi
+  }
+
   lock_or_refuse "$LOCK"
   load_or_refuse
   if granted; then
-    echo "fleet-seats: reserved pool=$POOL id=$TASK generation=$GEN (already granted by the fleet root)"
+    print_grant 'already granted'
     exit 0
   fi
   if inc_exists "$GEN"; then
@@ -1544,7 +1590,7 @@ EOF_ALLOW
     [ -z "$others" ] \
       || refuse "an earlier launch of $TASK (generation $others) is still unresolved; reconcile or reclaim it before starting another"
   fi
-  rm -f "$DENIED" "$REJECTED" "$APPROVED"
+  rm -f "$DENIED" "$REJECTED"
   {
     echo "state=$HOLDER_STATE"
     echo "task=$TASK"
@@ -1561,26 +1607,11 @@ EOF_ALLOW
   mv -f "$REQ.tmp.$$" "$REQ" || unavailable "cannot write $REQ"
   unlock
 
-  approved_record() {
-    lock_or_refuse "$LOCK"
-    load_or_refuse
-    if ! inc_exists "$GEN"; then
-      reserve_apply
-    fi
-    unlock
-    rm -f "$APPROVED"
-    echo "fleet-seats: recorded id=$TASK generation=$GEN (model $MODEL is in no pool)"
-    exit 0
-  }
-
   deadline=$((SECONDS + REMOTE_WAIT))
   while :; do
-    if [ "$POOL" != @checks ] && granted; then
-      echo "fleet-seats: reserved pool=$POOL id=$TASK generation=$GEN (granted by the fleet root)"
+    if granted; then
+      print_grant granted
       exit 0
-    fi
-    if [ "$POOL" = @checks ] && [ -f "$APPROVED" ] && [ "$(record_field "$APPROVED" nonce)" = "$GEN" ]; then
-      approved_record
     fi
     if [ -f "$REJECTED" ] && [ "$(record_field "$REJECTED" nonce)" = "$GEN" ]; then
       reason=$(record_field "$REJECTED" reason)
@@ -1596,13 +1627,9 @@ EOF_ALLOW
     sleep 1
   done
   lock_or_refuse "$LOCK"
-  if [ "$POOL" != @checks ] && granted; then
-    echo "fleet-seats: reserved pool=$POOL id=$TASK generation=$GEN (granted by the fleet root)"
+  if granted; then
+    print_grant granted
     exit 0
-  fi
-  if [ "$POOL" = @checks ] && [ -f "$APPROVED" ] && [ "$(record_field "$APPROVED" nonce)" = "$GEN" ]; then
-    unlock
-    approved_record
   fi
   rm -f "$REQ"
   unavailable "the fleet root on another host did not answer the seat request for $TASK within ${REMOTE_WAIT}s"

@@ -654,6 +654,9 @@ Letting the far side re-resolve it would silently move the mate onto another run
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
 Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reserves the replacement's primary fleet seat before host control, reads the confirmed identity back from the host's endpoint record, and republishes the primary's own route metadata to match.
 When fleet seat pools are configured, this wrapper is the required path: the host refuses a supervisor relaunch that does not carry the primary's seat operation.
+A persist-before-restart request binds to the host's recorded launch generation as well as the primary's route.
+The wrapper forwards that expected generation into host control, which compares it inside the host lifecycle episode before stopping anything.
+A missing binding or newer incarnation takes the re-read nudge path.
 The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence
@@ -684,6 +687,8 @@ It refuses while any of these holds:
 It closes only the retiring secondmate's panes or `2ndmate-<id>` workspace in `fm-remote`.
 It never stops the shared session or removes a sibling secondmate's workspace or panes.
 SSH exit 255 preserves both the route and local records because completion is unknown.
+Cleanup releases the ledger's nonterminal generations before discarding their recovery routes or containing homes.
+An accounting failure preserves those routes and homes for reconciliation.
 `--force` remains the explicit discard path and requires the same captain authority as local secondmate discard.
 
 No generic remote delete or write surface exists:

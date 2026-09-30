@@ -1019,6 +1019,41 @@ test_recovery_retains_confirmed_missing_generation() {
   pass "liveness recovery consumes the absence-proof refusal before any replacement"
 }
 
+test_recovery_does_not_kill_a_late_confirmed_start() {
+  local out
+  make_pooled_world pooled-late-start
+  pooled_meta g1
+  pooled_dispatch g1
+  cat > "$W/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+D="$W/endpoint"
+case "\$1" in
+  list-windows) cat "\$D/windows" ;;
+  display-message)
+    case "\$*" in
+      *pane_current_command*)
+        n=0
+        [ ! -f "\$D/reads" ] || n=\$(cat "\$D/reads")
+        n=\$((n + 1))
+        printf '%s\n' "\$n" > "\$D/reads"
+        [ "\$n" -lt 3 ] || printf 'claude\n' > "\$D/command"
+        cat "\$D/command"
+        ;;
+      *) printf 'fakepane\n' ;;
+    esac
+    ;;
+  kill-window) : > "\$D/killed"; : > "\$D/windows" ;;
+esac
+SH
+  chmod +x "$W/fakebin/tmux"
+  out=$(pooled_recover)
+  assert_contains "$out" '1|skipped|' "late startup confirmation authorized recovery: $out"
+  assert_equals confirmed "$(pooled_lifecycle g1)" "the fresh alive observation was not recorded"
+  assert_absent "$W/endpoint/killed" "recovery killed the newly confirmed endpoint"
+  assert_absent "$W/spawn.log" "recovery launched after confirmation rather than reclamation"
+  pass "a late startup confirmation never authorizes destructive recovery"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -1050,3 +1085,5 @@ echo "# all fm-secondmate-liveness tests passed"
 
 test_recovery_adopts_current_ledger_generation
 test_recovery_retains_confirmed_missing_generation
+
+test_recovery_does_not_kill_a_late_confirmed_start

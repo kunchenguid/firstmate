@@ -65,14 +65,15 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  my ($op, $prev) = ("-", "-");
+  my ($op, $prev, $expected) = ("-", "-", "-");
   for (my $i = 0; $i < @args; $i++) {
     $op = $args[$i + 1] if $args[$i] eq "--operation";
     $prev = $args[$i + 1] if $args[$i] eq "--previous";
+    $expected = $args[$i + 1] if $args[$i] eq "--expect-generation";
   }
-  print join("\t", (map { defined $_ && $_ ne "" ? $_ : "-" } @args[0..5]), $op, $prev);
+  print join("\t", (map { defined $_ && $_ ne "" ? $_ : "-" } @args[0..5]), $op, $prev, $expected);
 ' "$argv_b64")
-IFS=$'\t' read -r cmd action id harness model effort op prev <<FIELDS
+IFS=$'\t' read -r cmd action id harness model effort op prev expected <<FIELDS
 $command_fields
 FIELDS
 [ "$cmd" = fm-remote-secondmate-control.sh ] || exit 93
@@ -101,6 +102,11 @@ if [ "$action" = disposition ]; then
   exit 0
 fi
 [ "$action" = relaunch ] || exit 94
+if [ "${FM_FAKE_HOST_GENERATION:-}" != "" ] && [ "$expected" != - ] && [ "$expected" != "$FM_FAKE_HOST_GENERATION" ]; then
+  [ -z "$op" ] || disposition prelaunch false false >&2
+  printf 'error: generation-mismatch: host now runs %s\n' "$FM_FAKE_HOST_GENERATION" >&2
+  exit 6
+fi
 old_stopped=false
 [ "$prev" = - ] || old_stopped=true
 case "$FM_FAKE_RELAUNCH_MODE" in
@@ -167,6 +173,7 @@ chmod +x "$FAKEBIN/fake-ssh"
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
     FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" FM_FAKE_DISPOSITION="${FM_FAKE_DISPOSITION:-}" \
+    FM_FAKE_HOST_GENERATION="${FM_FAKE_HOST_GENERATION:-}" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
 }
 
@@ -435,6 +442,30 @@ assert_equals host-generation "$(sed -n 's/^remote_spawn_gen=//p' "$HOME_DIR/sta
 OUT=$(run_relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
 expect_code 6 "$RC" "an old unpooled host generation: $OUT"
 pass "remote relaunch publishes and fences its host generation without pools"
+perl -pi -e 's/^remote_spawn_gen=.*/remote_spawn_gen=host-old/' "$HOME_DIR/state/ios.meta"
+OUT=$(FM_FAKE_HOST_GENERATION=host-new run_relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
+expect_code 6 "$RC" "a stale parent whose host already replaced the mate: $OUT"
+assert_contains "$OUT" "generation-mismatch" "the expected generation did not reach the host"
+pass "a newer host incarnation refuses a stale parent restart binding"
+
+reset_meta
+seed_pool
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "initial tracked remote launch: $OUT"
+OLD=$(sed -n 's/^fleet_seat_generation=//p' "$HOME_DIR/state/ios.meta")
+cp "$HOME_DIR/config/fleet-seats" "$TMP/optout-policy"
+rm "$HOME_DIR/config/fleet-seats"
+OUT=$(run_relaunch ios claude pool-model-a medium --expect-generation "$OLD"); RC=$?
+expect_code 0 "$RC" "remote opt-out successor: $OUT"
+NEW=$(sed -n 's/^fleet_seat_generation=//p' "$HOME_DIR/state/ios.meta")
+[ "$NEW" != "$OLD" ] || fail "opt-out kept the predecessor's generation"
+assert_equals released "$(ios_lifecycle "$OLD")" "remote opt-out stranded its predecessor"
+assert_equals confirmed "$(ios_lifecycle "$NEW")" "remote opt-out lost its successor confirmation"
+cp "$TMP/optout-policy" "$HOME_DIR/config/fleet-seats"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "the restored remote policy did not count the successor: $OUT"
+pass "remote opt-out handoffs record their successor and release the proven predecessor"
+
 
 # --- host side: token-scoped operation receipts and dispositions --------------
 # bin/fm-remote-secondmate-control.sh answers for exactly one operation token
@@ -559,5 +590,32 @@ chmod 0600 "$TMP/proven-response"
 seats reconcile-remote ios --generation new --response-file "$TMP/proven-response" >/dev/null || fail "proven remote destruction was refused"
 assert_equals released "$(ios_lifecycle old)" "proven remote destruction did not release its predecessor"
 pass "remote predecessor release requires startup confirmation or endpoint destruction proof"
+
+rm -f "$HOST_HOME/state/fleet-seats/policy.json"
+cat > "$HOST_HOME/state/parent-route/ios.meta" <<EOF
+kind=secondmate
+harness=claude
+backend=herdr
+window=fm-remote:w1:p1
+endpoint_task_id=ios
+herdr_session=fm-remote
+herdr_workspace_id=w1
+herdr_tab_id=w1:t1
+herdr_pane_id=w1:p1
+worktree=$HOST_HOME
+home=$HOST_HOME
+spawn_gen=host-new
+EOF
+OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
+expect_code 6 "$RC" "host generation mismatch without pools: $OUT"
+assert_grep 'spawn_gen=host-new' "$HOST_HOME/state/parent-route/ios.meta" "the mismatch changed the host incarnation"
+OUT=$(host_control relaunch ios claude pool-model-a medium --operation hostfence --previous host-old --expect-generation host-old); RC=$?
+expect_code 6 "$RC" "tracked host generation mismatch: $OUT"
+DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
+assert_equals 'prelaunch false' "$(printf '%s\n' "$DISP" | jq -r '.disposition + " " + (.old_stopped | tostring)')" "the host mismatch authorized a predecessor stop"
+perl -ni -e 'print unless /^spawn_gen=/' "$HOST_HOME/state/parent-route/ios.meta"
+OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
+expect_code 6 "$RC" "missing host generation binding: $OUT"
+pass "host lifecycle fencing refuses mismatched and missing incarnation bindings before effects"
 
 echo "ALL TESTS PASSED"

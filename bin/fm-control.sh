@@ -1328,6 +1328,16 @@ do_relaunch() {
     [ -z "$seat_out" ] || printf '%s\n' "$seat_out" >&2
   fi
 
+  if [ "$SEAT_TRACKED" = 1 ] && [ -n "$SEAT_PREV_GEN" ] && [ "$(agent_state)" = alive ]; then
+    local predecessor
+    predecessor=$(control_seats show "$ID") || die "could not read $ID's predecessor seat before stopping it"
+    if printf '%s\n' "$predecessor" | jq -e --arg g "$SEAT_PREV_GEN" \
+      'any(.incarnations[]; .generation == $g and (.lifecycle == "reserved" or .lifecycle == "confirmed"))' >/dev/null 2>&1; then
+      control_seats confirm "$ID" --generation "$SEAT_PREV_GEN" >/dev/null \
+        || die "could not record $ID's exact predecessor startup before stopping it"
+    fi
+  fi
+
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
@@ -1396,7 +1406,7 @@ do_relaunch() {
   RELAUNCH_AGENT_CONFIRMED=1
   # A supervisor's seat is confirmed by the launch owner's startup handoff;
   # replaying it here is idempotent and closes a lost confirmation.
-  if [ "$SEAT_TRACKED" = 1 ] && [ "$KIND" = secondmate ]; then
+  if [ "$SEAT_TRACKED" = 1 ]; then
     control_seats confirm "$ID" --generation "$SEAT_GEN" >/dev/null \
       || echo "warning: $ID's replacement is running, but its fleet seat confirmation could not be recorded; it stays counted" >&2
   fi

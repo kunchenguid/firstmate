@@ -525,6 +525,12 @@ fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
     seat_out=$(FM_HOME="$seat_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
       FM_CONFIG_OVERRIDE="$seat_config" FM_DATA_OVERRIDE="$seat_data" \
       "$FM_SM_LIVE_LIB_DIR/fm-fleet-seats.sh" reclaim "$id" --generation "$probed_gen" 2>&1) || seat_rc=$?
+    if [ "$seat_rc" -eq 0 ] && [ -n "$seat_out" ]; then
+      case "$seat_out" in
+        "fleet-seats: reclaimed id=$id generation=$probed_gen"*|"fleet-seats: released id=$id generation=$probed_gen"*|"fleet-seats: already terminal id=$id generation=$probed_gen"|"fleet-seats: no seat held id=$id generation=$probed_gen") ;;
+        *) seat_rc=1 ;;
+      esac
+    fi
     if [ "$seat_rc" -ne 0 ]; then
       FM_SM_LIVE_STATUS=skipped
       FM_SM_LIVE_REASON="its fleet seat generation $probed_gen was not reclaimed, so no replacement was launched: $(printf '%s\n' "$seat_out" | tail -1)"
