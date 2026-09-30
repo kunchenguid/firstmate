@@ -155,28 +155,53 @@ test_pi_extension_stale_incarnation_rejected() {
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 
-# drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
-# OpenCode plugin in a plain Node host and feed it one event per argument, in
-# order, through the same hooks.event entry OpenCode calls.
+# drive_oc_plugin <plugin-path> <own-location> <events-json-lines...>: load the
+# generated OpenCode plugin the way OpenCode 2 loads it (import the module, read
+# its default export, run setup(ctx)) in a plain Node host, then feed it one
+# event per argument through the subscription setup() opened. OpenCode 2's
+# plugin subscription is the whole server's event stream, so the host is given
+# an own-location to filter against exactly as a real server would.
 drive_oc_plugin() {
-  local plugin=$1
-  shift
-  PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
+  local plugin=$1 own=$2
+  shift 2
+  PLUGIN_PATH="$plugin" OC_OWN="$own" node --input-type=module - "$@" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
-const hooks = await mod.FmBusyState({});
-for (const arg of process.argv.slice(2)) {
-  await hooks.event({ event: JSON.parse(arg) });
+const definition = mod.default;
+if (!definition || typeof definition.id !== "string" || typeof definition.setup !== "function") {
+  throw new Error("generated plugin is not an OpenCode 2 definition");
 }
+const events = process.argv.slice(2).map((arg) => JSON.parse(arg));
+const cleanup = await definition.setup({
+  location: { directory: process.env.OC_OWN, project: { id: "t", directory: process.env.OC_OWN, canonical: process.env.OC_OWN } },
+  event: {
+    subscribe: () => ({
+      async *[Symbol.asyncIterator]() {
+        for (const event of events) yield event;
+      },
+    }),
+  },
+  session: { prompt: async () => ({ id: "msg_test" }) },
+});
+// Let the subscription's async loop drain: the plugin awaits a child process
+// per event before it can write the busy record this test reads back.
+for (let tick = 0; tick < 200; tick += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (typeof cleanup === "function") await cleanup();
 EOF
 }
 
-oc_status() {  # <sessionID> <type>
-  printf '{"type":"session.status","properties":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
+# A step starting is the worker becoming active, and a step ending without
+# asking for further tools is its turn ending. OpenCode 2 delivers neither
+# session.status nor session.idle to a plugin subscription, so these are the
+# events the generated plugin reads.
+oc_step_started() {  # <sessionID>
+  printf '{"type":"session.step.started","data":{"sessionID":"%s"},"location":{"directory":"%s"}}' "$1" "$2"
 }
 
-oc_idle() {  # <sessionID>
-  printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
+oc_turn_end() {  # <sessionID> <location> [finish]
+  printf '{"type":"session.step.ended","data":{"sessionID":"%s","finish":"%s"},"location":{"directory":"%s"}}' "$1" "${3:-stop}" "$2"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -192,39 +217,51 @@ test_opencode_plugin_semantic_lifecycle() {
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" "$(oc_status ses_main busy)") || fail "busy drive failed: $out"
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" "$(oc_step_started ses_main "$WT_DIR")") || fail "busy drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "session busy must classify 'busy opencode-plugin', got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "a starting step must classify 'busy opencode-plugin', got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_status ses_child busy)" \
-    "$(oc_status ses_child idle)") || fail "child-session drive failed: $out"
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_step_started ses_child "$WT_DIR")" \
+    "$(oc_turn_end ses_child "$WT_DIR")") || fail "child-session drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "a child session's idle must not clear the worker, got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "a child session's turn end must not clear the worker, got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main retry)" \
-    "$(oc_status ses_main idle)") || fail "retry/idle drive failed: $out"
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses_main "$WT_DIR")" \
+    "$(oc_turn_end ses_main "$WT_DIR")") || fail "turn-end drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's idle must classify idle, got '$out'"
+  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's turn end must classify idle, got '$out'"
+
+  # A tool-calls step is the agent loop continuing, not a turn end.
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses3 "$WT_DIR")" \
+    "$(oc_turn_end ses3 "$WT_DIR" tool-calls)") || fail "tool-calls drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "a tool-calls step must not read as a turn end, got '$out'"
+
+  # Another location's turn end is on the same shared stream and must be ignored.
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses4 "$WT_DIR")" \
+    "$(oc_turn_end ses4 /somewhere/else)") || fail "foreign-location drive failed: $out"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "another location's turn end must not clear the latched busy, got '$out'"
+  [ -f "$state/$id.turn-ended" ] || fail "a foreign turn end must not even touch the notification marker"
 
   rm -f "$state/$id.turn-ended"
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_idle ses_main)") || fail "session.idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "session.idle no longer touches the notification marker"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "session.idle for the latched session must classify idle, got '$out'"
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses5 "$WT_DIR")" \
+    "$(oc_turn_end ses5 "$WT_DIR")") || fail "marker drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a turn end no longer touches the notification marker"
 
-  rm -f "$state/$id.turn-ended"
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses2 busy)" \
-    "$(oc_idle ses_other)") || fail "other-session idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.idle"
+  out=$(drive_oc_plugin "$plugin" "$WT_DIR" \
+    "$(oc_step_started ses6 "$WT_DIR")" \
+    "$(oc_turn_end ses_other "$WT_DIR")") || fail "other-session turn end drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session's turn end"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+  [ "$out" = "busy opencode-plugin" ] || fail "another session's turn end must not clear the latched busy, got '$out'"
+  pass "opencode plugin classifies from v2 step events, scoped to the latched worker session"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>

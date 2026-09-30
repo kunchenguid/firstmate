@@ -1,60 +1,47 @@
-import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+// Session-start nudge for OpenCode: when a session appears in this instance's
+// own location, run bin/fm-sessionstart-nudge.sh and, when the wrapper prints a
+// nudge, deliver it to that session (see docs/sessionstart-nudge.md).
+//
+// OpenCode 2 changed both halves of this plugin's contract, so the shape below
+// is re-derived rather than transliterated. The v1 `event` hook returned from
+// the plugin factory is now an async subscription taken on the context and
+// aborted from the cleanup function `setup` returns. Event payloads moved from
+// `event.properties` to `event.data`, so the created session's id is
+// `event.data.sessionID` rather than `event.properties.info.id`. Delivering the
+// nudge moved from `client.session.promptAsync({ path, body: { parts } })` to
+// `ctx.session.prompt({ sessionID, text })`. The subscription is also the whole
+// server's stream, so the handler runs only for this instance's own location -
+// see lib/fm-opencode-contract.js.
+
+import { resolvePluginRoot, runProcess, subscribeOwnEvents } from "./lib/fm-opencode-contract.js";
 
 const handledSessions = new Set();
 
-function runProcess(command, args) {
-  return new Promise((resolveResult) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"] });
-    let stdout = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.on("error", () => resolveResult({ code: 0, stdout: "" }));
-    child.on("close", (code) => resolveResult({ code: code ?? 0, stdout }));
-  });
+function runNudge(root) {
+  return runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
 }
 
-function resolvePath(anchor) {
-  try {
-    return realpathSync(anchor);
-  } catch {
-    return resolve(anchor);
-  }
-}
+export default {
+  id: "firstmate.primary.sessionstart-nudge",
+  async setup(ctx) {
+    const root = await resolvePluginRoot(ctx);
+    if (!root) return;
 
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  return resolvePath(anchor);
-}
-
-export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-
-  return {
-    event: async ({ event }) => {
+    return subscribeOwnEvents(ctx, async (event) => {
       if (event.type !== "session.created") return;
-      const sessionID = event.properties?.info?.id ?? event.properties?.sessionID;
-      if (!sessionID || handledSessions.has(sessionID) || !root) return;
+      const sessionID = event.data?.sessionID;
+      if (!sessionID || handledSessions.has(sessionID)) return;
       handledSessions.add(sessionID);
 
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
+      const result = await runNudge(root);
       const nudge = result.code === 0 ? result.stdout.trim() : "";
       if (!nudge) return;
 
       try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
+        await ctx.session.prompt({ sessionID, text: nudge });
       } catch {
+        // A nudge that cannot be delivered is not worth failing the session over.
       }
-    },
-  };
+    });
+  },
 };

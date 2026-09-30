@@ -1,75 +1,58 @@
-import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+// Turn-end guard for OpenCode: when a turn ends, let the watcher coordinator
+// act first, and only when supervision is genuinely missing, run
+// bin/fm-turnend-guard.sh and deliver its finding so the turn cannot end blind
+// (see docs/turnend-guard.md).
+//
+// OpenCode 2 changed this plugin's contract, so the shape below is re-derived
+// rather than transliterated. The v1 `event` hook is now an async subscription
+// on the context, aborted from the cleanup function `setup` returns. Event
+// payloads moved from `event.properties` to `event.data`. OpenCode 2 also no
+// longer delivers v1's `session.idle` to a plugin subscription, so the turn-end
+// trigger is the last step of a turn instead - see turnEndedSessionID in
+// lib/fm-opencode-contract.js. Delivering the finding moved from
+// `client.session.promptAsync({ path, body: { parts } })` to
+// `ctx.session.prompt({ sessionID, text })`. The subscription is the whole
+// server's stream, so the handler runs only for this instance's own location.
+
+import { resolvePluginRoot, runProcess, subscribeOwnEvents, turnEndedSessionID } from "./lib/fm-opencode-contract.js";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 
 let skipNextIdle = false;
 
-function runProcess(command, args, input = "") {
-  return new Promise((resolve) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
-    child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
-    child.stdin.end(input);
-  });
-}
-
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  return resolvePath(anchor);
-}
-
-function resolvePath(anchor) {
-  try {
-    return realpathSync(anchor);
-  } catch {
-    return resolve(anchor);
-  }
-}
+// The guard reads its whole turn-end payload from stdin and exits 0 when stdin
+// is empty, so the payload the v1 adapter sent is still sent here; dropping it
+// would leave the guard permanently silent rather than loudly broken.
+const GUARD_PAYLOAD = '{"stop_hook_active":false}';
 
 function runGuard(root) {
   if (!root) return Promise.resolve({ code: 0, stderr: "" });
-  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], '{"stop_hook_active":false}');
+  return runProcess(`${root}/bin/fm-turnend-guard.sh`, [], { input: GUARD_PAYLOAD });
 }
 
-async function letWatchArmRun(sessionID, client) {
+async function letWatchArmRun(sessionID, ctx) {
   const coordinator = globalThis[COORDINATOR_KEY];
   if (!coordinator?.ensureArmed) return false;
-  const status = await coordinator.ensureArmed(sessionID, client);
+  const status = await coordinator.ensureArmed(sessionID, ctx);
   return status === "armed" || status === "wake" || status === "failed";
 }
 
-export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+export default {
+  id: "firstmate.primary.turnend-guard",
+  async setup(ctx) {
+    const root = await resolvePluginRoot(ctx);
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle") return;
+    return subscribeOwnEvents(ctx, async (event) => {
+      const sessionID = turnEndedSessionID(event);
+      if (!sessionID) return;
 
       if (skipNextIdle) {
         skipNextIdle = false;
         return;
       }
 
-      const sessionID = event.properties?.sessionID;
-      if (!sessionID) return;
-
-      if (await letWatchArmRun(sessionID, client)) return;
+      if (await letWatchArmRun(sessionID, ctx)) return;
 
       const result = await runGuard(root);
       if (result.code !== 2) return;
@@ -82,16 +65,11 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
             "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
             result.stderr,
         );
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }],
-          },
-        });
+        await ctx.session.prompt({ sessionID, text });
         skipNextIdle = true;
       } catch {
         skipNextIdle = false;
       }
-    },
-  };
+    });
+  },
 };
