@@ -2382,3 +2382,26 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Gemini half-block composer on Herdr
+
+On 2026-09-30, installed Gemini CLI 0.62.0 on macOS and Herdr client/server 0.7.4 produced a three-row half-block composer with an asterisk prompt and a styled placeholder.
+The quarantined [`Gemini 0.62.0 rendered-surface adapter`](../../bin/fm-composer-gemini-0.62.0.sh) owns the identity, envelope, footer and draft-input proof; the shared classifier consumes its verdict.
+Standing debt: this vendor-rendered layout is pinned to Gemini CLI 0.62.0 / Herdr 0.7.4 and is expected to break on a vendor release.
+The live guard verifies the pinned layout and native identity, and reports the endpoint version as unverified because Herdr's identity probe does not attest a Gemini release.
+Record the selected worker's release provenance separately when refreshing the real endpoint proof before extending the adapter's version scope.
+Production classification validates the pinned layout and native identity rather than querying a local binary version, which cannot attest the remote endpoint's version.
+This proof currently applies to Herdr's identity-capable surface; tmux's composer identity probe remains Pi-only, and backends without native Gemini identity refuse this shape.
+Refresh with the read-only guard against an existing idle endpoint:
+
+```sh
+FM_GEMINI_COMPOSER_LIVE=1 FM_GEMINI_COMPOSER_TARGET=default:w4:p6 FM_BACKEND_HERDR_BIN=/Users/jacob/.local/bin/herdr FM_BACKEND_HERDR_CLIENT_SESSION=default bash tests/fm-gemini-composer-live-e2e.test.sh
+```
+
+Observed output from the original 2026-09-30 guard, before its local-version check was removed:
+
+```text
+ok - Gemini 0.62.0: live Herdr idle composer empty; read-only guard
+```
+
+`tests/fm-composer-lib.test.sh` covers the positive proof and refusal cases in both locales.

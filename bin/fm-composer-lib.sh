@@ -33,8 +33,8 @@
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
 #               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
-#               shape stays `unknown`.
+#               Pi's blank separated composer and Gemini's half-block
+#               composer provable; with identity=0 those shapes stay `unknown`.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -77,6 +77,9 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#   half-block - gemini: an asterisk row between matching half-block rules.
+#                The asterisk alone proves nothing; the identity and footer
+#                safety contract is owned by fm-composer-gemini-0.62.0.sh.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -1612,6 +1615,11 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# Vendor-rendered layouts stay in named, version-scoped adapters; this
+# classifier consumes only their empty|pending|unknown|need-identity verdicts.
+# shellcheck source=bin/fm-composer-gemini-0.62.0.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-composer-gemini-0.62.0.sh"
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
@@ -1629,6 +1637,9 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  if _fm_composer_adapter_gemini_0_62_0 "$screen" "$plain" "$styled" "$has_identity" "$identity" "$cy"; then
+    return 0
+  fi
   _fm_composer_scan_screen "$plain" "$cy"
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.

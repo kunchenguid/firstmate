@@ -1026,3 +1026,105 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# Real Gemini 0.62.0 layout captured on Herdr 0.7.4, 2026-09-30.
+test_gemini_halfblock_identity() {
+  local screen typed trailing candidate
+  screen=$'transcript\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n* '"${ESC}[38;2;92;99;112m Type your message or @path/to/file${ESC}[0m"$'\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto'
+  assert_screen "Gemini idle requires lazy identity" need-identity "$CAPS_STYLED" "$screen"
+  assert_screen "Gemini live done halfblock" empty "$CAPS_STYLED" "$screen" '' $'gemini\tdone'
+  assert_screen "Gemini idle halfblock" empty "$CAPS_STYLED" "$screen" '' $'gemini\tidle'
+  assert_screen "Gemini blocked modal refuses" unknown "$CAPS_STYLED" "$screen" '' $'gemini\tblocked'
+  assert_screen "Gemini working refuses exit" unknown "$CAPS_STYLED" "$screen" '' $'gemini\tworking'
+  assert_screen "wrong identity refuses asterisk" unknown "$CAPS_STYLED" "$screen" '' $'pi\tdone'
+  assert_screen "identity unavailable refuses" unknown "$CAPS_STYLED_NOID" "$screen"
+  typed=${screen/Type your message or @path\/to\/file/fix the tests}
+  # Typed input stays bright and cannot be erased as ghost placeholder text.
+  typed=${typed//38;2;92;99;112/38;2;171;178;191}
+  assert_screen "Gemini draft stays pending" pending "$CAPS_STYLED" "$typed" '' $'gemini\tdone'
+  assert_screen "Gemini stale box above shell" unknown "$CAPS_STYLED" "$screen"$'\n$ ' '' $'gemini\tdone'
+  for trailing in 'jacob@host ~ %' 'jacob@host:~/repo$' '[root@host repo]#' \
+    'PS C:\repo>' 'Working on request...' 'unrecognized footer' '❯' \
+    '/repo main no sandbox Auto jacob@host ~ %' '/repo main no sandbox Unknown' \
+    '/repo main sandbox Auto'; do
+    candidate=${screen%$'\n'*}$'\n'"$trailing"
+    assert_screen "Gemini unproven footer: $trailing" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+    assert_screen "Gemini activity below footer: $trailing" unknown "$CAPS_STYLED" "$screen"$'\n'"$trailing" '' $'gemini\tidle'
+  done
+  candidate=${screen%$'\n'*}
+  assert_screen "Gemini incomplete footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  candidate=${candidate%$'\n'*}
+  assert_screen "Gemini done without footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  assert_screen "Gemini idle without footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tidle'
+  assert_screen "Gemini missing footer before identity probe" unknown "$CAPS_STYLED" "$candidate"
+  candidate=${screen/workspace (\/directory)   branch   sandbox   \/model/workspace (\/directory) arbitrary sandbox \/model}
+  assert_screen "Gemini unproven footer header" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  pass "Gemini halfblock composer binds geometry, styling and native idle identity"
+}
+test_gemini_halfblock_identity
+
+# Exercise the live guard's executable interface with a disappearing server.
+# The fake CLI records operations, so any attempted server restart is visible.
+test_gemini_live_guard_read_only() {
+  local fixture mode rc out operation
+  fixture=$(fm_test_tmproot gemini-composer-guard)
+  mkdir -p "$fixture/bin"
+  cat > "$fixture/bin/gemini" <<'SH'
+#!/usr/bin/env bash
+printf 'called\n' >> "$GUARD_GEMINI_LOG"
+if [ "$GUARD_MODE" = local-unavailable ]; then exit 1; fi
+printf '0.62.1\n'
+SH
+  cat > "$fixture/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GUARD_LOG"
+case "$1 $2" in
+  'agent get')
+    [ "$GUARD_MODE" != absent ] || exit 1
+    status=done
+    if [ -f "$GUARD_CAPTURED" ] && [ "$GUARD_MODE" = changed ]; then status=working; fi
+    printf '{"result":{"agent":{"agent":"gemini","agent_status":"%s"}}}\n' "$status"
+    ;;
+  'status --json')
+    case "$GUARD_MODE" in
+      stopped) printf '{"server":{"running":false}}\n' ;;
+      unknown) printf '{}\n' ;;
+      *) printf '{"server":{"running":true}}\n' ;;
+    esac
+    ;;
+  'pane read')
+    [ "$GUARD_MODE" != capture-failed ] || exit 1
+    touch "$GUARD_CAPTURED"
+    printf '▄▄▄▄▄▄▄▄\n* \n▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto\n'
+    ;;
+  *) exit 9 ;;
+ esac
+SH
+  chmod +x "$fixture/bin/gemini" "$fixture/bin/herdr"
+  for mode in alive stopped unknown capture-failed changed absent local-upgraded local-unavailable; do
+    : > "$fixture/commands"
+    : > "$fixture/gemini-commands"
+    rm -f "$fixture/captured"
+    rc=0
+    out=$(PATH="$fixture/bin:$PATH" FM_GEMINI_COMPOSER_LIVE=1 \
+      FM_GEMINI_COMPOSER_TARGET=fixture:w1:p1 \
+      FM_BACKEND_HERDR_BIN="$fixture/bin/herdr" FM_BACKEND_HERDR_CLIENT_SESSION=fixture \
+      GUARD_GEMINI_LOG="$fixture/gemini-commands" GUARD_LOG="$fixture/commands" GUARD_CAPTURED="$fixture/captured" GUARD_MODE="$mode" \
+      bash "$ROOT/tests/fm-gemini-composer-live-e2e.test.sh" 2>&1) || rc=$?
+    if [ "$mode" = alive ] || [ "$mode" = local-upgraded ] || [ "$mode" = local-unavailable ]; then
+      [ "$rc" -eq 0 ] || fail "live guard rejected idle fixture: $out"
+    else
+      [ "$rc" -ne 0 ] || fail "live guard accepted $mode server/identity"
+    fi
+    [ ! -s "$fixture/gemini-commands" ] || fail "guard queried a local binary unrelated to the endpoint"
+    while IFS= read -r operation; do
+      case "$operation" in
+        'agent get w1:p1 --session fixture'|'status --json --session fixture'|\
+        'pane read w1:p1 --source visible --format ansi --session fixture') ;;
+        *) fail "live guard attempted non-read-only operation: $operation" ;;
+      esac
+    done < "$fixture/commands"
+  done
+  pass "Gemini live guard refuses lost server/capture/identity without mutations"
+}
+test_gemini_live_guard_read_only

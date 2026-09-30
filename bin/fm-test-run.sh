@@ -356,6 +356,7 @@ family_for_basename() {
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
+    fm-gemini-composer-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
     fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
@@ -1615,8 +1616,8 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
-    bin/fm-composer-lib.sh)
-      # The shared shape catalogue is vendor-rendered signal; a change to it
+    bin/fm-composer-lib.sh|bin/fm-composer-gemini-0.62.0.sh)
+      # Composer rendering adapters carry vendor signal; a change to them
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the
       # portable families.
       printf '%s\n' backend-dispatch

@@ -562,6 +562,27 @@ test_backend_source_requires_adapter_file() {
   done
 }
 
+test_backend_source_requires_gemini_adapter() {
+  local dir backend out rc
+  dir="$TMP_ROOT/gemini-adapter-precheck"
+  mkdir -p "$dir"
+  cp -R "$ROOT/bin/." "$dir/"
+  rm "$dir/fm-composer-gemini-0.62.0.sh"
+  for backend in tmux herdr zellij orca cmux; do
+    rc=0
+    out=$(bash -c '
+      . "$1"
+      FM_BACKEND_LIB_DIR=$2
+      set -e
+      fm_backend_source "$3"
+      printf "lifecycle continued\n"
+    ' _ "$ROOT/bin/fm-backend.sh" "$dir" "$backend" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$backend loaded without its Gemini adapter: $out"
+    [ -z "$out" ] || fail "$backend sourced an incomplete library tree: $out"
+  done
+  pass "every backend refuses a missing Gemini adapter before sourcing"
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1210,6 +1231,7 @@ test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
 test_backend_source_requires_adapter_file
+test_backend_source_requires_gemini_adapter
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
