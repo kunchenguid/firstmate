@@ -56,7 +56,28 @@ fm_harness_path_name() {  # <path>
 }
 
 # True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# is an omp per-session worker helper rather than an omp session. omp 18.4.4 runs
+# helpers from its own binary under the exact `omp` name (verified:
+# `omp __omp_worker_daemon_broker`, with `__omp_worker_lsp_mux` and
+# `__omp_worker_text_predict` beneath it), and every tool shell of an interactive
+# session is a child of its broker. A helper is never the session: it can outlive
+# it reparented to pid 1. The marker is argv[1] exactly, never a substring,
+# because a session's own argv can quote a helper name inside its prompt.
+fm_harness_is_omp_worker_helper() {  # <comm> <args>
+  local comm=$1 args=$2 rest
+  [ "${comm##*/}" = omp ] || return 1
+  case "$args" in
+    "$comm "*) rest=${args#"$comm "} ;;
+    *' '*) rest=${args#* } ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in __omp_worker_*) return 0 ;; esac
+  return 1
+}
+
+# True when the process described by command name $1 and full argument string $2
+# is a verified harness session. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# An omp worker helper is not a session, so it never matches.
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
@@ -71,6 +92,7 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  fm_harness_is_omp_worker_helper "$comm" "$args" && return 1
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -116,17 +138,27 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# An omp worker helper (fm_harness_is_omp_worker_helper) is crossed, never
+# printed: the omp 18.4.4 tool shell runs under its session's broker, and the
+# session is the omp process above it. Above a helper only an omp session is
+# accepted, so an orphaned helper (reparented to pid 1) or one under anything
+# else ends the walk with nothing to own.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ comm args extending=0 printed=0 helper=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    if fm_harness_is_omp_worker_helper "$comm" "$args"; then
+      [ "$extending" -eq 0 ] || break
+      helper=1
+    elif fm_harness_process_matches "$comm" "$args"; then
+      [ "$helper" -eq 0 ] || [ "${comm##*/}" = omp ] || break
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
-    elif [ "$extending" -eq 1 ]; then
+    elif [ "$extending" -eq 1 ] || [ "$helper" -eq 1 ]; then
       break
     fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')

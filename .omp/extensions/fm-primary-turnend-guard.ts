@@ -56,19 +56,31 @@ const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.omp-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
 
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+function psField(pid: string, field: string): string {
+  const result = spawnSync("ps", ["-o", field, "-p", pid], { encoding: "utf8" });
   if (result.status !== 0) return "";
   return result.stdout.trim();
+}
+
+// A live omp worker helper (`omp __omp_worker_daemon_broker`) is never a session
+// owner; bin/fm-session-lock-lib.sh's fm_harness_is_omp_worker_helper owns the rule.
+function ompWorkerHelper(pid: string): boolean {
+  const comm = psField(pid, "comm=");
+  const args = psField(pid, "args=");
+  if (comm.split("/").pop() !== "omp") return false;
+  const space = args.indexOf(" ");
+  if (space < 0) return false;
+  const rest = args.startsWith(`${comm} `) ? args.slice(comm.length + 1) : args.slice(space + 1);
+  return rest.startsWith("__omp_worker_");
 }
 
 function pidAlive(pid: string): boolean {
   try {
     process.kill(Number(pid), 0);
-    return true;
   } catch {
     return false;
   }
+  return !ompWorkerHelper(pid);
 }
 
 function lockOwnership(): LockOwnership {
@@ -82,7 +94,7 @@ function lockOwnership(): LockOwnership {
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
     if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
+    pid = psField(pid, "ppid=");
     if (!pid || pid === "1") break;
   }
   return pidAlive(lockPid) ? "other" : "missing";

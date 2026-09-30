@@ -14,6 +14,8 @@
 #   4. with the successor watcher frozen until its beacon passes the lab grace,
 #      the next turn end is genuinely unsupervised, so session_stop must compel
 #      the turn-end guard continuation and the model reaches for the tool.
+#   5. bin/fm-lock.sh run as a named bash service, under the session's omp
+#      daemon broker, confirms the lock-holding omp session as owner.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -85,12 +87,26 @@ reap_lab() {
   for pid in $(lab_pids); do kill -KILL "$pid" 2>/dev/null || true; done
 }
 
+# The omp daemon broker a lab session starts is named only `omp
+# __omp_worker_daemon_broker`, never the lab path, so stage 4 records its pid and
+# cleanup reaps it only while that pid still names a broker.
+LAB_BROKER_PID_FILE="$PROJECT/state/tool-shell-parent-pid"
+reap_lab_broker() {
+  local pid
+  pid=$(tr -d '[:space:]' < "$LAB_BROKER_PID_FILE" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$(ps -o args= -p "$pid" 2>/dev/null)" in
+    *' __omp_worker_daemon_broker') kill -TERM "$pid" 2>/dev/null || true ;;
+  esac
+}
+
 cleanup() {
   exec 3>&- 2>/dev/null || true
   if [ -n "$OMP_PID" ]; then
     kill -TERM "$OMP_PID" 2>/dev/null || true
   fi
   reap_lab
+  reap_lab_broker
   rm -rf "$LAB"
 }
 trap cleanup EXIT
@@ -291,6 +307,27 @@ if [ -z "$repaired_pid" ] || ! kill -0 "$repaired_pid" 2>/dev/null; then
   fail "no live watcher after the guard stage"
 fi
 pass "omp $OMP_VERSION: session_stop compelled the guard continuation (guard rc=2, then a stop_hook_active stop) and the model reached for fm_watch_arm_omp"
+
+# --- 4. session-lock ownership from a broker-parented tool shell ----------------
+# From omp 18.4.4 a session's tool processes can run under its own
+# `omp __omp_worker_daemon_broker` helper, which carries the `omp` name; a named
+# bash service always does. A session start run there must still resolve the omp
+# session that already holds the lock, never the helper between them. The broker
+# parent is asserted, so this stage cannot pass on a shell omp ran directly.
+# shellcheck disable=SC2016 # $PPID must expand in the model's service shell, not here
+rpc_send '{"id":"p5","type":"prompt","message":"Call your bash tool exactly once to start this command as a named service with name fm-lock-probe and ready log PROBE-DONE, then reply done and nothing else: bin/fm-lock.sh > state/tool-lock.out 2>&1; ps -o args= -p $PPID > state/tool-shell-parent; echo $PPID > state/tool-shell-parent-pid; echo PROBE-DONE"}'
+wait_for_agent_ends 5 360 || fail "omp did not finish the tool-shell lock turn"
+wait_for_file "$PROJECT/state/tool-shell-parent" 20 || fail "the model did not run the tool-shell lock service"
+tool_parent=$(cat "$PROJECT/state/tool-shell-parent")
+case "$tool_parent" in
+  *' __omp_worker_daemon_broker') ;;
+  *) fail "omp $OMP_VERSION ran the bash service under '$tool_parent', not its daemon broker; re-verify the broker shape in bin/fm-session-lock-lib.sh" ;;
+esac
+tool_lock=$(cat "$PROJECT/state/tool-lock.out" 2>/dev/null || true)
+[ "$tool_lock" = "lock acquired: harness pid $omp_real_pid" ] \
+  || fail "fm-lock.sh under the omp daemon broker did not confirm the omp session $omp_real_pid as owner: $tool_lock"
+[ "$(sed -n '1p' "$PROJECT/state/.lock")" = "$omp_real_pid" ] || fail "the broker-parented lock call rewrote the lock away from the omp session"
+pass "omp $OMP_VERSION: a tool shell under the omp daemon broker resolves the lock-holding omp session as its owner"
 
 # --- shutdown -------------------------------------------------------------------
 # omp documents that closing rpc stdin disposes the session and exits 0. On
