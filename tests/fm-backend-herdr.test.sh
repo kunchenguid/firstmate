@@ -859,6 +859,34 @@ test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one() {
   pass "herdr client selection: a live pane behind a stale shadowing client reads alive"
 }
 
+test_pin_agent_name_scopes_spawn_rename_to_task_session() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/pin-spawn"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pin_agent_name default w1:p2 ship-ab12' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "pin should succeed when the rename succeeds"
+  [ -z "$out" ] || fail "pin should be silent on success, got: $out"
+  assert_contains "$(cat "$log")" $'agent\x1frename\x1fw1:p2\x1fship-ab12' "pin did not issue agent rename <pane> <task-id>"
+  assert_contains "$(cat "$log")" 'HERDR_SESSION=default' "pin did not scope the rename to the task session"
+  pass "herdr agent pin: a spawn pins the fresh pane to its task id in its own session"
+}
+
+test_pin_agent_name_relaunch_rename_failure_never_fails() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/pin-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pin_agent_name fm-remote w9:p4 scout-xy99' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "pin must not fail a relaunch when the rename fails"
+  assert_contains "$(cat "$log")" $'agent\x1frename\x1fw9:p4\x1fscout-xy99' "pin did not attempt the relaunch rename"
+  assert_contains "$out" "keeps its server-assigned name" "pin did not warn about the failed rename"
+  pass "herdr agent pin: a failed relaunch rename warns and never fails the relaunch"
+}
+
 # shellcheck disable=SC2016
 test_cli_caches_the_selected_client_within_a_process() {
   local dir out
@@ -5845,6 +5873,8 @@ test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
+test_pin_agent_name_scopes_spawn_rename_to_task_session
+test_pin_agent_name_relaunch_rename_failure_never_fails
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process

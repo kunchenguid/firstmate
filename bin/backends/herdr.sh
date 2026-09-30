@@ -3215,6 +3215,23 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
   printf '%s' "$out" | jq -r '[.result.agent.agent // "", .result.agent.agent_status // ""] | @tsv' 2>/dev/null
 }
 
+# fm_backend_herdr_pin_agent_name: best-effort pin of a pane's agent display
+# name to <name>. Herdr 0.9.1 assigns every agent a random call-sign at start
+# and fresh ones across a server restart, so fm-spawn.sh pins each worker's
+# agent to its task id (the secondmate id for a secondmate launch) once the
+# spawn or relaunch has fully succeeded and the agent is live - a rename on
+# an agent-less pane fails agent_not_found, so this never runs at tab-create
+# time. The name arrives as metadata from the caller and is never parsed
+# from a label or title. A rename failure warns and still returns 0: the
+# name is cosmetic and must never fail a spawn or relaunch.
+fm_backend_herdr_pin_agent_name() {  # <session> <pane-id> <name>
+  local session=${1:-} pane=${2:-} name=${3:-}
+  [ -n "$session" ] && [ -n "$pane" ] && [ -n "$name" ] || return 0
+  fm_backend_herdr_cli "$session" agent rename "$pane" "$name" >/dev/null 2>&1 || \
+    echo "warning: herdr agent rename of pane $pane to '$name' failed; the agent keeps its server-assigned name" >&2
+  return 0
+}
+
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
 # backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.

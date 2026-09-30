@@ -5478,4 +5478,16 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
+# Herdr assigns every agent a random call-sign at start and fresh ones across
+# a server restart, so pin the live agent's display name to this task's id now
+# that the spawn has fully succeeded (the agent is live here; a rename on an
+# agent-less pane fails). $ID is the task id for a crewmate, scout, or
+# relaunch and the secondmate id for a secondmate launch. Best-effort: the
+# name is cosmetic and a rename failure never fails the spawn or relaunch.
+# Every endpoint the herdr backend (re)creates converges here with T holding
+# "session:pane-id", so this one site also re-applies the pin after a
+# relaunch rebind, a projection reclaim, or a husk replacement.
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_pin_agent_name "${T%%:*}" "${T#*:}" "$ID"
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
