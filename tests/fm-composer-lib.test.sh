@@ -1062,3 +1062,65 @@ test_gemini_halfblock_identity() {
   pass "Gemini halfblock composer binds geometry, styling and native idle identity"
 }
 test_gemini_halfblock_identity
+
+# Exercise the live guard's executable interface with a disappearing server.
+# The fake CLI records operations, so any attempted server restart is visible.
+test_gemini_live_guard_read_only() {
+  local fixture mode rc out operation
+  fixture=$(fm_test_tmproot gemini-composer-guard)
+  mkdir -p "$fixture/bin"
+  cat > "$fixture/bin/gemini" <<'SH'
+#!/usr/bin/env bash
+printf 'fixture-version\n'
+SH
+  cat > "$fixture/bin/herdr" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GUARD_LOG"
+case "$1 $2" in
+  'agent get')
+    [ "$GUARD_MODE" != absent ] || exit 1
+    status=done
+    if [ -f "$GUARD_CAPTURED" ] && [ "$GUARD_MODE" = changed ]; then status=working; fi
+    printf '{"result":{"agent":{"agent":"gemini","agent_status":"%s"}}}\n' "$status"
+    ;;
+  'status --json')
+    case "$GUARD_MODE" in
+      stopped) printf '{"server":{"running":false}}\n' ;;
+      unknown) printf '{}\n' ;;
+      *) printf '{"server":{"running":true}}\n' ;;
+    esac
+    ;;
+  'pane read')
+    [ "$GUARD_MODE" != capture-failed ] || exit 1
+    touch "$GUARD_CAPTURED"
+    printf '▄▄▄▄▄▄▄▄\n* \n▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto\n'
+    ;;
+  *) exit 9 ;;
+ esac
+SH
+  chmod +x "$fixture/bin/gemini" "$fixture/bin/herdr"
+  for mode in alive stopped unknown capture-failed changed absent; do
+    : > "$fixture/commands"
+    rm -f "$fixture/captured"
+    rc=0
+    out=$(PATH="$fixture/bin:$PATH" FM_GEMINI_COMPOSER_LIVE=1 \
+      FM_GEMINI_COMPOSER_TARGET=fixture:w1:p1 \
+      FM_BACKEND_HERDR_BIN="$fixture/bin/herdr" FM_BACKEND_HERDR_CLIENT_SESSION=fixture \
+      GUARD_LOG="$fixture/commands" GUARD_CAPTURED="$fixture/captured" GUARD_MODE="$mode" \
+      bash "$ROOT/tests/fm-gemini-composer-live-e2e.test.sh" 2>&1) || rc=$?
+    if [ "$mode" = alive ]; then
+      [ "$rc" -eq 0 ] || fail "live guard rejected idle fixture: $out"
+    else
+      [ "$rc" -ne 0 ] || fail "live guard accepted $mode server/identity"
+    fi
+    while IFS= read -r operation; do
+      case "$operation" in
+        'agent get w1:p1 --session fixture'|'status --json --session fixture'|\
+        'pane read w1:p1 --source visible --format ansi --session fixture') ;;
+        *) fail "live guard attempted non-read-only operation: $operation" ;;
+      esac
+    done < "$fixture/commands"
+  done
+  pass "Gemini live guard refuses lost server/capture/identity without mutations"
+}
+test_gemini_live_guard_read_only
