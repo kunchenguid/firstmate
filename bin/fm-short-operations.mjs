@@ -18,7 +18,8 @@
 // under this home's data/. MAIN first obtains native inspect/read and the
 // read-only cleanup-copy-inspect binding; it supplies schema
 // fm-cleanup-current-judgment.v1, home/id/index/nonce/task/spawn_gen, the current
-// goal_revision/brief_sha256, candidate (unique generation-bound merge facts),
+// goal_revision/brief_sha256, candidate (the current generation-bound merge
+// facts selected by lifecycle completion while other history stays retained),
 // hashes (the five unchanged request/result/intent/effect/output files),
 // copy_binding, inspect basis/evidence, and judgment (native accepted assess
 // shape: outcome, empty remaining_gap, separate authority_ref, evidence refs).
