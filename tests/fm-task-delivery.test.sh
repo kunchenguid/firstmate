@@ -420,6 +420,8 @@ test_promotion_persists_the_selected_ship_branch() {
     "promotion did not deliver the selected branch-creation command"
   assert_grep "Ship branch: fix/$id" "$instructions" \
     "promotion did not deliver the selected immutable branch contract"
+  assert_grep "first-person plural" "$instructions" \
+    "promotion did not deliver the artifact wording rule"
   assert_contains "$out" "promoted $id to ship" "branch-prefix promotion did not complete normally"
   pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
 }

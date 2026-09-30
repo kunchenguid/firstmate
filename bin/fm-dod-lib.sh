@@ -165,6 +165,14 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   esac
 }
 
+# fm_ship_voice_rule owns the ship worker's wording rule for outward artifacts,
+# shared by an ordinary ship brief and scout promotion. It cross-references the
+# AGENTS.md non-chat-artifact rule rather than restating it.
+fm_ship_voice_rule() {
+  printf '%s\n' '8. In commit messages, PR titles and descriptions, code, and comments, never mention the captain or firstmate and never address anyone (AGENTS.md, top section).'
+  printf '%s\n' '   Describe the work as part of the team in first-person plural ("we ran ...", "our merge of main", "left for reviewers").'
+}
+
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>

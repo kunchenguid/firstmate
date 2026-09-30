@@ -508,6 +508,10 @@ test_ship_project_memory_wording() {
     "project-memory contract still invites additions for durable knowledge"
   assert_grep "A correction edits only the wrong text: do not run \`$ROOT/bin/fm-ensure-agents-md.sh\`" "$brief" \
     "project-memory contract no longer forbids the ensure helper on a correction"
+  assert_grep "never mention the captain or firstmate" "$brief" \
+    "ship brief lost the artifact wording rule"
+  assert_grep "first-person plural" "$brief" \
+    "ship brief lost the first-person-plural wording"
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
@@ -1302,8 +1306,8 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   # One shared string, not two copies: the emitted rule must be byte-identical
   # across the ship and scout scaffolds so a later edit cannot fix one and miss
   # the other.
-  ship_rule=$(awk '/^7\. Never administer/,/^$/' "$home/data/brief-pool-no-mistakes/brief.md")
-  scout_rule=$(awk '/^7\. Never administer/,/^$/' "$brief")
+  ship_rule=$(awk '/^7\. Never administer/{p=1} /^8\. |^$/{p=0} p' "$home/data/brief-pool-no-mistakes/brief.md")
+  scout_rule=$(awk '/^7\. Never administer/{p=1} /^8\. |^$/{p=0} p' "$brief")
   [ -n "$ship_rule" ] || fail "ship brief emitted no shared-infrastructure rule to compare"
   [ "$ship_rule" = "$scout_rule" ] \
     || fail "ship and scout shared-infrastructure rules have drifted apart"
