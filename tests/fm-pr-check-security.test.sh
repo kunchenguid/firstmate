@@ -1715,6 +1715,8 @@ test_gerrit_arming_records_no_patch_set_revision() {
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
 
   write_task_meta "$dir" task-rev
+  printf '%s\n' "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review; pipeline summary posted on patch set 1" \
+    > "$state/task-rev.status"
   FM_TEST_GERRIT_REVISION=$(git -C "$dir/wt" rev-parse HEAD) run_check_entry "$dir" task-rev \
     https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
     || fail "arming a Gerrit watch failed"
@@ -1800,11 +1802,15 @@ test_gerrit_ready_gate_reads_the_published_tree() {
 
   : > "$dir/gerrit-axi.log"
   write_task_meta "$dir" task-published
+  printf '%s\n' "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review; pipeline summary posted on patch set 1" \
+    > "$state/task-published.status"
   FM_TEST_GERRIT_REVISION=$published run_check_entry "$dir" task-published \
     https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
     || fail "arming refused a change whose current patch set carries this copy's HEAD tree"
-  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+  grep -qF -- "show 4201 --host gerrit.example --messages all --json" "$dir/gerrit-axi.log" \
     || fail "the gate did not read the change from its own server"
+  [ "$(grep -c -- "show 4201" "$dir/gerrit-axi.log")" = 1 ] \
+    || fail "the gate read the tree and the summary in separate reads that could straddle a new patch set"
   [ -e "$state/task-published.check.sh" ] || fail "an accepted Gerrit arming left no poll armed"
   grep -q '^pr_head=' "$state/task-published.meta" \
     && fail "the gate's live revision was recorded as pr_head"
@@ -1954,9 +1960,13 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
     _ "$ROOT" "$dir/wt" "$dir/project" "$line" 2>&1)
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "the done gate refused a recovered, published copy: $out"
-  # The no-mistakes contract's ready report also names the summary message's
-  # patch set after the published line; that suffix must not hide the change.
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a ready report that names no pipeline summary patch set"
+  case "$out" in
+    *"does not name the patch set its pipeline summary was posted on"*) ;;
+    *) fail "the refusal did not say the ready report names no summary patch set: $out" ;;
+  esac
+  # The no-mistakes contract's ready report names the summary message's patch
+  # set after the published line; that suffix must not hide the change.
   set +e
   out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed FM_TEST_GERRIT_PATCH_SET=2 \
     FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
@@ -2015,9 +2025,30 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
     *) fail "the refusal did not name the mismatched patch set: $out" ;;
   esac
 
+  # Arming asks the gate about the task's own done: line, since only the worker
+  # knows the summary's patch set; with none, or one without the suffix, it is
+  # refused and nothing is recorded.
   write_task_meta "$dir" task-recovered
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a no-mistakes Gerrit publish with no ready report naming its summary"
+  case "$out" in
+    *"does not name the patch set its pipeline summary was posted on"*) ;;
+    *) fail "the arming refusal did not say no summary patch set was named: $out" ;;
+  esac
+  printf '%s\n' "$line" > "$state/task-recovered.status"
+  set +e
+  FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a ready report without the pipeline summary suffix"
+  grep -q '^pr=' "$state/task-recovered.meta" && fail "a refused arming recorded pr="
+  printf '%s\n' "done [at=1700000000]: PR $url published for review; pipeline summary posted on patch set 1" \
+    >> "$state/task-recovered.status"
   FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed run_check_entry "$dir" task-recovered "$url" >/dev/null \
-    || fail "arming refused a recovered copy whose squash carries the pipeline's result"
+    || fail "arming refused a recovered copy whose ready report names its summary's patch set"
   grep -qxF "pr=$url" "$state/task-recovered.meta" || fail "the recovered publish was not recorded"
 
   # A direct-PR task never runs the pipeline, so no run is asked about.

@@ -1117,22 +1117,25 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
     if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
     || return 1
   fm_pr_head_valid "$revision" || return 1
-  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
   # shellcheck disable=SC2034
   FM_PR_RECORD_REVISION=$revision
 }
 
-# The current patch set of one Gerrit change and whether a change message on
-# that patch set contains <marker>, read live with every cover message. Gerrit
-# names a message's patch set in its own first line ("Patch Set 3:"), which is
-# the patch_set gerrit-axi reports for the row. Consumed by bin/fm-dod-lib.sh's
-# no-mistakes ready gate, which accepts a published change only when the
-# pipeline summary was posted on the patch set it publishes. Fails on any
-# reading that does not name exactly this change and its current patch set.
+# The current patch set of one Gerrit change, its revision, and whether a
+# change message on that patch set contains <marker>, all from one live read
+# with every cover message, so the tree and the summary are checked against the
+# same patch set. Gerrit names a message's patch set in its own first line
+# ("Patch Set 3:"), which is the patch_set gerrit-axi reports for the row.
+# Consumed by bin/fm-dod-lib.sh's no-mistakes ready gate, which accepts a
+# published change only when that revision carries the worker copy's HEAD tree
+# and the pipeline summary was posted on that patch set. Fails on any reading
+# that does not name exactly this change and its current patch set.
 fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
-  local host=$1 number=$2 marker=$3 json reading ps posted
+  local host=$1 number=$2 marker=$3 json reading ps posted revision
   FM_PR_RECORD_PATCH_SET=
   FM_PR_RECORD_SUMMARY_POSTED=
+  FM_PR_RECORD_REVISION=
   command -v gerrit-axi >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
   case "$number" in
@@ -1147,17 +1150,22 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
     | if type == "object" and .ok == true and (.changes | type) == "array" then . else error("invalid gerrit record") end
     | [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
     | if ($match | length) == 1 and ($match[0].patch_set | type) == "number"
-      then $match[0].patch_set
+      and ($match[0].revision | type) == "string"
+      then $match[0]
       else error("no exact change record")
       end
-    | . as $ps
+    | .patch_set as $ps
+    | .revision as $revision
     | ($root.messages // []) as $messages
     | if ($messages | type) != "array" then error("invalid messages") else . end
     | [$messages[] | select(type == "object" and .change == $change and .patch_set == $ps
         and (.message | type) == "string" and (.message | contains($marker)))] as $posted
-    | "\($ps) \(($posted | length) > 0)"' 2>/dev/null) || return 1
+    | "\($ps) \(($posted | length) > 0) \($revision)"' 2>/dev/null) || return 1
   ps=${reading%% *}
   posted=${reading#* }
+  revision=${posted#* }
+  posted=${posted%% *}
+  fm_pr_head_valid "$revision" || return 1
   case "$ps" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -1165,12 +1173,15 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <marker>
     true|false) ;;
     *) return 1 ;;
   esac
-  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_summary_posted.
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
   # shellcheck disable=SC2034
   FM_PR_RECORD_PATCH_SET=$ps
-  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_summary_posted.
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
   # shellcheck disable=SC2034
   FM_PR_RECORD_SUMMARY_POSTED=$posted
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_read_current.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_REVISION=$revision
 }
 
 fm_pr_poll_retirement_data_valid() {

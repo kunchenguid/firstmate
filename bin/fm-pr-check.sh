@@ -137,10 +137,26 @@ MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
 # The gate is asked about the ready report this task's worker was told to give;
 # on a Gerrit change both publishing modes report the same published line.
+# A no-mistakes Gerrit report also names the patch set its pipeline summary was
+# posted on, which only the worker knows, so the gate is asked about the task's
+# own latest done: line naming this change when its status file has one.
 case "$PROVIDER:$MODE" in
   gerrit:*) DONE_LINE="done: PR $URL published for review" ;;
   *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
+esac
+case "$PROVIDER:$MODE" in
+  gerrit:no-mistakes|gerrit:)
+    STATUS_FILE="$STATE/$ID.status"
+    if [ -f "$STATUS_FILE" ] && [ ! -L "$STATUS_FILE" ]; then
+      while IFS= read -r STATUS_LINE || [ -n "$STATUS_LINE" ]; do
+        status_line_verb "$STATUS_LINE" STATUS_VERB
+        [ "$STATUS_VERB" = "done" ] || continue
+        [ "$(fm_dod_pr_url_from_done_note "$(status_line_note "$STATUS_LINE")")" = "$URL" ] || continue
+        DONE_LINE=$STATUS_LINE
+      done < "$STATUS_FILE"
+    fi
+    ;;
 esac
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then

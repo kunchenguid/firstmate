@@ -38,7 +38,8 @@
 # also hold the result of a passed run. These live reads are the one check at the ready
 # decision; a later rebase or patch set on the server does not revoke an armed
 # task's done. A no-mistakes Gerrit done also needs the pipeline summary on
-# that current patch set, read live by fm_dod_gerrit_summary_posted, and
+# that current patch set, read in the same live read and checked by
+# fm_dod_gerrit_summary_posted, and
 # bin/fm-spawn.sh and bin/fm-promote.sh refuse such a ship up front through
 # fm_gerrit_summary_capable when gerrit-axi cannot post one. Teardown's
 # landed-work test remains the complete discard gate.
@@ -574,22 +575,34 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
         "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; } )
 }
 
-# 0 when <url> names a Gerrit change whose current patch set carries the tree of
-# the worktree's HEAD. The revision is read live and bounded, because the server
-# is the only place a refs/for/ push leaves it, and it must already be an object
-# in the worktree - the publish that made it ran there - so a patch set pushed
-# from elsewhere matches only once this copy holds it.
-fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
-  local wt=$1 url=$2 revision head_tree revision_tree lib
-  fm_pr_url_parse "$url" || return 1
-  [ "$FM_PR_PROVIDER" = gerrit ] || return 1
+# <url>'s current patch set, read live and bounded, because the server is the
+# only place a refs/for/ push leaves it: "<revision>", or with <marker> - the
+# no-mistakes gate - "<revision> <patch_set> <posted>" from the one read that
+# also lists its cover messages, so the tree and the summary are checked
+# against the same patch set.
+fm_dod_gerrit_read_current() {  # <url> [<marker>]
+  local url=$1 marker=${2:-} lib
+  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] || return 1
   lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
   # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
-  revision=$(fm_run_timed 10 bash -c '
+  fm_run_timed 10 bash -c '
     . "$1"
-    fm_pr_gerrit_read_revision "$2" "$3" || exit 1
-    printf "%s\n" "$FM_PR_RECORD_REVISION"
-  ' _ "$lib" "$FM_PR_HOST" "$FM_PR_NUMBER" 2>/dev/null) || return 1
+    if [ -n "$4" ]; then
+      fm_pr_gerrit_read_summary "$2" "$3" "$4" || exit 1
+      printf "%s %s %s\n" "$FM_PR_RECORD_REVISION" "$FM_PR_RECORD_PATCH_SET" "$FM_PR_RECORD_SUMMARY_POSTED"
+    else
+      fm_pr_gerrit_read_revision "$2" "$3" || exit 1
+      printf "%s\n" "$FM_PR_RECORD_REVISION"
+    fi
+  ' _ "$lib" "$FM_PR_HOST" "$FM_PR_NUMBER" "$marker" 2>/dev/null
+}
+
+# 0 when <revision>, a Gerrit change's current patch set, carries the tree of
+# the worktree's HEAD. It must already be an object in the worktree - the
+# publish that made it ran there - so a patch set pushed from elsewhere matches
+# only once this copy holds it.
+fm_dod_gerrit_revision_carries_head() {  # <worktree> <revision>
+  local wt=$1 revision=$2 head_tree revision_tree
   fm_pr_head_valid "$revision" || return 1
   head_tree=$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null) || return 1
   revision_tree=$(git -C "$wt" rev-parse --verify --quiet "$revision^{tree}" 2>/dev/null) || return 1
@@ -597,36 +610,24 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 }
 
 # 0 when the no-mistakes pipeline summary was posted on the published patch
-# set: a live read of <url>'s cover messages shows one on the change's current
-# patch set containing FM_DOD_GERRIT_SUMMARY_MARKER, the first line the contract
-# gives the summary, and a patch set the done <note> names is that current one.
-# The worker's own record of the post is not evidence, because a skipped or
-# failed post leaves a worker free to claim one; the server's message list is.
-# 1 when refused; stdout then holds a one-line reason.
-fm_dod_gerrit_summary_posted() {  # <url> <note>
-  local url=$1 note=$2 lib reading ps posted named
-  fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] || {
-    printf '%s\n' "the pipeline summary cannot be checked: $url is not a Gerrit change"
-    return 1
-  }
-  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
-  # shellcheck disable=SC2016  # The inner script expands after bash -c receives positional args.
-  if ! reading=$(fm_run_timed 10 bash -c '
-    . "$1"
-    fm_pr_gerrit_read_summary "$2" "$3" "$4" || exit 1
-    printf "%s %s\n" "$FM_PR_RECORD_PATCH_SET" "$FM_PR_RECORD_SUMMARY_POSTED"
-  ' _ "$lib" "$FM_PR_HOST" "$FM_PR_NUMBER" "$FM_DOD_GERRIT_SUMMARY_MARKER" 2>/dev/null); then
-    printf '%s\n' "the pipeline summary on $url could not be read"
-    return 1
-  fi
-  ps=${reading%% *}
-  posted=${reading#* }
+# set: <posted> is the live reading of whether a cover message on the change's
+# current patch set <patch_set> contains FM_DOD_GERRIT_SUMMARY_MARKER, the first
+# line the contract gives the summary, and the done <note> names that current
+# patch set. The worker's own record of the post is not evidence, because a
+# skipped or failed post leaves a worker free to claim one; the server's message
+# list is. 1 when refused; stdout then holds a one-line reason.
+fm_dod_gerrit_summary_posted() {  # <url> <patch_set> <posted> <note>
+  local url=$1 ps=$2 posted=$3 note=$4 named
   if [ "$posted" != true ]; then
     printf '%s\n' "no pipeline summary message is on patch set $ps of $url: no change message on the current patch set contains '$FM_DOD_GERRIT_SUMMARY_MARKER'"
     return 1
   fi
   named=$(printf '%s\n' "$note" | sed -n 's/.*pipeline summary posted on patch set \([0-9][0-9]*\).*/\1/p' | head -n 1)
-  if [ -n "$named" ] && [ "$named" != "$ps" ]; then
+  if [ -z "$named" ]; then
+    printf '%s\n' "the ready report does not name the patch set its pipeline summary was posted on: end it with '; pipeline summary posted on patch set $ps'"
+    return 1
+  fi
+  if [ "$named" != "$ps" ]; then
     printf '%s\n' "the ready report names the pipeline summary on patch set $named, but $url's current patch set is $ps"
     return 1
   fi
@@ -720,6 +721,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local marker reading
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -744,18 +746,20 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   fi
   if [ "$gerrit" = 1 ]; then
+    marker=
     case "$mode" in
       no-mistakes|'')
-        fm_dod_nm_custody_returned "$wt" || return 1 ;;
+        fm_dod_nm_custody_returned "$wt" || return 1
+        marker=$FM_DOD_GERRIT_SUMMARY_MARKER ;;
     esac
-    if ! fm_dod_gerrit_change_carries_head "$wt" "$url"; then
+    reading=$(fm_dod_gerrit_read_current "$url" "$marker") || reading=
+    if ! fm_dod_gerrit_revision_carries_head "$wt" "${reading%% *}"; then
       printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
       return 1
     fi
-    case "$mode" in
-      no-mistakes|'')
-        fm_dod_gerrit_summary_posted "$url" "$(status_line_note "$line")" || return 1 ;;
-    esac
+    [ -n "$marker" ] || return 0
+    reading=${reading#* }
+    fm_dod_gerrit_summary_posted "$url" "${reading%% *}" "${reading#* }" "$(status_line_note "$line")" || return 1
     return 0
   fi
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
