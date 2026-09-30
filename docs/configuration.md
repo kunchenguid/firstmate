@@ -1100,7 +1100,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match and model-router classification that firstmate otherwise reasons out in its own context becomes one short tool turn.
 It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
 
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
@@ -1118,12 +1118,14 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 
 **What the model receives**
 
-When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
-The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
+When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state.
+It asks one rule Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule.
+The same request also asks fixed Choice questions for router evidence: intent (`implementation`, `bugfix`, `investigation`, `review`, `operations`, `documentation`, `design`, `other`), domain (`firstmate`, `project_code`, `infrastructure`, `github`, `browser_visual`, `docs`, `unknown`), difficulty (`low`, `medium`, `high`, `xhigh`), risk (`low`, `medium`, `high`, `sensitive`), likely model class (`small_fast`, `standard`, `strong_reasoning`, `current_web`, `vision`, `code_execution`), and whether the request should escalate before dispatch (`yes`, `no`).
+The model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
 
+The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 When the sections are sent from a scout brief, the line `Brief kind: scout (report only)` comes first, taken from the scaffold's scout contract line; ship briefs and briefs sent whole get no kind line.
 A ship brief's delivery mode is deliberately not sent, because in live runs naming it pushed a routine ship brief toward the hardest tier (see [the verification record](verification/dispatch-resolve.md)).
-
 The scaffold's standard setup, rules, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
 
 **Never-send list (config/dispatch-never-send)**
@@ -1140,7 +1142,8 @@ Every entry is trimmed of surrounding whitespace, and any run of whitespace, in 
 Example Client Ltd
 ```
 
-Before the request is sent, every string in it is checked: the project name, the task text, each rule's `when`, and the fixed question text.
+Before the request is sent, every operator-controlled string in it is checked: the project name, the task text, and each rule's `when`.
+The tool's own fixed question and option text carries no operator content and is not checked, so a listed value that appears only in that vocabulary leaves resolution running.
 A match stops the request: the resolver behaves exactly as when it is off, printing one `dispatch-resolve: off (...; nothing sent)` line on stderr and nothing on stdout, making no network or quota call, and exiting 0, so firstmate dispatches through its existing intake.
 A list that is present but not a readable regular file also stops the request the same way rather than sending unchecked text.
 That one diagnostic names the list line number at most and never prints the listed value or the matching text.
@@ -1175,6 +1178,16 @@ When the picked rule declares its own floor but its probability falls below it, 
 
 No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
 
+**Classifier answer validation and evidence**
+
+- Each axis is validated against the options that axis actually offered in the request, so the offered vocabulary and the accepted vocabulary cannot drift apart.
+- The rule answer and the `escalation` answer must contain exactly every offered choice, use numeric probabilities from 0 through 1 that sum to approximately 1 within 0.01, and carry a confidence from 0 through 1; the `escalation` answer must also be present and name one of its own offered options, so a missing or unrecognized escalation answer is an `error` outcome, never read as "no escalation".
+- The classifier axes other than `escalation` are published evidence only: their choices and confidences ride on the `classification:` line and never gate the route, so low confidence on an axis no gate reads cannot veto an otherwise valid rule match.
+- An evidence axis that is missing, malformed, or answered outside its offered options is published as `unavailable` on the `classification:` line and changes nothing else, so one bad evidence distribution never discards a valid rule match.
+- The `escalation` axis can make the tool decline to emit a profile, but only when its own confidence reaches the fixed 0.6 escalation floor, which a rule's `min_confidence` never raises.
+- A `yes` below the floor is published on the `classification:` line and routes as usual, so a near-coin-flip reading never spends a full intake.
+- No classifier answer can directly authorize a model launch, a merge, a sensitive action, or an exception to local policy, and a declared `approval` or rule-floor gate is always reported ahead of the classifier, whatever its confidence.
+
 **Candidate eligibility and evidence**
 
 - Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
@@ -1187,29 +1200,28 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 | --- | --- |
 | `clear` | A `profile:` line ready for `fm-spawn.sh`. |
 | `ambiguous` | Confidence below the floor with no runner-up taken. |
-| `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
+| `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, a genuine tie, or a classifier escalation recommendation at or above the confidence floor, reported after every declared local gate. |
 | `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
 
 Every result above exits 0.
 
-- Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 - Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
 
-The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-
+The tool never replaces firstmate's judgment, `quota-array-dispatch`, secondmate scope enforcement, the captain-approval gate, safety boundaries, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
+By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, secondmate scope, safety, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 **Key handling and fixed settings**
 
 - The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 - The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, the escalation confidence floor at 0.6, and request timeout at 10 seconds, measured against the shipped multi-axis request; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 
-The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+The live rule-match, task-section, fallback, and router-axis evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+
 
 ## Toolchain
 
