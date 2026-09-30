@@ -72,6 +72,8 @@ An attempted or uncertain cleanup action still requires exact readback before cl
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
 The due reader evaluates the required cleanup postconditions semantically: additive diagnostics and historical ShortTask request version labels do not change the verdict, while persisted receipt bytes remain immutable evidence.
+For a historical cleanup observation recorded before retained-copy preservation fields existed, omitting those still-absent fields is equivalent to the current null-field projection and does not rewrite the stored digest.
+Present preservation fields, every other fact in the cleanup observation and each separately assessed evidence item remain bound, so this compatibility does not admit changed evidence.
 Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
 Open goals, unmerged required delivery and incomplete scout decision inventories refuse that closure.
