@@ -140,6 +140,69 @@ if "$ROOT/bin/fm-inactive-reconcile.sh" acknowledge "$broken_fp" >/dev/null 2>&1
 test -f "$broken_pending"
 pass 'unknown lifecycle state keeps its durable recovery notification pending'
 
+# A notification observed while lifecycle state was unreadable remains historical
+# after the task is repaired. The public drain may acknowledge that old
+# observation only after a current, exact lifecycle read succeeds; doing so must
+# not replay its pending effect, close the goal, or suppress a current wake.
+REPAIRED_HOME="$TMP_ROOT/repaired-home"
+export FM_HOME="$REPAIRED_HOME"
+mkdir -p "$FM_HOME/data/repaired" "$FM_HOME/state"
+printf 'Continue this repaired goal\n' > "$FM_HOME/data/repaired/brief.md"
+printf 'spawn_gen=s-repaired\nkind=scout\n' > "$FM_HOME/state/repaired.meta"
+python3 "$LIB" init repaired >/dev/null
+cp "$FM_HOME/data/repaired/lifecycle.json" "$TMP_ROOT/repaired-valid.json"
+printf '{}\n' > "$FM_HOME/data/repaired/lifecycle.json"
+chmod 600 "$FM_HOME/data/repaired/lifecycle.json"
+"$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+repaired_pending=$(grep -l '^task_id=repaired$' "$FM_HOME/state/terminal-outcomes/"*.pending)
+repaired_fp=${repaired_pending##*/}; repaired_fp=${repaired_fp%.pending}
+drain_output=$("$ROOT/bin/fm-wake-drain.sh" 2>&1)
+ack_args=$(printf '%s\n' "$drain_output" | sed -nE 's/.*--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+).*/\1 \2/p' | tail -1)
+read -r ack_seq ack_generation <<< "$ack_args"
+[ -n "$ack_seq" ] && [ -n "$ack_generation" ] \
+  || fail "repaired lifecycle drain omitted acknowledgement command: $drain_output"
+if "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" --recovery-generation "$ack_generation" >/dev/null 2>&1; then
+  fail 'drain acknowledged an actually invalid lifecycle observation'
+fi
+test -f "$repaired_pending" || fail 'invalid lifecycle acknowledgement removed pending evidence'
+
+cp "$TMP_ROOT/repaired-valid.json" "$FM_HOME/data/repaired/lifecycle.json"
+"$CLI" lifecycle repaired > "$TMP_ROOT/input.json"
+python3 - "$TMP_ROOT/input.json" <<'PY'
+import json,sys
+p=sys.argv[1];d=json.load(open(p));a=d['assessment'];d['next_action']={
+'id':'repaired.g1.a1','kind':'readback','phase':'prepared','expected_execution_generation':'s-repaired',
+'payload_ref':a['evidence'][0]['ref'],'payload_sha256':a['evidence'][0]['sha256'],
+'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
+d['next_action_seq']=2;json.dump(d,open(p,'w'))
+PY
+"$CLI" reconcile repaired --expected-revision 1 --record "$TMP_ROOT/input.json" >/dev/null
+"$CLI" action repaired --action-id repaired.g1.a1 --phase attempted >/dev/null
+printf 'spawn_gen=conflicting-generation\nkind=scout\n' > "$FM_HOME/state/repaired.meta"
+if "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" --recovery-generation "$ack_generation" >/dev/null 2>&1; then
+  fail 'drain acknowledged an execution-generation conflict'
+fi
+test -f "$repaired_pending" || fail 'conflicting lifecycle acknowledgement removed pending evidence'
+
+printf 'spawn_gen=s-repaired\nkind=scout\n' > "$FM_HOME/state/repaired.meta"
+before_ack=$(sha256sum "$FM_HOME/data/repaired/lifecycle.json" | awk '{print $1}')
+"$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" --recovery-generation "$ack_generation" >/dev/null
+test -f "${repaired_pending%.pending}.presented" || fail 'repaired unknown observation was not acknowledged'
+test ! -s "$FM_HOME/state/.wake-queue" || fail 'repaired unknown observation remained queued after acknowledgement'
+"$ROOT/bin/fm-inactive-reconcile.sh" acknowledge "$repaired_fp"
+after_ack=$(sha256sum "$FM_HOME/data/repaired/lifecycle.json" | awk '{print $1}')
+test "$before_ack" = "$after_ack" || fail 'historical acknowledgement changed current lifecycle evidence'
+"$CLI" lifecycle repaired | jq -e '.disposition=="open" and .revision==3 and .next_action.phase=="attempted" and .next_action.attempts==1' >/dev/null
+"$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+current_pending=$(grep -l '^task_id=repaired$' "$FM_HOME/state/terminal-outcomes/"*.pending)
+test "$(grep '^lifecycle_revision=' "$current_pending")" = 'lifecycle_revision=3' \
+  || fail 'open repaired goal did not publish its current lifecycle observation'
+test "$before_ack" = "$(sha256sum "$FM_HOME/data/repaired/lifecycle.json" | awk '{print $1}')" \
+  || fail 'continued monitoring replayed or changed the pending action'
+pass 'repaired unknown wake acknowledgement is guarded, idempotent, and preserves the open goal and pending effect'
+
+export FM_HOME="$TMP_ROOT/home"
+
 "$CLI" lifecycle queued > "$TMP_ROOT/input.json"
 python3 - "$TMP_ROOT/input.json" <<'PY'
 import json,sys

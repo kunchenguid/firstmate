@@ -457,8 +457,11 @@ acknowledge() { # <fingerprint>
     '') ;;
     unknown)
       task=$(record_value "$pending" task_id)
-      printf 'REFUSED: repair task %s lifecycle state before acknowledging its unknown goal wake\n' "$task" >&2
-      return 1
+      current=$(fm_task_lifecycle read "$task" 2>/dev/null) || current=null
+      if ! printf '%s\n' "$current" | jq -e 'type == "object"' >/dev/null 2>&1; then
+        printf 'REFUSED: repair task %s lifecycle state before acknowledging its unknown goal wake\n' "$task" >&2
+        return 1
+      fi
       ;;
     *)
       task=$(record_value "$pending" task_id)
