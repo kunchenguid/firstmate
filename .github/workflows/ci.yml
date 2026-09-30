@@ -503,6 +503,15 @@ jobs:
             exit 1
           }
 
+          owner_output=$(FM_TEST_ONLY=test_owner_detection_swaps_to_ppid_when_bashpid_absent \
+            /bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$owner_output"
+          owner_count=$(printf '%s\n' "$owner_output" | grep -c '^ok - ')
+          [ "$owner_count" -eq 1 ] || {
+            echo "::error::expected 1 fm-timeout-lib owner swap bash 3.2 regression, got $owner_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
