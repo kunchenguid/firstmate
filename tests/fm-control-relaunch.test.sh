@@ -2443,8 +2443,9 @@ PROBE
   printf gemini > "$dir/fake/command"
   cp "$dir/home/state/rlgemvertex.meta" "$dir/meta-before"
   before=$(cat "$dir/fake/literal")
-  out=$(run_spawn "$dir" rlgemvertex --relaunch)
-  [ "$?" -ne 0 ] || fail "Gemini relaunch must refuse an active worker"
+  if out=$(run_spawn "$dir" rlgemvertex --relaunch); then
+    fail "Gemini relaunch must refuse an active worker"
+  fi
   cmp -s "$dir/meta-before" "$dir/home/state/rlgemvertex.meta" \
     || fail "Gemini refused relaunch changed the active task record"
   [ "$(cat "$dir/fake/literal")" = "$before" ] \
