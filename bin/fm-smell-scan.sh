@@ -156,12 +156,26 @@ class Scan:
 
     # --- scope -------------------------------------------------------------
 
+    def path_inside_root(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve(strict=False)
+            return resolved == self.root or self.root in resolved.parents
+        except (OSError, RuntimeError):
+            return False
+
     def is_git_work_tree(self) -> bool:
         proc = subprocess.run(
             ["git", "-C", str(self.root), "rev-parse", "--is-inside-work-tree"],
             check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         return proc.returncode == 0
+
+    def validate_paths(self) -> None:
+        for rel in self.paths:
+            requested = Path(rel)
+            target = requested if requested.is_absolute() else self.root / requested
+            if not self.path_inside_root(target):
+                raise UsageError(f"--paths entry resolves outside --root: {rel}")
 
     def excluded(self, rel: str) -> bool:
         parts = rel.split("/")
@@ -176,13 +190,20 @@ class Scan:
     def list_files(self) -> list[str]:
         if not self.is_git_work_tree():
             raise UsageError("--root must be a git work tree")
+        self.validate_paths()
         args = ["git", "-C", str(self.root), "ls-files", "-z", "--"]
         args.extend(self.paths)
         proc = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if proc.returncode != 0:
             raise UsageError("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
         found = [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
-        return sorted(rel for rel in found if not self.excluded(rel) and (self.root / rel).is_file())
+        files = []
+        for rel in found:
+            path = self.root / rel
+            if self.excluded(rel) or not self.path_inside_root(path) or not path.is_file():
+                continue
+            files.append(rel)
+        return sorted(files)
 
     # --- content -----------------------------------------------------------
 
@@ -190,6 +211,10 @@ class Scan:
         if rel in self.text_cache:
             return self.text_cache[rel]
         path = self.root / rel
+        if not self.path_inside_root(path):
+            self.notes.append(f"outside-root file skipped: {rel}")
+            self.text_cache[rel] = None
+            return None
         result: list[str] | None = None
         try:
             if path.stat().st_size > self.max_bytes:
@@ -263,6 +288,40 @@ class Scan:
             if stripped.startswith("<!--") and stripped.endswith("-->"):
                 return stripped[4:-3].strip()
             return None
+        return None
+
+    def inline_comment(self, line: str, style: str) -> str | None:
+        full_line = self.strip_comment(line, style)
+        if full_line is not None:
+            return full_line
+        if style == "html":
+            return None
+        delimiters = {
+            "hash": ("#",),
+            "slash": ("//", "/*"),
+            "dashline": ("--",),
+            "semi": (";",),
+        }.get(style)
+        if not delimiters:
+            return None
+        quote = ""
+        escaped = False
+        for index, char in enumerate(line):
+            if escaped:
+                escaped = False
+                continue
+            if quote:
+                if char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in {"'", '"'}:
+                quote = char
+                continue
+            for delimiter in delimiters:
+                if line.startswith(delimiter, index):
+                    return line[index + len(delimiter):].strip()
         return None
 
     def blame_times(self, rel: str) -> dict[int, int] | None:
@@ -399,7 +458,7 @@ def collect_stale_comments(scan: Scan, files, findings: list[Finding], stale_day
             continue
         markers = []
         for index, raw in enumerate(scan.lines(rel) or [], start=1):
-            text = scan.strip_comment(raw, style)
+            text = scan.inline_comment(raw, style)
             match = MARKER_RE.search(text) if text else None
             if match:
                 markers.append((index, match.group(1), text))

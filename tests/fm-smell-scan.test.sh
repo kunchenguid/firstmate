@@ -210,6 +210,68 @@ print(",".join(sorted({f["path"] for f in d["findings"]})))
 ')" "--exclude must drop the excluded subtree"
 }
 
+test_paths_and_symlinks_stay_inside_root() {
+  local fix outside json
+  fix=$(fm_test_tmproot fm-smell-root-bound) || fail "tmproot"
+  outside=$(fm_test_tmproot fm-smell-outside) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  build_fixture "$fix"
+  mkdir -p "$outside"
+  cat > "$outside/private.sh" <<'EOF'
+#!/usr/bin/env bash
+# TODO: external marker must never become scan evidence.
+EOF
+  ln -s "$outside/private.sh" "$fix/src/external.sh"
+  git -C "$fix" add src/external.sh
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "tracked external symlink"
+
+  expect_failure "--paths entry resolves outside --root" --root "$fix" --paths ..
+  expect_failure "--paths entry resolves outside --root" --root "$fix" --paths "$outside/private.sh"
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-comment --stale-days 1)
+  assert_not_contains "$json" "src/external.sh" "tracked symlinks outside the root must be skipped"
+  assert_not_contains "$json" "external marker" "external symlink contents must not become evidence"
+}
+
+test_stale_comment_detects_inline_comments_without_quoted_markers() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-inline-comments) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/src"
+  cat > "$fix/src/hash.sh" <<'EOF'
+#!/usr/bin/env bash
+echo ok # TODO: hash inline old marker.
+echo "# TODO: quoted hash marker is code text."
+EOF
+  cat > "$fix/src/slash.js" <<'EOF'
+const text = "// TODO: quoted slash marker is code text.";
+run(); // FIXME: slash inline old marker.
+EOF
+  cat > "$fix/src/dash.sql" <<'EOF'
+select '-- HACK: quoted dash marker is code text';
+select 1; -- HACK: dash inline old marker.
+EOF
+  cat > "$fix/src/semi.clj" <<'EOF'
+(println "; XXX: quoted semi marker is code text")
+(println :ok) ; XXX: semi inline old marker.
+EOF
+  git -C "$fix" add -A
+  GIT_AUTHOR_DATE="2020-01-01T00:00:00Z" GIT_COMMITTER_DATE="2020-01-01T00:00:00Z" \
+    git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "old inline markers"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-comment --stale-days 1)
+  assert_equals 4 "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["summary"]["total"])
+')" "inline comment markers must be detected for supported comment syntaxes"
+  assert_not_contains "$json" "quoted hash marker" "quoted hash markers must not be reported"
+  assert_not_contains "$json" "quoted slash marker" "quoted slash markers must not be reported"
+  assert_not_contains "$json" "quoted dash marker" "quoted dash markers must not be reported"
+  assert_not_contains "$json" "quoted semi marker" "quoted semi markers must not be reported"
+}
+
 test_output_is_deterministic_json() {
   local fix
   fix=$(fm_test_tmproot fm-smell-determinism) || fail "tmproot"
@@ -291,6 +353,8 @@ test_clean_tree_reports_no_findings
 test_every_category_detects_its_finding
 test_stale_days_threshold_gates_markers
 test_scope_and_excludes_bound_the_scan
+test_paths_and_symlinks_stay_inside_root
+test_stale_comment_detects_inline_comments_without_quoted_markers
 test_output_is_deterministic_json
 test_scan_is_read_only_and_guards_out_path
 test_exit_codes_and_usage_refusals
