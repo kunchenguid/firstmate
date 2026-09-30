@@ -623,19 +623,9 @@ test_reservations_cover_clones_of_one_origin() {
   commit_file "$solo" base base base
   git -C "$solo" checkout -qb office
   git -C "$solo" remote add origin "$TMP_ROOT/origin-reserve/elsewhere.git"
-  printf 'kind=ship\nproject=%s\nbranch=feature/solo\n' "$(cd "$solo" && pwd -P)" \
-    > "$home/state/named-origin-solo.meta"
-  id=named-origin-distinct
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/solo --base-branch office >/dev/null
-  fill_brief "$home/data/$id/brief.md"
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$right" --mode local-only --yolo off \
-    --branch-name feature/solo --base-branch office 2>&1); status=$?
-  assert_not_contains "$out" "already assigned" "a different origin was treated as the same reservation"
-  if [ "$status" -ne 0 ]; then
-    fail "a different origin refused the launch: $out"
+  if FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$right" "$solo"; then
+    fail "different origins shared a reservation"
   fi
 
   id=named-origin-promote
@@ -648,6 +638,13 @@ test_reservations_cover_clones_of_one_origin() {
   assert_contains "$out" "already assigned to task named-origin-other" "the occupying clone was not named at promotion"
   assert_grep 'kind=scout' "$home/state/$id.meta" "cross-clone promotion collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "cross-clone promotion collision published ship instructions"
+
+  git -C "$left" remote set-url origin https://github.com/kunchenguid/firstmate.git
+  git -C "$right" remote set-url origin git@github.com:kunchenguid/firstmate.git
+  if ! FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$left" "$right"; then
+    fail "equivalent HTTPS and SSH origin URLs did not share a reservation"
+  fi
   pass "named branch reservations cover every clone of one origin"
 }
 

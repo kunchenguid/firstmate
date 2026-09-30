@@ -1399,11 +1399,17 @@ fm_firstmate_root_home() {
 # Status 2 means an origin is configured but its local path cannot be
 # canonicalized; callers that must fail closed treat that as unresolved.
 fm_project_origin_identity() {  # <project-dir>
-  local project=$1 origin
+  local project=$1 origin host path
   [ -d "$project" ] || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
   [ -n "$origin" ] || return 1
   case "$origin" in
+    git@*:* )
+      host=${origin#git@}
+      path=${host#*:}
+      host=${host%%:*}
+      origin="https://$host/$path"
+      ;;
     /*)
       if [ -d "$origin" ]; then
         origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 2
