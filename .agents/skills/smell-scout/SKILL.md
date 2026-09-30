@@ -29,6 +29,7 @@ The scan decides only the five mechanical categories above, and never publishes 
 1. Resolve the scope from the request: the repository root, and the subtree the audit covers.
    Say so in the report, because reachability and duplication are only meaningful within the scope actually scanned.
 2. Run `bin/fm-smell-scan.sh --root <repo>` for a Markdown review queue, or add `--json` for a machine-readable one.
+   The scanner reads git-tracked files only; ignored and untracked files are outside its evidence boundary.
    Read its coverage and note lines before summarizing: they state which categories ran, whether ages came from git, and anything the scan could not parse.
    Useful flags: `--paths` to bound the subtree, `--stale-days` for the marker window, `--exclude` for deliberately mirrored trees such as per-harness copies, `--out` to write the report outside the scanned tree, `--check` to fail a gate on findings.
 3. Read the tree for the judgement categories the scan cannot decide, and record each one with the same fields.
@@ -50,4 +51,4 @@ The scan decides only the five mechanical categories above, and never publishes 
   Removal, rewriting, and dependency or secret review belong to a separately authorized lane.
 - In firstmate's own repository, the existing owners keep their verdicts: `bin/fm-lint.sh` owns shell and workflow lint, and `bin/fm-doc-audience-check.sh` owns documentation classification and local link resolution.
   The scan complements them and never replaces or restates them.
-- Report the scan's limits with its findings: reachability ignores dynamic dispatch, indirect sourcing, and external callers; marker ages need a git work tree; and unsupported or oversized files are skipped rather than guessed.
+- Report the scan's limits with its findings: reachability ignores dynamic dispatch, indirect sourcing, and external callers; marker ages are unavailable when `--no-git` is passed; and unsupported or oversized files are skipped rather than guessed.

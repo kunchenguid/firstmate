@@ -3,7 +3,7 @@
 #
 # Usage:
 #   bin/fm-smell-scan.sh [--root <dir>] [--paths <rel> ...] [--category <id> ...]
-#                        [--stale-days <n>] [--exclude <glob> ...] [--include-untracked]
+#                        [--stale-days <n>] [--exclude <glob> ...]
 #                        [--no-git] [--max-file-bytes <n>] [--json | --out <file>]
 #                        [--check] [--help]
 #
@@ -29,11 +29,9 @@
 #   1  --check was passed and at least one finding was reported
 #   2  usage or configuration error
 #
-# The scanned tree is read through git's tracked file list when --root is a git
-# work tree, so ignored, generated, and vendored paths are skipped; pass
-# --include-untracked for a filesystem walk instead. Generated and vendored
-# directories named in DEFAULT_EXCLUDES are skipped either way, and --exclude
-# adds more.
+# The scanned tree is read through git's tracked file list, so ignored,
+# untracked, generated, and vendored paths are skipped. Generated and vendored
+# directories named in DEFAULT_EXCLUDES are skipped, and --exclude adds more.
 set -eu
 
 exec python3 - "$@" <<'PY'
@@ -148,11 +146,10 @@ class Finding:
 
 
 class Scan:
-    def __init__(self, root: Path, paths, excludes, include_untracked, max_bytes):
+    def __init__(self, root: Path, paths, excludes, max_bytes):
         self.root = root
         self.paths = [p.rstrip("/") for p in paths]
         self.excludes = tuple(DEFAULT_EXCLUDES) + tuple(excludes)
-        self.include_untracked = include_untracked
         self.max_bytes = max_bytes
         self.text_cache: dict[str, list[str] | None] = {}
         self.notes: list[str] = []
@@ -177,31 +174,15 @@ class Scan:
         )
 
     def list_files(self) -> list[str]:
-        if self.is_git_work_tree() and not self.include_untracked:
-            args = ["git", "-C", str(self.root), "ls-files", "-z", "--"]
-            args.extend(self.paths)
-            proc = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if proc.returncode != 0:
-                raise UsageError("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
-            found = [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
-        else:
-            if not self.is_git_work_tree():
-                self.notes.append("--root is not a git work tree: file ages are unavailable")
-            found = list(self.walk_scope())
+        if not self.is_git_work_tree():
+            raise UsageError("--root must be a git work tree")
+        args = ["git", "-C", str(self.root), "ls-files", "-z", "--"]
+        args.extend(self.paths)
+        proc = subprocess.run(args, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            raise UsageError("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
+        found = [p for p in proc.stdout.decode("utf-8", "replace").split("\0") if p]
         return sorted(rel for rel in found if not self.excluded(rel) and (self.root / rel).is_file())
-
-    def walk_scope(self):
-        for base in self.paths or ["."]:
-            start = self.root / base
-            if start.is_file():
-                yield os.path.relpath(start, self.root).replace(os.sep, "/")
-                continue
-            if not start.is_dir():
-                continue
-            for dirpath, dirnames, filenames in os.walk(start):
-                dirnames[:] = sorted(d for d in dirnames if d not in self.excludes)
-                for name in sorted(filenames):
-                    yield os.path.relpath(os.path.join(dirpath, name), self.root).replace(os.sep, "/")
 
     # --- content -----------------------------------------------------------
 
@@ -429,7 +410,7 @@ def collect_stale_comments(scan: Scan, files, findings: list[Finding], stale_day
             for index, marker, text in markers:
                 findings.append(Finding(
                     "stale-comment", "low", "needs-review", rel, index, text[:120],
-                    note=f"{marker} marker; age unavailable without a git work tree",
+                    note=f"{marker} marker; age unavailable with --no-git",
                 ))
             continue
         for index, marker, text in markers:
@@ -531,7 +512,7 @@ def scan_once(args) -> tuple[list[Finding], Scan, list[str]]:
     if unknown:
         raise UsageError("unknown --category: " + ", ".join(unknown))
 
-    scan = Scan(root, args.paths, args.exclude, args.include_untracked, args.max_file_bytes)
+    scan = Scan(root, args.paths, args.exclude, args.max_file_bytes)
     files = scan.list_files()
     for rel in files:
         scan.lines(rel)
@@ -552,7 +533,7 @@ def scan_once(args) -> tuple[list[Finding], Scan, list[str]]:
         collect_stale_comments(scan, files, findings, args.stale_days, use_git)
         coverage["stale-comment"] = (
             "ages from git blame" if use_git
-            else "no ages: --no-git or not a git work tree, so markers are reported as needs-review"
+            else "no ages: --no-git was passed, so markers are reported as needs-review"
         )
 
     findings = sorted(
@@ -570,7 +551,6 @@ def main(argv) -> int:
     parser.add_argument("--exclude", action="append", default=[])
     parser.add_argument("--stale-days", type=int, default=365)
     parser.add_argument("--max-file-bytes", type=int, default=MAX_FILE_BYTES_DEFAULT)
-    parser.add_argument("--include-untracked", action="store_true")
     parser.add_argument("--no-git", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--out")
@@ -581,7 +561,7 @@ def main(argv) -> int:
     if args.help:
         print("usage: fm-smell-scan.sh --root <dir> [--paths <rel> ...] "
               "[--category <id> ...] [--stale-days <n>] [--exclude <glob> ...] "
-              "[--include-untracked] [--no-git] [--max-file-bytes <n>] "
+              "[--no-git] [--max-file-bytes <n>] "
               "[--json | --out <file>] [--check]")
         print()
         print("categories: " + ", ".join(CATEGORIES))

@@ -102,6 +102,7 @@ expect_failure() {
 test_help_lists_every_category() {
   expect_rc 0 --help
   assert_contains "$SCAN_OUT" "usage: fm-smell-scan.sh" "--help must print usage"
+  assert_not_contains "$SCAN_OUT" "--include-untracked" "--help must not advertise untracked scans"
   local category
   for category in dead-code stale-doc duplicated-comment commented-out-code stale-comment; do
     assert_contains "$SCAN_OUT" "$category" "--help must name the $category category"
@@ -183,12 +184,22 @@ test_scope_and_excludes_bound_the_scan() {
   build_fixture "$fix"
 
   local scoped
+  cat > "$fix/src/private.sh" <<'EOF'
+#!/usr/bin/env bash
+# TODO: this untracked marker must stay outside scan evidence.
+private_orphan() { echo no; }
+EOF
   scoped=$(bash "$CHECK" --root "$fix" --json --paths docs)
   assert_equals "docs/guide.md" "$(printf '%s' "$scoped" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 print(",".join(sorted({f["path"] for f in d["findings"]})))
 ')" "--paths must bound the scan to the named subtree"
+  assert_equals 0 "$(bash "$CHECK" --root "$fix" --json --category stale-comment --stale-days 1 | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(sum(1 for f in d["findings"] if f["path"] == "src/private.sh"))
+')" "untracked files must stay outside scan evidence"
 
   local excluded
   excluded=$(bash "$CHECK" --root "$fix" --json --exclude 'src')
@@ -243,7 +254,11 @@ test_exit_codes_and_usage_refusals() {
   expect_rc 0 --root "$fix" --category stale-doc --json
   expect_failure "unknown --category" --root "$fix" --category nonexistent
   expect_failure "--root is not a directory" --root "$bad"
+  mkdir -p "$bad"
+  expect_failure "--root must be a git work tree" --root "$bad"
   expect_failure "--stale-days must be a positive integer" --root "$fix" --stale-days 0
+  run_scan --root "$fix" --include-untracked
+  expect_code 2 "$SCAN_RC" "the removed untracked scan flag must be a usage error"
   run_scan --root "$fix" --not-a-flag
   expect_code 2 "$SCAN_RC" "an unknown flag must be a usage error"
 }
