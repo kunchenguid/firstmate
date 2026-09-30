@@ -30,7 +30,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent] [--origin <origin-id>]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -165,6 +165,8 @@
 # treat "cannot tell" as its own case instead of as a no. With
 # `--distinguish-absent`, an absent local task returns 3 instead of 1; a home
 # with no backlog file counts as absent, because it records no captain calls.
+# With `--origin`, the task-id is an inventory entry resolved by the same
+# identity rules as `verify`; an unresolved entry returns 2.
 # It prints nothing on these predicate results and mutates nothing, unless
 # `--identity` asks it to print this call's
 # LIFECYCLE identity, which it does on an exit 0 only. That identity - the
@@ -1857,10 +1859,15 @@ EOF
 # exist holds nothing. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
-command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+command_open() {  # <task-id> [--identity] [--distinguish-absent] [--origin <origin-id>]
+  local id='' origin='' resolved identity=0 distinguish_absent=0 data state root file backend show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --origin)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || { usage >&2; exit 2; }
+        origin=$2
+        shift
+        ;;
       --identity) identity=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
       -*) usage >&2; exit 2 ;;
@@ -1877,6 +1884,11 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       exit 2
       ;;
   esac
+  if [ -n "$origin" ]; then
+    case "$origin" in *[!A-Za-z0-9._-]*) usage >&2; exit 2 ;; esac
+    resolved=$(resolve_entry "$origin" "$id") || return 2
+    id=${resolved%% *}
+  fi
   data=$(fm_backlog_data_absolute "$DATA") \
     || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
   root=$(fm_backlog_root "$data") \
@@ -1892,6 +1904,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       # is absent from it rather than held. A record that EXISTS but cannot be
       # read is a different state and still leaves by the exit 2 paths below,
       # because that one may hide a live hold.
+      [ -z "$origin" ] || return 2
       [ "$distinguish_absent" = 0 ] || return 3
       return 1
     fi
@@ -1916,6 +1929,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     return 1
   fi
   if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    [ -z "$origin" ] || return 2
     [ "$distinguish_absent" = 0 ] || return 3
     return 1
   fi

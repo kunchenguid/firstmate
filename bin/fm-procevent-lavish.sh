@@ -66,8 +66,8 @@
 #            (teardown passes the task's data directory, its recorded worktree,
 #            and its task scratch), or it is the artifact of a source this home
 #            registered for that task. Nothing is matched by name, and a board
-#            whose source belongs to another task, or that lies outside every
-#            root, is never touched. For each board the source is retired FIRST
+#            whose source belongs to another task is never touched.
+#            For each board the source is retired FIRST
 #            through bin/fm-procevent.sh, so the end is never delivered as a
 #            `session_ended` wake for a task that no longer exists, and then
 #            `lavish-axi end` closes the session on the server its saved URL
@@ -345,15 +345,15 @@ task_source_artifacts() {  # <task-id>
   done
 }
 
-# Sessions of the Lavish store that are still open and whose file lies under one
-# of the roots, as `<file>` lines. A missing store means no sessions at all.
-open_sessions_under() {  # <root>...
+# Sessions of the Lavish store that are still open, as `<file>` lines.
+# A missing store means no sessions at all.
+open_session_files() {
   local store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
   [ -e "$store" ] || return 0
-  perl -MJSON::PP -MEncode=decode,FB_CROAK -e '
+  perl -MJSON::PP -e '
     use strict;
     use warnings;
-    my ($path, @roots) = @ARGV;
+    my ($path) = @ARGV;
     open my $fh, "<", $path or die "cannot read Lavish session store\n";
     -f $fh or die "Lavish session store is not a regular file\n";
     local $/;
@@ -361,18 +361,14 @@ open_sessions_under() {  # <root>...
     !$@ or die "invalid Lavish session store\n";
     ref($state) eq "HASH" && ref($state->{sessions}) eq "HASH"
       or die "invalid Lavish session store\n";
-    @roots = map { my $r = decode("UTF-8", $_, FB_CROAK); $r =~ s{/+\z}{}; $r } @roots;
     binmode STDOUT, ":utf8";
     for my $s (sort { ($a->{file} // "") cmp ($b->{file} // "") } values %{$state->{sessions}}) {
       next unless ref($s) eq "HASH" && defined($s->{file});
       next if ($s->{status} // "") eq "ended";
       next if $s->{file} =~ /[\n\r]/;
-      for my $r (@roots) {
-        next if $r eq "";
-        if (index($s->{file}, "$r/") == 0) { print "$s->{file}\n"; last }
-      }
+      print "$s->{file}\n";
     }
-  ' "$store" "$@"
+  ' "$store"
 }
 
 end_one_board() {  # <task-id> <file> <source-id> <open-session-files>
@@ -402,7 +398,7 @@ end_one_board() {  # <task-id> <file> <source-id> <open-session-files>
 }
 
 cmd_end_task() {
-  local task=${1-} real id file rc=0 opened
+  local task=${1-} real id file root rc=0 opened
   local -a roots=() files=()
   [ -n "$task" ] || usage
   fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
@@ -421,14 +417,23 @@ cmd_end_task() {
       *) usage ;;
     esac
   done
-  opened=$(open_sessions_under "${roots[@]+"${roots[@]}"}") || {
+  opened=$(open_session_files) || {
     printf 'warning: cannot read the Lavish session store, so no board of task %s was ended\n' "$task"
     return 1
   }
   while IFS= read -r file; do
-    [ -z "$file" ] || files+=("$file")
+    [ -n "$file" ] || continue
+    for root in "${roots[@]+"${roots[@]}"}"; do
+      case "$file" in
+        "${root%/}/"*) files+=("$file"); break ;;
+      esac
+    done
   done <<EOF
 $opened
+EOF
+  while IFS= read -r file; do
+    [ -z "$file" ] || files+=("$file")
+  done <<EOF
 $(task_source_artifacts "$task")
 EOF
   [ "${#files[@]}" -gt 0 ] || return 0

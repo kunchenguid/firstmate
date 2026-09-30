@@ -3207,8 +3207,64 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+# Whether the task still carries an open captain call: its own backlog item is
+# held for the captain (the retained close), or an entry of the captain-call
+# inventory recorded in its metadata is. bin/fm-captain-hold.sh `open` owns the
+# predicate, and "cannot tell" counts as open, because ending a board the
+# captain may still answer on is the mistake this guards against. The hold
+# records tie a call to a task, not to a board file, so the whole task's boards
+# are kept together.
+teardown_has_open_captain_call() {
+  local entry status keys
+  status=0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" \
+    >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 1 ] || return 0
+  keys=$(fm_meta_get "$META" decision_keys)
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    status=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" open "$entry" --origin "$ID" \
+      >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 1 ] || return 0
+  done <<EOF
+$(printf '%s\n' "$keys" | tr ',' '\n')
+EOF
+  return 1
+}
+
+# End the Lavish review sessions this task leaves behind and retire the sources
+# that listened on them; bin/fm-procevent-lavish.sh end-task owns the mechanics
+# and the path-only attribution. A secondmate's boards under its own home belong
+# to that home's tasks, so only its data directory in this home is a root.
+# Failing to end a session never blocks or discards anything: it is reported
+# and teardown continues, because the boards stay reopenable and endable by hand.
+teardown_end_lavish_boards() {
+  local FM_HOME=$1 STATE=$2 DATA=$3 CONFIG=$4 ID=$5 META=$6
+  shift 6
+  local -a roots=("$DATA/$ID" "$@")
+  local out rc=0
+  if teardown_has_open_captain_call; then
+    echo "Lavish boards of task $ID stay open: the task still carries an open captain call." >&2
+    return 0
+  fi
+  local -a root_args=()
+  local root
+  for root in "${roots[@]}"; do root_args+=(--root "$root"); done
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-procevent-lavish.sh" end-task "$ID" "${root_args[@]}" 2>&1) || rc=$?
+  if [ -n "$out" ]; then
+    if [ "$rc" -eq 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
+  fi
+  [ "$rc" -eq 0 ] || echo "warning: some Lavish boards of task $ID could not be concluded; teardown continues (see above)" >&2
+  return 0
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_tmp
+  local -a child_roots
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3252,6 +3308,24 @@ cleanup_firstmate_home_children() {
           || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
+    child_roots=()
+    child_owner_rc=0
+    if [ "$child_kind" != secondmate ]; then
+      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+        if [ "$child_backend" != orca ] && fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+          require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
+        fi
+        case "$child_owner_rc" in
+          0) child_roots+=("$child_wt") ;;
+          "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+          *) require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1 ;;
+        esac
+      fi
+      child_tmp=$(meta_value "$child_meta" tasktmp)
+      [ -z "$child_tmp" ] || child_roots+=("$child_tmp")
+    fi
+    teardown_end_lavish_boards "$home" "$sub_state" "$home/data" "$home/config" \
+      "$child_id" "$child_meta" "${child_roots[@]+"${child_roots[@]}"}"
     if [ "$child_kind" = secondmate ]; then
       child_home=$(meta_value "$child_meta" home)
       [ -n "$child_home" ] || child_home=$child_wt
@@ -3271,14 +3345,8 @@ cleanup_firstmate_home_children() {
       # slot reassigned to another task is not this child's to kill, reset,
       # or return, so only its records are cleaned up. The preflight above
       # already named the reassignment on stderr under the same lock.
-      child_owner_rc=0
-      if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
-      fi
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         :
-      elif [ "$child_owner_rc" -ne 0 ]; then
-        require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
@@ -3479,69 +3547,6 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
-# Whether the task still carries an open captain call: its own backlog item is
-# held for the captain (the retained close), or an entry of the captain-call
-# inventory recorded in its metadata is. bin/fm-captain-hold.sh `open` owns the
-# predicate, and "cannot tell" counts as open, because ending a board the
-# captain may still answer on is the mistake this guards against. The hold
-# records tie a call to a task, not to a board file, so the whole task's boards
-# are kept together.
-teardown_has_open_captain_call() {
-  local entry status keys
-  [ "$TEARDOWN_BACKLOG_TRANSITION" = close ] || return 0
-  [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ] || return 1
-  keys=$(fm_meta_get "$META" decision_keys)
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    status=0
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" open "$entry" --distinguish-absent \
-      >/dev/null 2>&1 || status=$?
-    if [ "$status" -eq 3 ]; then
-      status=0
-      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-        FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID-decision-$entry" --distinguish-absent \
-        >/dev/null 2>&1 || status=$?
-    fi
-    case "$status" in
-      1|3) ;;
-      *) return 0 ;;
-    esac
-  done <<EOF
-$(printf '%s\n' "$keys" | tr ',' '\n')
-EOF
-  return 1
-}
-
-# End the Lavish review sessions this task leaves behind and retire the sources
-# that listened on them; bin/fm-procevent-lavish.sh end-task owns the mechanics
-# and the path-only attribution. A secondmate's boards under its own home belong
-# to that home's tasks, so only its data directory in this home is a root.
-# Failing to end a session never blocks or discards anything: it is reported
-# and teardown continues, because the boards stay reopenable and endable by hand.
-teardown_end_lavish_boards() {
-  local -a roots=("$DATA/$ID")
-  local out rc=0
-  if [ "$KIND" != secondmate ]; then
-    if teardown_owns_worktree && [ -n "$WT" ] && [ -d "$WT" ]; then roots+=("$WT"); fi
-    [ -z "$TASK_TMP" ] || roots+=("$TASK_TMP")
-  fi
-  if teardown_has_open_captain_call; then
-    echo "Lavish boards of task $ID stay open: the task still carries an open captain call." >&2
-    return 0
-  fi
-  local -a root_args=()
-  local root
-  for root in "${roots[@]}"; do root_args+=(--root "$root"); done
-  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-procevent-lavish.sh" end-task "$ID" "${root_args[@]}" 2>&1) || rc=$?
-  if [ -n "$out" ]; then
-    if [ "$rc" -eq 0 ]; then printf '%s\n' "$out"; else printf '%s\n' "$out" >&2; fi
-  fi
-  [ "$rc" -eq 0 ] || echo "warning: some Lavish boards of task $ID could not be concluded; teardown continues (see above)" >&2
-  return 0
-}
-
 BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
@@ -3637,7 +3642,13 @@ fi
 # Lavish review boards (see script header): every refusal above has passed, and
 # the isolated copy has not been returned yet, so a board living in it is ended
 # while its file still exists.
-teardown_end_lavish_boards
+LAVISH_BOARD_ROOTS=()
+if [ "$KIND" != secondmate ]; then
+  if teardown_owns_worktree && [ -n "$WT" ] && [ -d "$WT" ]; then LAVISH_BOARD_ROOTS+=("$WT"); fi
+  [ -z "$TASK_TMP" ] || LAVISH_BOARD_ROOTS+=("$TASK_TMP")
+fi
+teardown_end_lavish_boards "$FM_HOME" "$STATE" "$DATA" "$CONFIG" "$ID" "$META" \
+  "${LAVISH_BOARD_ROOTS[@]+"${LAVISH_BOARD_ROOTS[@]}"}"
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
 # pruned code root. Best effort - a sweep failure never blocks this teardown.

@@ -4273,8 +4273,9 @@ lavish_board_fixture() {  # <case-dir>
   cat > "$case_dir/fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = end ] || exit 0
-printf 'end %s host=%s port=%s source=%s\n' "$2" "${LAVISH_AXI_HOST:-}" "${LAVISH_AXI_PORT:-}" \
-  "$([ -e "${FM_TEST_SOURCE_FILE:-/nonexistent}" ] && echo present || echo absent)" >> "${FM_TEST_LAVISH_LOG:?}"
+printf 'end %s host=%s port=%s source=%s file=%s\n' "$2" "${LAVISH_AXI_HOST:-}" "${LAVISH_AXI_PORT:-}" \
+  "$([ -e "${FM_TEST_SOURCE_FILE:-/nonexistent}" ] && echo present || echo absent)" \
+  "$([ -f "$2" ] && echo present || echo absent)" >> "${FM_TEST_LAVISH_LOG:?}"
 [ -z "${FM_TEST_LAVISH_FAIL:-}" ] || { echo "error: Lavish server unreachable" >&2; exit 1; }
 exit 0
 SH
@@ -4296,7 +4297,7 @@ lavish_register_source() {  # <case-dir> <task-id> <board-file>
 
 run_teardown_lavish() {  # <case-dir> [teardown args...]
   local case_dir=$1; shift
-  LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" FM_TEST_LAVISH_LOG="$case_dir/lavish.log" \
+  FM_HOME="$case_dir" LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" FM_TEST_LAVISH_LOG="$case_dir/lavish.log" \
     FM_TEST_SOURCE_FILE="${LAVISH_TEST_SOURCE_FILE:-}" run_teardown "$case_dir" "$@"
 }
 
@@ -4379,27 +4380,30 @@ test_lavish_end_failure_is_reported_and_does_not_block_teardown() {
 }
 
 test_lavish_boards_of_a_task_with_an_open_captain_call_stay_open() {
-  local case_dir rc id
-  case_dir=$(make_case lavish-open-call)
-  land_lavish_case "$case_dir"
-  seed_backlog_in_flight "$case_dir"
-  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
-    FM_CONFIG_OVERRIDE="$case_dir/config" "$ROOT/bin/fm-captain-hold.sh" hold task-x1 \
-    --reason "waiting on the captain" >/dev/null || fail "lavish-open-call: could not hold the task"
-  lavish_board_fixture "$case_dir"
-  id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/data/task-x1/board.html") \
-    || fail "lavish-open-call: could not register the task-owned source"
+  local case_dir rc id mode
+  for mode in automatic manual; do
+    case_dir=$(make_case "lavish-open-call-$mode")
+    land_lavish_case "$case_dir"
+    seed_backlog_in_flight "$case_dir"
+    [ "$mode" != manual ] || printf 'manual\n' > "$case_dir/config/backlog-backend"
+    FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+      FM_CONFIG_OVERRIDE="$case_dir/config" "$ROOT/bin/fm-captain-hold.sh" hold task-x1 \
+      --reason "waiting on the captain" >/dev/null || fail "lavish-open-call: could not hold the task"
+    lavish_board_fixture "$case_dir"
+    id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/data/task-x1/board.html") \
+      || fail "lavish-open-call: could not register the task-owned source"
 
-  set +e
-  run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
+    set +e
+    run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
 
-  expect_code 0 "$rc" "lavish-open-call: teardown should still retain the held task"
-  [ ! -s "$case_dir/lavish.log" ] || fail "lavish-open-call: a board carrying an open captain call was ended: $(cat "$case_dir/lavish.log")"
-  assert_present "$case_dir/state/procevent/$id.source" "lavish-open-call: the source of a kept board was retired"
-  assert_grep 'stay open' "$case_dir/stderr" "lavish-open-call: the kept boards were not reported"
-  pass "a task still held for the captain keeps its Lavish boards and their sources"
+    expect_code 0 "$rc" "lavish-open-call: teardown should still retain the held task"
+    [ ! -s "$case_dir/lavish.log" ] || fail "lavish-open-call: a board carrying an open captain call was ended: $(cat "$case_dir/lavish.log")"
+    assert_present "$case_dir/state/procevent/$id.source" "lavish-open-call: the source of a kept board was retired"
+    assert_grep 'stay open' "$case_dir/stderr" "lavish-open-call: the kept boards were not reported"
+    pass "a task still held for the captain keeps its Lavish boards and sources with $mode backlog updates"
+  done
 }
 
 test_lavish_boards_stay_open_while_an_inventoried_captain_call_is_open() {
@@ -4453,6 +4457,251 @@ test_lavish_source_owned_by_another_task_is_never_touched() {
     fail "lavish-other-owner: a board listened on by another task was ended"
   fi
   pass "a board whose source belongs to another task is left alone"
+}
+
+test_teardown_ends_registered_lavish_boards_outside_its_roots() {
+  local case_dir rc id ended_id missing_id real_case
+  case_dir=$(make_case lavish-registered-outside)
+  land_lavish_case "$case_dir"
+  lavish_board_fixture "$case_dir"
+  id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/home-board.html") \
+    || fail "lavish-outside: could not register the external board"
+  printf '<html>ended</html>\n' > "$case_dir/ended-outside.html"
+  printf '<html>unlisted</html>\n' > "$case_dir/unlisted.html"
+  ended_id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/ended-outside.html") \
+    || fail "lavish-outside: could not register the ended board"
+  missing_id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/unlisted.html") \
+    || fail "lavish-outside: could not register the unlisted board"
+  real_case=$(lavish_real_path "$case_dir")
+  jq --arg file "$real_case/ended-outside.html" \
+    '.sessions.aaaaaaaaaaaaaaa6 = {file: $file, status: "ended"}' \
+    "$case_dir/lavish-state/state.json" > "$case_dir/lavish-state/next.json"
+  mv "$case_dir/lavish-state/next.json" "$case_dir/lavish-state/state.json"
+  LAVISH_TEST_SOURCE_FILE="$case_dir/state/procevent/$id.source"
+  rc=0
+  run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  LAVISH_TEST_SOURCE_FILE=
+
+  expect_code 0 "$rc" "lavish-outside: teardown should succeed"
+  assert_grep "end $real_case/home-board.html host=127.0.0.1 port=47391 source=absent file=present" \
+    "$case_dir/lavish.log" "lavish-outside: the registered external session was not ended after retiring its source"
+  [ "$(wc -l < "$case_dir/lavish.log" | tr -d ' ')" = 3 ] \
+    || fail "lavish-outside: must end exactly the two root boards and the open registered board"
+  for id in "$id" "$ended_id" "$missing_id"; do
+    assert_absent "$case_dir/state/procevent/$id.source" "lavish-outside: a task source stayed registered"
+  done
+  assert_present "$case_dir/home-board.html" "lavish-outside: ending deleted the shared artifact"
+  pass "registered external boards end while ended and unlisted sessions only retire their sources"
+}
+
+test_lavish_inventory_resolution_in_manual_mode() {
+  local case_dir rc id variant held_id
+  for variant in exact legacy missing answered; do
+    case_dir=$(make_case "lavish-manual-inventory-$variant")
+    land_lavish_case "$case_dir"
+    seed_backlog_in_flight "$case_dir"
+    printf 'manual\n' > "$case_dir/config/backlog-backend"
+    printf '%s\n' 'decisions_reviewed=1' 'decision_keys=held-q' >> "$case_dir/state/task-x1.meta"
+    held_id=held-q
+    [ "$variant" != legacy ] || held_id=task-x1-decision-held-q
+    if [ "$variant" != missing ]; then
+      FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+        "$ROOT/bin/fm-captain-hold.sh" hold "$held_id" --title question --reason waiting >/dev/null \
+        || fail "lavish-manual-$variant: could not hold the inventoried call"
+      if [ "$variant" = answered ]; then
+        printf 'Approved\n' > "$case_dir/answer.txt"
+        FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+          "$ROOT/bin/fm-captain-hold.sh" answer "$held_id" --decision-file "$case_dir/answer.txt" >/dev/null \
+          || fail "lavish-manual-answered: could not answer the inventoried call"
+      fi
+    fi
+    lavish_board_fixture "$case_dir"
+    id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/data/task-x1/board.html") \
+      || fail "lavish-manual-$variant: could not register the board"
+    rc=0
+    run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "lavish-manual-$variant: teardown should succeed"
+    [ "$(backlog_row_state "$case_dir")" = "in_flight" ] \
+      || fail "lavish-manual-$variant: manual mode mutated the task backlog"
+    if [ "$variant" = answered ]; then
+      [ "$(wc -l < "$case_dir/lavish.log" | tr -d ' ')" = 2 ] \
+        || fail "lavish-manual-answered: answered calls kept boards open"
+      assert_absent "$case_dir/state/procevent/$id.source" "lavish-manual-answered: source stayed registered"
+    else
+      [ ! -s "$case_dir/lavish.log" ] || fail "lavish-manual-$variant: an open or unknown inventory was ignored"
+      assert_present "$case_dir/state/procevent/$id.source" "lavish-manual-$variant: a protected source was retired"
+    fi
+    pass "manual backlog mode respects $variant captain-call inventory"
+  done
+}
+
+test_lavish_migrated_inventory_uses_the_captain_hold_resolver() {
+  local case_dir variant rc id row real_tasks
+  real_tasks=$(command -v tasks-axi)
+  for variant in notes prefix ambiguous scan-error answered; do
+    case_dir=$(make_case "lavish-migrated-$variant")
+    land_lavish_case "$case_dir"
+    case "$variant" in
+      notes|prefix)
+        write_meta "$case_dir" no-mistakes scout
+        mkdir -p "$case_dir/data/task-x1"
+        printf 'Review complete; old-key awaits the captain.\n' > "$case_dir/data/task-x1/report.md"
+        ;;
+    esac
+    printf '%s\n' 'decisions_reviewed=1' 'decision_keys=old-key' >> "$case_dir/state/task-x1.meta"
+    mkdir -p "$case_dir/graph"
+    printf '%s\n' 'task:' '  id: task-x1' '  state: in_flight' '  hold_kind: -' \
+      '  held: no' '  blocked: no' > "$case_dir/graph/task-x1.show"
+    cat > "$case_dir/.tasks.toml" <<EOF
+backend = "beads"
+[beads]
+path = "$case_dir/graph"
+binary = "bd"
+prefix = "fm"
+EOF
+    row=renamed-call
+    [ "$variant" != prefix ] || row=fm-task-x1-decision-old-key
+    printf '%s\n' 'task:' "  id: $row" '  state: queued' '  hold_kind: captain' \
+      '  held: yes' '  blocked: no' '  body: ""' > "$case_dir/graph/$row.show"
+    if [ "$variant" = answered ]; then
+      printf '%s\n' 'task:' "  id: $row" '  state: done' '  hold_kind: captain' \
+        '  held: no' '  blocked: no' '  body: "Captain answer: Approved"' > "$case_dir/graph/$row.show"
+    fi
+    jq -n --arg id "$row" '[{id: $id, notes: "migrated from data/backlog.md id task-x1-decision-old-key on 2026-09-04"}]' \
+      > "$case_dir/graph/rows.json"
+    case "$variant" in
+      prefix) printf '[]\n' > "$case_dir/graph/rows.json" ;;
+      ambiguous)
+        jq '. + [{id: "another-call", notes: .[0].notes}]' "$case_dir/graph/rows.json" > "$case_dir/graph/next.json"
+        mv "$case_dir/graph/next.json" "$case_dir/graph/rows.json"
+        ;;
+    esac
+    cat > "$case_dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ]; then
+  printf '%s\n' "$*" >> "$FM_TEST_BEADS_GRAPH/reads.log"
+  if [ -f "$FM_TEST_BEADS_GRAPH/${2:-}.show" ]; then
+    cat "$FM_TEST_BEADS_GRAPH/$2.show"
+    exit 0
+  fi
+  printf 'code: NOT_FOUND\n'
+  exit 1
+fi
+if [ "${1:-} ${2:-}" = 'done task-x1' ]; then
+  printf '%s\n' 'task:' '  id: task-x1' '  state: done' '  hold_kind: -' \
+    '  held: no' '  blocked: no' > "$FM_TEST_BEADS_GRAPH/task-x1.show"
+  exit 0
+fi
+exec "$FM_TEST_REAL_TASKS_AXI" "$@"
+SH
+    cat > "$case_dir/fakebin/bd" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = 'list --all --json' ] || exit 1
+[ "${FM_TEST_BEADS_SCAN_FAIL:-0}" = 0 ] || exit 1
+cat "$BEADS_DIR/rows.json"
+SH
+    chmod +x "$case_dir/fakebin/tasks-axi" "$case_dir/fakebin/bd"
+    lavish_board_fixture "$case_dir"
+    id=$(lavish_register_source "$case_dir" task-x1 "$case_dir/data/task-x1/board.html") \
+      || fail "lavish-migrated-$variant: could not register the board"
+    rc=0
+    FM_TEST_REAL_TASKS_AXI="$real_tasks" FM_TEST_BEADS_GRAPH="$case_dir/graph" \
+      FM_TEST_BEADS_SCAN_FAIL="$([ "$variant" = scan-error ] && echo 1 || echo 0)" \
+      run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "lavish-migrated-$variant: teardown should succeed: $(cat "$case_dir/stderr")"
+    assert_grep '  state: done' "$case_dir/graph/task-x1.show" "lavish-migrated-$variant: the task itself did not close"
+    if [ "$variant" = answered ]; then
+      [ "$(wc -l < "$case_dir/lavish.log" | tr -d ' ')" = 2 ] \
+        || fail "lavish-migrated-answered: answered migrated calls kept boards open"
+      assert_absent "$case_dir/state/procevent/$id.source" "lavish-migrated-answered: source stayed registered"
+    else
+      [ ! -s "$case_dir/lavish.log" ] || fail "lavish-migrated-$variant: an open or uncertain migrated call was ignored"
+      assert_present "$case_dir/state/procevent/$id.source" "lavish-migrated-$variant: a protected source was retired"
+    fi
+    case "$variant" in
+      notes|prefix|answered)
+        assert_grep "show $row" "$case_dir/graph/reads.log" "lavish-migrated-$variant: the resolved row was never read"
+        ;;
+    esac
+    pass "teardown respects $variant migrated captain-call resolution"
+  done
+}
+
+test_forced_secondmate_cleanup_ends_child_lavish_boards_before_return() {
+  local case_dir home nested child board id real_case rc mode hold_home
+  for mode in return remove; do
+    case_dir=$(make_case "lavish-child-$mode")
+    write_meta "$case_dir" local-only secondmate
+    configure_secondmate_with_tmux_children "$case_dir"
+    home="$case_dir/secondmate-home"
+    nested="$home/nested-home"
+    mkdir -p "$nested/state" "$nested/data" "$nested/config" "$nested/projects"
+    printf 'nested-sm\n' > "$nested/.fm-secondmate-home"
+    fm_write_meta "$home/state/nested-sm.meta" "window=firstmate:fm-nested-sm" \
+      'endpoint_task_id=nested-sm' 'kind=secondmate' 'mode=local-only' \
+      "home=$nested" "worktree=$nested" "project=$case_dir/project"
+    git -C "$case_dir/project" worktree add -q -b fm/grandchild "$case_dir/grandchild-wt" main
+    fm_write_meta "$nested/state/grandchild.meta" 'window=firstmate:fm-grandchild' \
+      'endpoint_task_id=grandchild' 'kind=ship' 'mode=local-only' \
+      "worktree=$case_dir/grandchild-wt" "project=$case_dir/project"
+    lavish_board_fixture "$case_dir"
+    real_case=$(lavish_real_path "$case_dir")
+    mkdir -p "$home/data/child-a" "$case_dir/child-scratch"
+    printf 'tasktmp=%s\n' "$case_dir/child-scratch" >> "$home/state/child-a.meta"
+    for board in child-a-wt/board.html child-b-wt/board.html grandchild-wt/board.html \
+      secondmate-home/data/child-a/board.html child-scratch/board.html shared-child.html; do
+      printf '<html>child</html>\n' > "$case_dir/$board"
+      jq --arg file "$real_case/$board" \
+        '.sessions[$file] = {file: $file, status: "open", url: "http://127.0.0.1:47391/session/bbbbbbbbbbbbbbbb"}' \
+        "$case_dir/lavish-state/state.json" > "$case_dir/lavish-state/next.json"
+      mv "$case_dir/lavish-state/next.json" "$case_dir/lavish-state/state.json"
+    done
+    cp -R "$ROOT/bin" "$home/bin"
+    id=$(lavish_register_source "$home" child-a "$case_dir/shared-child.html") \
+      || fail "lavish-child-$mode: could not register the child's external board"
+    for child in child-a child-b; do
+      hold_home="$case_dir"
+      [ "$child" != child-b ] || hold_home=$home
+      FM_HOME="$hold_home" FM_STATE_OVERRIDE="$hold_home/state" FM_DATA_OVERRIDE="$hold_home/data" \
+        "$ROOT/bin/fm-captain-hold.sh" hold "$child" --title question --reason waiting >/dev/null \
+        || fail "lavish-child-$mode: could not seed the home-specific holds"
+    done
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = return ] || exit 0
+printf 'return %s\n' "$*" >> "$FM_TEST_LAVISH_LOG"
+[ "${FM_TEST_RETURN_FAIL:-0}" = 0 ]
+SH
+    LAVISH_TEST_SOURCE_FILE="$home/state/procevent/$id.source"
+    rc=0
+    FM_HOME="$ROOT" LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" \
+      FM_TEST_LAVISH_LOG="$case_dir/lavish.log" FM_TEST_SOURCE_FILE="$LAVISH_TEST_SOURCE_FILE" \
+      FM_TEST_RETURN_FAIL="$([ "$mode" = remove ] && echo 1 || echo 0)" \
+      run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    LAVISH_TEST_SOURCE_FILE=
+    expect_code 0 "$rc" "lavish-child-$mode: forced teardown should succeed: $(cat "$case_dir/stderr")"
+    for board in child-a-wt/board.html grandchild-wt/board.html \
+      secondmate-home/data/child-a/board.html child-scratch/board.html shared-child.html; do
+      awk -v file="$real_case/$board" '
+        $1 == "end" && $2 == file && $NF == "file=present" { found = 1 }
+        END { if (!found) exit 1 }
+      ' "$case_dir/lavish.log" || fail "lavish-child-$mode: $board was not ended before its artifact disappeared: $(cat "$case_dir/lavish.log") $(cat "$case_dir/stderr")"
+    done
+    assert_grep "end $real_case/shared-child.html host=127.0.0.1 port=47391 source=absent" \
+      "$case_dir/lavish.log" "lavish-child-$mode: the child's source was not retired before ending its board"
+    if grep -Fq "end $real_case/child-b-wt/board.html" "$case_dir/lavish.log"; then
+      fail "lavish-child-$mode: ignored a hold in the child's owning home"
+    fi
+    for child in child-a grandchild; do
+      awk -v file="$real_case/$child-wt/board.html" -v wt="$case_dir/$child-wt" '
+        $1 == "end" && $2 == file { ended = 1 }
+        $1 == "return" && $NF == wt { if (!ended) exit 1; returned = 1 }
+        END { if (!returned) exit 1 }
+      ' "$case_dir/lavish.log" || fail "lavish-child-$mode: $child was returned before its board ended"
+    done
+    assert_absent "$home" "lavish-child-$mode: forced cleanup did not remove the secondmate home"
+    pass "forced child cleanup ends boards using each owning home before worktree $mode"
+  done
 }
 
 test_missing_startup_source_refuses_before_cleanup
@@ -4563,3 +4812,7 @@ test_lavish_end_failure_is_reported_and_does_not_block_teardown
 test_lavish_boards_of_a_task_with_an_open_captain_call_stay_open
 test_lavish_boards_stay_open_while_an_inventoried_captain_call_is_open
 test_lavish_source_owned_by_another_task_is_never_touched
+test_teardown_ends_registered_lavish_boards_outside_its_roots
+test_lavish_inventory_resolution_in_manual_mode
+test_lavish_migrated_inventory_uses_the_captain_hold_resolver
+test_forced_secondmate_cleanup_ends_child_lavish_boards_before_return
