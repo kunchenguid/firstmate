@@ -398,6 +398,18 @@ def cleanup_observation(receipt):
     return result
 
 
+def cleanup_observation_matches(receipt, key):
+    """Absent preservation fields add no fact to a pre-preservation digest."""
+    observation = cleanup_observation(receipt)
+    if key == digest(json.dumps(observation, sort_keys=True).encode()):
+        return True
+    if 'preservation_ref' in receipt or 'preservation_sha256' in receipt:
+        return False
+    for field in ('preservation_ref', 'preservation_sha256'):
+        observation.pop(field)
+    return key == digest(json.dumps(observation, sort_keys=True).encode())
+
+
 def stamp(value):
     require(isinstance(value, str) and re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', value), 'invalid UTC timestamp')
     return datetime.datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
@@ -1624,8 +1636,8 @@ class Task:
         self.reference(record['assessment']['authority_ref'])
         for item in record['assessment']['evidence']:
             if record.get('cleanup_ref') == item['ref'] and record.get('cleanup_observation_key'):
-                require(record['cleanup_observation_key'] == digest(json.dumps(
-                    cleanup_observation(self.cleanup_read()), sort_keys=True).encode()), 'cleanup facts changed')
+                require(cleanup_observation_matches(self.cleanup_read(), record['cleanup_observation_key']),
+                        'cleanup facts changed')
                 continue
             self.reference(item['ref'], item['sha256'])
         meta = dict(line.split('=', 1) for line in
@@ -1690,7 +1702,7 @@ class Task:
                         if receipt is not None:
                             observation = cleanup_observation(receipt)
                             observations.append(observation)
-                            if record.get('cleanup_observation_key') == digest(json.dumps(observation, sort_keys=True).encode()):
+                            if cleanup_observation_matches(receipt, record.get('cleanup_observation_key')):
                                 continue
                         else:
                             observations.append(observed)

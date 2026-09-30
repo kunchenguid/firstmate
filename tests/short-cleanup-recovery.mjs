@@ -29,7 +29,7 @@ for(const role of ['AUTHOR','COMMITTER']){process.env[`GIT_${role}_NAME`]='fixtu
 process.env.GIT_CONFIG_GLOBAL='/dev/null';process.env.GIT_CONFIG_NOSYSTEM='1';
 mkdir(tmp);const basePath=process.env.FM_SHORT_TEST_BASE_PATH??process.env.PATH;
 const git=(...args)=>cmd('git',args);
-function setup(label,interrupt=false,backlog=false){
+function setup(label,interrupt=false,backlog=false,generation='g-fixture',goal=1){
   const base=tmp+'/'+label,home=base+'/home',project=base+'/project',remote=base+'/remote.git',bin=base+'/bin',pool=base+'/pool',alias=base+'/alias';
   for(const dir of [home+'/state',home+'/data/task',home+'/config',bin,pool])mkdir(dir);
   write(home+'/state/.lock',String(process.pid));fs.symlinkSync(pool,alias);
@@ -67,14 +67,15 @@ PATH=${shellQuote(basePath)} exec "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "
   const h=(...args)=>JSON.parse(cmd(bin+'/herdr',args,env));
   const ws=h('workspace','create','--cwd',base,'--label',label,'--no-focus').result;
   const pane=ws.root_pane.pane_id;
-  write(home+'/state/task.meta',`kind=ship\nmode=local-only\nspawn_gen=g-fixture\nworktree=${copy}\nproject=${project}\nbackend=herdr\nwindow=${session}:${pane}\nherdr_session=${session}\nherdr_workspace_id=${ws.workspace.workspace_id}\nherdr_tab_id=${ws.tab.tab_id}\nherdr_pane_id=${pane}\nendpoint_task_id=task\n`);
+  write(home+'/state/task.meta',`kind=ship\nmode=local-only\nspawn_gen=${generation}\nworktree=${copy}\nproject=${project}\nbackend=herdr\nwindow=${session}:${pane}\nherdr_session=${session}\nherdr_workspace_id=${ws.workspace.workspace_id}\nherdr_tab_id=${ws.tab.tab_id}\nherdr_pane_id=${pane}\nendpoint_task_id=task\n`);
   write(home+'/data/task/brief.md','Synthetic accepted cleanup fixture\n');write(home+'/data/task/report.md','Retained report\n');
   const life=(op,...args)=>JSON.parse(cmd('python3',[root+'/bin/fm-task-lifecycle.py',op,'task',...args],env));
-  life('init');life('owner-receipt','--execution-generation','g-fixture','--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',copy,'rev-parse','HEAD')}));
+  life('init');life('owner-receipt','--execution-generation',generation,'--kind','merge','--facts',JSON.stringify({url:'local:fixture',head:git('-C',copy,'rev-parse','HEAD')}));
+  for(let n=2;n<=goal;n++){const revision=life('read');write(home+'/goal.json',{...revision,goal_revision:n});cmd('bash',[root+'/bin/fm-task-state.sh','reconcile','task','--expected-revision',String(revision.revision),'--record',home+'/goal.json'],env);}
   const record=life('read');record.disposition='accepted';record.assessment.remaining_gap='';
   record.assessment.evidence.push({ref:home+'/data/task/report.md',sha256:createHash('sha256').update(fs.readFileSync(home+'/data/task/report.md')).digest('hex')});write(home+'/accepted.json',record);
   cmd('bash',[root+'/bin/fm-task-state.sh','reconcile','task','--expected-revision',String(record.revision),'--record',home+'/accepted.json'],env);
-  cmd('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" task "$3" g-fixture','fixture',root,copy,home],env);
+  cmd('bash',['-c','. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" task "$3" "$4"','fixture',root,copy,home,generation],env);
   if(backlog){write(home+'/.tasks.toml','backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\n');cmd('tasks-axi',['add','task','Recovery fixture','--kind','ship','--repo','sample','--start','--file',home+'/data/backlog.md'],env);}
   const step={action:'cleanup',task:'task'},id='short-'+createHash('sha256').update(label).digest('hex'),dir=home+'/state/short-agents/'+id;mkdir(dir);
   const request={version:2,id,input:{key:label,goal:'fixture',acceptance:'owner proof',materials:[],operations:{authority:'isolated fixture',expiresAt:Date.now()+600000,steps:[step]}},operationBindings:bindOperations(home,{expiresAt:Date.now()+600000,steps:[step]}),acceptedAt:Date.now(),nonce:'fixture-'+label};
@@ -85,8 +86,25 @@ const run=f=>{const child=spawnSync(process.execPath,[root+'/tests/short-cleanup
 const snap=f=>({head:git('-C',f.copy,'rev-parse','HEAD'),branch:git('-C',f.copy,'branch','--show-current'),status:git('-C',f.copy,'status','--porcelain'),inode:fs.statSync(f.copy).ino,files:git('-C',f.copy,'ls-files','--cached','--others','--exclude-standard','-z').split('\0').filter(Boolean).map(n=>[n,fs.readFileSync(f.copy+'/'+n).toString('base64')])});
 const recover=(f,index=0,env=f.env)=>spawnSync(process.execPath,[root+'/bin/fm-short-agent.mjs','settle-cleanup',f.request.id,String(index)],{env,encoding:'utf8',timeout:30000});
 const fail=(f,pattern,index=0,env=f.env)=>{const p=recover(f,index,env);assert.notEqual(p.status,0,p.stdout);assert.match(p.stderr,pattern);assert(fs.existsSync(f.marker));assert(!fs.existsSync(f.dir+'/operation-0.receipt.json'));};
+// Historical owner fixture: the same facts were hashed before preservation
+// fields existed. Python's JSON serialization is the persisted digest format.
+function historicalObservation(f){
+  const file=f.home+'/data/task/lifecycle.json',record=read(file),receipt=f.life('cleanup-read');
+  assert.equal(record.cleanup_ref,f.home+'/state/task.cleanup.json');
+  assert.equal(receipt.phases.directory_return.reason_code,'copy-disposal-attempt');
+  const key=cmd('python3',['-c',`import json,hashlib,sys
+c=json.load(open(sys.argv[1]));o={k:c.get(k) for k in ('task_id','spawn_gen','goal_revision','journal_sha256','launch_binding','copy_binding')}
+o['phases']={n:{k:p.get(k) for k in ('state','reason_code')} for n,p in c['phases'].items() if n!='record_close'}
+print(hashlib.sha256(json.dumps(o,sort_keys=True).encode()).hexdigest())`,record.cleanup_ref],f.env);
+  assert.notEqual(key,record.cleanup_observation_key,'historical/current projection must diverge');
+  write(file,{...record,cleanup_observation_key:key});
+  return file;
+}
 const success=setup('alias-success');assert.equal(run(success).state,'completed');assert(!fs.existsSync(success.marker));assert(!fs.existsSync(success.home+'/state/task.meta'));assert.equal(read(success.dir+'/operation-0.receipt.json').evidence.copyDisposition,'returned-or-already-absent');
 const f=setup('pending-recovery',true,true);assert.equal(run(f).state,'blocked');assert.equal(f.life('cleanup-read').phases.directory_return.state,'pending');
+const legacyLifecycle=historicalObservation(f),legacyBytes=fs.readFileSync(legacyLifecycle,'utf8');
+assert.equal(f.life('completion-read').disposition,'accepted');assert.equal(fs.readFileSync(legacyLifecycle,'utf8'),legacyBytes,'readback must not rewrite historical evidence');
+const ordinary=spawnSync('bash',[root+'/bin/fm-task-state.sh','assess','task'],{env:f.env,encoding:'utf8'});assert.equal(ordinary.status,6);assert.match(ordinary.stderr,/pending short-operation receipt/);
 write(f.copy+'/uncommitted.txt','preserve dirty content\n');git('-C',f.copy,'checkout','-b','unmerged');write(f.copy+'/committed.txt','preserve unmerged content\n');git('-C',f.copy,'add','committed.txt');git('-C',f.copy,'commit','-m','unmerged');
 write(f.home+'/state/shared.meta',`worktree=${f.copy}\n`);
 const original=Object.fromEntries(['request.json','result.json','operation-0.intent.json','operation-0.effect.json','operation-0.output.json'].map(n=>[n,fs.readFileSync(f.dir+'/'+n,'utf8')])),before=snap(f),effects=fs.readFileSync(f.base+'/effects.log','utf8');
@@ -99,6 +117,11 @@ const bypass=spawnSync('bash',[root+'/bin/fm-teardown.sh','task','--preserve-cop
 const reqBytes=fs.readFileSync(f.dir+'/request.json','utf8');write(f.dir+'/request.json',{...JSON.parse(reqBytes),input:{...f.request.input,operations:{...f.request.input.operations,steps:[{action:'cleanup',task:'wrong'}]}}});fail(f,/step\/task\/generation changed/);write(f.dir+'/request.json',reqBytes);
 const meta=f.home+'/state/task.meta',metaBytes=fs.readFileSync(meta,'utf8');
 for(const replacement of ['spawn_gen=wrong','endpoint_task_id=wrong']){write(meta,metaBytes.replace(replacement.split('=')[0]+'='+ (replacement.startsWith('spawn')?'g-fixture':'task'),replacement));fail(f,/task binding changed/);write(meta,metaBytes);}
+const cleanupFile=f.home+'/state/task.cleanup.json',cleanupBytes=fs.readFileSync(cleanupFile,'utf8');
+for(const edit of [c=>({...c,spawn_gen:'wrong'}),c=>({...c,goal_revision:c.goal_revision+1}),c=>({...c,phases:{...c.phases,pane_close:{state:'confirmed',reason_code:'changed'}}}),c=>({...c,phases:{...c.phases,directory_return:{state:'retained',reason_code:'changed'}}}),c=>({...c,journal_sha256:'a'.repeat(64)}),c=>({...c,preservation_ref:null}),c=>({...c,preservation_sha256:null})]){
+  write(cleanupFile,edit(JSON.parse(cleanupBytes)));fail(f,/cleanup facts changed|receipt identity conflict/);assert(!fs.existsSync(f.dir+'/operation-0.preservation.json'));write(cleanupFile,cleanupBytes);
+}
+write(f.home+'/data/task/report.md','changed unrelated acceptance evidence\n');fail(f,/evidence digest changed/);write(f.home+'/data/task/report.md','Retained report\n');
 fs.renameSync(f.copy,f.copy+'-original');mkdir(f.copy);fail(f,/identity changed/);fs.rmdirSync(f.copy);fs.renameSync(f.copy+'-original',f.copy);
 const gitDir=f.project+'/.git';fs.renameSync(gitDir,gitDir+'-original');mkdir(gitDir);fail(f,/Git owner unreadable|Git owner changed/);fs.rmdirSync(gitDir);fs.renameSync(gitDir+'-original',gitDir);
 const started=f.dir+'/started.json',startedBytes=fs.readFileSync(started,'utf8');write(started,{...JSON.parse(startedBytes),pid:process.pid,identity:processIdentity(process.pid)});fail(f,/executor to be dead/);write(started,startedBytes);
@@ -131,11 +154,16 @@ fs.writeFileSync(interrupted.base+'/bin/tasks-axi',`#!/usr/bin/env bash\nif [ "$
 const savedResult=fs.readFileSync(interrupted.dir+'/result.json','utf8'),savedCopy=snap(interrupted),savedEffects=fs.readFileSync(interrupted.base+'/effects.log','utf8');
 fail(interrupted,/backlog .*pending/);assert(!fs.existsSync(interrupted.home+'/state/task.meta'));assert(fs.existsSync(interrupted.home+'/state/task.backlog-close'));assert.equal(interrupted.life('due').due,true);
 assert.equal(recover(interrupted).status,0);assert.equal(interrupted.life('due').due,false);assert.equal(fs.readFileSync(interrupted.dir+'/result.json','utf8'),savedResult);assert.deepEqual(snap(interrupted),savedCopy);assert.equal(fs.readFileSync(interrupted.base+'/effects.log','utf8'),savedEffects);
-const chain=setup('chain-recovery',true),steps=[{action:'sync',project:chain.project},{action:'cleanup',task:'task'},{action:'sync',project:chain.project}];
+const chain=setup('chain-recovery',true,false,'s1790725410.4156501.4288',3),steps=[{action:'sync',project:chain.project},{action:'cleanup',task:'task'},{action:'sync',project:chain.project}];
 const realGit=cmd('which',['git'],{...process.env,PATH:basePath}),gitCalls=chain.base+'/git-calls';
 fs.writeFileSync(chain.base+'/bin/git',`#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${shellQuote(gitCalls)}\nexec ${shellQuote(realGit)} "$@"\n`,{mode:0o755});
 chain.request.input.operations.steps=steps;chain.request.operationBindings=bindOperations(chain.home,chain.request.input.operations);write(chain.dir+'/request.json',chain.request);assert.equal(run(chain).state,'blocked');
+historicalObservation(chain);assert.equal(chain.life('read').goal_revision,3);assert.equal(chain.life('read').execution_generation,'s1790725410.4156501.4288');
+const chainOriginal=Object.fromEntries(['request.json','result.json','operation-1.intent.json','operation-1.effect.json','operation-1.output.json'].map(n=>[n,fs.readFileSync(chain.dir+'/'+n,'utf8')])),chainCopy=snap(chain);
 const syncCalls=()=>fs.readFileSync(gitCalls,'utf8').split('\n').filter(line=>/(^| )(fetch|merge|checkout|reset)( |$)/.test(line)),syncBefore=syncCalls();assert(syncBefore.length>0,'the first sync exercised real Git effects');
 const early=fs.readFileSync(chain.dir+'/operation-0.receipt.json','utf8'),chainEffects=fs.readFileSync(chain.base+'/effects.log','utf8');assert.equal(recover(chain,1).status,0);assert.equal(fs.readFileSync(chain.dir+'/operation-0.receipt.json','utf8'),early);assert(!fs.existsSync(chain.dir+'/operation-2.intent.json'));assert.equal(fs.readFileSync(chain.base+'/effects.log','utf8'),chainEffects);
 assert.deepEqual(syncCalls(),syncBefore);
+for(const [name,bytes] of Object.entries(chainOriginal))assert.equal(fs.readFileSync(chain.dir+'/'+name,'utf8'),bytes);
+assert.deepEqual(snap(chain),chainCopy);assert(!fs.existsSync(chain.marker));assert(!fs.existsSync(chain.home+'/state/task.meta'));assert.equal(chain.life('due').due,false);
+console.log(`PASS ${mode}: pre-preservation cleanup observation, exact original generation and step 1, changed facts/acceptance refusals`);
 console.log(`PASS ${mode}: alias return, exact pending preservation, unchanged failure/content, identity/live-child/lease/project-owner refusals, idempotent settlement and lifecycle completion`);
