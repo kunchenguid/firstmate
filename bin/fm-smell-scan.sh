@@ -48,6 +48,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
+from urllib.parse import unquote
 
 SCHEMA = "fm-smell-scan.v1"
 
@@ -155,6 +156,7 @@ class Scan:
         self.text_cache: dict[str, list[str] | None] = {}
         self.notes: list[str] = []
         self.tracked_files: set[str] | None = None
+        self.tracked_dirs: set[str] | None = None
 
     # --- scope -------------------------------------------------------------
 
@@ -196,13 +198,28 @@ class Scan:
         return self.tracked_files
 
     def tracked_dir_set(self) -> set[str]:
+        if self.tracked_dirs is not None:
+            return self.tracked_dirs
         dirs = set()
         for rel in self.tracked_file_set():
             path = Path(rel).parent
             while str(path) != ".":
                 dirs.add(str(path).replace(os.sep, "/"))
                 path = path.parent
+        self.tracked_dirs = dirs
         return dirs
+
+    def tracked_readable_path(self, rel: str) -> bool:
+        path = self.root / rel
+        if not self.path_inside_root(path):
+            return False
+        if path.is_symlink():
+            try:
+                target_rel = self.root_rel(path)
+            except ValueError:
+                return False
+            return target_rel in self.tracked_file_set()
+        return True
 
     def excluded(self, rel: str) -> bool:
         parts = rel.split("/")
@@ -222,7 +239,7 @@ class Scan:
         files = []
         for rel in found:
             path = self.root / rel
-            if self.excluded(rel) or not self.path_inside_root(path) or not path.is_file():
+            if self.excluded(rel) or not self.tracked_readable_path(rel) or not path.is_file():
                 continue
             files.append(rel)
         return sorted(files)
@@ -233,8 +250,8 @@ class Scan:
         if rel in self.text_cache:
             return self.text_cache[rel]
         path = self.root / rel
-        if not self.path_inside_root(path):
-            self.notes.append(f"outside-root file skipped: {rel}")
+        if not self.tracked_readable_path(rel):
+            self.notes.append(f"untracked-target file skipped: {rel}")
             self.text_cache[rel] = None
             return None
         result: list[str] | None = None
@@ -334,6 +351,35 @@ class Scan:
         index = self.inline_comment_index(line, style)
         return line if index is None else line[:index]
 
+    def executable_reference_text(self, line: str, style: str) -> str | None:
+        text = self.code_text(line, style)
+        if text is None:
+            return None
+        quote_chars = {"'", '"'}
+        if style == "slash":
+            quote_chars.add("`")
+        quote = ""
+        escaped = False
+        kept = []
+        for char in text:
+            if escaped:
+                escaped = False
+                kept.append(" " if quote else char)
+                continue
+            if quote:
+                if char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                kept.append(" ")
+                continue
+            if char in quote_chars:
+                quote = char
+                kept.append(" ")
+                continue
+            kept.append(char)
+        return "".join(kept)
+
     def comment_delimiters(self, style: str):
         if style == "html":
             return ()
@@ -394,30 +440,27 @@ class Scan:
         return times
 
 
-def comment_blocks(scan: Scan, rel: str) -> list[tuple[int, list[str]]]:
+def comment_blocks(scan: Scan, rel: str) -> list[list[tuple[int, str]]]:
     style = scan.comment_style(rel)
     if style is None:
         return []
     lines = scan.lines(rel)
     if not lines:
         return []
-    blocks: list[tuple[int, list[str]]] = []
-    current: list[str] = []
-    start = 0
+    blocks: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
     for index, raw in enumerate(lines, start=1):
         if index == 1 and style == "hash" and raw.startswith("#!"):
             continue
         text = scan.strip_comment(raw, style)
         if text is None:
             if len(current) >= 2:
-                blocks.append((start, current))
+                blocks.append(current)
             current = []
             continue
-        if not current:
-            start = index
-        current.append(text)
+        current.append((index, text))
     if len(current) >= 2:
-        blocks.append((start, current))
+        blocks.append(current)
     return blocks
 
 
@@ -447,8 +490,16 @@ def code_line_share(block) -> tuple[int, int]:
 def collect_comments(scan: Scan, files, findings: list[Finding]) -> dict[str, list[tuple[str, int, str, int]]]:
     blocks_by_text: dict[str, list[tuple[str, int, str, int]]] = {}
     for rel in files:
-        for start, block in comment_blocks(scan, rel):
-            block = [line for line in block if not any(m in line.lower() for m in LICENSE_MARKERS)]
+        for raw_block in comment_blocks(scan, rel):
+            filtered = [
+                (line_number, line)
+                for line_number, line in raw_block
+                if not any(m in line.lower() for m in LICENSE_MARKERS)
+            ]
+            if not filtered:
+                continue
+            start = filtered[0][0]
+            block = [line for _, line in filtered]
             if sum(1 for line in block if line.strip()) < 2 or block_is_decorative(block):
                 continue
             normalized = normalize_block(block)
@@ -479,6 +530,8 @@ def collect_duplicated_comments(blocks_by_text, findings: list[Finding]) -> None
 
 
 def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
+    tracked_files = scan.tracked_file_set()
+    tracked_dirs = scan.tracked_dir_set()
     for rel in sorted(scan.text_cache):
         if Path(rel).suffix.lower() not in {".md", ".mdx"}:
             continue
@@ -488,7 +541,7 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                     continue
                 if any(char in target for char in "*?[]{}"):
                     continue
-                clean = target.split("#", 1)[0]
+                clean = unquote(target.split("#", 1)[0])
                 if not clean:
                     continue
                 path = Path(clean)
@@ -497,7 +550,7 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                     scan.notes.append(f"outside-root Markdown target skipped: {rel}:{index}")
                     continue
                 target_rel = scan.root_rel(target_path)
-                if target_rel in scan.tracked_file_set() or target_rel in scan.tracked_dir_set():
+                if target_rel in tracked_files or target_rel in tracked_dirs:
                     continue
                 findings.append(Finding(
                     "stale-doc", "medium", "confirmed", rel, index, clean,
@@ -548,7 +601,7 @@ def collect_dead_code(scan: Scan, files, findings: list[Finding]) -> None:
         style = scan.comment_style(rel)
         if style is None:
             continue
-        code = [text for raw in lines for text in [scan.code_text(raw, style)] if text is not None]
+        code = [text for raw in lines for text in [scan.executable_reference_text(raw, style)] if text is not None]
         identifiers.update(IDENT_RE.findall("\n".join(code)))
     for rel in files:
         if not scan.is_shell(rel):

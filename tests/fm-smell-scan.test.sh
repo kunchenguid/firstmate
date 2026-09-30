@@ -7,6 +7,12 @@
 # scanned tree.
 set -u
 
+export TMPDIR=${TMPDIR:-/sloth/fm-smell-scan-test-tmp}
+mkdir -p "$TMPDIR" || {
+  printf 'not ok - failed to create TMPDIR %s\n' "$TMPDIR" >&2
+  exit 1
+}
+
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -233,6 +239,27 @@ EOF
   assert_not_contains "$json" "external marker" "external symlink contents must not become evidence"
 }
 
+test_tracked_symlink_to_untracked_target_stays_outside_evidence() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-symlink-trackedness) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/docs"
+  printf 'docs/private.md\n' > "$fix/.gitignore"
+  printf '#!/usr/bin/env bash\n# TODO: private target must not become evidence.\n' > "$fix/docs/private.md"
+  ln -s private.md "$fix/docs/link.md"
+  git -C "$fix" add .gitignore docs/link.md
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "tracked symlink to ignored target"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-comment --stale-days 1)
+  assert_equals 0 "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["summary"]["total"])
+')" "tracked symlink to an untracked target must not produce findings"
+  assert_not_contains "$json" "private target" "untracked symlink target text must not become evidence"
+}
+
 test_stale_docs_skip_outside_root_targets() {
   local fix outside json
   fix=$(fm_test_tmproot fm-smell-doc-root-bound) || fail "tmproot"
@@ -299,6 +326,30 @@ print(",".join(f["evidence"] for f in d["findings"]))
   assert_not_contains "$json" "../targets" "tracked directories outside the selected scan scope must stay valid"
 }
 
+test_stale_docs_decode_local_url_paths() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-doc-encoded-links) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/docs"
+  printf 'encoded target\n' > "$fix/docs/my file.md"
+  cat > "$fix/docs/links.md" <<'EOF'
+# Links
+
+[encoded](my%20file.md)
+[missing](missing%20file.md)
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "encoded links"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-doc)
+  assert_equals "missing file.md" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "percent-encoded local links must compare against decoded tracked paths"
+}
+
 test_stale_comment_detects_inline_comments_without_quoted_markers() {
   local fix json
   fix=$(fm_test_tmproot fm-smell-inline-comments) || fail "tmproot"
@@ -363,6 +414,63 @@ d = json.load(sys.stdin)
 print(",".join(f["evidence"] for f in d["findings"]))
 ')" "inline comments must not count as dead-code references"
   assert_not_contains "$json" "called()" "real executable callers must still suppress dead-code findings"
+}
+
+test_dead_code_ignores_quoted_string_references() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-dead-quoted-string) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/src"
+  cat > "$fix/src/functions.sh" <<'EOF'
+#!/usr/bin/env bash
+unused() { :; }
+called() { :; }
+echo "unused is described in quoted prose."
+printf '%s\n' 'unused appears in single-quoted prose too.'
+called
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "dead code quoted string"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category dead-code)
+  assert_equals "unused()" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "quoted strings must not count as dead-code references"
+  assert_not_contains "$json" "called()" "real executable callers must still count"
+}
+
+test_duplicate_comments_anchor_after_filtered_license_lines() {
+  local fix json
+  fix=$(fm_test_tmproot fm-smell-duplicate-filtered-line) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/src"
+  cat > "$fix/src/one.sh" <<'EOF'
+#!/usr/bin/env bash
+# Copyright 2020 Example Corp.
+# Repeated operational note for the scanner.
+# Keep this contract in one maintained place.
+true
+EOF
+  cat > "$fix/src/two.sh" <<'EOF'
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Repeated operational note for the scanner.
+# Keep this contract in one maintained place.
+true
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "duplicated comments with filtered headers"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category duplicated-comment)
+  assert_equals "src/one.sh:3" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print([f["path"] + ":" + str(f["line"]) for f in d["findings"]][0])
+')" "duplicate comments must anchor at the first surviving comment line"
 }
 
 test_output_is_deterministic_json() {
@@ -448,9 +556,13 @@ test_stale_days_threshold_gates_markers
 test_scope_and_excludes_bound_the_scan
 test_paths_and_symlinks_stay_inside_root
 test_stale_docs_skip_outside_root_targets
+test_tracked_symlink_to_untracked_target_stays_outside_evidence
 test_stale_docs_use_tracked_targets_only
+test_stale_docs_decode_local_url_paths
 test_stale_comment_detects_inline_comments_without_quoted_markers
 test_dead_code_ignores_inline_comment_references
+test_dead_code_ignores_quoted_string_references
+test_duplicate_comments_anchor_after_filtered_license_lines
 test_output_is_deterministic_json
 test_scan_is_read_only_and_guards_out_path
 test_exit_codes_and_usage_refusals
