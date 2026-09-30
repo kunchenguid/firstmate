@@ -10,7 +10,7 @@ export async function currentCleanupCases({root,tmp,live,setup,run,snap,write,re
  const names=['request.json','result.json','operation-0.intent.json','operation-0.effect.json','operation-0.output.json'];
  const state=(f,op,...args)=>JSON.parse(cmd('bash',[root+'/bin/fm-task-state.sh',op,'task',...args],f.env));
  const generation='s1790772537.1906761.31007';
- async function stage(label,backlog=false){
+ async function stage(label,backlog=false,retainedHistory=false){
   const f=setup(label,false,backlog,generation),session=f.request.operationBindings[0].herdr_session;
   if(!live){
    const socket=f.base+'/owned.sock',server=net.createServer();sockets.push(server);const previousCwd=process.cwd();process.chdir(f.base);await new Promise(resolve=>server.listen('owned.sock',resolve));process.chdir(previousCwd);
@@ -41,10 +41,12 @@ esac
   const initial=state(f,'inspect','--evidence','data/task/report.md','--evidence','state/task.meta');
   assert.equal(spawnSync('bash',[root+'/bin/fm-task-state.sh','assess','task','--basis',initial.basis,'--judgment',JSON.stringify({disposition:'accepted',outcome:'initial acceptance',remaining_gap:'',authority_ref:'data/task/report.md',evidence:['data/task/report.md','state/task.meta']})],{env:f.env,encoding:'utf8'}).status,0);
   write(f.home+'/state/task.meta',fs.readFileSync(f.home+'/state/task.meta','utf8')+'pr=local:fixture\npr_head='+git('-C',f.copy,'rev-parse','HEAD')+'\n');
+  if(retainedHistory)f.life('owner-receipt','--execution-generation',generation,'--kind','merge','--facts',JSON.stringify({url:'local:historical-fixture',head:'b'.repeat(40)}));
   assert.equal(run(f).state,'blocked');assert.match(read(f.dir+'/operation-0.output.json').stderr,/evidence digest changed/);
   write(f.home+'/data/task/current-authority.md','Independent MAIN acceptance and unconditional copy retention\n');
   const refs=['data/task/brief.md','data/task/report.md','state/task.meta','state/task.herdr-presentation'];
   const authority='data/task/current-authority.md',inspection=state(f,'inspect',...refs.concat(authority).flatMap(ref=>['--evidence',ref])),record=f.life('read');
+  if(retainedHistory)assert.equal(record.owner_receipts.merge.length,2);
   const q={schema:'fm-cleanup-current-judgment.v1',home:f.home,id:f.request.id,index:0,nonce:f.request.nonce,task:'task',spawn_gen:generation,goal_revision:record.goal_revision,brief_sha256:record.brief_sha256,hashes:Object.fromEntries(names.map(n=>[n,hash(f.dir+'/'+n)])),copy_binding:f.life('cleanup-copy-inspect'),candidate:record.owner_receipts.merge[0].facts,basis:inspection.basis,judgment:{disposition:'accepted',outcome:'Current MAIN accepts delivered fixture and authorizes exact endpoint retirement, preserving all copies and original uncertainty',remaining_gap:'',authority_ref:authority,evidence:refs.concat(authority)},evidence:inspection.evidence};
   f.qfile=f.home+'/data/task/current-judgment.json';write(f.qfile,q);f.q=q;f.journal=journal;return f;
  }
@@ -52,7 +54,7 @@ esac
  const refuse=(f,pattern,index=0,env=f.env)=>{const r=recover(f,index,env);assert.notEqual(r.status,0,r.stdout);assert.match(r.stderr,pattern);assert(fs.existsSync(f.marker));assert(!fs.existsSync(f.dir+'/operation-0.receipt.json'));return r;};
  try {
   if(live)cmd(process.env.HERDR_LAB_HELPER,['viewer','start',process.env.HERDR_LAB_SESSION],{...process.env,PATH:basePath});
-  const f=await stage('current-present',true),original=Object.fromEntries(names.map(n=>[n,fs.readFileSync(f.dir+'/'+n)]));
+  const f=await stage('current-present',true,true),original=Object.fromEntries(names.map(n=>[n,fs.readFileSync(f.dir+'/'+n)])),mergeHistory=structuredClone(f.life('read').owner_receipts.merge);
   // This path preserves shared, dirty and unmerged copies without even asking
   // the disposal owner whether those bytes qualify for return.
   write(f.copy+'/dirty.txt','retain dirty bytes\n');git('-C',f.copy,'checkout','-b','current-unmerged');write(f.copy+'/unmerged.txt','retain committed bytes\n');git('-C',f.copy,'add','unmerged.txt');git('-C',f.copy,'commit','-m','unmerged');
@@ -79,13 +81,13 @@ esac
   const legacy=state(f,'inspect',...f.q.judgment.evidence.flatMap(ref=>['--evidence',ref]));write(f.qfile,{...f.q,basis:legacy.basis,evidence:legacy.evidence});refuse(f,/launch-owner identity/);fs.writeFileSync(f.qfile,savedQ);fs.writeFileSync(f.journal,savedJournal);
   const moved=f.copy+'-saved';fs.renameSync(f.copy,moved);fs.mkdirSync(f.copy);try{refuse(f,/directory\/Git ownership/);}finally{fs.rmdirSync(f.copy);fs.renameSync(moved,f.copy);}
   if(!live)refuse(f,/terminal\/process identity/,0,{...f.env,FM_TEST_TERMINAL:'reused-terminal'});
-  const result=recover(f);assert.equal(result.status,0,result.stderr);const recovered=JSON.parse(result.stdout);assert.equal(recovered.originalAttempt,'uncertain');assert.equal(recovered.result,'blocked');assert.equal(recovered.settlement,'main-current-cleanup-readback');assert(!fs.existsSync(f.marker));assert(!fs.existsSync(meta));assert.deepEqual(snap(f),before);
+  const result=recover(f);assert.equal(result.status,0,result.stderr);const recovered=JSON.parse(result.stdout);assert.equal(recovered.originalAttempt,'uncertain');assert.equal(recovered.result,'blocked');assert.equal(recovered.settlement,'main-current-cleanup-readback');assert(!fs.existsSync(f.marker));assert(!fs.existsSync(meta));assert.deepEqual(snap(f),before);assert.deepEqual(f.life('read').owner_receipts.merge,mergeHistory);
   for(const [n,bytes] of Object.entries(original))assert.deepEqual(fs.readFileSync(f.dir+'/'+n),bytes);
   assert.equal(f.life('due').due,false);const calls=fs.readFileSync(f.base+'/herdr.log');assert.equal(recover(f).status,0);assert.deepEqual(fs.readFileSync(f.base+'/herdr.log'),calls,'completed recovery makes no endpoint calls');
   write(f.dir+'/operation-0.output.json','changed original');assert.notEqual(recover(f).status,0);assert.equal(f.life('due').due,true);fs.writeFileSync(f.dir+'/operation-0.output.json',original['operation-0.output.json']);
   const notificationCalls=fs.readFileSync(f.base+'/herdr.log');
   const notification=spawnSync(process.execPath,['--experimental-strip-types',root+'/tests/short-notification-consumer.mjs',root,f.home,f.request.id,f.base+'/notification-code'],{env:f.env,encoding:'utf8',timeout:45000});assert.equal(notification.status,0,notification.stderr);process.stdout.write(notification.stdout);assert.deepEqual(fs.readFileSync(f.base+'/herdr.log'),notificationCalls,'notification never repeats endpoint effects');
-  const absent=await stage('current-absent');cmd(absent.base+'/bin/herdr',['pane','close',absent.pane],absent.env);const absentCalls=fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l));assert.equal(recover(absent).status,0);assert.deepEqual(fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l)),absentCalls);
+  const absent=await stage('current-absent',false,true);cmd(absent.base+'/bin/herdr',['pane','close',absent.pane],absent.env);const absentCalls=fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l));assert.equal(recover(absent).status,0);assert.deepEqual(fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l)),absentCalls);
   const interrupted=await stage('current-bookkeeping',true),stopFile=interrupted.base+'/stop-backlog';write(stopFile,'fail once');
   const realTasks=cmd('which',['tasks-axi'],{...process.env,PATH:basePath});
   fs.writeFileSync(interrupted.base+'/bin/tasks-axi',`#!/usr/bin/env bash\nif [ "$1" = done ] && [ -e ${shellQuote(stopFile)} ]; then rm ${shellQuote(stopFile)};echo injected-backlog-failure >&2;exit 1;fi\nexec ${shellQuote(realTasks)} "$@"\n`,{mode:0o755});

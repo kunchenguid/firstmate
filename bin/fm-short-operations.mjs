@@ -451,7 +451,8 @@ function currentCleanupContext(home,id,index,file) {
   const record=lifecycleCurrent(home,v.step.task,'read');
   if(record.disposition!=='accepted'||record.execution_generation!==q.spawn_gen||record.goal_revision!==q.goal_revision||record.brief_sha256!==q.brief_sha256||record.next_action!==null) fail('current cleanup intent/generation changed');
   const merges=(record.owner_receipts?.merge??[]).filter(r=>r.execution_generation===q.spawn_gen);
-  if(merges.length!==1||!equal(merges[0].facts,q.candidate)) fail('current cleanup candidate/merge proof changed');
+  const candidateProofs=merges.filter(r=>equal(r.facts,q.candidate));
+  if(candidateProofs.length!==1) fail('current cleanup candidate/merge proof changed');
   const refs=q.judgment.evidence;
   const required=[`data/${v.step.task}/brief.md`,`data/${v.step.task}/report.md`,`state/${v.step.task}.meta`,`state/${v.step.task}.herdr-presentation`];
   if(required.some(ref=>!q.judgment.evidence.includes(ref))||!q.judgment.evidence.includes(q.judgment.authority_ref)||new Set(refs).size!==refs.length) fail('current cleanup lacks unique current evidence/authority');
@@ -470,6 +471,10 @@ function currentCleanupContext(home,id,index,file) {
     const full=metadata(home,v.step.task);
     if(full.kind!=='ship'||full.pr!==q.candidate.url||full.pr_head!==q.candidate.head) fail('current cleanup metadata candidate changed');
     if(!equal(lifecycleCurrent(home,v.step.task,'cleanup-copy-inspect'),q.copy_binding)) fail('current cleanup directory/Git ownership changed');
+    if(currentAssessmentMatches({record,q})) {
+      const completion=lifecycleCurrent(home,v.step.task,'completion-read');
+      if(!equal(completion.completion_delivery,candidateProofs[0])) fail('current cleanup lifecycle delivery changed');
+    }
   } else if(!proof) fail('current cleanup requires original current metadata');
   if(proof&&!equal(proof.copy_binding,q.copy_binding)) fail('current cleanup copy judgment changed');
   if(!proof) {

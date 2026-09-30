@@ -1628,6 +1628,28 @@ class Task:
             return self.action(args)
         return record
 
+    def completion_delivery(self, record, meta_fields):
+        """Select the one current ship delivery while retaining receipt history."""
+        meta = dict(meta_fields)
+        proofs = [p for p in record.get('owner_receipts', {}).get('merge', [])
+                  if p['execution_generation'] == record['execution_generation']]
+        require(proofs and all(text(p['facts'].get('head')) and text(p['facts'].get('url')) for p in proofs),
+                'required delivery has no confirmed merge receipt')
+        pr = [value for key, value in meta_fields if key == 'pr']
+        head = [value for key, value in meta_fields if key == 'pr_head']
+        require(len(pr) <= 1 and len(head) <= 1, 'ambiguous current delivery metadata')
+        if len(proofs) == 1:
+            proof = proofs[0]
+        else:
+            require(len(pr) == len(head) == 1 and text(pr[0]) and text(head[0]),
+                    'multiple merge receipts need one current delivery identity')
+            current = [p for p in proofs if p['facts'] == {'url': pr[0], 'head': head[0]}]
+            require(len(current) == 1, 'current delivery identity conflicts with merge receipts')
+            proof = current[0]
+        require(not meta.get('pr') or meta['pr'] == proof['facts']['url'], 'delivery URL conflicts with merge receipt')
+        require(not meta.get('pr_head') or meta['pr_head'] == proof['facts']['head'], 'delivery head conflicts with merge receipt')
+        return proof
+
     def completion_read(self):
         """Business completion proof for retained-resource backlog closure only."""
         record = self.read()
@@ -1643,7 +1665,6 @@ class Task:
             self.reference(item['ref'], item['sha256'])
         meta_fields = [line.split('=', 1) for line in
                        regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line]
-        meta = dict(meta_fields)
         kind = self.task_kind()
         report = self.directory / 'report.md'
         if kind == 'scout':
@@ -1658,24 +1679,7 @@ class Task:
                 record['revision'] += 1
                 self.write(record)
         else:
-            proofs = [p for p in record.get('owner_receipts', {}).get('merge', [])
-                      if p['execution_generation'] == record['execution_generation']]
-            require(proofs and all(text(p['facts'].get('head')) and text(p['facts'].get('url')) for p in proofs),
-                    'required delivery has no confirmed merge receipt')
-            pr = [value for key, value in meta_fields if key == 'pr']
-            head = [value for key, value in meta_fields if key == 'pr_head']
-            require(len(pr) <= 1 and len(head) <= 1, 'ambiguous current delivery metadata')
-            if len(proofs) == 1:
-                proof = proofs[0]
-            else:
-                require(len(pr) == len(head) == 1 and text(pr[0]) and text(head[0]),
-                        'multiple merge receipts need one current delivery identity')
-                current = [p for p in proofs if p['facts'] == {'url': pr[0], 'head': head[0]}]
-                require(len(current) == 1, 'current delivery identity conflicts with merge receipts')
-                proof = current[0]
-            require(not meta.get('pr') or meta['pr'] == proof['facts']['url'], 'delivery URL conflicts with merge receipt')
-            require(not meta.get('pr_head') or meta['pr_head'] == proof['facts']['head'], 'delivery head conflicts with merge receipt')
-            return dict(record, completion_delivery=proof)
+            return dict(record, completion_delivery=self.completion_delivery(record, meta_fields))
         return record
 
     def due(self, record):
@@ -1964,9 +1968,10 @@ class Task:
         record = self.read()
         require(q.get('brief_sha256') == record['brief_sha256'] == digest(regular(self.directory / 'brief.md')),
                 'current cleanup intent changed')
-        merges = [p['facts'] for p in record.get('owner_receipts', {}).get('merge', [])
-                  if p['execution_generation'] == receipt['spawn_gen']]
-        require(merges == [q.get('candidate')], 'current cleanup candidate changed')
+        require(record['execution_generation'] == receipt['spawn_gen'], 'current cleanup generation changed')
+        meta_fields = [line.split('=', 1) for line in proof.get('metadata', '').splitlines() if '=' in line]
+        selected = self.completion_delivery(record, meta_fields)
+        require(selected['facts'] == q.get('candidate'), 'current cleanup candidate changed')
         judgment = q['judgment']
         require(record['disposition'] == judgment['disposition'] == 'accepted' and
                 record['assessment']['outcome'] == judgment['outcome'] and record['assessment']['remaining_gap'] == '' and
