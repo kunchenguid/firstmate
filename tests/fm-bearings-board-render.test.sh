@@ -94,12 +94,12 @@ require_listener_reached_poll() {  # <home>
 
 # Build the board from <underway-json> plus <charted-json> and return what the
 # renderer produced.
-render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more]
-  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} data="$1/payload.json"
+render_board() {  # <home> <underway-json> <charted-json> [charted_more] [charted_warning_more] [captains_call-json]
+  local home=$1 underway=$2 charted=$3 more=${4:-0} warning_more=${5:-0} calls=${6:-[]} data="$1/payload.json"
   jq -n --argjson underway "$underway" --argjson charted "$charted" \
-    --argjson more "$more" --argjson warning_more "$warning_more" '{
+    --argjson more "$more" --argjson warning_more "$warning_more" --argjson calls "$calls" '{
     schema:"fm-bearings-board.v1", home:"render-home", generated:"2026-08-26T00:00Z",
-    prs_live:false, captains_call:[], underway:$underway, landed:[],
+    prs_live:false, captains_call:$calls, underway:$underway, landed:[],
     charted:$charted, charted_more:$more, charted_warning_more:$warning_more}' > "$data"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -295,6 +295,26 @@ test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text() {
   pass "board text links URLs and existing reports in new tabs, a missing report stays text, and markup stays text"
 }
 
+test_decision_option_labels_link_their_urls() {
+  local home out
+  home=$(make_home option-links)
+  out=$(render_board "$home" '[]' '[]' 0 0 '[
+    {"key":"sample-option-links","type":"decision","repo":"sample","title":"Pick a runbook",
+     "about":"","decide":"Which?","allow_freeform":false,
+     "options":[
+       {"value":"a","label":"Follow https://docs.example.com/runbook"},
+       {"value":"b","label":"<b>Skip</b>"}]}
+  ]')
+  printf '%s' "$out" | jq -e '
+    .error == ""
+    and .options[0:2] == [
+      {text: "Follow https://docs.example.com/runbook", links: [{text: "https://docs.example.com/runbook",
+        href: "https://docs.example.com/runbook", target: "_blank", rel: "noopener"}]},
+      {text: "<b>Skip</b>", links: []}]
+  ' >/dev/null || fail "a decision option label did not link its URL while keeping markup as text: $out"
+  pass "decision option labels link their URLs in new tabs and keep markup as text"
+}
+
 test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text() {
   local home report out page
   home=$(make_home preview)
@@ -351,4 +371,5 @@ test_a_board_of_only_warnings_still_reports_nothing_queued
 test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text
+test_decision_option_labels_link_their_urls
 test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text

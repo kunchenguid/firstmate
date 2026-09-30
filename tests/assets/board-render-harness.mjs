@@ -5,7 +5,8 @@
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
 //   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable,links}], empty, more, error }
+//     charted:[{title,sub,badges,pickable,links}], options:[{text,links}], empty,
+//     more, error }
 // where links is [{text,href,target,rel}] for every anchor in a row's text.
 import { readFileSync } from "node:fs";
 
@@ -31,6 +32,12 @@ class Node {
     this.classList = {
       add: (c) => { this.className = (this.className + " " + c).trim(); },
       contains: (c) => this.className.split(/\s+/).includes(c),
+      remove: (c) => { this.className = this.className.split(/\s+/).filter((x) => x !== c).join(" "); },
+      toggle: (c, on) => {
+        const want = on === undefined ? !this.classList.contains(c) : Boolean(on);
+        if (want) { if (!this.classList.contains(c)) this.classList.add(c); } else this.classList.remove(c);
+        return want;
+      },
     };
   }
   get textContent() {
@@ -122,6 +129,9 @@ const rowsOf = (container) =>
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
 
+const deck = byId.get("bb-call") || new Node("div");
+const optionLabels = deck.querySelectorAll(".bb-opt__label").map((l) => ({ text: l.textContent, links: linksOf(l) }));
+
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
 // A fail-closed render replaces the page body instead of the board sections, so
@@ -134,4 +144,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ stats, underway, charted, options: optionLabels, empty, more, error: errorText }) + "\n");

@@ -565,7 +565,7 @@ __FM_BEARINGS_BOARD_DATA__
       input.type = "radio"; input.name = "answer"; input.value = o.value;
       lab.appendChild(input);
       var body = el("span", "bb-opt__body");
-      body.appendChild(el("span", "bb-opt__label", o.label));
+      body.appendChild(linked("span", "bb-opt__label", o.label));
       if (o.hint) body.appendChild(linked("span", "bb-opt__hint", o.hint));
       lab.appendChild(body);
       if (item.recommend_value && o.value === item.recommend_value) {
