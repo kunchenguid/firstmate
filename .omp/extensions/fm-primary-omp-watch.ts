@@ -54,11 +54,13 @@
 // context), the wake is a plain user message, which omp starts as a turn at
 // once. An idle follow-up is not enough: omp starts a turn for a follow-up
 // queued while idle only when the conversation ends in an assistant reply or
-// a tool result, and omp's advisor appends its note after a final answer, so
-// an idle follow-up waited in omp's queue until someone typed (seen on omp
-// 18.3.5, 18.4.2, and 18.4.3; the idle case of
-// tests/fm-omp-interrupt-live-e2e.test.sh re-checks it). With no handler
-// context yet, the wake stays a follow-up.
+// a tool result. omp's advisor appends its note after a final answer, and the
+// turn-end guard's session_compact digest (pi.sendMessage) appends a hidden
+// custom message after a compaction, so an idle follow-up waited in omp's
+// queue until someone typed (seen on omp 18.3.5, 18.4.2, and 18.4.3; the idle
+// case of tests/fm-omp-interrupt-live-e2e.test.sh re-checks it with the same
+// pi.sendMessage custom message). With no handler context yet, the wake stays
+// a follow-up.
 // The successor pipeline never waits for the model to read a wake: a
 // follow-up queued while main is streaming joins the running run without ever
 // raising before_agent_start, so waiting on that event stalls every later
