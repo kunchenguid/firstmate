@@ -26,6 +26,10 @@ exit 0
 SH
   cat > "$TMP_ROOT/$dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+  exit
+fi
 printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
 printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
 printf '\n' >> "${FM_RUNTIME_LOG:?}"
@@ -70,6 +74,106 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   assert_present "$dir/home/state/$id.meta" "$description: metadata changed before refusal"
   assert_present "$dir/worktree/sentinel" "$description: worktree changed before refusal"
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
+}
+
+# Two homes independently clone the same remote. Historical metadata can name
+# the second clone even though Treehouse handed it a slot owned by the first.
+test_foreign_clone_failed_return_then_reassignment() {
+  local dir id=old-task other=new-task spelling second_home second_project slot rc worker before
+  for spelling in canonical symlink; do
+    dir=$(make_case "crossclone-$spelling")
+    mark_case_as_treehouse_pool "$dir"
+    git clone -q --bare "$dir/project" "$dir/origin.git"
+    git -C "$dir/project" remote add origin "$dir/origin.git"
+    second_home="$dir/second-home"
+    second_project="$second_home/projects/project"
+    mkdir -p "$second_home/state" "$second_home/data" "$second_home/config" "$second_home/projects"
+    git clone -q "$dir/origin.git" "$second_project"
+    printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+      > "$dir/home/data/secondmates.md"
+    write_local_parent_record "$second_home" "$dir/home"
+    slot="$dir/pool/1/project"
+    [ "$spelling" != symlink ] || slot="$dir/worktree"
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$slot" "project=$dir/project" "kind=scout"
+    # Retain the old record across a real executable return failure.
+    cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+  exit
+fi
+printf 'return attempted\n' >> "${FM_RUNTIME_LOG:?}"
+echo 'worktree is not managed by treehouse' >&2
+exit 1
+SH
+    set +e
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "failed Treehouse return unexpectedly succeeded"
+    assert_present "$dir/home/state/$id.meta" "failed return lost old task metadata"
+    assert_contains "$(cat "$dir/runtime.log")" 'return attempted' "fixture did not reach the failed return"
+
+    # Replay the incident's stranded foreign project identity and slot reuse.
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$slot" "project=$second_project" "kind=scout"
+    fm_write_meta "$second_home/state/$other.meta" \
+      "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+      "worktree=$dir/pool/1/project" "project=$dir/project" "kind=ship"
+    claim_pool_slot "$dir" "$other" "$second_home"
+    git -C "$slot" checkout -qb "fm/$other"
+    printf 'new unlanded work\n' > "$slot/new-work"
+    before=$(git -C "$slot" rev-parse HEAD)
+    ( cd "$slot" && exec sleep 120 ) &
+    worker=$!
+    : > "$dir/runtime.log"
+    assert_refused_without_mutation "$dir" "$id" "foreign clone $spelling reassignment"
+    kill -0 "$worker" 2>/dev/null || fail "old cleanup killed the reassigned worker"
+    [ "$(git -C "$slot" symbolic-ref --short HEAD)" = "fm/$other" ] || fail "old cleanup reset the new branch"
+    [ "$(git -C "$slot" rev-parse HEAD)" = "$before" ] || fail "old cleanup moved the new HEAD"
+    assert_present "$slot/new-work" "old cleanup discarded unlanded work"
+    assert_present "$second_home/state/$other.meta" "old cleanup removed the new task"
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    assert_contains "$(cat "$dir/stderr")" "$other" "collision refusal did not name the new worker"
+
+    # With no second record or claim, the mismatched project alone must refuse
+    # before process termination or Treehouse return, including --force.
+    rm "$second_home/state/$other.meta" "$dir/pool/1/.fm-slot-owner"
+    : > "$dir/runtime.log"
+    assert_refused_without_mutation "$dir" "$id" "foreign clone $spelling without another record"
+    assert_contains "$(cat "$dir/stderr")" 'Git common directory mismatch' "foreign clone identity did not refuse"
+  done
+  pass "foreign-clone cleanup after a failed return preserves reassigned workers, branches, edits, and records through canonical and symlink paths"
+}
+
+test_slot_claim_binds_home_and_task() {
+  local dir id=same-task out
+  dir=$(make_case slot-home-identity)
+  mark_case_as_treehouse_pool "$dir"
+  mkdir -p "$dir/other-home"
+  claim_pool_slot "$dir" "$id" "$dir/other-home"
+  out=$(FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_slot_owner_state "$2" "$3"; printf "%s\n" "$FM_TREEHOUSE_SLOT_OWNER"; fm_treehouse_slot_owner_release "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id")
+  [ "$out" = other ] || fail "identical task id in another home was treated as the owner: $out"
+  assert_present "$dir/pool/1/.fm-slot-owner" "another home's identical task id released the claim"
+  if FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_slot_owner_claim "$2" "$3" "$FM_HOME"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id"; then
+    fail "claim replaced an identically named task in another home"
+  fi
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "home=$dir/other-home" "failed claim rewrote its owner"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  assert_refused_without_mutation "$dir" "$id" "same task id claimed by another home"
+  ln -s "$dir/other-home" "$dir/home-alias"
+  out=$(FM_HOME="$dir/home-alias" bash -c '. "$1"; fm_treehouse_slot_owner_state "$2" "$3"; printf "%s\n" "$FM_TREEHOUSE_SLOT_OWNER"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/worktree" "$id")
+  [ "$out" = mine ] || fail "symlink spelling of the owning home lost its claim: $out"
+  pass "slot claims distinguish identical task ids in different homes and accept symlink home aliases"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation() {
@@ -608,6 +712,8 @@ test_sole_slot_record_still_tears_down() {
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
   grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+  grep -Fq "treehouse <return> <--force> <$dir/pool/1/project>" "$dir/runtime.log" \
+    || fail "return did not use Treehouse's registered spelling for the symlinked slot"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
   pass "fm-teardown: a task that solely holds its slot still returns it"
@@ -1409,3 +1515,29 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
+
+test_foreign_clone_failed_return_then_reassignment
+test_slot_claim_binds_home_and_task
+
+
+test_changed_pool_selection_refuses_before_mutation() {
+  local dir id=changed-pool
+  dir=$(make_case changed-pool-selection)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # The Git repository still matches, but return's config now selects a
+  # different pool, as can happen between acquisition and cleanup.
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then printf '[]\n'; exit 0; fi
+printf 'unexpected mutation\n' >> "${FM_RUNTIME_LOG:?}"
+exit 1
+SH
+  assert_refused_without_mutation "$dir" "$id" "changed Treehouse pool selection"
+  assert_contains "$(cat "$dir/stderr")" 'does not contain' "changed-pool refusal did not identify the selected pool"
+  pass "a changed Treehouse pool root refuses before any process kill or return even when Git repository identity matches"
+}
+
+test_changed_pool_selection_refuses_before_mutation

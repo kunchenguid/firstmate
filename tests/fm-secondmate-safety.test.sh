@@ -2098,6 +2098,11 @@ EOF
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
 case "${1:-}" in
+  status)
+    git -c core.quotePath=false worktree list --porcelain | sed -n 's/^worktree //p' | \
+      jq -Rsc 'split("\n") | map(select(length > 0) | {path: .})'
+    exit
+    ;;
   return)
     shift
     target=

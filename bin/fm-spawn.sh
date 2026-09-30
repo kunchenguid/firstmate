@@ -149,7 +149,15 @@
 #   it; relaunch is exempt because the existing task's control lock covers it.
 #   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
 #   root Firstmate home's state directory before slot allocation and holds it through
-#   task metadata publication. Teardown holds that same lock while proving and
+#   task metadata publication. Treehouse 2.1.0+ supplies the required structured
+#   pool status (bin/fm-install-treehouse.sh owns the CI pin). Under that lock,
+#   Treehouse's status --json must
+#   resolve only slots with this clone's physical Git common directory before
+#   get can reset anything; unknown status and foreign pools refuse. Available
+#   slots with surviving task records or claims require guarded teardown first.
+#   The allocated path is independently checked before claim/base refresh, so
+#   project= always identifies the repository that actually owns the slot.
+#   Teardown holds that same lock while proving and
 #   returning a slot, so allocation cannot reuse a slot before its owner record
 #   is published. Under that same lock it writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
@@ -157,8 +165,8 @@
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   metadata publication has released that lock leaves the claim in place;
+#   guarded teardown must release it before that slot can be reused.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1333,8 +1341,8 @@ spawn_abort_cleanup() {
   # must not leave a claim naming a task no record describes. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
   # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
+  # already released that lock and leaves the claim for guarded teardown's
+  # verified release rather than racing it. The release itself never removes
   # another task's claim.
   if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
     [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
@@ -1343,7 +1351,7 @@ spawn_abort_cleanup() {
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so guarded teardown must reconcile it" >&2
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3182,7 +3190,7 @@ real_path_or_raw() { # <path>
 
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# and its git dir is distinct from the project repository's common git dir. SPAWN_WT_TOP is
 # left holding the worktree root the check read, and SPAWN_WT_REASON a short
 # phrase naming why a rejected path failed, both for the refusal messages.
 #
@@ -3242,6 +3250,10 @@ spawn_worktree_isolated() { # <path>
   fi
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
+    return 1
+  fi
+  if [ "$BACKEND" != orca ] && ! fm_treehouse_same_repository "$PROJ_ABS" "$path"; then
+    SPAWN_WT_REASON="its Git common directory belongs to a different project clone"
     return 1
   fi
   return 0
@@ -3474,6 +3486,10 @@ else
     echo "error: task $ID cannot be dispatched because its backlog data directory is inaccessible: $DATA ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  fm_treehouse_allocation_preflight "$PROJ_ABS" || exit 1
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
@@ -4292,6 +4308,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    fm_treehouse_require_exclusive_record "$STATE/$ID.meta" "$ID" "$STATE" "$WT" || exit 1
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1

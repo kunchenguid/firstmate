@@ -743,6 +743,50 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+test_foreign_pool_refuses_before_allocation() {
+  local rec id spelling out status original before
+  for spelling in canonical symlink; do
+    id="foreign-pool-$spelling"
+    rec=$(make_case "$id" "$id")
+    read_case_record "$rec"
+    lay_out_as_pool_slot
+    original=$PROJECT_DIR
+    mkdir -p "$CASE_DIR/other-home/projects"
+    git clone -q "$CASE_DIR/origin.git" "$CASE_DIR/other-home/projects/project"
+    PROJECT_DIR="$CASE_DIR/other-home/projects/project"
+    if [ "$spelling" = symlink ]; then
+      ln -s "$POOL_DIR" "$CASE_DIR/slot-alias"
+      POOL_DIR="$CASE_DIR/slot-alias"
+    fi
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] || exit 91
+jq -n --arg path "$FM_FAKE_PANE_PATH" '[{path:$path,status:"available"}]'
+SH
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn accepted a foreign clone's pool"
+    assert_contains "$out" 'Git common directory mismatch' "allocation did not explain foreign pool identity"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "foreign pool allocation published task metadata"
+    [ ! -e "$SLOT_CLAIM" ] || fail "foreign pool allocation overwrote the slot claim"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "foreign pool refusal changed HEAD"
+    [ ! -e "$original/.git/FETCH_HEAD" ] || fail "foreign pool allocation fetched or refreshed the original clone"
+
+    # If an endpoint later reports a foreign path despite an empty preflight,
+    # the post-get assertion must independently refuse it before claim/refresh.
+    fm_fake_exit0 "$FAKEBIN_DIR" treehouse
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+    out=$(run_spawn "$id" --scout)
+    status=$?
+    [ "$status" -ne 0 ] || fail "post-allocation validation accepted a foreign clone"
+    assert_contains "$out" 'different project clone' "post-allocation refusal did not identify common directory divergence"
+    [ ! -e "$SLOT_CLAIM" ] || fail "post-allocation foreign refusal claimed the slot"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "post-allocation refusal refreshed the foreign slot"
+  done
+  pass "spawn refuses foreign same-remote pool slots before allocation and independently before claim or refresh"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
@@ -763,5 +807,94 @@ test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
 test_stale_pin_carrying_real_work_is_not_called_stale
 test_stale_pin_beside_other_dirt_reports_one_verdict
+
+
+test_foreign_pool_refuses_before_allocation
+
+
+# This optional tool check runs only disposable Git repositories and a private
+# Treehouse config root. No terminal backend or model process is involved.
+test_real_treehouse_same_remote_pool() {
+  local treehouse_bin rec id slot reused out rc common first_common version
+  treehouse_bin=$(command -v treehouse || true)
+  if [ -z "$treehouse_bin" ]; then
+    printf 'skip - real Treehouse cross-clone check (treehouse not installed)\n'
+    return 0
+  fi
+  version=$("$treehouse_bin" --version)
+  id=real-treehouse-crossclone
+  rec=$(make_case "$id" "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/treehouse-user/.config/treehouse" "$CASE_DIR/other-home/projects"
+  printf 'root = "%s"\n' "$CASE_DIR/private-pools" > "$CASE_DIR/treehouse-user/.config/treehouse/config.toml"
+  git clone -q "$CASE_DIR/origin.git" "$CASE_DIR/other-home/projects/project"
+  # Match the literal URL too: Treehouse hashes URL text, not remote contents.
+  git -C "$CASE_DIR/other-home/projects/project" remote set-url origin "file://$CASE_DIR/origin.git"
+  slot=$(cd "$PROJECT_DIR" && HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" get --lease 2> "$CASE_DIR/lease.stderr") \
+    || fail "real Treehouse could not allocate disposable slot: $(cat "$CASE_DIR/lease.stderr")"
+  ( cd "$PROJECT_DIR" && HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" return --force "$slot" ) \
+    > "$CASE_DIR/return.stdout" 2> "$CASE_DIR/return.stderr" \
+    || fail "real Treehouse could not return disposable slot: $(cat "$CASE_DIR/return.stderr")"
+  reused=$(cd "$CASE_DIR/other-home/projects/project" && HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" get --lease 2> "$CASE_DIR/reuse.stderr") \
+    || fail "real Treehouse did not allocate from second clone: $(cat "$CASE_DIR/reuse.stderr")"
+  [ "$reused" = "$slot" ] || fail "Treehouse $version changed cross-clone pool behavior; refresh this reproduction"
+  common=$(git -C "$reused" rev-parse --path-format=absolute --git-common-dir)
+  first_common=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir)
+  [ "$common" -ef "$first_common" ] || fail "reused slot did not retain original Git common directory"
+  ln -s "$slot" "$CASE_DIR/real-slot-alias"
+  out=$(FM_HOME="$HOME_DIR" HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1 \
+    bash -c '. "$1"; fm_treehouse_return_preflight "$2" "$3" && printf "%s\n" "$FM_TREEHOUSE_RETURN_PATH"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR" "$CASE_DIR/real-slot-alias") \
+    || fail "return preflight refused a symlink spelling of the true owner's slot"
+  [ "$out" = "$slot" ] || fail "return preflight did not retain Treehouse's registered path spelling: $out"
+  # The fixed public guard refuses the same foreign pool even while leased.
+  out=$(FM_HOME="$HOME_DIR" HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1 \
+    bash -c '. "$1"; fm_treehouse_allocation_preflight "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$CASE_DIR/other-home/projects/project" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "allocation preflight accepted the real foreign pool"
+  assert_contains "$out" 'Git common directory mismatch' "real pool identity refusal did not explain divergence"
+  # Treehouse 2.1 resolves explicit returns from the slot itself, independently
+  # of the caller's clone. Do not infer the receipt's failed-return cause from
+  # common-dir divergence alone; the portable test injects that historical
+  # failure separately and verifies safe retry after reassignment.
+  pass "real Treehouse $version shares same-remote clone pools; Firstmate refuses foreign allocation"
+
+}
+
+test_real_treehouse_same_remote_pool
+
+
+test_available_pool_with_surviving_owner_refuses() {
+  local kind rec id out rc
+  for kind in record claim invalid; do
+    id="available-old-$kind"
+    rec=$(make_case "$id" "$id")
+    read_case_record "$rec"
+    lay_out_as_pool_slot
+    cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = status ] || exit 91
+jq -n --arg path "$FM_FAKE_PANE_PATH" '[{path:$path,status:"available"}]'
+SH
+    case "$kind" in
+      record)
+        fm_write_meta "$HOME_DIR/state/old-task.meta" "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+        ;;
+      claim) printf 'task=old-task\nhome=%s\n' "$HOME_DIR" > "$SLOT_CLAIM" ;;
+      invalid) printf '#!/usr/bin/env bash\nprintf "not JSON\\n"\n' > "$FAKEBIN_DIR/treehouse" ;;
+    esac
+    out=$(run_spawn "$id" --scout) && rc=0 || rc=$?
+    [ "$rc" -ne 0 ] || fail "allocation reused a slot with $kind ownership evidence"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused allocation published metadata"
+    case "$kind" in
+      record) assert_contains "$out" 'old-task' "record refusal lost task identity" ;;
+      claim) assert_contains "$out" 'retains an ownership claim' "claim refusal lost its evidence" ;;
+      invalid) assert_contains "$out" 'cannot inspect Treehouse pool identity' "invalid pool JSON did not fail closed" ;;
+    esac
+  done
+  pass "available slots with retained task records or claims and unreadable pool status refuse before allocation"
+}
+
+test_available_pool_with_surviving_owner_refuses
 
 echo "# all fm-spawn-pool-base-freshen tests passed"

@@ -6,6 +6,40 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Treehouse slot identity across local homes
+
+Verified on 2026-09-30 with macOS 26.5.2, Bash 3.2.57, Git 2.50.1, and Treehouse v2.1.0.
+The installed pin was downloaded and checksum-verified with `bin/fm-install-treehouse.sh <disposable-tool-directory>`; the [official release](https://github.com/kunchenguid/treehouse/releases/tag/v2.1.0) is dated 2026-07-20.
+The ownership protocol remains in [`bin/fm-wake-lib.sh`](../../bin/fm-wake-lib.sh), and the guarded recovery procedure is in [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header.
+
+The executable fixtures use independent local homes and clones of one disposable remote, a failed return followed by slot reassignment, live disposable processes, and canonical and symlink paths.
+The optional real-Treehouse case reproduced shared allocation across those clones while the allocated worktree retained the first clone's Git common directory.
+Treehouse v2.1.0 resolves explicit returns from the slot path itself, so the real-tool check does not claim that a foreign Git common directory alone reproduces an unmanaged return.
+The portable failure fixture covers that cleanup failure independently.
+
+Refresh the evidence with:
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh tests/fm-teardown-endpoint-safety.test.sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh tests/fm-secondmate-safety.test.sh tests/fm-spawn-worktree-settle.test.sh tests/fm-spawn-orca-worktree.test.sh tests/fm-spawn-batch.test.sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+```
+
+Selected regression output:
+
+```text
+ok - spawn refuses foreign same-remote pool slots before allocation and independently before claim or refresh
+ok - real Treehouse v2.1.0 shares same-remote clone pools; Firstmate refuses foreign allocation
+ok - foreign-clone cleanup after a failed return preserves reassigned workers, branches, edits, and records through canonical and symlink paths
+ok - slot claims distinguish identical task ids in different homes and accept symlink home aliases
+ok - a changed Treehouse pool root refuses before any process kill or return even when Git repository identity matches
+```
+
+The shared spawn path covers every supported worker harness before its launch, with no rendered harness signal involved.
+Source inspection confirms tmux, Herdr, Zellij, and cmux use that Treehouse path; Orca uses its own worktree identity and retains its separate regression.
+The backend and descendant tests use fixtures; no live Herdr, Zellij, Orca, or cmux session is operated by these checks.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
