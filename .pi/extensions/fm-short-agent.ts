@@ -35,12 +35,28 @@ export default function (pi: ExtensionAPI) {
     if (!(await owner())) throw Error('short-agent control requires the owning primary Pi session lock');
     return service ??= new ShortAgents(home, root);
   };
+  // The primary outlives home updates. Its cached ShortAgents module cannot
+  // read receipts introduced by a newer owner, even after files are updated.
+  // Read/reconcile through the current public owner; its evidence and process
+  // guards remain authoritative and no cleanup effect is replayed here.
+  const currentOwner = async (action: 'status' | 'reconcile', id?: string) => {
+    if (!(await owner())) throw Error('short-agent control requires the owning primary Pi session lock');
+    const result = await runCommandAsync(process.execPath,
+      [resolve(root, 'bin/fm-short-agent.mjs'), action, ...(id ? [id] : [])], {
+        env: { ...process.env, FM_HOME: home, FM_ROOT_OVERRIDE: root,
+          FM_STATE_OVERRIDE: resolve(home, 'state'), FM_DATA_OVERRIDE: resolve(home, 'data'),
+          FM_CONFIG_OVERRIDE: resolve(home, 'config') },
+        maxBuffer: Number.POSITIVE_INFINITY,
+      });
+    if (result.status !== 0) throw Error(result.stderr.trim() || `short-agent ${action} failed`);
+    return JSON.parse(result.stdout);
+  };
   const reconcile = async () => {
     if (busy) return;
     busy = true;
     try {
       if (!(await owner())) return;
-      await (await get()).reconcile();
+      await currentOwner('reconcile');
       if (!active) return;
       lastError = '';
     }
@@ -82,8 +98,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Read status/result or cancel a short-agent ID. Cancellation preserves the first terminal result. Detailed evidence stays local; ordinary notification acknowledgement uses fm_branch_processed.',
     parameters: Type.Object({ id: Type.String(), action: Type.Union([Type.Literal('status'), Type.Literal('result'), Type.Literal('cancel')]) }),
     async execute(_id, args) {
-      const control = await get();
-      const result = args.action === 'cancel' ? control.cancel(args.id) : control.status(args.id);
+      const result = args.action === 'cancel' ? (await get()).cancel(args.id) : await currentOwner('status', args.id);
       void reconcile();
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
     },

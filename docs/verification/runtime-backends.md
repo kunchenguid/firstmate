@@ -1318,6 +1318,12 @@ The fixture chains use one model fixture invocation and one operation tool per c
 The optional install also repeats the tool call to prove receipt reuse without reinstalling.
 The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operator guide](../short-agents.md) owns current use, compatibility, and provider-limit distinctions.
 
+On 2026-10-01 (Asia/Shanghai), Pi 0.99.1 and Node v22.22.2 passed the resident ShortTask consumer guard after the public owner was updated in place.
+Refresh its token-free real-SDK case with `FM_SHORT_NOTIFICATION_PI_E2E=1 bin/fm-test-run.sh tests/fm-short-operations.test.sh`; the same script always runs the portable tool/event boundary.
+The current-judgment fixture retains the original blocked result and uncertain attempt while status/result read the completed cleanup receipt, notification publishes once, and changed original evidence, judgment, nonce or primary ownership refuse.
+The named Herdr 0.8.0 / protocol 20 lab also passed with no additional endpoint calls during notification; `FM_SHORT_NOTIFICATION_PI_E2E=1 FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh` refreshes that combined guard.
+Only Pi loads this resident extension; Codex and TraeX continue using the unchanged public CLI reader.
+
 ## Pi branch activity display
 
 Verified on 2026-09-29 (Asia/Shanghai) with Pi 0.87.1 and Node v22.22.2 on Linux using an isolated real Pi CLI pseudo-terminal and SDK branch.

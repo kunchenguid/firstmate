@@ -83,6 +83,8 @@ esac
   for(const [n,bytes] of Object.entries(original))assert.deepEqual(fs.readFileSync(f.dir+'/'+n),bytes);
   assert.equal(f.life('due').due,false);const calls=fs.readFileSync(f.base+'/herdr.log');assert.equal(recover(f).status,0);assert.deepEqual(fs.readFileSync(f.base+'/herdr.log'),calls,'completed recovery makes no endpoint calls');
   write(f.dir+'/operation-0.output.json','changed original');assert.notEqual(recover(f).status,0);assert.equal(f.life('due').due,true);fs.writeFileSync(f.dir+'/operation-0.output.json',original['operation-0.output.json']);
+  const notificationCalls=fs.readFileSync(f.base+'/herdr.log');
+  const notification=spawnSync(process.execPath,['--experimental-strip-types',root+'/tests/short-notification-consumer.mjs',root,f.home,f.request.id,f.base+'/notification-code'],{env:f.env,encoding:'utf8',timeout:45000});assert.equal(notification.status,0,notification.stderr);process.stdout.write(notification.stdout);assert.deepEqual(fs.readFileSync(f.base+'/herdr.log'),notificationCalls,'notification never repeats endpoint effects');
   const absent=await stage('current-absent');cmd(absent.base+'/bin/herdr',['pane','close',absent.pane],absent.env);const absentCalls=fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l));assert.equal(recover(absent).status,0);assert.deepEqual(fs.readFileSync(absent.base+'/herdr.log','utf8').split('\n').filter(l=>/pane[\x1f ]close/.test(l)),absentCalls);
   const interrupted=await stage('current-bookkeeping',true),stopFile=interrupted.base+'/stop-backlog';write(stopFile,'fail once');
   const realTasks=cmd('which',['tasks-axi'],{...process.env,PATH:basePath});

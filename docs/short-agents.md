@@ -107,6 +107,7 @@ Failed, cancelled, interrupted, and uncertain tasks retain their actual terminal
 MAIN does not poll normal operation progress or execute the chain's commands.
 Delivery is deduplicated, including a crash between storing the outcome and its notification receipt.
 A notification error is surfaced without replacing the terminal result.
+Pi status/result and notification reconciliation delegate to the current [CLI owner](../bin/fm-short-agent.mjs), preserving receipt validation when the primary outlives a home update.
 
 Cancellation revokes operation authority and publishes one terminal result.
 A call already in progress may have changed its target; cancellation does not undo an effect or provider billing.
