@@ -225,6 +225,23 @@ test_actionable_close_delivers_queued_wake() {
   pass "codex auto-arm: actionable close starts a successor, commits rewake, and queues one envelope to the payload session"
 }
 
+test_delivery_without_gnu_timeout() {
+  local dir out status shim
+  dir=$(make_primary_dir "$TMP_ROOT/no-gnu-timeout")
+  : > "$dir/state/task.meta"
+  install_queue_stub "$dir"
+  write_arm_fixture "$dir" actionable
+  shim="$TMP_ROOT/no-gnu-timeout-shim"
+  mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\nexit 127\n' > "$shim/timeout"
+  chmod +x "$shim/timeout"
+  out=$(PATH="$shim:$PATH" FM_TIMEOUT_MECHANISM_OVERRIDE=bash run_autoarm "$dir" "sess-thread-mac" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the hook always exits 0"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "a host without GNU timeout lost the rewake outcome: $(epoch_outcome "$dir")"
+  [ "$(queue_deliveries "$dir")" = 1 ] || fail "a host without GNU timeout delivered $(queue_deliveries "$dir") queued wakes, expected 1"
+  pass "codex auto-arm: delivery uses the portable bounded runner on a host without GNU timeout"
+}
+
 test_quiet_close_stays_silent() {
   local dir out status pid identity
   dir=$(make_primary_dir "$TMP_ROOT/quiet")
@@ -585,6 +602,7 @@ test_inert_when_pi_code_payload() {
 }
 
 test_actionable_close_delivers_queued_wake
+test_delivery_without_gnu_timeout
 test_quiet_close_stays_silent
 test_failed_startup_delivers_one_notice_then_suppressed
 test_delivery_failure_is_nonfatal

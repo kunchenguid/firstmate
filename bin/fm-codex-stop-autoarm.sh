@@ -155,6 +155,8 @@ esac
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 # shellcheck source=bin/fm-operational-input.sh
 . "$SCRIPT_DIR/fm-operational-input.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # fm-watch.sh touches the liveness beacon once per cycle, immediately before
 # its terminal wait, so a healthy watcher's beacon can legitimately age up to
@@ -390,9 +392,9 @@ deliver_wake() {  # <encoded-envelope>
   [ -n "$SESSION_ID" ] || return 1
   if [ -n "${FM_CODEX_QUEUE_BIN:-}" ]; then
     # shellcheck disable=SC2086 # the seam may carry queue arguments
-    timeout 30 $FM_CODEX_QUEUE_BIN "$SESSION_ID" "$encoded" >/dev/null 2>&1
+    fm_run_timed 30 $FM_CODEX_QUEUE_BIN "$SESSION_ID" "$encoded" >/dev/null 2>&1
   else
-    timeout 30 codex queue --thread "$SESSION_ID" --message "$encoded" >/dev/null 2>&1
+    fm_run_timed 30 codex queue --thread "$SESSION_ID" --message "$encoded" >/dev/null 2>&1
   fi
 }
 
