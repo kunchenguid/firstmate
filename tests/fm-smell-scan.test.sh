@@ -233,6 +233,40 @@ EOF
   assert_not_contains "$json" "external marker" "external symlink contents must not become evidence"
 }
 
+test_stale_docs_skip_outside_root_targets() {
+  local fix outside json
+  fix=$(fm_test_tmproot fm-smell-doc-root-bound) || fail "tmproot"
+  outside=$(fm_test_tmproot fm-smell-doc-outside) || fail "tmproot"
+  fm_git_init_commit "$fix"
+  mkdir -p "$fix/docs" "$outside"
+  printf 'private\n' > "$outside/private.md"
+  ln -s "$outside/private.md" "$fix/docs/external.md"
+  cat > "$fix/docs/links.md" <<EOF
+# Links
+
+[missing](missing.md)
+[absolute]($outside/private.md)
+[traversal](../../$(basename "$outside")/private.md)
+[symlink](external.md)
+EOF
+  git -C "$fix" add -A
+  git -C "$fix" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "root-bound docs"
+
+  json=$(bash "$CHECK" --root "$fix" --json --category stale-doc)
+  assert_equals "missing.md" "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(",".join(f["evidence"] for f in d["findings"]))
+')" "only in-root missing links may become stale-doc findings"
+  assert_equals 3 "$(printf '%s' "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(sum(1 for note in d["notes"] if note.startswith("outside-root Markdown target skipped: docs/links.md:")))
+')" "outside-root Markdown targets must be reported as scope limits"
+  assert_not_contains "$json" "$outside/private.md" "outside absolute paths must not be finding evidence"
+}
+
 test_stale_comment_detects_inline_comments_without_quoted_markers() {
   local fix json
   fix=$(fm_test_tmproot fm-smell-inline-comments) || fail "tmproot"
@@ -245,6 +279,7 @@ echo "# TODO: quoted hash marker is code text."
 EOF
   cat > "$fix/src/slash.js" <<'EOF'
 const text = "// TODO: quoted slash marker is code text.";
+const templated = `// TODO: quoted template marker is code text.`;
 run(); // FIXME: slash inline old marker.
 EOF
   cat > "$fix/src/dash.sql" <<'EOF'
@@ -268,6 +303,7 @@ print(d["summary"]["total"])
 ')" "inline comment markers must be detected for supported comment syntaxes"
   assert_not_contains "$json" "quoted hash marker" "quoted hash markers must not be reported"
   assert_not_contains "$json" "quoted slash marker" "quoted slash markers must not be reported"
+  assert_not_contains "$json" "quoted template marker" "quoted template markers must not be reported"
   assert_not_contains "$json" "quoted dash marker" "quoted dash markers must not be reported"
   assert_not_contains "$json" "quoted semi marker" "quoted semi markers must not be reported"
 }
@@ -354,6 +390,7 @@ test_every_category_detects_its_finding
 test_stale_days_threshold_gates_markers
 test_scope_and_excludes_bound_the_scan
 test_paths_and_symlinks_stay_inside_root
+test_stale_docs_skip_outside_root_targets
 test_stale_comment_detects_inline_comments_without_quoted_markers
 test_output_is_deterministic_json
 test_scan_is_read_only_and_guards_out_path

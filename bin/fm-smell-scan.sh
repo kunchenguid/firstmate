@@ -304,6 +304,9 @@ class Scan:
         }.get(style)
         if not delimiters:
             return None
+        quote_chars = {"'", '"'}
+        if style == "slash":
+            quote_chars.add("`")
         quote = ""
         escaped = False
         for index, char in enumerate(line):
@@ -316,7 +319,7 @@ class Scan:
                 elif char == quote:
                     quote = ""
                 continue
-            if char in {"'", '"'}:
+            if char in quote_chars:
                 quote = char
                 continue
             for delimiter in delimiters:
@@ -442,7 +445,14 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                 if any(char in target for char in "*?[]{}"):
                     continue
                 clean = target.split("#", 1)[0]
-                if not clean or (scan.root / rel).parent.joinpath(clean).exists():
+                if not clean:
+                    continue
+                path = Path(clean)
+                target_path = path if path.is_absolute() else (scan.root / rel).parent.joinpath(path)
+                if not scan.path_inside_root(target_path):
+                    scan.notes.append(f"outside-root Markdown target skipped: {rel}:{index}")
+                    continue
+                if target_path.exists():
                     continue
                 findings.append(Finding(
                     "stale-doc", "medium", "confirmed", rel, index, clean,
