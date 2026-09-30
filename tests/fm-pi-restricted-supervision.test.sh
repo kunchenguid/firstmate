@@ -3,8 +3,9 @@
 # (.pi/extensions/restricted/fm-restricted-supervision.ts): it stays inert
 # unless selected, refuses to act beside a general shell tool or without the
 # session lock, acquires the lock with no model-callable tool, drains and
-# acknowledges only what it presented itself, forwards no model-provider key,
-# and serializes its delivery passes.
+# pages its complete presentation to the model before acknowledging only what
+# it presented itself, forwards no model-provider key, and serializes its
+# delivery passes.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -56,9 +57,10 @@ if [ "$#" -gt 0 ]; then
   exit 0
 fi
 printf '1\t100\tsignal\ttask-a\tdone: PR ready\n'
-if [ -e "$FM_HOME/drain-floods" ]; then
-  head -c 70000 /dev/zero | tr '\0' 'x'
-  echo
+if [ -e "$FM_HOME/drain-large" ]; then
+  # Print a marker line every 8 KiB, filling ~150 KiB so the presentation
+  # spans several 64 KiB pages. Every marker must reach the model whole.
+  awk 'BEGIN { for (i = 0; i < 19; i += 1) { printf "marker-%02d ", i; for (j = 0; j < 8100; j += 1) printf "y"; printf "\n" } }'
 fi
 echo 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 42 --recovery-generation gen-7' >&2
 SH
@@ -181,22 +183,50 @@ process.stdout.write(calls());
   pass "a restricted session locks at start, presents wakes, and acknowledges only what it presented"
 }
 
-test_incomplete_presentation_stores_no_acknowledgement() {
+test_large_presentation_is_paged_across_calls() {
   local repo out
-  repo=$(make_root flood)
-  : > "$repo/home/drain-floods"
+  repo=$(make_root paged)
+  : > "$repo/home/drain-large"
   out=$(run_pi "$repo" 1 "
 await emit('session_start', { reason: 'startup' });
-const shown = await call('fm_drain');
-console.log(shown.includes('output truncated') ? 'truncated' : 'whole');
-console.log(shown.split('\n').slice(-1)[0]);
-console.log(await call('fm_drain', { acknowledge: true }));
-console.log('ack-calls=' + calls().split('\n').filter((l) => l.startsWith('drain --ack')).length);
-") || fail "flooded drain case failed: $out"
-  assert_contains "$out" "truncated" "an oversized presentation is cut for the model"
-  assert_contains "$out" "every presented wake stays queued" "the model is told nothing was consumed"
-  assert_contains "$out" "ack-calls=0" "no acknowledgement runs for wakes the model could not see"
-  pass "a presentation too large to show whole never acknowledges unseen wakes"
+const pages = [];
+const markers = new Set();
+const recordMarkers = (page) => {
+  for (const m of page.matchAll(/marker-(\d+)/g)) markers.add(m[1]);
+};
+let page = await call('fm_drain');
+pages.push(page);
+recordMarkers(page);
+console.log('page1-notes-more=' + /more page/.test(page));
+const refused = await call('fm_drain', { acknowledge: true });
+console.log('mid-ack-refused=' + /remain unread/.test(refused));
+let guard = 0;
+while (/more page/.test(pages[pages.length - 1])) {
+  page = await call('fm_drain');
+  pages.push(page);
+  recordMarkers(page);
+  if (guard++ > 20) throw new Error('too many pages');
+}
+console.log('pages=' + pages.length);
+const last = pages[pages.length - 1];
+console.log('last-notes-ack=' + /acknowledge: true/.test(last));
+console.log('markers=' + [...markers].sort().join(','));
+const ackOut = await call('fm_drain', { acknowledge: true });
+console.log('ack=' + /acknowledged the presented wakes through 42/.test(ackOut));
+const drainInvocations = calls().split('\n').filter((l) => l === 'drain ').length;
+console.log('drain-invocations=' + drainInvocations);
+const ackInvocations = calls().split('\n').filter((l) => l.startsWith('drain --ack')).length;
+console.log('ack-invocations=' + ackInvocations);
+") || fail "paged drain case failed: $out"
+  assert_contains "$out" "page1-notes-more=true" "the first page tells the model more pages remain"
+  assert_contains "$out" "mid-ack-refused=true" "acknowledge: true is refused while pages remain"
+  assert_contains "$out" "last-notes-ack=true" "the last page invites acknowledgement"
+  assert_contains "$out" "markers=00,01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18" \
+    "every marker from the presentation reaches the model across the pages"
+  assert_contains "$out" "ack=true" "acknowledgement runs the drain command once the last page has been read"
+  assert_contains "$out" "drain-invocations=1" "the drain script runs exactly once for the whole presentation"
+  assert_contains "$out" "ack-invocations=1" "acknowledgement runs exactly once, after the last page"
+  pass "a presentation over 64 KiB reaches the model whole across paged calls before it is acknowledged"
 }
 
 test_lock_held_by_a_short_lived_child_is_not_ownership() {
@@ -268,7 +298,7 @@ test_inert_unless_selected
 test_tool_inputs_are_closed
 test_unrestricted_session_refuses_everything
 test_restricted_session_locks_drains_and_acknowledges
-test_incomplete_presentation_stores_no_acknowledgement
+test_large_presentation_is_paged_across_calls
 test_lock_held_by_a_short_lived_child_is_not_ownership
 test_delivery_passes_are_serialized_and_follow_each_run
 test_interval_runs_passes_until_shutdown

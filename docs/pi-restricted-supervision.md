@@ -26,9 +26,12 @@ Leave the turn-end guard and the supervision branch out of this launch, because 
 
 - The session lock is taken by `bin/fm-lock.sh` at session start and names the Pi process itself; no lock tool is exposed, and no other startup work runs.
 - `fm_drain` presents queued wakes through `bin/fm-wake-drain.sh`, and `fm_drain` with `acknowledge: true` runs exactly the acknowledgement that its previous presentation printed.
-  A presentation too large to show whole stores no acknowledgement, so no wake is ever consumed unseen.
+  A drain's complete captured output is returned in pages of at most 64 KiB: while pages remain, a no-argument `fm_drain` call returns the next page instead of running the drain script again, and `fm_drain` with `acknowledge: true` refuses, saying how many pages remain.
+  The acknowledgement pair is stored only after the last page has been returned, so no wake is ever consumed before the model has seen every line the drain printed.
+  If the capture itself overflowed, timed out, or was aborted, the model is told plainly that part of the presentation was lost and its unread status lines and branch outcomes may not be shown again; no acknowledgement is stored.
 - `fm_deliver` runs one pass of `bin/fm-deliver-cycle.sh`, which also runs every three minutes and after each agent run, one pass at a time.
-  A pass arms merge monitoring for a task whose record shows exactly one ready change, and cleans up a task whose change the merge monitor confirmed merged, never with `--force`.
+  A pass arms merge monitoring for a task whose record shows exactly one ready change, and cleans up a task only when the merge monitor confirmed its recorded change merged and the task's current status is the ready report for its mode naming exactly that change; never with `--force`.
+  A missing, unreadable, unparseable, or non-ready current status, or one naming a different change, is reported and left for the supervisor.
   The script's header owns the exact rules.
 - Both tools act only while this Pi process holds the session lock.
 

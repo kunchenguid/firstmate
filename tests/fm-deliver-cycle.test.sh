@@ -153,7 +153,7 @@ test_confirmed_merge_is_cleaned_up_without_force() {
   local home
   home=$(new_home cleanup)
   fm_write_meta "$home/state/t5.meta" kind=ship mode=direct-PR "pr=$PR7"
-  printf 'done: PR %s\n' "$PR7" > "$home/state/t5.status"
+  printf 'done [at=100]: PR %s\n' "$PR7" > "$home/state/t5.status"
   run_cycle "$home"
   assert_equals "" "$(calls "$home")" "a monitored change that has not merged is left to its poll"
   mark_merged "$home" t5 "$PR7"
@@ -170,6 +170,7 @@ test_refused_cleanup_keeps_the_task() {
   local home
   home=$(new_home cleanup-refused)
   fm_write_meta "$home/state/t6.meta" kind=ship mode=direct-PR "pr=$PR7"
+  printf 'done [at=100]: PR %s\n' "$PR7" > "$home/state/t6.status"
   mark_merged "$home" t6 "$PR7"
   : > "$home/refuse-teardown"
   run_cycle "$home"
@@ -185,6 +186,7 @@ test_merge_marker_must_match_the_recorded_change() {
   local home
   home=$(new_home cleanup-mismatch)
   fm_write_meta "$home/state/t7.meta" kind=ship mode=direct-PR "pr=$PR7"
+  printf 'done [at=100]: PR %s\n' "$PR7" > "$home/state/t7.status"
   mark_merged "$home" t7 "$PR8"
   run_cycle "$home"
   assert_equals "" "$(calls "$home")" "a merge of a different change does not clean up this task"
@@ -195,6 +197,29 @@ test_merge_marker_must_match_the_recorded_change() {
   assert_equals "" "$(calls "$home")" "a merged task now reporting a newer change is not cleaned up"
   assert_contains "$OUT" "skipped t8" "the ambiguity is reported"
   pass "cleanup requires the confirmed merge to be the task's one current change"
+}
+
+test_merged_task_without_ready_status_is_left_for_the_supervisor() {
+  local home
+  home=$(new_home cleanup-missing-status)
+  # No status file at all: the ready evidence is absent, so cleanup skips the
+  # task and leaves it for the supervisor even though the merge is confirmed.
+  fm_write_meta "$home/state/nostatus.meta" kind=ship mode=direct-PR "pr=$PR7"
+  mark_merged "$home" nostatus "$PR7"
+  # A later blocked status after the ready report is not itself a ready line,
+  # so cleanup skips this task too until the supervisor decides.
+  fm_write_meta "$home/state/blocked.meta" kind=ship mode=direct-PR "pr=$PR7"
+  printf 'done [at=100]: PR %s\nblocked [at=200]: worktree lease stuck\n' "$PR7" > "$home/state/blocked.status"
+  mark_merged "$home" blocked "$PR7"
+  run_cycle "$home"
+  expect_code 0 "$RC" "skip pass"
+  assert_equals "" "$(calls "$home")" "no engine command runs without positive ready evidence"
+  assert_contains "$OUT" "skipped nostatus" "a merged task with no status file is reported"
+  assert_contains "$OUT" "left for the supervisor" "the skip names who owns it next"
+  assert_contains "$OUT" "skipped blocked" "a merged task whose current status is not the ready report is reported"
+  assert_present "$home/state/nostatus.meta" "the skipped task keeps its record"
+  assert_present "$home/state/blocked.meta" "the blocked task keeps its record"
+  pass "cleanup requires the current status to be the ready report naming the merged change"
 }
 
 test_arguments_and_missing_state_are_refused() {
@@ -218,4 +243,5 @@ test_refused_arm_is_reported_and_retried_next_pass
 test_confirmed_merge_is_cleaned_up_without_force
 test_refused_cleanup_keeps_the_task
 test_merge_marker_must_match_the_recorded_change
+test_merged_task_without_ready_status_is_left_for_the_supervisor
 test_arguments_and_missing_state_are_refused

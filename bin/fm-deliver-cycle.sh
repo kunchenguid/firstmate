@@ -21,10 +21,14 @@
 #            armed is still armed, because the merge poll's merged result is
 #            this engine's only confirmation of a merge.
 #   clean up A ship task whose recorded pr= the merge poll confirmed merged (the
-#            merge-notification marker owned by bin/fm-pr-lib.sh) -> bin/fm-teardown.sh
-#            <id>, never with --force, so its landed-work, lease, captain-hold,
-#            and endpoint gates stay final. A newer ready report naming a
-#            different change makes the task ambiguous and it is left alone.
+#            merge-notification marker owned by bin/fm-pr-lib.sh) and whose
+#            current status is the ready report its delivery mode requires
+#            naming exactly that recorded change -> bin/fm-teardown.sh <id>,
+#            never with --force, so its landed-work, lease, captain-hold, and
+#            endpoint gates stay final. Cleanup requires positive evidence:
+#            a missing, unreadable, unparseable, or non-ready current status,
+#            or a ready report naming a different change, is reported as
+#            "skipped <id>: ...; left for the supervisor" and nothing runs.
 #
 # Missing, malformed, or ambiguous records are skipped: nothing is armed or
 # cleaned up on a guess. A refusal from either engine command is reported and
@@ -114,7 +118,11 @@ for meta in "$STATE"/*.meta; do
     fi
     fm_pr_poll_merge_already_notified "$STATE" "$id" \
       "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || continue
-    if [ -n "$ready" ] && [ "$ready" != "$FM_PR_URL" ]; then
+    if [ -z "$ready" ]; then
+      report "skipped $id: $FM_PR_URL merged but its current status is not the ready report for its mode naming that change; left for the supervisor"
+      continue
+    fi
+    if [ "$ready" != "$FM_PR_URL" ]; then
       report "skipped $id: $FM_PR_URL merged but its latest ready report names $ready; left for the supervisor"
       continue
     fi

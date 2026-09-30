@@ -25,8 +25,16 @@
 //   - fm_drain runs bin/fm-wake-drain.sh to present queued wakes, and with
 //     acknowledge: true runs exactly the acknowledgement that its own previous
 //     presentation printed. The model supplies no sequence, generation, path,
-//     or command; a presentation too large to show whole stores no
-//     acknowledgement, so no wake is ever consumed unseen.
+//     or command. A drain's complete captured output is returned to the model
+//     in pages of at most 64 KiB: while pages remain, a no-argument fm_drain
+//     call returns the next page instead of running the drain script again,
+//     and fm_drain with acknowledge: true refuses, saying how many pages
+//     remain. The WAKE_ACK_REQUIRED pair is stored only after the last page
+//     has been returned, so no wake is ever consumed before the model has seen
+//     every line the drain printed. If the capture itself overflowed, timed
+//     out, or was aborted, the model is told plainly that part of this
+//     presentation was lost and its unread status lines and branch outcomes
+//     may not be shown again; no acknowledgement is stored.
 //   - fm_deliver, plus a pass on a fixed interval from session start and after
 //     every agent run, runs bin/fm-deliver-cycle.sh, which owns what a pass
 //     does. Passes are serialized: a trigger that arrives while one runs is
@@ -63,8 +71,13 @@ const LOCK_TIMEOUT_MS = 30_000;
 const DRAIN_TIMEOUT_MS = 60_000;
 const DELIVER_TIMEOUT_MS = 600_000;
 const KILL_GRACE_MS = 2_000;
-const CAPTURE_LIMIT_BYTES = 1024 * 1024;
+// The drain capture cap sits well above any realistic drain so its complete
+// output can be paged to the model. Other engine commands share the cap; a
+// delivery or lock command producing this much output is already a defect and
+// its excess is truncated for display, not paged.
+const CAPTURE_LIMIT_BYTES = 16 * 1024 * 1024;
 const MODEL_OUTPUT_LIMIT = 64 * 1024;
+const DRAIN_PAGE_BYTES = 64 * 1024;
 const ACK_LINE =
   /^WAKE_ACK_REQUIRED: after handling completes run bin\/fm-wake-drain\.sh --ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)$/gm;
 
@@ -88,6 +101,11 @@ type RunResult = {
   error: string;
 };
 type PendingAck = { through: string; generation: string };
+type DrainPresentation = {
+  pages: string[];
+  stagedAck: PendingAck | null;
+  incomplete: boolean;
+};
 
 function positiveInteger(name: string, fallback: number): number {
   const value = Number(process.env[name]);
@@ -217,6 +235,16 @@ function modelText(text: string): { text: string; truncated: boolean } {
   };
 }
 
+function paginate(text: string): string[] {
+  const buffer = Buffer.from(text, "utf8");
+  if (buffer.length === 0) return [""];
+  const pages: string[] = [];
+  for (let offset = 0; offset < buffer.length; offset += DRAIN_PAGE_BYTES) {
+    pages.push(buffer.subarray(offset, Math.min(offset + DRAIN_PAGE_BYTES, buffer.length)).toString("utf8"));
+  }
+  return pages;
+}
+
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
   return result.status === 0 ? result.stdout.trim() : "";
@@ -251,6 +279,7 @@ export default function (pi: ExtensionAPI) {
   const deliverIntervalMs = positiveInteger("FM_PI_RESTRICTED_DELIVER_INTERVAL_MS", 180_000);
   let ui: Ui;
   let pendingAck: PendingAck | null = null;
+  let presentation: DrainPresentation | null = null;
   let drainQueue: Promise<unknown> = Promise.resolve();
   let deliverRunning = false;
   let lastBackgroundReport = "";
@@ -359,6 +388,13 @@ export default function (pi: ExtensionAPI) {
         const refusal = readiness();
         if (refusal) return text(refusal, { refused: true });
         if (params?.acknowledge === true) {
+          if (presentation && presentation.pages.length > 0) {
+            const remaining = presentation.pages.length;
+            return text(
+              `fm_drain: ${remaining} more page${remaining === 1 ? "" : "s"} of the current presentation remain unread; call fm_drain without arguments to read the next page before acknowledging.`,
+              { refused: true, pagesRemaining: remaining },
+            );
+          }
           const ack = pendingAck;
           if (!ack) {
             return text("fm_drain: nothing to acknowledge; no presentation from this session is awaiting acknowledgement. Call fm_drain without arguments first.");
@@ -378,19 +414,40 @@ export default function (pi: ExtensionAPI) {
             : "";
           return text(`${modelText(body).text}${redirect}`, { acknowledged: result.status === 0 });
         }
-        const result = await runEngine(drainScript, [], DRAIN_TIMEOUT_MS, signal);
-        const shown = modelText(describe("fm_drain", result));
-        let ack: PendingAck | null = null;
-        for (const match of result.output.matchAll(ACK_LINE)) ack = { through: match[1], generation: match[2] };
-        const complete = !result.overflow && !result.timedOut && !result.aborted && !result.error && !shown.truncated;
-        pendingAck = complete ? ack : null;
-        let note = "";
-        if (pendingAck) {
-          note = "\n[fm_drain: after handling everything above, call fm_drain with acknowledge: true to run that acknowledgement]";
-        } else if (ack) {
-          note = "\n[fm_drain: this presentation was incomplete, so no acknowledgement was stored and every presented wake stays queued]";
+        // No arguments: return the next page of the current presentation if
+        // one is in progress, so the drain script runs exactly once per
+        // presentation and every captured line reaches the model.
+        if (!presentation || presentation.pages.length === 0) {
+          const result = await runEngine(drainScript, [], DRAIN_TIMEOUT_MS, signal);
+          const body = describe("fm_drain", result);
+          let ack: PendingAck | null = null;
+          for (const match of result.output.matchAll(ACK_LINE)) ack = { through: match[1], generation: match[2] };
+          const incomplete = result.overflow || result.timedOut || result.aborted || !!result.error;
+          const finalBody = incomplete
+            ? `${body}\n[fm_drain: part of this presentation was lost; its unread status lines and branch outcomes may not be shown again, so no acknowledgement will be stored]`
+            : body;
+          presentation = { pages: paginate(finalBody), stagedAck: ack, incomplete };
+          pendingAck = null;
         }
-        return text(`${shown.text}${note}`, { acknowledgementPending: pendingAck !== null });
+        const page = presentation.pages.shift() ?? "";
+        const remaining = presentation.pages.length;
+        if (remaining === 0) {
+          if (presentation.stagedAck && !presentation.incomplete) {
+            pendingAck = presentation.stagedAck;
+          }
+          const hadStagedAck = presentation.stagedAck !== null;
+          const wasIncomplete = presentation.incomplete;
+          presentation = null;
+          let note = "";
+          if (pendingAck) {
+            note = "\n[fm_drain: after handling everything above, call fm_drain with acknowledge: true to run that acknowledgement]";
+          } else if (hadStagedAck && wasIncomplete) {
+            note = "\n[fm_drain: this presentation was incomplete, so no acknowledgement was stored and every presented wake stays queued]";
+          }
+          return text(`${page}${note}`, { acknowledgementPending: pendingAck !== null, pagesRemaining: 0 });
+        }
+        const note = `\n[fm_drain: ${remaining} more page${remaining === 1 ? "" : "s"} of this presentation remain; call fm_drain without arguments to read the next page, and do not acknowledge until every page has been shown]`;
+        return text(`${page}${note}`, { acknowledgementPending: false, pagesRemaining: remaining });
       });
       drainQueue = run.catch(() => undefined);
       return run;
