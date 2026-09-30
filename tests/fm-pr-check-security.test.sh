@@ -240,6 +240,13 @@ patch_set=${FM_TEST_GERRIT_PATCH_SET:-1}
 # Cover messages, as `show --messages all` reports them: by default the
 # no-mistakes pipeline summary a worker posted on the current patch set.
 messages=${FM_TEST_GERRIT_MESSAGES-"[{\"change\":$change,\"patch_set\":$patch_set,\"author\":\"worker\",\"message\":\"Patch Set $patch_set:\\n\\nno-mistakes pipeline summary for run RUNFIXTURE\\n\\nno findings\"}]"}
+# Without --full the real CLI cuts a body over 1000 characters to its first
+# 1000 and marks the row truncated.
+if [[ " $* " == *" --full "* ]]; then
+  cut=(cat)
+else
+  cut=(jq -c '.messages |= map(if (.message | length) > 1000 then .message = .message[0:1000] | .truncated = true else . end)')
+fi
 printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":%s,"revision":"%s","url":"%s"}],"messages":%s}\n' \
   "$change" \
   "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
@@ -250,7 +257,7 @@ printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"s
   "$patch_set" \
   "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
   "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}" \
-  "$messages"
+  "$messages" | "${cut[@]}"
 SH
   # no-mistakes, answering only `axi status` the way the real CLI does from a
   # worker copy: a run object, then its branch_sync block. By default the run's
@@ -1818,7 +1825,7 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   FM_TEST_GERRIT_REVISION=$published run_check_entry "$dir" task-published \
     https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
     || fail "arming refused a change whose current patch set carries this copy's HEAD tree"
-  grep -qF -- "show 4201 --host gerrit.example --messages all --json" "$dir/gerrit-axi.log" \
+  grep -qF -- "show 4201 --host gerrit.example --messages all --full --json" "$dir/gerrit-axi.log" \
     || fail "the gate did not read the change from its own server"
   [ "$(grep -c -- "show 4201" "$dir/gerrit-axi.log")" = 1 ] \
     || fail "the gate read the tree and the summary in separate reads that could straddle a new patch set"
@@ -1987,7 +1994,7 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a ready report naming its pipeline summary message: $out"
-  grep -qF -- "show 4201 --host gerrit.example --messages all --json" "$dir/gerrit-axi.log" \
+  grep -qF -- "show 4201 --host gerrit.example --messages all --full --json" "$dir/gerrit-axi.log" \
     || fail "the gate did not read the change's cover messages from its own server"
 
   # A skipped post leaves no summary on the published patch set, and a summary
@@ -2089,6 +2096,20 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "the done gate refused a summary carrying every step's entry: $out"
+  # A summary longer than gerrit-axi's 1000-character preview still passes when
+  # its last required step line sits beyond the preview.
+  long_entry=$(printf 'x%.0s' $(seq 1 1100))
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$squash FM_TEST_NM_PIPELINE_HEAD=$fixed \
+    FM_TEST_NM_STEPS=$'review,completed,2,100\ntest,completed,0,100\nlint,completed,1,100' \
+    FM_TEST_GERRIT_MESSAGES="[{\"change\":4201,\"patch_set\":1,\"author\":\"worker\",\"message\":\"Patch Set 1:\\n\\nno-mistakes pipeline summary for run RUNFIXTURE\\n\\nreview: $long_entry - corrected\\nlint: trailing space - removed\"}]" \
+    PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" "$line; pipeline summary posted on patch set 1" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "the done gate refused a summary whose step line lies past the 1000-character preview: $out"
 
   # Arming asks the gate about the task's own done: line, since only the worker
   # knows the summary's patch set; with none, or one without the suffix, it is

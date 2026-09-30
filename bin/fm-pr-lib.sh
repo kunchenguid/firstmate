@@ -1126,8 +1126,9 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
 # change message on that patch set carries a run's summary - the line <first>,
 # plus a line starting "<step>:" for each step in the newline-separated <steps>
 # or, when <steps> is empty, the line "no findings" - all from one live read
-# with every cover message, so the tree and the summary are checked against the
-# same patch set. Gerrit names a message's patch set in its own first line
+# with every cover message whole (--full; without it gerrit-axi cuts a body to
+# its first 1000 characters, dropping a long summary's later step lines), so
+# the tree and the summary are checked against the same patch set. Gerrit names a message's patch set in its own first line
 # ("Patch Set 3:"), which is the patch_set gerrit-axi reports for the row.
 # Consumed by bin/fm-dod-lib.sh's no-mistakes ready gate, which accepts a
 # published change only when that revision carries the worker copy's HEAD tree
@@ -1143,7 +1144,7 @@ fm_pr_gerrit_read_summary() {  # <host> <number> <first> <steps>
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  if ! json=$(gerrit-axi show "$number" --host "$host" --messages all --json 2>/dev/null) \
+  if ! json=$(gerrit-axi show "$number" --host "$host" --messages all --full --json 2>/dev/null) \
     || [ -z "$json" ]; then
     return 1
   fi
