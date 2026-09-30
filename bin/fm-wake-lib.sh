@@ -1067,10 +1067,11 @@ fm_recovery_marker_reopen_announced() {
 # later reaper re-elects itself by renaming that dead reaper's tombstone, and a
 # reaper whose own election a trap interrupted resumes it from its tombstone.
 # A link whose named owner directory is gone with no tombstone anywhere names a
-# provably-dead holder: election has nothing to rename, and a competing reaper
-# would necessarily have left a tombstone (the mv that elects one is atomic),
-# so the link itself is removed and the lock is reclaimable. Without this, an
-# owner directory deleted underneath its link (operator cleanup of leaked
+# provably-dead holder: the reaper claims the absent owner name with an
+# exclusive mkdir - making the link an ordinary stale-owner one - and takes the
+# same elected, points-to-owner-guarded removal, so a competitor that removed
+# the link and re-acquired in the gap keeps its successor link. Without this,
+# an owner directory deleted underneath its link (operator cleanup of leaked
 # records) leaves a dangling steal mutex no arm can ever take, which wedges
 # every later watcher startup on that home.
 fm_lock_reap_dead_link() {
@@ -1100,8 +1101,13 @@ fm_lock_reap_dead_link() {
       if [ "$(readlink "$lockdir" 2>/dev/null || true)" != "$raw_target" ]; then
         return 1
       fi
-      rm -f "$lockdir" 2>/dev/null || return 1
-      return 0
+      # Elect a single reaper before deleting: claim the absent owner name
+      # (mkdir is atomic and exclusive), turning the dangling link into an
+      # ordinary stale-owner one for the guarded removal below. A competitor
+      # that removed the link and re-acquired in the gap left a successor link
+      # pointing elsewhere, which that points-to-owner guard refuses to delete.
+      mkdir -- "$owner" 2>/dev/null || return 1
+      token=$owner
     fi
   fi
   tomb="$owner.reaped.$current"
@@ -1160,9 +1166,10 @@ fm_lock_sweep_dead_owners() {
 # Collect the marker's abandoned scratch: ${marker}.tmp.* minted by
 # _fm_recovery_marker_write_locked between mktemp and its atomic rename, and
 # ${marker}.invalid.* quarantine directories from a failed arm-check repair.
-# The mint-to-rename window is milliseconds, so anything older than
-# FM_RECOVERY_TMP_STALE_AFTER is provably abandoned by a dead writer; the
-# default leaves room for a process frozen mid-write for a full hour.
+# Scratch exists only inside a writer's ${marker}.lock hold, so nothing is
+# collected while that lock names a live pid: a writer frozen mid-write for
+# longer than FM_RECOVERY_TMP_STALE_AFTER is still in flight, and a later pass
+# collects its scratch once the writer is provably gone.
 FM_RECOVERY_TMP_STALE_AFTER="${FM_RECOVERY_TMP_STALE_AFTER:-3600}"
 case "$FM_RECOVERY_TMP_STALE_AFTER" in
   ''|*[!0-9]*) FM_RECOVERY_TMP_STALE_AFTER=3600 ;;
@@ -1170,7 +1177,9 @@ case "$FM_RECOVERY_TMP_STALE_AFTER" in
 esac
 [ "$FM_RECOVERY_TMP_STALE_AFTER" -gt 0 ] || FM_RECOVERY_TMP_STALE_AFTER=3600
 fm_recovery_marker_sweep_stale() {
-  local marker=$1 scratch
+  local marker=$1 scratch pid
+  pid=$(cat "${marker}.lock/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" && return 0
   for scratch in "${marker}.tmp."* "${marker}.invalid."*; do
     [ -e "$scratch" ] || [ -L "$scratch" ] || continue
     [ "$(fm_path_age "$scratch")" -ge "$FM_RECOVERY_TMP_STALE_AFTER" ] || continue

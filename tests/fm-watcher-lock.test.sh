@@ -536,6 +536,49 @@ test_marker_sweep_collects_abandoned_scratch_only() {
   pass "marker scratch sweep collects aged quarantine dirs and tmp files only"
 }
 
+# A recovery writer holds ${marker}.lock across its whole mint-to-rename
+# window. One frozen between mktemp and the atomic rename for longer than
+# FM_RECOVERY_TMP_STALE_AFTER is stopped, not dead, so the sweep must spare
+# its in-flight scratch; once the writer is provably gone, the same aged
+# scratch is collected.
+test_marker_sweep_spares_live_writer_scratch() {
+  local dir state marker holder rc i
+  dir=$(make_case marker-sweep-inflight)
+  state="$dir/state"
+  marker="$state/.watcher-down"
+  : > "$marker.tmp.FROZEN1"
+  touch -t 200001010000 "$marker.tmp.FROZEN1"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2.lock" || exit 7
+    exec sleep 30
+  ' _ "$LIB" "$marker" >/dev/null 2>&1 &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$marker.lock" ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$marker.lock" ] || fail "frozen writer never took the marker lock"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ -e "$2.tmp.FROZEN1" ] || exit 8
+    exit 0
+  ' _ "$LIB" "$marker" || rc=$?
+  kill -KILL "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "marker scratch sweep deleted a live writer's in-flight scratch (rc=$rc)"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_recovery_marker_sweep_stale "$2"
+    [ ! -e "$2.tmp.FROZEN1" ] || exit 9
+    exit 0
+  ' _ "$LIB" "$marker" || fail "marker scratch sweep kept aged scratch after its writer died"
+  pass "marker scratch sweep spares a live writer's scratch and collects it once dead"
+}
+
 test_lock_reclaims_dead_steal_owner_without_nested_markers() {
   local dir state lockdir fakebin lnlog rc
   dir=$(make_case lock-dead-steal-owner)
@@ -699,6 +742,62 @@ SH
     *) fail "competing reaper did not report an outcome" ;;
   esac
   pass "a competing reaper cannot remove the successor's steal mutex"
+}
+
+test_lock_dangling_reap_cannot_remove_successor() {
+  # Two reapers verify the same dangling steal mutex. The competitor runs to
+  # completion exactly when the first one is about to remove the link; the
+  # first reaper must not delete the competitor's fresh live mutex link.
+  local dir state steal fakebin out rc
+  dir=$(make_case lock-dangling-reap-race)
+  state="$dir/state"
+  steal="$state/.contend.lock.steal"
+  fakebin="$dir/fakebin"
+  out="$dir/competitor"
+  ln -s "$steal.owner.GONE01" "$steal"
+  cat > "$fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+last=
+for arg do last=$arg; done
+if [ "$last" = "$FM_TEST_RACE_PATH" ] && mkdir "$FM_TEST_RACE_ONCE" 2>/dev/null; then
+  bash -c '
+    . "$1"
+    if fm_lock_try_acquire_steal_mutex "$2"; then
+      printf "won %s\n" "${BASHPID:-$$}" > "$3"
+      exec sleep 30
+    fi
+    printf "lost\n" > "$3"
+  ' _ "$FM_TEST_LIB" "$last" "$FM_TEST_RACE_OUT" >/dev/null 2>&1 &
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$FM_TEST_RACE_OUT" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+fi
+exec /bin/rm "$@"
+SH
+  chmod +x "$fakebin/rm"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LIB="$LIB" FM_TEST_RACE_PATH="$steal" \
+    FM_TEST_RACE_ONCE="$dir/race-once" FM_TEST_RACE_OUT="$out" \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire_steal_mutex "$2" || exit 1
+      [ "$(cat "$2/pid" 2>/dev/null)" = "${BASHPID:-$$}" ] || exit 2
+    ' _ "$LIB" "$steal" || rc=$?
+  [ -d "$dir/race-once" ] || fail "dangling reap race hook never fired"
+  case "$(cat "$out" 2>/dev/null || true)" in
+    won\ *)
+      kill -KILL "$(sed 's/^won //' "$out")" 2>/dev/null || true
+      [ "$rc" -ne 0 ] || fail "competing reapers both hold the steal mutex"
+      ;;
+    lost)
+      [ "$rc" -eq 0 ] || fail "no reaper acquired the dangling steal mutex (rc=$rc)"
+      ;;
+    *) fail "competing reaper did not report an outcome" ;;
+  esac
+  pass "a competing reaper cannot remove the successor of a dangling reap"
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
@@ -1759,10 +1858,12 @@ test_lock_reaps_dangling_steal_link_with_gone_owner
 test_recovery_marker_waits_are_bounded_on_startup_path
 test_sweep_collects_dead_owner_records_only
 test_marker_sweep_collects_abandoned_scratch_only
+test_marker_sweep_spares_live_writer_scratch
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_reclaims_dead_steal_owner_without_nested_markers
 test_lock_recovers_dead_nested_steal_chain
 test_lock_steal_reap_cannot_remove_successor
+test_lock_dangling_reap_cannot_remove_successor
 test_lock_reclaims_self_held_steal_mutex
 test_lock_resumes_own_interrupted_steal_reap
 test_lock_live_steal_mutex_is_not_reclaimed
