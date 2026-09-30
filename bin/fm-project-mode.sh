@@ -28,7 +28,7 @@
 #   - <name> [<mode> +yolo] - <desc> (added <date>)                  -> <mode> on fm/
 #   - <name> [<mode> +yolo branch=<prefix>] - <desc> (added <date>)  -> <mode> <yolo> <prefix>
 #   - <name> [<mode> forge=gerrit] - <desc> (added <date>)           -> <mode> off, --forge gerrit
-#   <name> may contain spaces; it ends at the literal " [" or " - " that follows it.
+#   <name> may contain spaces; bin/fm-project-registry-lib.sh owns where it ends.
 #   Bracket tokens are order-independent: +yolo, branch=<prefix>, and forge=<value>
 #   are recognized by their own shape wherever they appear, and whichever token is
 #   left over is the mode. <prefix> must not contain a space; an empty override
@@ -97,6 +97,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-project-registry-lib.sh
+. "$SCRIPT_DIR/fm-project-registry-lib.sh"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -125,7 +127,7 @@ fi
 # token, so an empty value survives the split), or nothing if the project is
 # absent. Every other token beside the mode is ignored, exactly as before either
 # annotation existed.
-parsed=$(awk -v n="$NAME" '
+parsed=$(awk -v n="$NAME" "$FM_PROJECT_REGISTRY_AWK"'
   function dist(x, y,   i, j, lx, ly, d, c, v) {
     lx = length(x); ly = length(y);
     for (i=0; i<=lx; i++) d[i,0] = i;
@@ -139,16 +141,8 @@ parsed=$(awk -v n="$NAME" '
     }
     return d[lx,ly];
   }
-  {
-    # Exact whole-name match on the raw line text (never a regex, so a name
-    # containing dots or brackets is compared literally): the line must start
-    # with "- " n, and the text right after the name must be empty, or start
-    # with " [" or " - ", so a name that is a leading prefix of a longer
-    # registered name does not match that longer row.
-    prefix = "- " n; plen = length(prefix);
-    if (substr($0, 1, plen) != prefix) next
-    after = substr($0, plen + 1);
-    if (after != "" && substr(after, 1, 2) != " [" && substr(after, 1, 3) != " - ") next
+  fm_registry_match($0, n) {
+    after = FM_REG_AFTER;
     mode="no-mistakes"; yolo="off"; branch="fm/"; forge="none";
     if (substr(after, 1, 2) == " [") {
       s="";

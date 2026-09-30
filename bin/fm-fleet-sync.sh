@@ -327,7 +327,7 @@ sync_project() {
     return 0
   fi
   if ! mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null); then
-    echo "$label: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh $label for the refusal)"
+    echo "$label: skipped: registry entry does not resolve to a delivery posture (run bin/fm-project-mode.sh \"$label\" for the refusal)"
     return 0
   fi
   mode=${mode_line%% *}

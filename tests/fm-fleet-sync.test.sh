@@ -426,6 +426,8 @@ test_unresolvable_registry_posture_skipped() {
 
   assert_contains "$out" "omicron: skipped: registry entry does not resolve to a delivery posture" \
     "a refused registry entry was not reported as a skip"
+  assert_contains "$out" 'run bin/fm-project-mode.sh "omicron" for the refusal' \
+    "the skip hint did not quote the project name for a copyable command"
   assert_not_contains "$out" "STUCK" "a refused registry entry was escalated to STUCK"
   [ "$(head_sha "$clone")" = "$before" ] || fail "a clone whose registry entry was refused was still fast-forwarded"
   pass "a clone whose registry entry the parser refuses is skipped, never synced on the default posture"

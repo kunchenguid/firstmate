@@ -363,7 +363,7 @@ if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
 while [ "$idx" -lt "${#POS[@]}" ]; do
-  SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
+  SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+$'\n'}${POS[$idx]}"
   idx=$((idx + 1))
 done
 if [ "$NO_PROJECTS" -eq 1 ]; then
@@ -377,7 +377,7 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
   PROJECT_CLONES_BODY="None. This is a project-less domain: its subject is the firstmate repo this home lives in, so it needs no separate clones under \`projects/\`; its crews take pooled worktrees of that firstmate repo."
   PROJECT_CLONES_NOTE="This domain has no separate project clones: its subject is the firstmate repo this home lives in, and its crews take pooled worktrees of that repo."
 else
-  PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
+  PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
 cat > "$BRIEF" <<EOF

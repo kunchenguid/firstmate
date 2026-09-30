@@ -640,6 +640,20 @@ fi
 assert_grep 'has no registry record' "$TMP_ROOT/seed-unregistered.out" \
   "the unregistered-project refusal did not name the missing record"
 
+# A remote route carries only project names that are safe path components, so a
+# registered name containing a space is refused before anything is provisioned,
+# never published remotely with a default posture in place of its own entry.
+printf '%s\n' '- foo bar [direct-PR +yolo] - spaced project (added 2026-09-28)' >> "$TMP_ROOT/seed-parent/data/projects.md"
+if FM_SECONDMATE_CHARTER='Spaced charter.' FM_SECONDMATE_SCOPE='spaced' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-spaced remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-spaced-home" "foo bar=$BETA_ORIGIN" \
+  > "$TMP_ROOT/seed-spaced.out" 2>&1; then
+  fail "remote seeding accepted a project name containing a space"
+fi
+assert_grep 'invalid project name: foo bar' "$TMP_ROOT/seed-spaced.out" \
+  "the spaced-name refusal did not name the whole project"
+assert_absent "$TMP_ROOT/seed-spaced-home" "the spaced project name still provisioned a remote home"
+
 out=$(FM_SECONDMATE_CHARTER='Own beta delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='beta delivery and validation' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-noclone remote-mac "$REMOTE_ROOT" \

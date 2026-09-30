@@ -28,6 +28,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-project-registry-lib.sh
+. "$SCRIPT_DIR/fm-project-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -244,7 +246,7 @@ EOF
   [ -n "$ORIGIN" ] || die "project $NAME has no origin"
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
-  case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
+  fm_project_registry_line - "$NAME" <<< "$REGISTRY_LINE" >/dev/null || die "project $NAME registry line is malformed"
   DEST="$FM_HOME/projects/$NAME"
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
