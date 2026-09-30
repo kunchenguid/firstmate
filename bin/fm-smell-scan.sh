@@ -501,7 +501,7 @@ def collect_stale_docs(scan: Scan, findings: list[Finding]) -> None:
                     continue
                 findings.append(Finding(
                     "stale-doc", "medium", "confirmed", rel, index, clean,
-                    note="local link target does not exist",
+                    note="local link target is absent from tracked repository evidence",
                 ))
 
 
