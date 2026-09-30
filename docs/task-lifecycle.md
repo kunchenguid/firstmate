@@ -77,6 +77,8 @@ Present preservation fields, every other fact in the cleanup observation and eac
 Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
 When a ship retains multiple merge receipts from its current execution generation, completion requires exactly one receipt matching the task metadata's current PR URL and head; absent, duplicate or conflicting identity refuses without pruning history.
+With a single current-generation receipt, delivery metadata may be absent, but any supplied URL or head must agree and duplicate identity fields still refuse.
+The selected receipt supplies the backlog completion reference, independently of receipt ordering, while all merge history remains intact.
 Open goals, unmerged required delivery and incomplete scout decision inventories refuse that closure.
 If tasks-axi has already pruned the exact Done row, the existing backlog-close owner can acknowledge bookkeeping from the configured Done archive only with matching terminal execution generation and preserved delivery reference.
 A missing, ambiguous, conflicting or unapplied archive reference keeps the close marker pending; recovery neither recreates the business task nor repeats endpoint/copy effects.
@@ -136,7 +138,7 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, relevant-change-only terminal observations and exact outcome replay.
 [`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh) covers ordinary-chat exclusion, authenticated task intent updates, interrupted append recovery, and bounded incremental indexing for warm and cold native sessions.
-[`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh) covers business closure with resources retained, false-closure refusal, interruption recovery, and exact Done-history convergence.
+[`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh), including its [`retirement-business.py`](../tests/retirement-business.py) fixture, covers business closure with resources retained, current-delivery selection among multiple receipts, identity and generation refusal, interruption recovery, and exact Done-history convergence.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.
 [`tests/fm-short-operations-herdr.test.sh`](../tests/fm-short-operations-herdr.test.sh) is the current real-Herdr completed-cleanup guard; the [runtime evidence](verification/runtime-backends.md#independent-task-workspace-cleanup) owns its environment, observed results and limits.
