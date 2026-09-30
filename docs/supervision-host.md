@@ -265,8 +265,7 @@ A host that starts without that ownership stands down before activation.
 So it never stops the owner's host or watcher or releases its leases.
 
 The stand-down is only for a live owner.
-The Claude auto-arm, the Cursor stop hook, and the Codex checkpoint reclaim a recorded owner that is a number no longer backed by a live verified harness through `bin/fm-lock.sh` before they run the host, so a replacement session whose predecessor's anchor pid died keeps supervision instead of standing down on the dead record every turn.
-A missing or malformed lock, and a live owner the session does not own, are never touched.
+The arm-owner reclaim rule above covers a dead recorded owner before activation.
 
 ### A host that dies without a close
 
