@@ -66,7 +66,7 @@ To answer an item, reply from exactly `johnpoyser@gmail.com` and make the first 
 Only inline `text/plain` content is parsed; attachments and embedded forwarded messages are excluded, and recognized quoted-history markers end answer extraction.
 The poller reads a message body only when its single `From` address is the owner and the topmost `Authentication-Results` field is the Gmail receiver's result (`mx.google.com`) showing DKIM or DMARC pass aligned with `gmail.com`; lower sender-supplied copies are ignored.
 Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
-While away, the poller walks unseen mail in ascending UID order from a persistent away-scan cursor, so each message, including retry mail, is examined at most once per away posture; ignored mail stays unread and cannot block later replies, and attended polling reports it after return.
+While away, the poller walks unseen mail in ascending UID order from a persistent away-scan cursor; ignored mail is examined at most once per away posture, stays unread, and cannot block later replies, so attended polling reports it after return. Failed reads of authenticated owner replies remain retryable.
 A failed read of a message, an owner reply that arrives while mail configuration is missing, or a reply handoff that fails or runs past the poll budget, is retried on later polls without blocking the scan; after three failed reads of an authenticated owner reply the poller stops retrying it and sends one alert, without message content, saying one reply could not be read.
 
 
