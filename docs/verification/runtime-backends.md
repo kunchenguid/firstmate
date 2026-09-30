@@ -17,6 +17,23 @@ The optional real-Treehouse case reproduced shared allocation across those clone
 Treehouse v2.1.0 resolves explicit returns from the slot path itself, so the real-tool check does not claim that a foreign Git common directory alone reproduces an unmanaged return.
 The portable failure fixture covers that cleanup failure independently.
 
+The real Treehouse v2.1.0 process-exit regression was verified on 2026-09-30 through the executable allocation preflight from a second local home.
+Its unowned control transitions from `in-use` to `available` and reproduces reuse of the same slot with its detached HEAD reset.
+Separate retained-record and retained-claim cases refuse before process exit, preserve the unlanded detached HEAD and exact reflog, and refuse again after exit.
+Allocation fails closed while any pool slot retains a task record or claim, including occupied slots; guarded teardown must release that ownership before another allocation.
+This deliberately limits concurrent allocation in a pool with retained process-backed task slots rather than relying on process liveness to preserve ownership.
+The shared preflight applies before the tmux, Herdr, Zellij, and cmux allocation paths; harness launch behavior and Orca's separate allocator are unchanged.
+
+Focused verification command and exact output:
+
+```sh
+FM_TEST_TREEHOUSE_RACE_ONLY=1 bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 control: in-use -> available -> same-slot reset
+Treehouse v2.1.0 record: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+Treehouse v2.1.0 claim: cross-home refusal before process exit; HEAD and reflog preserved; retry refused
+ok - real Treehouse process-exit allocation preserves retained cross-home task work
+```
+
 Refresh the evidence with:
 
 ```sh

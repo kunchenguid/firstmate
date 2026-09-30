@@ -1503,7 +1503,7 @@ fm_treehouse_return_preflight() {  # <project-dir> <worktree>
 # closed, even when currently leased: a process can exit between status and get.
 # A retained claim or task record requires guarded teardown before reuse.
 fm_treehouse_allocation_preflight() {  # <project-dir>
-  local project=$1 out paths slot marker availability
+  local project=$1 out paths slot marker
   out=$(cd "$project" && treehouse status --json) || {
     echo "REFUSED: cannot inspect Treehouse pool for $project; structured status requires Treehouse 2.1.0 or newer (bin/fm-install-treehouse.sh owns the verified pin)." >&2
     return 1
@@ -1512,12 +1512,9 @@ fm_treehouse_allocation_preflight() {  # <project-dir>
     echo "REFUSED: cannot inspect Treehouse pool identity for $project before allocation" >&2
     return 1
   }
-  while IFS=$'\t' read -r availability slot; do
+  while IFS=$'\t' read -r _ slot; do
     [ -n "$slot" ] || continue
     fm_treehouse_require_repository "$project" "$slot" || return 1
-    # Occupied slots are not allocation candidates; retaining their claims is
-    # expected during concurrent work. Validate identity for all entries above.
-    [ "$availability" = available ] || continue
     fm_treehouse_require_exclusive_record "" allocation "$STATE" "$slot" || return 1
     marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
     if [ -e "$marker" ] || [ -L "$marker" ]; then

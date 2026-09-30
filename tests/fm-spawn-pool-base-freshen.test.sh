@@ -787,6 +787,82 @@ SH
   pass "spawn refuses foreign same-remote pool slots before allocation and independently before claim or refresh"
 }
 
+
+test_real_treehouse_retained_owner_process_exit() (
+  local treehouse_bin rec slot child sha before status kind rc out pid='' i version reused
+  treehouse_bin=$(command -v treehouse || true)
+  if [ -z "$treehouse_bin" ]; then
+    [ "${FM_TEST_TREEHOUSE_RACE_ONLY:-0}" != 1 ] || fail "Treehouse is required for the focused race check"
+    printf 'skip - real Treehouse process-exit check (treehouse not installed)\n'
+    return 0
+  fi
+  version=$("$treehouse_bin" --version)
+  trap '[ -z "$pid" ] || { kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }' EXIT
+  for kind in control record claim; do
+    rec=$(make_case "process-exit-$kind" "new-task")
+    read_case_record "$rec"
+    child="$CASE_DIR/child-home"
+    mkdir -p "$child/state" "$child/data" "$CASE_DIR/treehouse-user/.config/treehouse"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$HOME_DIR" > "$child/.fm-secondmate-parent"
+    printf '%s\n' "- mate - fixture (home: $child; scope: test; projects: project; added 2026-01-01)" > "$HOME_DIR/data/secondmates.md"
+    printf 'root = "%s"\n' "$CASE_DIR/private-pools" > "$CASE_DIR/treehouse-user/.config/treehouse/config.toml"
+    export HOME="$CASE_DIR/treehouse-user" TREEHOUSE_NO_UPDATE_CHECK=1
+    slot=$(cd "$PROJECT_DIR" && "$treehouse_bin" get --lease 2> "$CASE_DIR/get.stderr") \
+      || fail "Treehouse could not create the disposable race slot"
+    (cd "$PROJECT_DIR" && "$treehouse_bin" return --force "$slot") > "$CASE_DIR/return.stdout" 2> "$CASE_DIR/return.stderr" \
+      || fail "Treehouse could not release the disposable setup lease"
+    printf 'unlanded detached work\n' > "$slot/unlanded.txt"
+    git -C "$slot" add unlanded.txt
+    git -C "$slot" -c user.name=test -c user.email=test@example.invalid commit -qm unlanded
+    sha=$(git -C "$slot" rev-parse HEAD)
+    before=$(git -C "$slot" reflog)
+    bash -c 'cd "$1" && exec sleep 120' _ "$slot" &
+    pid=$!
+    status=''
+    for i in $(seq 1 30); do
+      status=$(cd "$PROJECT_DIR" && "$treehouse_bin" status --json | jq -r --arg slot "$slot" '.[] | select(.path == $slot) | .status')
+      [ "$status" != in-use ] || break
+      sleep 0.1
+    done
+    [ "$status" = in-use ] || fail "Treehouse $version did not observe the live disposable process: $status"
+    case "$kind" in
+      record) fm_write_meta "$HOME_DIR/state/old-task.meta" "worktree=$slot" "project=$PROJECT_DIR" "kind=ship" ;;
+      claim) printf 'task=old-task\nhome=%s\n' "$HOME_DIR" > "$(dirname "$slot")/.fm-slot-owner" ;;
+    esac
+    out=$(FM_HOME="$child" bash -c '. "$1"; fm_treehouse_allocation_preflight "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR" 2>&1) && rc=0 || rc=$?
+    kill "$pid" || fail "could not end the disposable slot process"
+    wait "$pid" 2>/dev/null || true
+    pid=''
+    status=$(cd "$PROJECT_DIR" && "$treehouse_bin" status --json | jq -r --arg slot "$slot" '.[] | select(.path == $slot) | .status')
+    [ "$status" = available ] || fail "process exit did not expose the allocation race: $status"
+    if [ "$rc" -eq 0 ]; then
+      reused=$(cd "$PROJECT_DIR" && "$treehouse_bin" get --lease 2> "$CASE_DIR/reuse.stderr") \
+        || fail "Treehouse could not allocate after the process exited"
+      [ "$reused" = "$slot" ] || fail "Treehouse $version did not reuse the now-clean slot"
+    fi
+    if [ "$kind" = control ]; then
+      expect_code 0 "$rc" "an unowned slot should pass preflight"
+      [ "$(git -C "$slot" rev-parse HEAD)" != "$sha" ] || fail "control did not reproduce Treehouse's detached HEAD reset"
+      [ ! -e "$slot/unlanded.txt" ] || fail "control retained the displaced work unexpectedly"
+      printf 'Treehouse %s control: in-use -> available -> same-slot reset\n' "$version"
+    else
+      [ "$rc" -ne 0 ] || fail "$kind owner in another home passed preflight and lost its detached HEAD"
+      [ "$(git -C "$slot" rev-parse HEAD)" = "$sha" ] || fail "retained $kind owner lost its detached HEAD"
+      [ "$(git -C "$slot" reflog)" = "$before" ] || fail "retained $kind owner's reflog changed"
+      [ -f "$slot/unlanded.txt" ] || fail "retained $kind owner's work disappeared"
+      out=$(FM_HOME="$child" bash -c '. "$1"; fm_treehouse_allocation_preflight "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR" 2>&1) && rc=0 || rc=$?
+      [ "$rc" -ne 0 ] || fail "available slot with retained $kind ownership passed retry"
+      printf 'Treehouse %s %s: cross-home refusal before process exit; HEAD and reflog preserved; retry refused\n' "$version" "$kind"
+    fi
+  done
+  pass "real Treehouse process-exit allocation preserves retained cross-home task work"
+)
+
+test_real_treehouse_retained_owner_process_exit
+if [ "${FM_TEST_TREEHOUSE_RACE_ONLY:-0}" = 1 ]; then
+  exit 0
+fi
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh

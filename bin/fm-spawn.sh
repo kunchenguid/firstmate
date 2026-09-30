@@ -153,7 +153,7 @@
 #   pool status (bin/fm-install-treehouse.sh owns the CI pin). Under that lock,
 #   Treehouse's status --json must
 #   resolve only slots with this clone's physical Git common directory before
-#   get can reset anything; unknown status and foreign pools refuse. Available
+#   get can reset anything; unknown status and foreign pools refuse. All
 #   slots with surviving task records or claims require guarded teardown first.
 #   The allocated path is independently checked before claim/base refresh, so
 #   project= always identifies the repository that actually owns the slot.
