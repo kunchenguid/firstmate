@@ -521,7 +521,7 @@ SH
 }
 
 test_overlapping_builds_publish_whole_preview_sets() {
-  local home board a b data_a data_b pid_a pid_b rc_a rc_b href
+  local home board a b data_a data_b pid_a pid_b rc_a rc_b href final
   home=$(make_home preview-overlap)
   board="$home/.lavish/bearings-board.html"
   a="$home/data/scout-a/report.md"
@@ -564,9 +564,15 @@ SH
   set -e
   [ "$rc_a" -eq 0 ] && [ "$rc_b" -eq 0 ] \
     || fail "an overlapping build failed: A rc=$rc_a $(cat "$home/build-a.err"); B rc=$rc_b $(cat "$home/build-b.err")"
-  href=$(extract_payload "$board" | jq -r --arg b "$b" '.report_previews[$b]')
-  grep -q 'Report B' "$home/.lavish/$href" \
-    || fail "the last published board links a preview that does not resolve: $href"
+  # The lock does not order waiting builds, so either board may be the final one;
+  # whichever it is must link a preview of its own report.
+  final=$(extract_payload "$board" | jq -r --arg a "$a" --arg b "$b" '
+    .report_previews | if has($a) and (has($b) | not) then "A \(.[$a])"
+      elif has($b) and (has($a) | not) then "B \(.[$b])" else empty end')
+  [ -n "$final" ] || fail "the final board does not link exactly one of the two reports"
+  href=${final#* }
+  grep -q "Report ${final%% *}" "$home/.lavish/$href" \
+    || fail "the final board links a preview that does not resolve to its own report: $final"
   [ -z "$(find "$home/.lavish/bearings-board-reports" -mindepth 1 -type d)" ] \
     || fail "overlapping builds nested one preview set inside another: $(find "$home/.lavish/bearings-board-reports")"
   [ -z "$(find "$home/.lavish" -maxdepth 1 -name '.reports*')" ] \
