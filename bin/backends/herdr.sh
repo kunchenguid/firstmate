@@ -1865,9 +1865,8 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # cwd-derived "1 · <basename>" (other labels indicate a human rename or
 # repurpose), and refuse to close it if its pane hosts an actively working
 # agent per herdr's own agent-state detection (`agent get`) - belt-and-suspenders
-# against any other
-# unforeseen path landing a live agent in a tab this function was about to
-# close.
+# against any other unforeseen path landing a live agent in a tab this function
+# was about to close.
 #
 # Verified real-herdr behavior (not modeled by the canned-response fake-CLI
 # unit tests; modeled by make_herdr_statefake): closing a workspace's LAST
