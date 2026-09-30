@@ -12,7 +12,7 @@
 #   fm-procevent.sh reconcile
 #   fm-procevent.sh classify <result-file>
 #   fm-procevent.sh handled <source-id> <sequence>
-#   fm-procevent.sh retire <source-id> [--if-absent|--if-matches <adapter> -- <argv>...|--if-owner <registration-token>]
+#   fm-procevent.sh retire <source-id> [--if-absent|--if-matches <adapter> -- <argv>...|--if-owner <registration-token>|--if-task <task-id>]
 #   fm-procevent.sh sweep-home [--preflight]
 #   fm-procevent.sh binding-retirement-preflight <binding-digest>
 #   fm-procevent.sh extension-retirement <binding|transfer> <retirement-arguments...>
@@ -113,7 +113,8 @@
 #            built-in registration, --if-absent refuses while any registration
 #            exists, and --if-owner removes only the exact extension registration
 #            token printed by register-extension, so a stale owner cannot retire
-#            a replacement generation.
+#            a replacement generation. --if-task preserves foreign-home claims
+#            and registrations owned by another task, returning 3 without mutation.
 # sweep-home Retire a bounded snapshot of this home's registrations and owned
 #            claims, then refuse unless no registration, runner record, or owned
 #            claim remains. Used by supported Firstmate home retirement.
@@ -2133,11 +2134,16 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest='' round_owner=''
+  local extension_binding_digest='' round_owner='' expected_task=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
     --if-absent) [ "$#" -eq 2 ] || usage ;;
+    --if-task)
+      [ "$#" -eq 3 ] || usage
+      expected_task=$3
+      fm_pr_task_id_valid "$expected_task" || die "task id is invalid: $expected_task"
+      ;;
     --if-owner)
       [ "$#" -eq 3 ] || usage
       expected_owner=${3-}
@@ -2155,13 +2161,33 @@ cmd_retire() {
     *) usage ;;
   esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if [ "$condition" = --if-task ]; then
+    if [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; then
+      if ! fm_procevent_claim_load_locked "$id"; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot safely read source ownership: $id"
+      fi
+      if ! fm_procevent_claim_owned_by_state "$STATE" "$FM_HOME" \
+        || { [ -n "$FM_PROCEVENT_CLAIM_REG_DIR" ] && [ "$FM_PROCEVENT_CLAIM_REG_DIR" != "$REG" ]; }; then
+        fm_procevent_source_lock_release "$id"
+        printf 'source %s belongs to home %s\n' "$id" "$FM_PROCEVENT_CLAIM_HOME"
+        return 3
+      fi
+    fi
+    round_owner=$(source_owner_task "$id" 2>/dev/null || true)
+    if [ -n "$round_owner" ] && [ "$round_owner" != "$expected_task" ]; then
+      fm_procevent_source_lock_release "$id"
+      printf 'source %s belongs to task %s\n' "$id" "$round_owner"
+      return 3
+    fi
+  fi
   if source_retirement_blocked_locked "$id"; then
     round_owner=$(source_owner_task "$id")
     fm_procevent_source_lock_release "$id"
     die "cannot retire task-owned source $id while a captured round for task $round_owner is unacknowledged; acknowledge it with bin/fm-procevent.sh handled $id <sequence>"
   fi
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
-    if [ -z "$condition" ]; then
+    if [ -z "$condition" ] || [ "$condition" = --if-task ]; then
       fm_procevent_extension_registration_load_locked "$STATE" "$id"
       owner_state=$?
       case "$owner_state" in

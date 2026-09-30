@@ -371,31 +371,38 @@ open_session_files() {
   ' "$store"
 }
 
-end_one_board() {  # <task-id> <file> <source-id> <open-session-files>
-  local task=$1 file=$2 id=$3 opened=$4 rec owner out
+end_one_board() (  # <task-id> <file> <source-id> <open-session-files>
+  local task=$1 file=$2 id=$3 opened=$4 rec claim out rc=0 registered=0
   rec="$(lavish_source_registry)/$id.source"
-  if [ -e "$rec" ] || [ -L "$rec" ]; then
-    owner=$(sed -n 's/^owner_task=//p' "$rec" | head -1)
-    if [ -n "$owner" ] && [ "$owner" != "$task" ]; then
-      printf 'kept: %s (its source belongs to task %s)\n' "$file" "$owner"
+  if [ -e "$rec" ] || [ -L "$rec" ]; then registered=1; fi
+  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" --if-task "$task" 2>&1) || rc=$?
+  case "$rc" in
+    0) [ "$registered" -eq 0 ] || printf 'retired: %s\n' "$id" ;;
+    3)
+      printf 'kept: %s (%s)\n' "$file" "$out"
       return 0
-    fi
-    # Retire before ending, so the end never comes back as a wake.
-    if ! out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" 2>&1); then
+      ;;
+    *)
       printf 'warning: %s stays open: its source %s could not be retired: %s\n' \
         "$file" "$id" "$(printf '%s' "$out" | tr '\n' ' ')"
       return 1
-    fi
-    printf 'retired: %s\n' "$id"
-  fi
+      ;;
+  esac
   printf '%s\n' "$opened" | grep -Fxq -- "$file" || return 0
+  fm_procevent_source_lock_acquire "$id" || return 1
+  trap 'fm_procevent_source_lock_release "$id"' EXIT
+  claim=$(fm_procevent_claim_path "$id")
+  if [ -e "$claim" ] || [ -L "$claim" ] || [ -e "$rec" ] || [ -L "$rec" ]; then
+    printf 'kept: %s (its source was acquired again)\n' "$file"
+    return 0
+  fi
   if ! out=$( (apply_session_host "$file" && lavish-axi end "$file") 2>&1); then
     printf 'warning: could not end the Lavish session for %s (%s); end it with: lavish-axi end %s\n' \
       "$file" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)" "$file"
     return 1
   fi
   printf 'ended: %s\n' "$file"
-}
+)
 
 cmd_end_task() {
   local task=${1-} real id file root rc=0 opened

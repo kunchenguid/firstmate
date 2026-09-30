@@ -4704,6 +4704,130 @@ SH
   done
 }
 
+test_teardown_preserves_lavish_boards_owned_by_another_home() {
+  local caller selection case_dir home task foreign board id claim rc pid attempts local_record
+  local FM_PROCEVENT_CLAIM_ROOT
+  for caller in ordinary child; do
+    for selection in root root-registered registered; do
+      case_dir=$(make_case "lavish-foreign-$caller-$selection")
+      land_lavish_case "$case_dir"
+      lavish_board_fixture "$case_dir"
+      home=$case_dir
+      task=task-x1
+      if [ "$caller" = child ]; then
+        write_meta "$case_dir" local-only secondmate
+        configure_secondmate_with_tmux_children "$case_dir"
+        home="$case_dir/secondmate-home"
+        task=child-a
+        cp -R "$ROOT/bin" "$home/bin"
+      fi
+      mkdir -p "$home/data/$task"
+      board="$home/data/$task/foreign.html"
+      [ "$selection" != registered ] || board="$case_dir/shared-foreign.html"
+      printf '<html>Another home is reviewing this board.</html>\n' > "$board"
+      board=$(lavish_real_path "$board")
+      jq --arg file "$board" \
+        '.sessions.ffffffffffffffff = {file: $file, status: "open", url: "http://127.0.0.1:47391/session/ffffffffffffffff"}' \
+        "$case_dir/lavish-state/state.json" > "$case_dir/lavish-state/next.json"
+      mv "$case_dir/lavish-state/next.json" "$case_dir/lavish-state/state.json"
+      FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims"
+      export FM_PROCEVENT_CLAIM_ROOT
+      id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$board")
+      local_record="$home/state/procevent/$id.source"
+      if [ "$selection" != root ]; then
+        lavish_register_source "$home" "$task" "$board" >/dev/null \
+          || fail "lavish-foreign: could not register the local selection"
+        cp "$local_record" "$case_dir/local-before.source"
+      fi
+      foreign="$case_dir/foreign-home"
+      mkdir -p "$foreign/state" "$foreign/data" "$foreign/config"
+      fm_write_meta "$foreign/state/task-y.meta" 'window=firstmate:fm-task-y' \
+        'endpoint_task_id=task-y' 'kind=ship' "worktree=$case_dir/foreign-wt" "project=$case_dir/project"
+      fm_test_track_procevent_home "$foreign" "$FM_PROCEVENT_CLAIM_ROOT"
+      lavish_register_source "$foreign" task-y "$board" >/dev/null \
+        || fail "lavish-foreign: could not register the owning home"
+      mv "$case_dir/fakebin/lavish-axi" "$case_dir/fakebin/lavish-end"
+      cat > "$case_dir/fakebin/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = poll ]; then
+  : > "$FM_TEST_FOREIGN_POLL_STARTED"
+  while [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.1; done
+  exit 75
+fi
+exec "$(dirname "$0")/lavish-end" "$@"
+SH
+      chmod +x "$case_dir/fakebin/lavish-axi"
+      PATH="$case_dir/fakebin:$PATH" FM_HOME="$foreign" FM_STATE_OVERRIDE="$foreign/state" \
+        LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" \
+        FM_TEST_FOREIGN_POLL_STARTED="$case_dir/poll-started" \
+        "$ROOT/bin/fm-procevent.sh" ensure-listening "$id" > "$case_dir/start.stdout" 2> "$case_dir/start.stderr" \
+        || fail "lavish-foreign: listener did not start: $(cat "$case_dir/start.stderr")"
+      attempts=0
+      until [ -e "$case_dir/poll-started" ]; do
+        [ "$attempts" -lt 100 ] || fail "lavish-foreign: listener never entered the board poll"
+        sleep 0.05
+        attempts=$((attempts + 1))
+      done
+      claim="$FM_PROCEVENT_CLAIM_ROOT/$id.claim"
+      cp "$claim" "$case_dir/claim-before"
+      cp "$foreign/state/procevent/$id.source" "$case_dir/foreign-before.source"
+      pid=$(sed -n '2p' "$claim")
+      if [ "$caller" = child ]; then
+        cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ] && [ -f "$FM_TEST_LOCAL_BEFORE" ]; then
+  cmp -s "$FM_TEST_LOCAL_BEFORE" "$FM_TEST_LOCAL_RECORD" || exit 1
+  printf 'local source preserved before return\n' >> "$FM_TEST_LAVISH_LOG"
+fi
+exit 0
+SH
+      fi
+      rc=0
+      if [ "$caller" = ordinary ]; then
+        run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      else
+        mkdir -p "$case_dir/controller"
+        mv "$case_dir/state" "$case_dir/data" "$case_dir/config" "$case_dir/controller/"
+        FM_HOME="$case_dir/controller" FM_ROOT_OVERRIDE="$ROOT" PATH="$case_dir/fakebin:$PATH" \
+          LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" FM_TEST_LAVISH_LOG="$case_dir/lavish.log" \
+          FM_TEST_LOCAL_BEFORE="$case_dir/local-before.source" FM_TEST_LOCAL_RECORD="$local_record" \
+          "$TEARDOWN" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      fi
+      expect_code 0 "$rc" "lavish-foreign-$caller-$selection: teardown failed: $(cat "$case_dir/stderr")"
+      if grep -Fq "end $board " "$case_dir/lavish.log"; then
+        fail "lavish-foreign-$caller-$selection: teardown ended another home's board"
+      fi
+      cmp -s "$claim" "$case_dir/claim-before" || fail "lavish-foreign: teardown changed the foreign claim"
+      cmp -s "$foreign/state/procevent/$id.source" "$case_dir/foreign-before.source" \
+        || fail "lavish-foreign: teardown changed the foreign registration"
+      kill -0 "$pid" 2>/dev/null || fail "lavish-foreign: teardown stopped the foreign listener"
+      if [ "$selection" != root ]; then
+        if [ "$caller" = ordinary ]; then
+          cmp -s "$local_record" "$case_dir/local-before.source" \
+            || fail "lavish-foreign: teardown retired its local registration despite the foreign claim"
+        else
+          assert_grep 'local source preserved before return' "$case_dir/lavish.log" \
+            "lavish-foreign: child board cleanup retired its registration despite the foreign claim"
+        fi
+      fi
+      assert_grep "kept: $board" "$case_dir/stdout" "lavish-foreign: teardown did not report the foreign board it kept"
+      if [ -f "$board" ]; then
+        FM_HOME="$foreign" FM_STATE_OVERRIDE="$foreign/state" PATH="$case_dir/fakebin:$PATH" \
+          LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" FM_TEST_LAVISH_LOG="$case_dir/lavish.log" \
+          "$ROOT/bin/fm-procevent-lavish.sh" end-task task-y > "$case_dir/owner-end.stdout" 2> "$case_dir/owner-end.stderr" \
+          || fail "lavish-foreign: the owning home's cleanup failed: $(cat "$case_dir/owner-end.stdout") $(cat "$case_dir/owner-end.stderr")"
+        assert_grep "end $board " "$case_dir/lavish.log" "lavish-foreign: the owning home could not end its own board"
+        assert_absent "$claim" "lavish-foreign: the owning home did not release its claim"
+        assert_absent "$foreign/state/procevent/$id.source" "lavish-foreign: the owning home did not retire its registration"
+      else
+        FM_HOME="$foreign" FM_STATE_OVERRIDE="$foreign/state" "$ROOT/bin/fm-procevent.sh" retire "$id" >/dev/null \
+          || fail "lavish-foreign: could not stop the fixture listener"
+      fi
+      pass "$caller teardown preserves another home's $selection Lavish board and source"
+    done
+  done
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4816,3 +4940,4 @@ test_teardown_ends_registered_lavish_boards_outside_its_roots
 test_lavish_inventory_resolution_in_manual_mode
 test_lavish_migrated_inventory_uses_the_captain_hold_resolver
 test_forced_secondmate_cleanup_ends_child_lavish_boards_before_return
+test_teardown_preserves_lavish_boards_owned_by_another_home
