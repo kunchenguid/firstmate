@@ -11,6 +11,7 @@
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
+#   fm-procevent-lavish.sh end-task <task-id> [--root <dir>]...
 #   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh deliver-reply poll <artifact.html> --agent-reply-file <path>
 #
@@ -56,6 +57,35 @@
 #            only place Lavish's notion of "nothing was said" is decided.
 #            Task-owned terminal rounds bypass generic silence so their owner
 #            receives the stop-and-conclude instruction.
+#
+# end-task   Task teardown's half of a board's lifecycle: end the Lavish review
+#            sessions a finished task left open and retire the sources that
+#            listened on them, so boards from torn-down tasks stop accumulating
+#            in the machine-wide session list. Candidates are selected by
+#            artifact path: an open session's file lies under a `--root`
+#            directory, or the artifact is registered for this task in this
+#            home, even outside those roots. Nothing is matched by name;
+#            bin/fm-teardown.sh owns which roots it supplies.
+#            For each candidate, bin/fm-procevent.sh retire --if-task checks
+#            the machine-wide claim and known local-home registrations before
+#            mutation; its ownership contract requires a matching task owner
+#            for an existing local registration and preserves foreign or
+#            uncertain ownership. Only eligible sources are retired FIRST,
+#            so the end is never delivered as a
+#            `session_ended` wake for a task that no longer exists, and then
+#            `lavish-axi end` closes the session on the server its saved URL
+#            names. The source lock guards the final ownership check and end:
+#            any claim or registration acquired again keeps the session open.
+#            Already-ended or unlisted registered artifacts only retire their
+#            sources. Ending never deletes the file; a retained artifact can
+#            be reopened with `lavish-axi <file>` after teardown.
+#            A source that cannot be retired (for example an
+#            unacknowledged captured round, the only place a captain's answer
+#            still lives) keeps its board open and is reported. Prints one
+#            `ended:`, `retired:`, `kept:` or `warning:` line per finding and
+#            exits nonzero when any board could not be fully concluded. The
+#            caller owns failure handling and the captain-call guard; see
+#            bin/fm-teardown.sh's Lavish review boards contract.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish
@@ -204,6 +234,14 @@ post_lavish_reply() {  # <artifact> <reply-file>
 # Canonical identity is physical, not the path string: Lavish itself keys a
 # session on the realpath of the artifact, so two names for one file are one
 # source and must never become two owners.
+source_id_for_real() {  # <realpath>
+  if command -v shasum >/dev/null 2>&1; then
+    printf 'lavish-%s\n' "$(printf '%s' "$1" | shasum -a 256 | awk '{print substr($1,1,16)}')"
+  else
+    printf 'lavish-%s\n' "$(printf '%s' "$1" | sha256sum | awk '{print substr($1,1,16)}')"
+  fi
+}
+
 cmd_source_id() {
   local artifact=${1-} real
   [ -n "$artifact" ] || usage
@@ -211,11 +249,7 @@ cmd_source_id() {
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
   [ -f "$real" ] || die "artifact does not exist: $artifact"
-  if command -v shasum >/dev/null 2>&1; then
-    printf 'lavish-%s\n' "$(printf '%s' "$real" | shasum -a 256 | awk '{print substr($1,1,16)}')"
-  else
-    printf 'lavish-%s\n' "$(printf '%s' "$real" | sha256sum | awk '{print substr($1,1,16)}')"
-  fi
+  source_id_for_real "$real"
 }
 
 cmd_arm() {
@@ -298,6 +332,133 @@ cmd_retire() {
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id"
+}
+
+lavish_source_registry() { printf '%s\n' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/procevent"; }
+
+# The board files of this home's Lavish sources owned by <task-id>, one per
+# line. The artifact is the argument after `poll` in the recorded listener argv.
+task_source_artifacts() {  # <task-id>
+  local task=$1 rec
+  for rec in "$(lavish_source_registry)"/*.source; do
+    [ -f "$rec" ] && [ ! -L "$rec" ] || continue
+    grep -qx 'adapter=lavish' "$rec" || continue
+    grep -qx "owner_task=$task" "$rec" || continue
+    awk 'f && prev == "poll" { print; exit } /^argv:$/ { f = 1; next } f { prev = $0 }' "$rec"
+  done
+}
+
+# Sessions of the Lavish store that are still open, as `<file>` lines.
+# A missing store means no sessions at all.
+open_session_files() {
+  local store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
+  [ -e "$store" ] || return 0
+  perl -MJSON::PP -e '
+    use strict;
+    use warnings;
+    my ($path) = @ARGV;
+    open my $fh, "<", $path or die "cannot read Lavish session store\n";
+    -f $fh or die "Lavish session store is not a regular file\n";
+    local $/;
+    my $state = eval { decode_json(<$fh>) };
+    !$@ or die "invalid Lavish session store\n";
+    ref($state) eq "HASH" && ref($state->{sessions}) eq "HASH"
+      or die "invalid Lavish session store\n";
+    binmode STDOUT, ":utf8";
+    for my $s (sort { ($a->{file} // "") cmp ($b->{file} // "") } values %{$state->{sessions}}) {
+      next unless ref($s) eq "HASH" && defined($s->{file});
+      next if ($s->{status} // "") eq "ended";
+      next if $s->{file} =~ /[\n\r]/;
+      print "$s->{file}\n";
+    }
+  ' "$store"
+}
+
+end_one_board() (  # <task-id> <file> <source-id> <open-session-files>
+  local task=$1 file=$2 id=$3 opened=$4 rec claim out rc=0 registered=0
+  rec="$(lavish_source_registry)/$id.source"
+  if [ -e "$rec" ] || [ -L "$rec" ]; then registered=1; fi
+  out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" --if-task "$task" 2>&1) || rc=$?
+  case "$rc" in
+    0) [ "$registered" -eq 0 ] || printf 'retired: %s\n' "$id" ;;
+    3)
+      printf 'kept: %s (%s)\n' "$file" "$out"
+      return 0
+      ;;
+    *)
+      printf 'warning: %s stays open: its source %s could not be retired: %s\n' \
+        "$file" "$id" "$(printf '%s' "$out" | tr '\n' ' ')"
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$opened" | grep -Fxq -- "$file" || return 0
+  fm_procevent_source_lock_acquire "$id" || return 1
+  trap 'fm_procevent_source_lock_release "$id"' EXIT
+  claim=$(fm_procevent_claim_path "$id")
+  if [ -e "$claim" ] || [ -L "$claim" ] || [ -e "$rec" ] || [ -L "$rec" ]; then
+    printf 'kept: %s (its source was acquired again)\n' "$file"
+    return 0
+  fi
+  if ! out=$(fm_procevent_task_home_exclusive_locked "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "$id" 2>&1); then
+    printf 'kept: %s (%s)\n' "$file" "$out"
+    return 0
+  fi
+  if ! out=$( (apply_session_host "$file" && lavish-axi end "$file") 2>&1); then
+    printf 'warning: could not end the Lavish session for %s (%s); end it with: lavish-axi end %s\n' \
+      "$file" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)" "$file"
+    return 1
+  fi
+  printf 'ended: %s\n' "$file"
+)
+
+cmd_end_task() {
+  local task=${1-} real id file root rc=0 opened
+  local -a roots=() files=()
+  [ -n "$task" ] || usage
+  fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --root)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+        real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); print defined($p) ? $p : $ARGV[0]' "$2" 2>/dev/null) \
+          || real=$2
+        # A root of `/` would attribute every board on the host.
+        [ "$real" != / ] || die "refusing to attribute boards under /"
+        roots+=("$real")
+        shift 2
+        ;;
+      *) usage ;;
+    esac
+  done
+  opened=$(open_session_files) || {
+    printf 'warning: cannot read the Lavish session store, so no board of task %s was ended\n' "$task"
+    return 1
+  }
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    for root in "${roots[@]+"${roots[@]}"}"; do
+      case "$file" in
+        "${root%/}/"*) files+=("$file"); break ;;
+      esac
+    done
+  done <<EOF
+$opened
+EOF
+  while IFS= read -r file; do
+    [ -z "$file" ] || files+=("$file")
+  done <<EOF
+$(task_source_artifacts "$task")
+EOF
+  [ "${#files[@]}" -gt 0 ] || return 0
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    id=$(source_id_for_real "$file")
+    end_one_board "$task" "$file" "$id" "$opened" || rc=1
+  done <<EOF
+$(printf '%s\n' "${files[@]}" | LC_ALL=C sort -u)
+EOF
+  return "$rc"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -841,6 +1002,7 @@ cmd_read() {
 case "${1-}" in
   arm)       shift; cmd_arm "$@" ;;
   retire)    shift; cmd_retire "$@" ;;
+  end-task)  shift; cmd_end_task "$@" ;;
   poll)      shift; cmd_poll "$@" ;;
   deliver-reply) shift; cmd_deliver_reply "$@" ;;
   source-id) shift; cmd_source_id "$@" ;;
