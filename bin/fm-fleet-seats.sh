@@ -90,14 +90,14 @@
 # holder record cannot be read.
 #
 # REMOTE HOMES. The root's serve-remotes (run from the root's watcher) serves
-# each registered remote through bin/fm-on.sh while holding the root lock:
+# each registered remote through bin/fm-on.sh outside the root lock:
 #   - it allocates a serve epoch "<issuer>.<seq>" (a stable root issuer id plus
 #     a per-remote sequence persisted under the root lock), writes
 #     remote-<id>.pending carrying that epoch BEFORE the call - which
 #     invalidates the previous certificate even across a crash or timeout -
-#     sends the pool declaration on stdin with the digest, epoch, and each
+#     releases the lock and sends the pool declaration with the digest, epoch, and each
 #     pool's allowance (capacity minus every other holder, 0 while another
-#     remote is unconfirmed), then validates the whole response, publishes it
+#     remote is unconfirmed), then reacquires the lock, validates and publishes it
 #     atomically as remote-<id>.cert, and only then clears the matching
 #     pending marker. Lost, truncated, or mismatched output leaves the pending
 #     marker, so admission stays refused; an old response cannot clear a newer
@@ -151,9 +151,6 @@
 #   fm-fleet-seats.sh reconcile --limit <n>
 #       Bounded maintenance: try reclaim on up to <n> holders whose owner has
 #       ended, skipping busy episodes; nothing is killed to free a seat.
-#   fm-fleet-seats.sh cancel-relaunch <id> --token <gen>
-#       Compatibility spelling of release --reason prelaunch for exactly that
-#       generation; it accepts no death assertion.
 #   fm-fleet-seats.sh show <id>
 #       Print this home's holder record for <id> (read-only).
 #   fm-fleet-seats.sh serve-remotes
@@ -768,17 +765,17 @@ TASK='' MODEL='' HOLDER='' HARNESS='' DIGEST_ARG='' EPOCH_ARG='' RAW_LAUNCH=0
 GEN='' PREV_GEN='-' KIND='' ROUTE_FILE='' RESPONSE_FILE='' REASON='' LIMIT='' STATE_DIR_ARG=''
 ALLOWANCES=''
 case "$CMD" in
-  reserve|dispatch|confirm|release|reclaim|reconcile-remote|cancel-relaunch|show)
+  reserve|dispatch|confirm|release|reclaim|reconcile-remote|show)
     TASK=${1:-}
     shift 2>/dev/null || true
     id_ok "$TASK" || usage
     ;;
 esac
 case "$CMD" in
-  reserve|dispatch|confirm|release|reclaim|reconcile-remote|cancel-relaunch)
+  reserve|dispatch|confirm|release|reclaim|reconcile-remote)
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --generation|--token) GEN=${2:-}; shift 2 || usage ;;
+        --generation) GEN=${2:-}; shift 2 || usage ;;
         --previous-generation) PREV_GEN=${2:-}; shift 2 || usage ;;
         --model) MODEL=${2:-}; shift 2 || usage ;;
         --harness) HARNESS=${2:-}; shift 2 || usage ;;
@@ -808,7 +805,6 @@ case "$CMD" in
     case "$REASON" in prelaunch|cancelled|replaced|teardown) ;; *) usage ;; esac
     ;;
   reconcile-remote) [ -n "$RESPONSE_FILE" ] || usage ;;
-  cancel-relaunch) REASON=prelaunch; CMD=release ;;
   confirm|reclaim|show) ;;
   reconcile)
     [ "${1:-}" = --limit ] && is_count "${2:-}" && [ "$#" -eq 2 ] || usage
@@ -870,11 +866,11 @@ declared() {
   return 0
 }
 
-# Opt-out: with no declaration nothing is counted, recorded, or required, and
-# no jq is needed.
+# Reserve opts out without a declaration; existing ledger transitions remain available.
 case "$CMD" in
-  reserve|dispatch|confirm|release|reclaim|reconcile-remote|show)
-    declared || exit 0
+  reserve) declared || exit 0 ;;
+  dispatch|confirm|release|reclaim|reconcile-remote|show)
+    declared || [ -d "$LEDGER/holders" ] || exit 0
     ;;
   reconcile) [ -d "$LEDGER/holders" ] || exit 0 ;;
   serve-remotes)
@@ -972,9 +968,7 @@ set_terminal() {  # <generation> <released|reclaimed> <reason> <source>
 
 set_confirmed() {  # <generation>
   holder_mutate '(.incarnations[] | select(.generation == $g)) |= (.lifecycle = "confirmed"
-      | .launch_phase = "started" | .startup_confirmed = true)
-    | .incarnations = ([.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")]
-        + ([.incarnations[] | select(.lifecycle == "released" or .lifecycle == "reclaimed")] | .[-3:]))' \
+      | .launch_phase = "started" | .startup_confirmed = true)' \
     --arg g "$1"
 }
 
@@ -1009,6 +1003,7 @@ apply_remote_disposition() {
     and (.actual_generation == null or (.actual_generation | type == "string" and test("^[A-Za-z0-9._-]+$")))
     and (.previous_generation == null or (.previous_generation | type == "string"))
     and (.old_stopped | type == "boolean") and (.startup_confirmed | type == "boolean")
+    and (.old_destroyed == null or (.old_destroyed | type == "boolean"))
     and (.actual_model == null or (.actual_model | type == "string" and length > 0))
     and (.route == null or (.route | type == "object" and .placement == "remote"
       and (.backend | type == "string") and (.target | type == "string" and length > 0)))
@@ -1029,7 +1024,11 @@ apply_remote_disposition() {
     [ "$old_stopped" = true ] || return 0
     inc_exists "$prev" || return 0
     case "$(inc_get "$prev" .lifecycle)" in
-      reserved|confirmed) set_terminal "$prev" released old-stopped reconcile-remote || unavailable "cannot record $TASK's stopped predecessor" ;;
+      reserved|confirmed)
+        [ "$(inc_get "$prev" .startup_confirmed)" = true ] || [ "$(jq -r '.old_destroyed // false' "$resp")" = true ] \
+          || uncertain "the host did not prove destruction of $TASK's unconfirmed predecessor $prev"
+        set_terminal "$prev" released old-stopped reconcile-remote || unavailable "cannot record $TASK's stopped predecessor"
+        ;;
     esac
   }
   case "$disposition" in
@@ -1207,7 +1206,10 @@ if [ "$CMD" = release ]; then
         local)
           state=$(route_local_state "$GEN")
           case "$state" in
-            dead) ;;
+            dead)
+              [ "$(inc_get "$GEN" .startup_confirmed)" = true ] \
+                || uncertain "the unconfirmed predecessor $TASK generation $GEN holds only a shell; its submitted launch may still execute"
+              ;;
             missing) route_local_gone "$GEN" || uncertain "the old endpoint for $TASK is not proven stopped${EVIDENCE_REASON:+: $EVIDENCE_REASON}" ;;
             *) uncertain "the old endpoint for $TASK generation $GEN reads '$state', so its agent is not proven stopped" ;;
           esac
@@ -1286,16 +1288,8 @@ if [ "$CMD" = reclaim ]; then
         verdict='dead-after-start'
         ;;
       missing)
-        # A started generation's confidently missing endpoint is the same
-        # recovery-grade evidence the liveness driver relaunches on; a
-        # submitted-but-unconfirmed launch needs the backend's absence proof,
-        # because an unreachable endpoint could still run its buffered line.
-        if [ "$lifecycle" = confirmed ]; then
-          verdict='endpoint-missing'
-        else
-          route_local_gone "$GEN" || uncertain "the endpoint for $TASK generation $GEN is not proven destroyed${EVIDENCE_REASON:+: $EVIDENCE_REASON}"
-          verdict='endpoint-gone'
-        fi
+        route_local_gone "$GEN" || uncertain "the endpoint for $TASK generation $GEN is not proven destroyed${EVIDENCE_REASON:+: $EVIDENCE_REASON}"
+        verdict='endpoint-gone'
         ;;
       *) uncertain "the endpoint for $TASK generation $GEN reads '$state'" ;;
     esac
@@ -1306,7 +1300,8 @@ if [ "$CMD" = reclaim ]; then
     trap 'fm_lock_release "$META_LOCK_PATH" || true; cleanup' EXIT
     if [ "$kind" = secondmate ] && [ -f "$meta" ]; then
       mg=$(meta_generation "$meta")
-      [ -z "$mg" ] || [ "$mg" = "$GEN" ] || [ "$lifecycle" = reserved ] \
+      [ -z "$mg" ] || [ "$mg" = "$GEN" ] || [ "$lifecycle" = reserved ] || ! inc_exists "$mg" \
+        || [ "$(inc_get "$mg" .lifecycle)" = released ] || [ "$(inc_get "$mg" .lifecycle)" = reclaimed ] \
         || refuse "task $TASK now records generation $mg; the evidence about $GEN is stale"
     fi
   fi
@@ -1333,8 +1328,10 @@ if [ "$CMD" = reconcile ]; then
     # A home below the root reconciles only its own holders in the shared ledger.
     [ "$ROOT_SELF" -eq 1 ] || [ "$ROOT_REMOTE" -eq 1 ] || [ "$st" = "$CALLER_STATE" ] || continue
     fm_pid_alive "$owner" && continue
-    # A started supervisor's death is the liveness driver's episode.
-    [ "$lifecycle:$kind" != confirmed:secondmate ] || continue
+    if [ "$lifecycle:$kind" = confirmed:secondmate ] && [ -f "$st/$task.meta" ] \
+      && [ "$(meta_generation "$st/$task.meta")" = "$gen" ]; then
+      continue
+    fi
     if [ "$kind" != secondmate ] && [ -f "$st/$task.meta" ] \
       && [ "$(meta_generation "$st/$task.meta")" = "$gen" ]; then
       continue
@@ -1684,9 +1681,13 @@ if [ "$CMD" = serve-remotes ]; then
       && mv -f "$LEDGER/remote-$id.pending.tmp.$$" "$LEDGER/remote-$id.pending"; } \
       || unavailable "cannot invalidate the certificate for $id"
     rm -f "$LEDGER/remote-$id.policy" "$LEDGER/remote-$id.holders" 2>/dev/null || true
+    unlock
     served=0
-    if fm_run_timed "$REMOTE_CALL_TIMEOUT" "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-fleet-seats.sh serve \
-        --digest "$DIGEST" --epoch "$EPOCH" "$@" < "$POOLS" > "$TMPD/served" 2>"$TMPD/served.err"; then
+    rpc_rc=0
+    fm_run_timed "$REMOTE_CALL_TIMEOUT" "$SCRIPT_DIR/fm-on.sh" --stdin "$id" fm-fleet-seats.sh serve \
+        --digest "$DIGEST" --epoch "$EPOCH" "$@" < "$POOLS" > "$TMPD/served" 2>"$TMPD/served.err" || rpc_rc=$?
+    lock_or_refuse "$LOCK"
+    if [ "$rpc_rc" -eq 0 ]; then
       grep '^{' "$TMPD/served" | tail -1 > "$TMPD/cert"
       if jq -e --arg d "$DIGEST" --arg e "$EPOCH" --arg schema "$SERVE_SCHEMA" '
           .schema == $schema and .policy_digest == $d and .epoch == $e and .complete == true
@@ -1701,6 +1702,16 @@ if [ "$CMD" = serve-remotes ]; then
         ' "$TMPD/cert" >/dev/null 2>&1; then
         served=1
       fi
+    fi
+    if [ "$(cat "$LEDGER/remote-$id.pending" 2>/dev/null)" != "$EPOCH" ]; then
+      echo "unreachable $id (serve epoch superseded)"
+      unlock
+      continue
+    fi
+    if [ -e "$ROOT_CONFIG/fleet-seats" ] || [ -L "$ROOT_CONFIG/fleet-seats" ]; then
+      validate_pools "$ROOT_CONFIG/fleet-seats" && [ "$(policy_digest "$ROOT_CONFIG/fleet-seats")" = "$DIGEST" ] || served=0
+    else
+      [ "$(policy_digest <(printf '{"pools":[]}\n'))" = "$DIGEST" ] || served=0
     fi
     if [ "$served" -eq 1 ]; then
       { cp "$TMPD/cert" "$LEDGER/remote-$id.cert.tmp.$$" && mv -f "$LEDGER/remote-$id.cert.tmp.$$" "$LEDGER/remote-$id.cert"; } \

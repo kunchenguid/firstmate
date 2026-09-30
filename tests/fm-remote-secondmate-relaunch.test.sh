@@ -95,7 +95,8 @@ if [ "$action" = disposition ]; then
   case "$FM_FAKE_DISPOSITION" in
     dead) disposition dead-after-start true false "$op" ;;
     dead-other) disposition dead-after-start true false other-generation other-generation ;;
-    *) disposition unknown false false ;;
+    unknown) disposition unknown false false ;;
+    *) disposition started true false "$op" ;;
   esac
   exit 0
 fi
@@ -157,6 +158,8 @@ printf 'effort=%s\n' "$effort"
 if [ -n "$op" ]; then
   printf 'spawn_gen=%s\n' "$op"
   disposition started true "$old_stopped" "$op"
+else
+  printf 'spawn_gen=host-generation\n'
 fi
 SH
 chmod +x "$FAKEBIN/fake-ssh"
@@ -422,6 +425,17 @@ expect_code 6 "$RC" "a stale expected generation: $OUT"
 assert_contains "$OUT" "generation-mismatch" "the stale generation refusal was not named"
 pass "an expected-generation mismatch refuses before any seat or host effect"
 
+reset_meta
+rm -rf "$HOME_DIR/state/fleet-seats"
+rm -f "$HOME_DIR/config/fleet-seats"
+printf 'remote_spawn_gen=host-old\n' >> "$HOME_DIR/state/ios.meta"
+OUT=$(run_relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
+expect_code 0 "$RC" "generation-matching unpooled remote relaunch: $OUT"
+assert_equals host-generation "$(sed -n 's/^remote_spawn_gen=//p' "$HOME_DIR/state/ios.meta")" "unpooled relaunch did not publish its host generation"
+OUT=$(run_relaunch ios claude pool-model-a medium --expect-generation host-old); RC=$?
+expect_code 6 "$RC" "an old unpooled host generation: $OUT"
+pass "remote relaunch publishes and fences its host generation without pools"
+
 # --- host side: token-scoped operation receipts and dispositions --------------
 # bin/fm-remote-secondmate-control.sh answers for exactly one operation token
 # from its durable receipt and control journal; an absent or foreign receipt
@@ -457,6 +471,7 @@ assert_equals "prelaunch false" "$(host_disposition op2)" "an episode that never
 host_journal op2 failed:checkpoint instructions-restored
 assert_equals "prelaunch false" "$(host_disposition op2)" "a refusal before the stop was not prelaunch"
 host_journal op2 failed:exited prior-record-kept
+printf 'exit_result=stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-relaunch"
 assert_equals "cancelled true" "$(host_disposition op2)" "a stopped predecessor with an unsubmitted candidate was not cancelled"
 host_journal op2 failed:stopping
 assert_equals "unknown false" "$(host_disposition op2)" "an interrupted stop was not left unknown"
@@ -508,5 +523,41 @@ assert_contains "$OUT" "another lifecycle episode" "the episode refusal was not 
 cmp -s "$TMP/ios-before-episode.meta" "$HOME_DIR/state/ios.meta" || fail "a refused relaunch touched the parent record"
 [ -z "$(seats show ios)" ] || fail "a relaunch refused by the episode still reserved a seat"
 pass "a manual remote relaunch waits out, then refuses, a running recovery episode"
+
+for n in 1 2 3 4 5; do
+  OUT=$(host_control relaunch ios notaharness pool-model-a medium --operation "history$n"); RC=$?
+  [ "$RC" -ne 0 ] || fail "unverified harness operation succeeded"
+done
+assert_present "$HOST_HOME/state/parent-route/ios.seat-operation.history1" "successive operations deleted an older receipt"
+OUT=$(host_control relaunch ios claude pool-model-a medium --operation history1); RC=$?
+[ "$RC" -ne 0 ] || fail "an old refused token launched again"
+DISP=$(printf '%s\n' "$OUT" | sed -n 's/^seat_disposition=//p' | tail -1)
+assert_equals prelaunch "$(printf '%s\n' "$DISP" | jq -r .disposition)" "an old receipt did not preserve its refused outcome"
+assert_contains "$OUT" "already handled" "a delayed token was treated as fresh"
+host_receipt tombstone relaunch dead-after-start
+assert_equals "dead-after-start false" "$(host_disposition tombstone)" "a terminal receipt did not replay its recorded outcome"
+pass "host receipts survive successive operations and delayed retries never dispatch again"
+
+reset_meta
+seed_pool
+FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+  for pair in "old:-" "new:old"; do
+    gen=${pair%%:*} prev=${pair#*:}
+    "$SEATS" reserve ios --generation "$gen" --previous-generation "$prev" --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+    route="$FM_HOME/state/route-$gen"
+    (umask 077 && printf "{\"placement\":\"remote\",\"backend\":\"herdr\",\"target\":null,\"home\":\"/srv/fm-home\",\"host\":\"remote-mac\",\"remote_root\":\"/srv/fm\",\"operation\":\"%s\"}\n" "$gen" > "$route")
+    "$SEATS" dispatch ios --generation "$gen" --route-file "$route" >/dev/null || exit 1
+  done
+' || fail "could not submit the remote predecessor and candidate"
+jq -n '{schema:"fm-remote-seat-operation.v2", task:"ios", operation:"new", requested_generation:"new", actual_generation:"new", previous_generation:"old", disposition:"started", startup_confirmed:true, old_stopped:true, old_destroyed:false, route:{placement:"remote",backend:"herdr",target:"fm-remote:w1:p1"},actual_model:"pool-model-a",complete:true}' > "$TMP/predecessor-response"
+chmod 0600 "$TMP/predecessor-response"
+OUT=$(seats reconcile-remote ios --generation new --response-file "$TMP/predecessor-response" 2>&1); RC=$?
+expect_code 3 "$RC" "unconfirmed remote predecessor stop without destruction proof: $OUT"
+assert_equals reserved "$(ios_lifecycle old)" "remote old_stopped freed an unconfirmed predecessor"
+jq '.old_destroyed=true' "$TMP/predecessor-response" > "$TMP/proven-response"
+chmod 0600 "$TMP/proven-response"
+seats reconcile-remote ios --generation new --response-file "$TMP/proven-response" >/dev/null || fail "proven remote destruction was refused"
+assert_equals released "$(ios_lifecycle old)" "proven remote destruction did not release its predecessor"
+pass "remote predecessor release requires startup confirmation or endpoint destruction proof"
 
 echo "ALL TESTS PASSED"
