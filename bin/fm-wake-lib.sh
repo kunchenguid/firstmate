@@ -988,8 +988,8 @@ _fm_recovery_marker_arm_check() {
 # (_fm_recovery_marker_ack) or arm-check minting a fresh episode from a missing
 # or invalid marker both clear the counter, so this bound never shortens the
 # once-per-genuine-generation resurface a live, attentive session relies on.
-FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-3}
-case "$FM_RECOVERY_REOPEN_LIMIT" in ''|*[!0-9]*) FM_RECOVERY_REOPEN_LIMIT=3 ;; esac
+FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-1}
+case "$FM_RECOVERY_REOPEN_LIMIT" in ''|*[!0-9]*) FM_RECOVERY_REOPEN_LIMIT=1 ;; esac
 
 _fm_recovery_marker_reopen_announced() {
   local marker=$1 lock counter_file count generation

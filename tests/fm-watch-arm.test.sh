@@ -1497,7 +1497,7 @@ test_invalid_reopen_limit_falls_back_to_default() {
   mkdir -p "$home/data"
   printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
   chmod 0600 "$state/.watcher-down"
-  printf '3\n' > "$state/.watcher-down.reopen-count"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
   printf '%s\t1\tcheck\tinvalid-limit\tcheck: invalid limit row\n' "$(date +%s)" > "$state/.wake-queue"
   printf '1\n' > "$state/.wake-queue.seq"
 
