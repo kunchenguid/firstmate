@@ -1616,8 +1616,8 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
-    bin/fm-composer-lib.sh)
-      # The shared shape catalogue is vendor-rendered signal; a change to it
+    bin/fm-composer-lib.sh|bin/fm-composer-gemini-0.62.0.sh)
+      # Composer rendering adapters carry vendor signal; a change to them
       # re-selects the live guard (fm-composer-matrix-live-e2e) alongside the
       # portable families.
       printf '%s\n' backend-dispatch

@@ -1027,7 +1027,7 @@ test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
 
-# Real Gemini 0.58.0 layout captured on Herdr 0.7.4, 2026-09-30.
+# Real Gemini 0.62.0 layout captured on Herdr 0.7.4, 2026-09-30.
 test_gemini_halfblock_identity() {
   local screen typed trailing candidate
   screen=$'transcript\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n* '"${ESC}[38;2;92;99;112m Type your message or @path/to/file${ESC}[0m"$'\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto'
@@ -1071,7 +1071,7 @@ test_gemini_live_guard_read_only() {
   mkdir -p "$fixture/bin"
   cat > "$fixture/bin/gemini" <<'SH'
 #!/usr/bin/env bash
-printf 'fixture-version\n'
+if [ "$GUARD_MODE" = unsupported-version ]; then printf '0.62.1\n'; else printf '0.62.0\n'; fi
 SH
   cat > "$fixture/bin/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -1099,7 +1099,7 @@ case "$1 $2" in
  esac
 SH
   chmod +x "$fixture/bin/gemini" "$fixture/bin/herdr"
-  for mode in alive stopped unknown capture-failed changed absent; do
+  for mode in alive stopped unknown capture-failed changed absent unsupported-version; do
     : > "$fixture/commands"
     rm -f "$fixture/captured"
     rc=0
@@ -1112,6 +1112,9 @@ SH
       [ "$rc" -eq 0 ] || fail "live guard rejected idle fixture: $out"
     else
       [ "$rc" -ne 0 ] || fail "live guard accepted $mode server/identity"
+    fi
+    if [ "$mode" = unsupported-version ]; then
+      [ ! -s "$fixture/commands" ] || fail "unsupported Gemini version reached Herdr"
     fi
     while IFS= read -r operation; do
       case "$operation" in

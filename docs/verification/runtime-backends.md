@@ -2386,7 +2386,10 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 ### Gemini half-block composer on Herdr
 
 On 2026-09-30, installed Gemini CLI 0.62.0 on macOS and Herdr client/server 0.7.4 produced a three-row half-block composer with an asterisk prompt and a styled placeholder.
-[`_fm_composer_gemini_halfblock` in the shared classifier](../../bin/fm-composer-lib.sh) owns the identity, envelope, footer and draft-input safety contract.
+The quarantined [`Gemini 0.62.0 rendered-surface adapter`](../../bin/fm-composer-gemini-0.62.0.sh) owns the identity, envelope, footer and draft-input proof; the shared classifier consumes its verdict.
+Standing debt: this vendor-rendered layout is pinned to Gemini CLI 0.62.0 / Herdr 0.7.4 and is expected to break on a vendor release.
+The live guard refuses a different Gemini version; refresh the real endpoint proof before extending the adapter's version scope.
+Production classification validates the pinned layout and native identity rather than querying a local binary version, which cannot attest the remote endpoint's version.
 This proof currently applies to Herdr's identity-capable surface; tmux's composer identity probe remains Pi-only, and backends without native Gemini identity refuse this shape.
 Refresh with the read-only guard against an existing idle endpoint:
 

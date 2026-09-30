@@ -9,6 +9,8 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$ROOT/bin/fm-composer-lib.sh"
 . "$ROOT/bin/backends/herdr.sh"
 version=$(gemini --version)
+[ "$version" = 0.62.0 ] \
+  || fail "Gemini $version: rendered-surface adapter is pinned to 0.62.0; reverify before upgrading"
 target=${FM_GEMINI_COMPOSER_TARGET:?select an existing idle Gemini endpoint}
 fm_backend_herdr_parse_target "$target" || fail "Gemini $version: invalid target"
 identity=$(fm_backend_herdr_composer_identity "$target") \
