@@ -41,6 +41,8 @@ command -v tasks-axi >/dev/null 2>&1 || {
   exit 0
 }
 
+python3 "$ROOT/tests/retirement-business.py" "$ROOT" "$TMP_ROOT/retirement-business" || exit $?
+
 # --- fixture ----------------------------------------------------------------
 
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
@@ -627,6 +629,17 @@ EOF
   chmod +x "$case_dir/fakebin/herdr"
 }
 
+fixture_delivery() {  # <case-dir> <id> <data-dir> <generation> <delivery-url>
+  local case_dir=$1 id=$2 data=$3 generation=$4 url=$5 facts
+  facts=$(jq -cn --arg url "$url" \
+    '{url:$url,head:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}') \
+    || fail 'cannot prepare fixture delivery receipt'
+  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" \
+    python3 "$ROOT/bin/fm-task-lifecycle.py" owner-receipt "$id" \
+      --kind merge --execution-generation "$generation" \
+      --facts "$facts" >/dev/null || fail 'fixture delivery receipt failed'
+}
+
 run_spawn() {  # <case-dir> <args...>
   local case_dir=$1
   shift
@@ -1127,6 +1140,7 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
   chmod 600 "$assessment"
   FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
     reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_delivery "$case_dir" "$id" "$data" "$generation" 'local:/fixture#main'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "immediate-child-data teardown failed: $out"
@@ -1162,6 +1176,7 @@ test_bare_relative_data_dispatches_and_completes() {
   chmod 600 "$assessment"
   FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
     reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_delivery "$case_dir" "$id" "$data" "$generation" 'local:/fixture#main'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_teardown "$case_dir" "$id") \
     || fail "bare-relative-data teardown failed: $out"
@@ -1862,6 +1877,9 @@ test_completed_cleanup_bookkeeping_retry_preserves_resources() {
   FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
   printf 'preserve completed local changes\n' > "$case_dir/wt/retained.txt"
   printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$home/state/$id.meta"
+  fixture_delivery "$case_dir" "$id" "$home/data" \
+    "$(sed -n 's/^spawn_gen=//p' "$home/state/$id.meta")" \
+    'https://github.com/example/firstmate/pull/42'
   pane=$(sed -n 's/^herdr_pane_id=//p' "$home/state/$id.meta")
   marker="$home/state/$id.backlog-close"
   break_verb "$case_dir" "done"

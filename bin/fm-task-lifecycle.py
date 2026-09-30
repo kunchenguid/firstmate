@@ -12,19 +12,34 @@ every specified file. Include authority, action payload and blocker release path
 in that inspection. assess takes semantic fields only; stale bytes or revisions
 refuse. next_action optionally supplies kind, payload_ref, recheck_at, deadline,
 attempt_limit (default 1), and blocker {owner,dependency,release_ref}; null clears
-only a resolved action. The owner derives identity, hashes, timestamps and counters.
+only a resolved action. supersede_prepared explicitly clears/replaces an
+unattempted wait/readback/decision with new authority and exact old-payload
+evidence; attempted/uncertain effects still require readback.
+The owner derives identity, hashes, timestamps and counters.
 intent_changed is explicit MAIN reconciliation for unexplained brief/execution
 changes with new authority; revoke_delegation revokes a v2 grant separately first.
 The native fm_task_continuation route action with update_brief:true appends exact
 authenticated input words to the intent subsection and synchronizes this record.
 Its internal update-brief takes --session-file, --entry-id and --input, verifying
-the original capture and explicit route under the native home owner and task lock.
+the original current-branch user message (or verified Feishu delivery) and explicit
+task route under the native home owner and task lock. Historical task-assigned
+capture proofs remain recoverable; chat is not an independently supervised goal.
 The bounded intent_updates field retains before/after hashes and a prepared
 transaction until atomic brief replacement and record commit converge. Retry
 the same route after interruption; a different unexplained byte sequence refuses.
 refresh records a verified executor receipt/start without semantic acceptance.
 Merge and cleanup owners alone call owner-receipt inside their guarded effects;
 owner_receipts holds exact generation-bound observed facts, never permissions.
+completion-read validates retained-resource business closure: terminal judgment,
+assessed report and captain-call inventory for scouts, guarded merge facts for
+accepted ships. Explicit archive is stop authority, never invented delivery.
+cleanup-copy-bind captures the original metadata's canonical copy/project
+paths, directory and Git owner identities in the existing cleanup receipt before
+metadata removal. cleanup-copy-read verifies this immutable home/task/generation
+binding for the teardown owner's copy-only path; it never recreates metadata.
+Missing historical identity and attempted disposal require exact readback.
+link-cleanup owns cleanup_observation_key in this same record: phase state/reason
+and identity bindings, excluding presentation clocks and additive diagnostics.
 The due reader also recognizes assessed historical ShortTask results through
 their same-home request, nonce, exact cleanup step, execution binding and complete
 operation receipt. Missing/conflicting evidence remains due; readback never replays.
@@ -60,10 +75,15 @@ Optional next_action.continuation has exactly one of these observation contracts
     the synthetic fm-spawn busy seed, process presence, or a status report.
     A matching handled inbox message plus current working executor proves receipt;
     delivery alone is pending. This reader never sends, retries or relaunches.
-  blocker: {type, owner, dependency, release_ref, release_sha256, recovery_trigger}.
+  blocker: {type, owner, dependency, release_ref, release_sha256, recovery_trigger,
+            optional release_projection: delivery-v1, release_task_kind: ship|scout}.
     recovery_trigger is evidence-change; an unchanged bound dependency stays quiet
     until deadline, then becomes due once. Changed evidence requests judgment,
     never grants effect/merge/permission authority.
+    New terminal lifecycle-file blockers use delivery-v1: task/goal/execution/brief,
+    disposition, assessed final scout report, or current-generation guarded ship
+    merge facts. Open goals, other files and historical bindings stay byte-bound.
+    This never loosens inspect or effect-payload byte checks.
 Unknown, stale, missing or uncertain effects are due for readback, never replay.
 An action receipt is not goal acceptance. Acceptance is main's evidence-backed
 assessment with an empty remaining_gap. Archived goals never request execution.
@@ -118,8 +138,8 @@ import re
 import stat
 import sys
 import tempfile
-import subprocess
 import time
+import subprocess
 
 SCHEMA = 'fm-task-lifecycle.v1'
 DELEGATED_SCHEMA = 'fm-task-lifecycle.v2'
@@ -128,6 +148,11 @@ MAX_BYTES = 262144
 MAX_INT = 9007199254740991
 KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision', 'cleanup', 'remote-followup'}
 PHASES = {'prepared', 'attempted', 'confirmed', 'refused', 'uncertain'}
+SESSION_INDEX_SCHEMA = 'fm-task-session-index.v1'
+SESSION_SCAN_BYTES = 33554432
+SESSION_RECORD_BYTES = 16777216
+SESSION_INDEX_BYTES = 16777216
+SESSION_INDEX_ENTRIES = 50000
 
 
 class Refusal(Exception):
@@ -172,6 +197,180 @@ def unique_object(pairs):
     return result
 
 
+def native_session(path, index_directory, selected_entry=None, input_id=None):
+    """Incrementally index bounded session deltas and read current-branch records."""
+    require(path.is_absolute(), 'native session path must be absolute')
+    started = time.monotonic()
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    with os.fdopen(fd, 'rb') as stream:
+        st = os.fstat(stream.fileno())
+        require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid(), 'unsafe native input session file identity')
+        probe = os.environ.get('FM_TASK_SESSION_READ_PROBE')
+        def emit_probe(session_bytes, records, status):
+            if probe:
+                with open(probe, 'a', encoding='utf-8') as output:
+                    output.write(json.dumps({'bytes': session_bytes, 'records': records, 'status': status}) + '\n')
+        emit_probe(0, 0, 'start')
+        index_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        index_st = index_directory.lstat()
+        require(stat.S_ISDIR(index_st.st_mode) and index_st.st_uid == os.getuid() and not index_directory.is_symlink(),
+                'unsafe native session index directory')
+        index_path = index_directory / (digest(str(path).encode()) + '.json')
+        cached = None
+        if index_path.exists() or index_path.is_symlink():
+            index_file_st = index_path.lstat()
+            require(stat.S_ISREG(index_file_st.st_mode) and index_file_st.st_nlink == 1 and
+                    index_file_st.st_uid == os.getuid() and index_file_st.st_size <= SESSION_INDEX_BYTES,
+                    'unsafe native session index')
+            try:
+                candidate = json.loads(index_path.read_bytes(), object_pairs_hook=unique_object)
+                candidate_entries = candidate.get('entries')
+                require(candidate.get('schema') == SESSION_INDEX_SCHEMA and candidate.get('path') == str(path) and
+                        candidate.get('device') == st.st_dev and candidate.get('inode') == st.st_ino and
+                        integer(candidate.get('indexed_size')) and candidate['indexed_size'] <= st.st_size and
+                        isinstance(candidate_entries, list) and len(candidate_entries) <= SESSION_INDEX_ENTRIES,
+                        'stale native session index')
+                offsets = {}
+                for item in candidate_entries:
+                    require(isinstance(item, dict) and text(item.get('id'), 512) and
+                            (item.get('parentId') is None or text(item.get('parentId'), 512)) and
+                            integer(item.get('offset')) and integer(item.get('length'), 1) and
+                            bool(re.fullmatch(r'[a-f0-9]{64}', str(item.get('sha256', '')))),
+                            'invalid native session index entry')
+                    require(item['id'] not in offsets, 'duplicate native session index identity')
+                    offsets[item['id']] = item
+                boundary_length = min(4096, candidate['indexed_size'])
+                boundary = os.pread(stream.fileno(), boundary_length, candidate['indexed_size'] - boundary_length)
+                require(digest(boundary) == candidate.get('boundary_sha256'), 'native session index boundary changed')
+                if candidate['indexed_size'] == st.st_size:
+                    require(candidate.get('mtime_ns') == st.st_mtime_ns, 'native session changed without append')
+                cached = candidate
+            except (Refusal, ValueError, TypeError, KeyError, AttributeError):
+                cached = None
+        index = cached or {'schema': SESSION_INDEX_SCHEMA, 'path': str(path), 'device': st.st_dev,
+                           'inode': st.st_ino, 'indexed_size': 0, 'header': None, 'entries': [], 'leaf_id': None}
+        offsets = {item['id']: item for item in index['entries']}
+        starting_offset = index['indexed_size']
+        checkpoint = starting_offset
+        stream.seek(starting_offset)
+        scanned_bytes = 0
+        scanned_records = 0
+        while stream.tell() < st.st_size and time.monotonic() - started < 10:
+            offset = stream.tell()
+            remaining = min(SESSION_SCAN_BYTES - scanned_bytes, st.st_size - offset)
+            if remaining <= 0:
+                break
+            raw = stream.readline(min(SESSION_RECORD_BYTES + 1, remaining))
+            if not raw:
+                break
+            scanned_bytes += len(raw)
+            require(len(raw) <= SESSION_RECORD_BYTES, 'native session record exceeds bounded readback')
+            if not raw.endswith(b'\n') and stream.tell() < st.st_size:
+                stream.seek(offset)
+                break
+            checkpoint = stream.tell()
+            if not raw.strip():
+                continue
+            entry = json.loads(raw, object_pairs_hook=unique_object)
+            scanned_records += 1
+            if index['header'] is None:
+                require(entry.get('type') == 'session', 'missing session identity')
+                index['header'] = {'offset': offset, 'length': len(raw), 'sha256': digest(raw)}
+                continue
+            require(len(index['entries']) < SESSION_INDEX_ENTRIES, 'native session index exceeds entry bound')
+            entry_id = entry.get('id')
+            parent_id = entry.get('parentId')
+            require(text(entry_id, 512) and (parent_id is None or text(parent_id, 512)), 'invalid native session ancestry')
+            require(entry_id not in offsets, 'duplicate session entry identity')
+            receipt = entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-input'
+            item = {'id': entry_id, 'parentId': parent_id, 'type': entry.get('type'), 'offset': offset,
+                    'length': len(raw), 'sha256': digest(raw)}
+            if receipt:
+                item.update({'customType': 'fm-continuation-input', 'input_id': entry.get('data', {}).get('id'),
+                             'task': entry.get('data', {}).get('task'), 'pending': entry.get('data', {}).get('pending')})
+            index['entries'].append(item)
+            offsets[entry_id] = item
+            index['leaf_id'] = entry_id
+        require(index['header'] is not None, 'missing session identity')
+        index['indexed_size'] = checkpoint
+        index['mtime_ns'] = st.st_mtime_ns
+        boundary_length = min(4096, checkpoint)
+        index['boundary_sha256'] = digest(os.pread(stream.fileno(), boundary_length, checkpoint - boundary_length))
+        changed_index = bool(scanned_bytes or cached is None)
+        def persist_index():
+            raw_index = (json.dumps(index, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
+            require(len(raw_index) <= SESSION_INDEX_BYTES, 'native session index exceeds byte bound')
+            temporary_fd, temporary = tempfile.mkstemp(prefix='.session-index.', dir=index_directory)
+            try:
+                with os.fdopen(temporary_fd, 'wb') as output:
+                    output.write(raw_index); output.flush(); os.fsync(output.fileno())
+                os.replace(temporary, index_path)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+        after_scan = os.fstat(stream.fileno())
+        if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != \
+                (after_scan.st_dev, after_scan.st_ino, after_scan.st_size, after_scan.st_mtime_ns):
+            emit_probe(scanned_bytes, scanned_records, 'changed')
+            raise Refusal('native session changed during readback')
+        if checkpoint < st.st_size:
+            require(checkpoint > starting_offset, 'native session bounded readback made no complete-record progress')
+            if changed_index:
+                persist_index()
+            emit_probe(scanned_bytes, scanned_records, 'checkpoint')
+            raise Refusal('native session index catch-up incomplete; retry the same operation')
+
+        chain, seen = [], set()
+        entry_id = index['leaf_id']
+        while entry_id is not None:
+            require(entry_id not in seen, 'invalid session ancestry')
+            seen.add(entry_id)
+            item = offsets.get(entry_id)
+            require(item is not None, 'incomplete session ancestry')
+            chain.append(item)
+            entry_id = item['parentId']
+        chain.reverse()
+        require(selected_entry is None or selected_entry in seen, 'route receipt is outside the current session branch')
+
+        session_bytes = scanned_bytes
+        def read_indexed(item):
+            nonlocal session_bytes
+            raw = os.pread(stream.fileno(), item['length'], item['offset'])
+            session_bytes += len(raw)
+            require(len(raw) == item['length'] and digest(raw) == item['sha256'], 'native session indexed entry changed')
+            return json.loads(raw, object_pairs_hook=unique_object)
+
+        header = read_indexed(index['header'])
+        full = set()
+        if selected_entry is not None:
+            full.add(selected_entry)
+            route = read_indexed(offsets[selected_entry])
+            source_id = route.get('data', {}).get('source_entry_id')
+            if source_id is not None:
+                require(source_id in seen, 'original message is outside the current session branch')
+                full.add(source_id)
+        entries = [header]
+        retained_bytes = 0
+        for item in chain:
+            receipt = item.get('customType') == 'fm-continuation-input'
+            keep = item['id'] in full or receipt and (input_id is None or item.get('input_id') == input_id)
+            if keep:
+                entry = route if selected_entry == item['id'] else read_indexed(item)
+                retained_bytes += item['length']
+                require(retained_bytes <= SESSION_RECORD_BYTES, 'native task receipts exceed bounded readback')
+                if input_id is None and receipt:
+                    entry['data'] = {key: entry.get('data', {})[key] for key in ('id', 'task', 'pending') if key in entry.get('data', {})}
+                entries.append(entry)
+            else:
+                entries.append({key: item[key] for key in ('id', 'parentId', 'type') if key in item})
+        final = os.fstat(stream.fileno())
+        require((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) ==
+                (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns), 'native session changed during readback')
+        if changed_index:
+            persist_index()
+        emit_probe(session_bytes, scanned_records, 'success')
+        return entries
+
+
 def load(path):
     return json.loads(regular(path, True), object_pairs_hook=unique_object)
 
@@ -181,6 +380,18 @@ def complete_cleanup_facts(facts):
     return (isinstance(facts, dict) and facts.get('taskRecordRemoved') is True and
             facts.get('endpointConfirmedGone') is True and facts.get('bookkeepingComplete') is True and
             facts.get('copyDisposition') in ('returned-or-already-absent', 'retained-shared', 'retained-primary', 'retained-dirty', 'retained-unlanded', 'retained-unverified'))
+
+
+def cleanup_observation(receipt):
+    """Retained resource facts, excluding business close and presentation data."""
+    result = {key: receipt.get(key) for key in
+              ('task_id', 'spawn_gen', 'goal_revision', 'journal_sha256', 'launch_binding', 'copy_binding')}
+    phases = receipt.get('phases', {})
+    require(isinstance(phases, dict), 'invalid cleanup phases')
+    require(all(isinstance(phase, dict) for phase in phases.values()), 'invalid cleanup phase')
+    result['phases'] = {name: {key: phase.get(key) for key in ('state', 'reason_code')}
+                        for name, phase in phases.items() if name != 'record_close'}
+    return result
 
 
 def stamp(value):
@@ -230,6 +441,43 @@ class Task:
         require(atom(generation), 'missing execution generation')
         return generation
 
+    def task_kind(self):
+        meta = self.state / (self.id + '.meta')
+        values = []
+        for line in regular(meta).decode().splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key == 'kind':
+                values.append(value)
+        require(len(values) == 1 and values[0] in ('ship', 'scout'), 'completion needs a known task kind')
+        return values[0]
+
+    def captain_call_completion(self, record=None):
+        meta = self.state / (self.id + '.meta')
+        if not meta.exists() and not meta.is_symlink():
+            return (record or self.read(current=False) or {}).get('captain_call_completion')
+        reviewed = None
+        keys = None
+        for line in regular(meta).decode().splitlines():
+            key, sep, value = line.partition('=')
+            if sep and key == 'decisions_reviewed':
+                reviewed = value
+            elif sep and key == 'decision_keys':
+                keys = value
+        if reviewed != '1' or keys is None:
+            return None
+        inventory = [] if not keys else keys.split(',')
+        if not all(atom(key) for key in inventory) or inventory != sorted(set(inventory)):
+            return None
+        try:
+            gate = subprocess.run([str(Path(__file__).with_name('fm-captain-hold.sh')), 'verify', self.id],
+                env=dict(os.environ, FM_HOME=str(self.home), FM_DATA_OVERRIDE=str(self.data),
+                         FM_STATE_OVERRIDE=str(self.state)), capture_output=True, text=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if gate.returncode != 0:
+            return None
+        return {'decisions_reviewed': True, 'decision_keys': inventory, 'verified': True}
+
     def reference(self, ref, sha=None):
         require(text(ref, 4096), 'missing evidence reference')
         path = Path(ref)
@@ -250,6 +498,55 @@ class Task:
             path = self.home / path
         return str(path.resolve(strict=True)), digest(raw)
 
+    def release_digest(self, ref, task_kind=None):
+        """A lifecycle dependency releases on goal/delivery, not readback bookkeeping.
+
+        Other evidence remains byte-bound. This projection is observation only;
+        inspect/assessment evidence and effect payloads still bind exact bytes.
+        """
+        raw = self.reference(ref)
+        path = Path(ref)
+        if not path.is_absolute():
+            path = self.home / path
+        if path.name != 'lifecycle.json':
+            return digest(raw)
+        dependency = Task(path.parent.name)
+        require(path.resolve() == dependency.path.resolve(), 'noncanonical lifecycle dependency')
+        record = dependency.read()
+        require(record is not None, 'missing lifecycle dependency')
+        task_kind = task_kind or dependency.task_kind()
+        require(task_kind in ('ship', 'scout'), 'delivery projection needs a known task kind')
+        delivery = None
+        if record['disposition'] == 'accepted' and task_kind == 'scout':
+            report = dependency.directory / 'report.md'
+            identity = str(report.resolve(strict=True))
+            reports = []
+            for item in record['assessment']['evidence']:
+                evidence = Path(item['ref'])
+                if not evidence.is_absolute():
+                    evidence = dependency.home / evidence
+                if not evidence.is_symlink() and str(evidence.resolve(strict=True)) == identity:
+                    reports.append(item['sha256'])
+            require(len(set(reports)) == 1, 'accepted scout needs its assessed final report')
+            delivery = {'report_ref': identity, 'report_sha256': reports[0],
+                        'captain_calls': dependency.captain_call_completion(record)}
+        elif record['disposition'] == 'accepted' and task_kind == 'ship':
+            delivery = {'merge': [proof for proof in record.get('owner_receipts', {}).get('merge', [])
+                if proof['execution_generation'] == record['execution_generation'] and
+                text(proof['facts'].get('head')) and text(proof['facts'].get('url'))]}
+        return digest(json.dumps([record['task_id'], record['goal_revision'],
+            record['execution_generation'], record['brief_sha256'], record['disposition'],
+            task_kind, delivery], sort_keys=True).encode())
+
+    def check_release(self, continuation):
+        require(self.release_observation(continuation) == continuation['release_sha256'],
+                'dependency release evidence changed')
+
+    def release_observation(self, continuation):
+        if continuation.get('release_projection') == 'delivery-v1':
+            return self.release_digest(continuation['release_ref'], continuation.get('release_task_kind'))
+        return digest(self.reference(continuation['release_ref']))
+
     def validate(self, record, current=True):
         require(isinstance(record, dict), 'record must be an object')
         require(record.get('schema') in (SCHEMA, DELEGATED_SCHEMA) and record.get('task_id') == self.id, 'record identity/schema mismatch')
@@ -259,6 +556,17 @@ class Task:
         require(integer(record.get('next_action_seq'), 1), 'invalid action sequence')
         for key in ('decision_ref', 'cleanup_ref'):
             require(record.get(key) is None or text(record[key], 4096), 'invalid ' + key)
+        require(record.get('cleanup_observation_key') is None or
+                bool(re.fullmatch('[a-f0-9]{64}', str(record['cleanup_observation_key']))),
+                'invalid cleanup observation binding')
+        completion = record.get('captain_call_completion')
+        require(completion is None or isinstance(completion, dict) and
+                set(completion) == {'decisions_reviewed', 'decision_keys', 'verified'} and
+                completion['decisions_reviewed'] is True and completion['verified'] is True and
+                isinstance(completion['decision_keys'], list) and
+                all(atom(key) for key in completion['decision_keys']) and
+                completion['decision_keys'] == sorted(set(completion['decision_keys'])),
+                'invalid retained captain-call completion')
         assessment = record.get('assessment')
         require(isinstance(assessment, dict), 'missing assessment')
         require(text(assessment.get('outcome')) and text(assessment.get('remaining_gap'), empty=True), 'missing outcome/gap')
@@ -330,6 +638,10 @@ class Task:
                     require(text(continuation.get('owner')) and text(continuation.get('dependency')), 'blocker needs owner and dependency')
                     require(continuation.get('recovery_trigger') == 'evidence-change', 'unsupported recovery trigger')
                     require(text(continuation.get('release_ref')) and bool(re.fullmatch(r'[a-f0-9]{64}', str(continuation.get('release_sha256', '')))), 'blocker needs observable release condition')
+                    require(continuation.get('release_projection') in (None, 'delivery-v1'), 'unsupported release projection')
+                    require(continuation.get('release_task_kind') is None or
+                            continuation.get('release_projection') == 'delivery-v1' and
+                            continuation['release_task_kind'] in ('ship', 'scout'), 'invalid release task kind')
                 else:
                     raise Refusal('unsupported continuation type')
         if action and record['disposition'] == 'accepted':
@@ -398,7 +710,6 @@ class Task:
                                 'execution_generation': record['execution_generation'], 'delegation_revision': grant['revision']},
                     'task intent/delegation changed since branch admission')
         if effect and os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
-            require(os.environ.get('FM_BRANCH_INPUT_BARRIER') != '1', 'unclassified user input prevents new effects')
             self.input_barrier(os.environ.get('FM_BRANCH_MAIN_SESSION_FILE', ''))
         return grant
 
@@ -407,9 +718,7 @@ class Task:
         # snapshot alone misses input arriving during a long bash command.
         path = Path(session_file)
         require(path.is_absolute(), 'branch effects require the original MAIN input receipt session')
-        st = path.lstat()
-        require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid() and st.st_size <= 16777216, 'MAIN input receipt session is unsafe or exceeds bounded readback')
-        entries = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        entries = native_session(path, self.state / 'task-session-index')
         by_id = {e['id']: e for e in entries if 'id' in e}
         chain, seen = [], set()
         entry = entries[-1] if entries else {}
@@ -421,7 +730,7 @@ class Task:
             if entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-input':
                 value = entry.get('data', {})
                 inputs[value['id']] = value
-        require(not any(v.get('pending') or not v.get('task') and not v.get('answer') for v in inputs.values()), 'unclassified original input receipt prevents new effects')
+        require(not any(v.get('task') == self.id and v.get('pending') for v in inputs.values()), 'pending task intent update prevents new effects')
 
     def branch_patch(self, args):
         record = self.read()
@@ -449,7 +758,7 @@ class Task:
             self.reference(action['payload_ref'], action['payload_sha256'])
             continuation = action.get('continuation', {})
             if continuation.get('type') == 'blocker':
-                self.reference(continuation['release_ref'], continuation['release_sha256'])
+                self.check_release(continuation)
             if action['kind'] == 'steer':
                 require(not action.get('continuation'), 'steer receipt belongs to the actual delivery owner')
             record['next_action'] = action
@@ -735,6 +1044,8 @@ class Task:
             return {'task_id': self.id, 'enrolled': False}
         result = {key: record.get(key) for key in ('schema', 'task_id', 'revision', 'goal_revision', 'execution_generation',
                 'disposition', 'assessment', 'next_action', 'decision_ref', 'cleanup_ref', 'delegation', 'precheck')}
+        result['intent_updates'] = {key: {'phase': update['phase'], 'proof': update['proof']}
+            for key, update in record.get('intent_updates', {}).items()}
         result['owner_receipts'] = {kind: history[-1] for kind, history in record.get('owner_receipts', {}).items()}
         return result
 
@@ -743,8 +1054,8 @@ class Task:
         judgment = json.loads(args.judgment, object_pairs_hook=unique_object)
         require(isinstance(judgment, dict) and set(judgment) <= {
             'disposition', 'outcome', 'remaining_gap', 'authority_ref', 'evidence', 'next_action',
-            'intent_changed', 'revoke_delegation'}, 'unsupported semantic input')
-        require(all(type(judgment[key]) is bool for key in ('intent_changed', 'revoke_delegation') if key in judgment),
+            'intent_changed', 'revoke_delegation', 'supersede_prepared'}, 'unsupported semantic input')
+        require(all(type(judgment[key]) is bool for key in ('intent_changed', 'revoke_delegation', 'supersede_prepared') if key in judgment),
                 'semantic intent/delegation choices must be booleans')
         refs = judgment.get('evidence')
         require(isinstance(refs, list) and refs and all(text(ref, 4096) for ref in refs), 'evidence references required')
@@ -800,9 +1111,28 @@ class Task:
                 if action.get('blocker'):
                     blocker = action['blocker']
                     require(set(blocker) == {'owner', 'dependency', 'release_ref'}, 'unsupported blocker input')
+                    release_kind = None
+                    if (candidate['disposition'] in ('accepted', 'archived') and
+                            Path(blocker['release_ref']).name == 'lifecycle.json'):
+                        dependency = Task(Path(blocker['release_ref']).parent.name)
+                        dependency_record = dependency.read()
+                        if dependency_record and dependency_record['disposition'] in ('accepted', 'archived'):
+                            release_kind = dependency.task_kind()
+                    projected = release_kind is not None
                     candidate['next_action']['continuation'] = dict(blocker, type='blocker',
-                        release_sha256=digest(self.reference(blocker['release_ref'])), recovery_trigger='evidence-change')
+                        release_sha256=(self.release_digest(blocker['release_ref'], release_kind) if projected else
+                                        digest(self.reference(blocker['release_ref']))), recovery_trigger='evidence-change')
+                    if projected:
+                        candidate['next_action']['continuation']['release_projection'] = 'delivery-v1'
+                        candidate['next_action']['continuation']['release_task_kind'] = release_kind
                 candidate['next_action_seq'] += 1
+        args.supersede_prepared = judgment.get('supersede_prepared', False)
+        if args.supersede_prepared:
+            old = prior.get('next_action')
+            require(old and old['phase'] == 'prepared' and old['attempts'] == 0 and
+                    old['kind'] in ('wait', 'readback', 'decision'), 'only an unattempted observation can be superseded')
+            require('next_action' in judgment and authority != prior['assessment']['authority_ref'] and
+                    old['payload_ref'] in refs, 'superseding needs new authority and the exact old payload in readback')
         # Recheck immediately before the existing invariant/CAS owner commits.
         require(args.basis == self.inspect(bound)['basis'], 'assessment evidence changed during readback')
         args.expected_revision = prior['revision']
@@ -827,11 +1157,7 @@ class Task:
             require(parent > 1, 'input caller is outside owning session')
         require(str(parent) == pid, 'input owner ancestry exceeded')
         path = Path(args.session_file)
-        st = path.lstat()
-        require(path.is_absolute() and stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and
-                st.st_uid == os.getuid() and st.st_size <= 16777216, 'unsafe native input session')
-        entries = [json.loads(line, object_pairs_hook=unique_object) for line in path.read_text().splitlines() if line.strip()]
-        require(entries and entries[0].get('type') == 'session', 'missing session identity')
+        entries = native_session(path, self.state / 'task-session-index', args.entry_id, args.input)
         by_id = {e['id']: e for e in entries[1:] if 'id' in e}
         chain, seen = [], set()
         route = by_id.get(args.entry_id)
@@ -848,17 +1174,48 @@ class Task:
         require(route.get('customType') == 'fm-continuation-input' and route.get('data', {}).get('task') == self.id and
                 route.get('data', {}).get('update_brief') is True and route.get('data', {}).get('id') == args.input,
                 'not an explicit intent route receipt')
-        values = [e.get('data', {}) for e in reversed(chain) if e.get('type') == 'custom' and
-                  e.get('customType') == 'fm-continuation-input' and e.get('data', {}).get('id') == args.input]
-        require(len(values) >= 2 and text(values[0].get('text')) and not values[0].get('task') and
-                not values[0].get('answer'), 'missing original authenticated input')
-        value = values[-1]
-        require(value.get('task') == self.id and value.get('update_brief') is True and
-                value.get('text') == values[0]['text'] and not value.get('answer'), 'input not explicitly routed as intent update')
-        require(all(v.get('text') == value['text'] and v.get('task', self.id) == self.id and not v.get('answer') for v in values),
-                'input authority was rerouted or answered')
-        return value, {'session_file': str(path), 'entry_id': args.entry_id, 'input': args.input,
-                       'sha256': digest(json.dumps(by_id[args.entry_id], sort_keys=True).encode())}
+        value = route['data']
+        proof = {'session_file': str(path), 'entry_id': args.entry_id, 'input': args.input,
+                 'sha256': digest(json.dumps(route, sort_keys=True).encode())}
+        source_id = value.get('source_entry_id')
+        if source_id:
+            require(source_id in seen, 'original message is outside the current session branch')
+            source = by_id[source_id]
+            require(source_id == args.input, 'original message identity changed')
+            content = source.get('message', {}).get('content') if source.get('type') == 'message' else source.get('content')
+            original = content if isinstance(content, str) else ''.join(p.get('text', '') for p in content
+                if isinstance(p, dict) and p.get('type') == 'text') if isinstance(content, list) else ''
+            require(text(original) and value.get('text') == original, 'intent words differ from original message')
+            proof['source_sha256'] = digest(json.dumps(source, sort_keys=True).encode())
+            retained = self.read(current=False)
+            prior = (retained or {}).get('intent_updates', {}).get(digest((str(path) + '\0' + args.input).encode()))
+            # A prepared transaction has already authenticated these exact bytes.
+            # Rechecking a consumed delivery would strand a safe interrupted append.
+            authenticated = prior and prior.get('proof') == proof
+            if not authenticated:
+                if source.get('type') == 'message':
+                    require(source.get('message', {}).get('role') == 'user', 'source is not an original user message')
+                else:
+                    script = Path(__file__).resolve().with_name('fm-feishu-state.mjs').as_uri()
+                    check = subprocess.run(['node', '--input-type=module', '-e',
+                        'import {verifyFeishuSessionMessage as verify} from ' + json.dumps(script) +
+                        '; let raw=""; for await (const part of process.stdin) raw+=part; ' +
+                        'process.stdout.write(verify(process.argv[1],JSON.parse(raw))?"verified":"refused");', str(self.home)],
+                        input=json.dumps(source), capture_output=True, text=True, check=False, timeout=10)
+                    require(check.returncode == 0 and check.stdout == 'verified', 'missing immutable Feishu delivery proof')
+                operational = subprocess.run([str(Path(__file__).resolve().with_name('fm-operational-input.sh')), 'classify'],
+                    input=original, capture_output=True, text=True, check=False, timeout=10)
+                require(operational.returncode == 1 and not operational.stdout.strip(), 'operational input is not task intent')
+        else:
+            # Older task-assigned transactions retain their original capture and
+            # route proofs. Unassigned historical chat is never newly supervised.
+            values = [e.get('data', {}) for e in reversed(chain) if e.get('type') == 'custom' and
+                      e.get('customType') == 'fm-continuation-input' and e.get('data', {}).get('id') == args.input]
+            require(len(values) >= 2 and text(values[0].get('text')) and not values[0].get('task') and
+                    not values[0].get('answer'), 'missing original authenticated input')
+            require(all(v.get('text') == value['text'] and v.get('task', self.id) == self.id and not v.get('answer') for v in values),
+                    'input authority was rerouted or answered')
+        return value, proof
 
     def update_brief(self, args):
         value, proof = self.native_input(args)
@@ -1001,6 +1358,8 @@ class Task:
         else:
             require('coordination' not in candidate, 'coordination requires an actual native readback receipt')
         require(candidate.get('owner_receipts') == (prior or {}).get('owner_receipts'), 'effect facts belong to their receipt owners')
+        require(candidate.get('cleanup_observation_key') == (prior or {}).get('cleanup_observation_key'),
+                'cleanup observation belongs to its receipt owner')
         require(candidate.get('intent_updates') == (prior or {}).get('intent_updates'), 'intent receipts belong to the brief update owner')
         self.validate(candidate)
         grant = candidate.get('delegation')
@@ -1035,7 +1394,7 @@ class Task:
             self.reference(action['payload_ref'], action['payload_sha256'])
             continuation = action.get('continuation', {})
             if continuation.get('type') == 'blocker' and (not prior or action != prior.get('next_action')):
-                self.reference(continuation['release_ref'], continuation['release_sha256'])
+                self.check_release(continuation)
         if candidate['disposition'] != 'open' and action and (not prior or action != prior.get('next_action')):
             require(action['kind'] in ('decision', 'readback', 'wait'), 'terminal task cannot prepare execution')
         if prior:
@@ -1050,7 +1409,10 @@ class Task:
                 require(candidate_authority != self.authority_identity(prior['assessment']['authority_ref']), 'archive requires explicit stop authority')
             old_action = prior.get('next_action')
             if old_action and old_action['phase'] not in ('confirmed', 'refused'):
-                require(action == old_action, 'outstanding action must be confirmed/refused before replacement')
+                require(action == old_action or getattr(args, 'supersede_prepared', False) and
+                        old_action['phase'] == 'prepared' and old_action['attempts'] == 0 and
+                        old_action['kind'] in ('wait', 'readback', 'decision'),
+                        'outstanding action must be confirmed/refused before replacement')
             if action and (not old_action or old_action['id'] != action['id']):
                 require(action['id'] == f'{self.id}.g{candidate["goal_revision"]}.a{prior["next_action_seq"]}' and action['phase'] == 'prepared' and action['attempts'] == 0, 'new action identity/phase must be monotonic')
                 require(candidate['next_action_seq'] == prior['next_action_seq'] + 1, 'action sequence mismatch')
@@ -1203,8 +1565,7 @@ class Task:
                 elif action['phase'] == 'refused':
                     reason = 'action refused; choose a different authorized diagnostic or evidenced blocker'
                 elif continuation.get('type') == 'blocker':
-                    raw = self.reference(continuation['release_ref'])
-                    observation = digest(raw)
+                    observation = self.release_observation(continuation)
                     if observation == continuation['release_sha256'] and stamp(now()) < stamp(action['deadline']):
                         state, reason = 'blocked', continuation['owner'] + ': ' + continuation['dependency']
                     else:
@@ -1250,15 +1611,123 @@ class Task:
             return self.action(args)
         return record
 
+    def completion_read(self):
+        """Business completion proof for retained-resource backlog closure only."""
+        record = self.read()
+        require(record and record['disposition'] in ('accepted', 'archived'), 'goal is not terminal')
+        if record['disposition'] == 'archived':
+            return record
+        self.reference(record['assessment']['authority_ref'])
+        for item in record['assessment']['evidence']:
+            if record.get('cleanup_ref') == item['ref'] and record.get('cleanup_observation_key'):
+                require(record['cleanup_observation_key'] == digest(json.dumps(
+                    cleanup_observation(self.cleanup_read()), sort_keys=True).encode()), 'cleanup facts changed')
+                continue
+            self.reference(item['ref'], item['sha256'])
+        meta = dict(line.split('=', 1) for line in
+                    regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line)
+        kind = self.task_kind()
+        report = self.directory / 'report.md'
+        if kind == 'scout':
+            sha = digest(regular(report))
+            require(any(self.authority_identity(item['ref']) == (str(report.resolve()), sha)
+                        and item['sha256'] == sha for item in record['assessment']['evidence']),
+                    'accepted scout needs its assessed final report')
+            completion = self.captain_call_completion(record)
+            require(completion is not None, 'scout captain-call completion gate is not verified')
+            if record.get('captain_call_completion') != completion:
+                record['captain_call_completion'] = completion
+                record['revision'] += 1
+                self.write(record)
+        else:
+            proofs = [p for p in record.get('owner_receipts', {}).get('merge', [])
+                      if p['execution_generation'] == record['execution_generation']]
+            require(len(proofs) == 1 and text(proofs[0]['facts'].get('head')) and
+                    text(proofs[0]['facts'].get('url')), 'required delivery has no confirmed merge receipt')
+            require(not meta.get('pr') or meta['pr'] == proofs[0]['facts']['url'], 'delivery URL conflicts with merge receipt')
+        return record
+
+    def due(self, record):
+        action = record.get('next_action') if record else None
+        terminal = bool(record and record['disposition'] in ('accepted', 'archived'))
+        complete = bool(terminal and self.cleanup_complete(record))
+        cleanup = bool(terminal and not complete and
+                       ((self.state / (self.id + '.meta')).exists() or record.get('cleanup_ref') or
+                        (self.state / (self.id + '.cleanup.json')).exists()))
+        release = None
+        if cleanup and action and action['kind'] == 'wait' and action['phase'] == 'prepared':
+            continuation = action.get('continuation', {})
+            if continuation.get('type') == 'blocker':
+                try:
+                    release = self.release_observation(continuation)
+                    if stamp(now()) < min(stamp(action['recheck_at']), stamp(action['deadline'])):
+                        cleanup = release != continuation['release_sha256']
+                except (Refusal, OSError, ValueError):
+                    release = 'unreadable'
+        open_goal = bool(record and record['disposition'] == 'open')
+        due = bool((open_goal and (not action or stamp(action['recheck_at']) <= stamp(now()))) or cleanup)
+        expired = bool((open_goal or cleanup) and action and stamp(action['deadline']) <= stamp(now()))
+        observations = []
+        for path in (self.directory / 'report.md', self.state / (self.id + '.cleanup.json')):
+            if path.exists() or path.is_symlink():
+                try:
+                    observed = digest(regular(path))
+                    # Receipt presentation/formatting is not a new resource fact.
+                    if terminal and (not complete or record.get('cleanup_observation_key')) and path.name.endswith('.cleanup.json'):
+                        try:
+                            receipt = self.cleanup_read()
+                        except Refusal:
+                            # Historical minimal receipts may lack resource
+                            # identity; an independent complete owner proof
+                            # retains their previous byte-bound readback.
+                            if not complete:
+                                raise
+                            receipt = None
+                        if receipt is not None:
+                            observation = cleanup_observation(receipt)
+                            observations.append(observation)
+                            if record.get('cleanup_observation_key') == digest(json.dumps(observation, sort_keys=True).encode()):
+                                continue
+                        else:
+                            observations.append(observed)
+                    else:
+                        observations.append(observed)
+                    if record and not any(item['sha256'] == observed and
+                            (self.home / item['ref']).resolve() == path.resolve()
+                            for item in record['assessment']['evidence']):
+                        due = True
+                except (Refusal, OSError, ValueError):
+                    observations.append('unreadable')
+                    due = True
+            elif record and any((self.home / item['ref']).resolve() == path.resolve()
+                                for item in record['assessment']['evidence']):
+                observations.append('missing:' + path.name)
+                due = True
+        key = digest(json.dumps(observations, sort_keys=True).encode())
+        result = {'due': due, 'expired': expired, 'observed_evidence_key': key, 'record': record}
+        if terminal:
+            # No revision, assessment prose, coordination, or presentation clock.
+            # The first reached bound remains the same observation after restart.
+            wait = None
+            if action and action['kind'] == 'wait':
+                bound = min(action['recheck_at'], action['deadline'])
+                wait = [bound, stamp(now()) >= stamp(bound), release]
+            effect = action if action and action['kind'] == 'cleanup' else None
+            result['reconciliation_key'] = digest(json.dumps([record['goal_revision'],
+                record['execution_generation'], record['disposition'], key, wait, effect], sort_keys=True).encode())
+        return result
+
     def link_cleanup(self):
         record = self.read()
         require(record and record['disposition'] in ('accepted', 'archived'), 'cleanup needs terminal disposition')
         receipt = self.state / (self.id + '.cleanup.json')
         regular(receipt, True)
         evidence = {'ref': str(receipt), 'sha256': digest(regular(receipt, True))}
-        if record.get('cleanup_ref') == str(receipt) and evidence in record['assessment']['evidence']:
+        observation_key = digest(json.dumps(cleanup_observation(load(receipt)), sort_keys=True).encode())
+        if record.get('cleanup_ref') == str(receipt) and record.get('cleanup_observation_key') == observation_key:
             return record
         record['cleanup_ref'] = str(receipt)
+        record['cleanup_observation_key'] = observation_key
         record['assessment']['evidence'] = [item for item in record['assessment']['evidence'] if item['ref'] != str(receipt)] + [evidence]
         record['revision'] += 1
         self.write(record)
@@ -1273,6 +1742,16 @@ class Task:
         meta = self.state / (self.id + '.meta')
         if meta.exists() or meta.is_symlink():
             return False
+        receipt_path = self.state / (self.id + '.cleanup.json')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            try:
+                receipt = load(receipt_path)
+                if receipt.get('copy_binding'):
+                    receipt = self.cleanup_read()
+                    if receipt['phases'].get('directory_return', {}).get('state') != 'confirmed':
+                        return False
+            except (Refusal, OSError, ValueError):
+                return False
         if any(proof['execution_generation'] == record['execution_generation'] and
                complete_cleanup_facts(proof['facts'])
                for proof in record.get('owner_receipts', {}).get('cleanup', [])):
@@ -1280,47 +1759,52 @@ class Task:
         ref = record.get('cleanup_ref')
         if not ref:
             return False
-        try:
-            path = Path(ref)
-            if not path.is_absolute():
-                path = self.home / path
-            root = self.state / 'short-agents'
-            require(path.name == 'result.json' and path.parent.parent == root and
-                    re.fullmatch(r'short-[a-f0-9]{64}', path.parent.name), 'not a ShortTask result')
-            require(path.resolve(strict=True) == path, 'unsafe ShortTask result path')
-            evidence = [item for item in record['assessment']['evidence']
-                        if (self.home / item['ref']).resolve() == path]
-            require(len(evidence) == 1, 'unbound historical cleanup result')
-            self.reference(str(path), evidence[0]['sha256'])
-            result = load(path)
-            request = load(path.parent / 'request.json')
-            require(result.get('id') == request.get('id') == path.parent.name and
-                    result.get('state') == 'completed' and result.get('evidence') == str(path.parent),
-                    'historical cleanup result identity conflict')
-            require(atom(request.get('nonce')), 'missing ShortTask nonce')
-            require(text(request['input'].get('key')) and
-                    request['id'] == 'short-' + digest(request['input']['key'].encode()), 'ShortTask key conflict')
-            steps = request['input']['operations']['steps']
-            bindings = request['operationBindings']
-            require(isinstance(steps, list) and isinstance(bindings, list) and
-                    len(steps) == len(bindings), 'invalid historical operation chain')
-            indices = [i for i, step in enumerate(steps) if isinstance(step, dict) and
-                       step.get('action') == 'cleanup' and step.get('task') == self.id]
-            require(len(indices) == 1, 'ambiguous cleanup step')
-            index = indices[0]
-            binding = bindings[index]
-            require(binding.get('spawn_gen') == record['execution_generation'] and
-                    binding.get('endpoint_task_id', self.id) == self.id, 'cleanup generation conflict')
-            receipt = load(path.parent / f'operation-{index}.receipt.json')
-            require(receipt.get('id') == request['id'] and receipt.get('nonce') == request['nonce'] and
-                    type(receipt.get('index')) is int and receipt['index'] == index and
-                    receipt.get('action') == 'cleanup' and receipt.get('state') == 'completed',
-                    'historical cleanup effect identity conflict')
-            return complete_cleanup_facts(receipt.get('evidence'))
-        except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
-            # Missing/conflicting evidence retains the existing readback duty;
-            # no shape mismatch is permission to replay an uncertain operation.
-            return False
+        refs = [ref] + [item.get('ref') for item in record['assessment']['evidence']]
+        completed = set()
+        for ref in refs:
+            try:
+                path = Path(ref)
+                if not path.is_absolute():
+                    path = self.home / path
+                root = self.state / 'short-agents'
+                require(path.name == 'result.json' and path.parent.parent == root and
+                        re.fullmatch(r'short-[a-f0-9]{64}', path.parent.name), 'not a ShortTask result')
+                require(path.resolve(strict=True) == path, 'unsafe ShortTask result path')
+                evidence = [item for item in record['assessment']['evidence']
+                            if (self.home / item['ref']).resolve() == path]
+                require(len(evidence) == 1, 'unbound historical cleanup result')
+                self.reference(str(path), evidence[0]['sha256'])
+                result = load(path)
+                request = load(path.parent / 'request.json')
+                require(result.get('id') == request.get('id') == path.parent.name and
+                        result.get('state') == 'completed' and result.get('evidence') == str(path.parent),
+                        'historical cleanup result identity conflict')
+                require(atom(request.get('nonce')), 'missing ShortTask nonce')
+                require(text(request['input'].get('key')) and
+                        request['id'] == 'short-' + digest(request['input']['key'].encode()), 'ShortTask key conflict')
+                steps = request['input']['operations']['steps']
+                bindings = request['operationBindings']
+                require(isinstance(steps, list) and isinstance(bindings, list) and
+                        len(steps) == len(bindings), 'invalid historical operation chain')
+                indices = [i for i, step in enumerate(steps) if isinstance(step, dict) and
+                           step.get('action') == 'cleanup' and step.get('task') == self.id]
+                require(len(indices) == 1, 'ambiguous cleanup step')
+                index = indices[0]
+                binding = bindings[index]
+                require(binding.get('spawn_gen') == record['execution_generation'] and
+                        binding.get('endpoint_task_id', self.id) == self.id, 'cleanup generation conflict')
+                receipt = load(path.parent / f'operation-{index}.receipt.json')
+                require(receipt.get('id') == request['id'] and receipt.get('nonce') == request['nonce'] and
+                        type(receipt.get('index')) is int and receipt['index'] == index and
+                        receipt.get('action') == 'cleanup' and receipt.get('state') == 'completed',
+                        'historical cleanup effect identity conflict')
+                if complete_cleanup_facts(receipt.get('evidence')):
+                    completed.add(path)
+            except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
+                # Missing/conflicting evidence retains the existing readback duty;
+                # no shape mismatch is permission to replay an uncertain operation.
+                continue
+        return len(completed) == 1
 
     def cleanup_read(self):
         record = self.read()
@@ -1331,6 +1815,80 @@ class Task:
                 result.get('goal_revision') == record['goal_revision'], 'cleanup receipt identity conflict')
         require(isinstance(result.get('phases'), dict), 'invalid cleanup phases')
         return result
+
+    def cleanup_copy_bind(self):
+        """Capture exact copy identity in the existing cleanup receipt before retirement."""
+        record = self.read()
+        require(record and record['disposition'] in ('accepted', 'archived'), 'copy binding needs terminal task')
+        fields = unique_object([line.split('=', 1) for line in regular(self.state / (self.id + '.meta')).decode().splitlines() if '=' in line])
+        require(fields.get('spawn_gen') == record['execution_generation'], 'copy execution generation conflict')
+        def identity(raw):
+            path = Path(raw)
+            require(path.is_absolute() and path.is_dir(), 'copy/project needs an existing absolute directory')
+            canonical = path.resolve(strict=True)
+            st = canonical.stat()
+            result = {'path': str(canonical), 'device': st.st_dev, 'inode': st.st_ino}
+            git = subprocess.run(['git', '-C', str(canonical), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                capture_output=True, text=True, check=False, timeout=10)
+            if git.returncode == 0:
+                common = Path(git.stdout.strip()).resolve(strict=True)
+                common_stat = common.stat()
+                result['git'] = dict(path=str(common), device=common_stat.st_dev, inode=common_stat.st_ino)
+            return result
+        binding = {'home': str(self.home.resolve()), 'task': self.id, 'spawn_gen': record['execution_generation'],
+                   'copy': identity(fields.get('worktree', '')), 'project': identity(fields.get('project', ''))}
+        receipt_path = self.state / (self.id + '.cleanup.json')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            receipt = self.cleanup_read()
+        else:
+            receipt = dict(schema='fm-task-cleanup.v1', task_id=self.id, spawn_gen=record['execution_generation'],
+                           goal_revision=record['goal_revision'], phases={})
+        require(not receipt.get('copy_binding') or receipt['copy_binding'] == binding, 'copy binding changed')
+        if receipt.get('copy_binding') != binding:
+            receipt['copy_binding'] = binding
+            self.write_cleanup_receipt(receipt_path, receipt)
+        return binding
+
+    def write_cleanup_receipt(self, path, receipt):
+        raw = (json.dumps(receipt, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+        require(len(raw) <= MAX_BYTES, 'cleanup receipt too large')
+        fd, temporary = tempfile.mkstemp(prefix='.cleanup.', dir=self.state)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
+
+    def cleanup_copy_read(self):
+        receipt = self.cleanup_read()
+        binding = receipt.get('copy_binding')
+        require(isinstance(binding, dict) and binding.get('home') == str(self.home.resolve()) and
+                binding.get('task') == self.id and binding.get('spawn_gen') == receipt['spawn_gen'],
+                'missing exact retained copy binding; recover original owner evidence, never recreate metadata')
+        phase = receipt['phases'].get('directory_return', {})
+        require(isinstance(phase, dict), 'invalid retained copy phase')
+        if phase.get('state') == 'confirmed':
+            return dict(binding=binding, phase=phase, absent=False)
+        for kind in ('project', 'copy'):
+            identity = binding.get(kind, {})
+            path = Path(identity.get('path', ''))
+            require(path.is_absolute(), 'invalid copy binding path')
+            if kind == 'copy' and not path.exists() and not path.is_symlink():
+                return dict(binding=binding, phase=phase, absent=True)
+            require(path.is_dir() and not path.is_symlink() and str(path.resolve()) == identity['path'], 'copy/project path changed')
+            st = path.stat()
+            require(st.st_dev == identity.get('device') and st.st_ino == identity.get('inode'), 'copy/project identity changed')
+            git_identity = identity.get('git')
+            if git_identity:
+                git = subprocess.run(['git', '-C', str(path), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                    capture_output=True, text=True, check=False, timeout=10)
+                require(git.returncode == 0, 'copy Git owner unreadable')
+                common = Path(git.stdout.strip()).resolve(strict=True)
+                common_stat = common.stat()
+                require(str(common) == git_identity['path'] and common_stat.st_dev == git_identity['device'] and
+                        common_stat.st_ino == git_identity['inode'], 'copy Git owner changed')
+        return dict(binding=binding, phase=phase, absent=False)
 
     def cleanup_binding(self, args):
         """Validate or persist an immutable binding before endpoint effects.
@@ -1418,7 +1976,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -1492,11 +2050,17 @@ def main():
             result = task.authorize(args)
         elif args.operation == 'link-cleanup':
             result = task.link_cleanup()
+        elif args.operation == 'cleanup-copy-bind':
+            result = task.cleanup_copy_bind()
+        elif args.operation == 'cleanup-copy-read':
+            result = task.cleanup_copy_read()
         elif args.operation == 'cleanup-binding':
             task.cleanup_binding(args)
             return
         elif args.operation == 'cleanup-read':
             result = task.cleanup_read()
+        elif args.operation == 'completion-read':
+            result = task.completion_read()
         elif args.operation == 'bind-execution':
             result = task.bind_execution(args)
         elif args.operation == 'refresh-brief':
@@ -1507,46 +2071,7 @@ def main():
                 print(result['disposition'] if result else 'legacy')
                 return
             if args.operation == 'due':
-                action = result.get('next_action') if result else None
-                cleanup_complete = bool(result and task.cleanup_complete(result))
-                cleanup_obligation = bool(result and result['disposition'] in ('accepted', 'archived') and
-                                          not cleanup_complete and
-                                          ((task.state / (task.id + '.meta')).exists() or
-                                           result.get('cleanup_ref') or
-                                           (task.state / (task.id + '.cleanup.json')).exists()))
-                # An action receipt proves its effect, never goal acceptance.
-                # A future bounded wait defers reconciliation; even a confirmed
-                # action leaves an open goal due once that bound is reached.
-                # A bounded, evidence-bound terminal wait defers only cleanup.
-                # Terminal goals remain due only while a concrete resource or
-                # cleanup receipt is unfinished; a complete owner receipt stops
-                # the bounded scanner from publishing another generation.
-                if cleanup_obligation and action and action['kind'] == 'wait' and action['phase'] == 'prepared':
-                    continuation = action.get('continuation', {})
-                    if (continuation.get('type') == 'blocker' and
-                            stamp(now()) < stamp(action['recheck_at']) and stamp(now()) < stamp(action['deadline'])):
-                        try:
-                            cleanup_obligation = digest(task.reference(continuation['release_ref'])) != continuation['release_sha256']
-                        except (Refusal, OSError):
-                            pass  # Missing release evidence requires readback, never a replay.
-                open_goal = bool(result and result['disposition'] == 'open')
-                due = bool(result and ((open_goal and action and stamp(action['recheck_at']) <= stamp(now())) or
-                                       (open_goal and not action) or cleanup_obligation))
-                expired = bool((open_goal or cleanup_obligation) and action and stamp(action['deadline']) <= stamp(now()))
-                observations = []
-                for path in (task.directory / 'report.md', task.state / (task.id + '.cleanup.json')):
-                    if path.exists() or path.is_symlink():
-                        try:
-                            observed = digest(regular(path))
-                            observations.append(observed)
-                            if result and not any(item['sha256'] == observed and
-                                                  (task.home / item['ref']).resolve() == path.resolve()
-                                                  for item in result['assessment']['evidence']):
-                                due = True
-                        except (Refusal, OSError):
-                            observations.append('unreadable')
-                            due = True
-                print(json.dumps({'due': due, 'expired': expired, 'observed_evidence_key': digest(json.dumps(observations).encode()), 'record': result}))
+                print(json.dumps(task.due(result)))
                 return
         print(json.dumps(result, ensure_ascii=False))
     except (Refusal, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:

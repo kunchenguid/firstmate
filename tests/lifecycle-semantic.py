@@ -150,6 +150,9 @@ assert 'outstanding lifecycle effect' in refused.stderr and 'unexpected-forge-ac
 refused = call('fm-merge-local.sh', 'task', ok=False)
 assert 'outstanding lifecycle effect' in refused.stderr, refused.stderr
 assess(dict(judgment, next_action=None), ok=False)
+(home / 'data/correction').write_text('New authority requests a different observation; uncertain effect still needs exact readback.')
+assess(dict(judgment, authority_ref='data/correction', evidence=['data/payload', 'data/correction'],
+            next_action=None, supersede_prepared=True), ok=False)
 r3 = routed('request3', 'Cannot overwrite an uncertain action.')
 update('request3', r3, ok=False)
 inbox = home / 'state/task.inbox'

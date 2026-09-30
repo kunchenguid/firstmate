@@ -6256,7 +6256,7 @@ if(cursorAfterReconciliation===cursorBefore)throw Error('stale observation did n
 sendMode='persist-throw';pi.events.emit('firstmate:heartbeat-tick',{});
 await wait(()=>effects.some(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending')),'healthy batch after stale task');
 const batch=effects.find(e=>e.message.customType==='fm-task-continuation'&&e.message.content.includes('healthy-two: pending'));
-if(!batch.message.content.includes('Already collected input must continue through this batch.'))throw Error('stale task discarded already-collected input');
+if(batch.message.content.includes('Already collected input must continue through this batch.'))throw Error('chat became a task continuation goal');
 if(!record('healthy-two').coordination)throw Error('stale task prevented healthy task coordination');
 const effectCount=effects.length;
 sendMode='success';pi.events.emit('firstmate:heartbeat-tick',{});await sleep(500);
@@ -6486,14 +6486,11 @@ if(escalationEntries().length!==1) throw Error('reload duplicated escalation');
 await fire('session_compact',{},defaultSessionCtx);
 await fire('before_agent_start',{prompt:'Separate request B: explain configuration.'},defaultSessionCtx);
 const next=await beforeSettle();
-if(!next.continued || !next.content.includes('Separate request B')) throw Error('independent input B was lost');
-if(next.content.includes('prerequisite: pending')) throw Error('independent input reset A budget');
-if(escalationEntries().length!==1) throw Error('compaction or independent input duplicated escalation');
+if(next.continued) throw Error('ordinary question became an independent continuation');
+if(escalationEntries().length!==1) throw Error('compaction or chat duplicated task escalation');
 const tool=mainTools.find(t=>t.name==='fm_task_continuation');
-const listing=JSON.parse((await tool.execute('list',{action:'list'})).content[0].text);
-const input=listing.inputs.find(i=>i.text.includes('Separate request B'));
-const answer=await tool.execute('answer',{action:'answer',input:input.id,answer:'Configuration uses the documented per-home file.'});
-if(answer.isError) throw Error(JSON.stringify(answer));
+const listing=JSON.parse((await tool.execute('list',{action:'list'},undefined,undefined,defaultSessionCtx)).content[0].text);
+if(listing.pending_updates.length || 'inputs' in listing) throw Error('chat acquired input bookkeeping');
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
 // Unchanged evidence survives exhausted ordinary attempts. Only the existing
 // heartbeat may deliver a later recovery, and UI safety still takes priority.

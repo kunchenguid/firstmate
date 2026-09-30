@@ -802,16 +802,124 @@ test_completed_pool_uncertain_ownership_retains_copy() {
       stale-generation) claim_pool_slot "$dir" "$id"; sed -i 's/^spawn_gen=.*/spawn_gen=another-generation/' "$dir/pool/1/.fm-slot-owner" ;;
       foreign-home) claim_pool_slot "$dir" "$id" "$dir/another-home" ;;
     esac
-    stage_archived_action "$dir" "$id" cleanup uncertain
+    stage_archived_action "$dir" "$id" steer uncertain
     run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "slot $variant blocked completed window closure: $(cat "$dir/stderr")"
     assert_present "$dir/runtime.log.w1:p-$id.closed" 'completed window was not actually closed'
     assert_present "$dir/pool/1/project/.git" 'unproved copy ownership allowed deletion'
     assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
     ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unproved pool ownership allowed return'
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" >/dev/null || fail 'retired pool copy observation failed'
+    ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'copy-only returned an unproved/foreign pool slot'
   done
   pass 'uncertain or foreign pool ownership retains the copy while completed windows and records retire'
 }
 
+test_retained_copy_only_followthrough() {
+  local dir id variant before_runtime before_report rc copy_path
+  for variant in dirty unlanded shared primary identity-changed disposal-interruption disposal-before-effect; do
+    id="copy-followthrough-$variant"
+    dir=$(make_case "$id")
+    git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid commit --allow-empty -qm base
+    rm -rf "$dir/worktree"
+    git -C "$dir/project" worktree add -q -b "$id" "$dir/worktree"
+    printf 'Retained task content\n' > "$dir/worktree/sentinel"
+    if [ "$variant" != dirty ] && [ "$variant" != disposal-interruption ] && [ "$variant" != disposal-before-effect ]; then
+      git -C "$dir/worktree" add sentinel
+      git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm content
+    fi
+    copy_path="$dir/worktree"
+    if [ "$variant" = primary ]; then copy_path="$dir/project"; fi
+    write_herdr_meta "$dir/home/state/$id.meta" \
+      "window=isolated:fm-$id" "worktree=$copy_path" "project=$dir/project" "kind=ship"
+    if [ "$variant" = shared ]; then
+      write_herdr_meta "$dir/home/state/sibling.meta" \
+        'window=isolated:fm-sibling' "worktree=$copy_path" "project=$dir/project" 'kind=ship'
+    fi
+    # Preserve an uncertain archived business effect separately from copy disposal.
+    stage_archived_action "$dir" "$id" steer uncertain
+    printf 'Preserved final report\n' > "$dir/home/data/$id/report.md"
+    before_report=$(shasum "$dir/home/data/$id/report.md")
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || fail "retained copy setup failed: $(cat "$dir/stderr")"
+    assert_absent "$dir/home/state/$id.meta" 'retirement kept completed execution metadata active'
+    before_runtime=$(cat "$dir/runtime.log")
+    jq -e '.copy_binding.copy.inode>0 and .phases.directory_return.state=="retained"' \
+      "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'exact retained copy identity was not durable before metadata retirement'
+    if [ "$variant" = identity-changed ]; then
+      mv "$dir/worktree" "$dir/original-retained-copy"
+      mkdir "$dir/worktree"
+      printf 'Unrelated replacement content\n' > "$dir/worktree/replacement"
+    fi
+    rc=0
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/copy.out" 2> "$dir/copy.err" || rc=$?
+    [ "$(cat "$dir/runtime.log")" = "$before_runtime" ] || fail 'copy-only repeated an endpoint operation'
+    case "$variant" in
+      identity-changed)
+        [ "$rc" -ne 0 ] || fail 'replacement inode was admitted as the retired copy'
+        assert_present "$dir/worktree/replacement" 'copy-only removed replacement content'
+        ;;
+      *)
+        [ "$rc" = 0 ] || fail "copy-only readback failed: $(cat "$dir/copy.err")"
+        assert_present "$copy_path/.git" 'copy-only removed protected copy'
+        ;;
+    esac
+    [ "$(shasum "$dir/home/data/$id/report.md")" = "$before_report" ] || fail 'copy follow-through changed the report'
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | \
+      jq -e '.disposition=="archived" and .next_action.phase=="uncertain"' >/dev/null || fail 'copy-only revived business or accepted its uncertain effect'
+    if [ "$variant" = dirty ] || [ "$variant" = disposal-interruption ] || [ "$variant" = disposal-before-effect ]; then
+      # One actual relevant release: commit and integrate the original copy.
+      git -C "$dir/worktree" add sentinel
+      git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid commit -qm content
+      git -C "$dir/project" merge --ff-only "$id" >/dev/null
+      if [ "$variant" = disposal-interruption ] || [ "$variant" = disposal-before-effect ]; then
+        local real_git
+        real_git=$(command -v git)
+        cat > "$dir/fakebin/git" <<SH
+#!/bin/sh
+if [ "\$3 \$4" = 'worktree remove' ]; then
+  [ "$variant" = disposal-before-effect ] && exit 73
+  "$real_git" "\$@" || exit \$?
+  exit 73
+fi
+exec "$real_git" "\$@"
+SH
+        chmod +x "$dir/fakebin/git"
+        rc=0
+        FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+          "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/crash.out" 2> "$dir/crash.err" || rc=$?
+        [ "$rc" -ne 0 ] || fail 'injected post-disposal response failure was hidden'
+        if [ "$variant" = disposal-before-effect ]; then
+          assert_present "$dir/worktree/sentinel" 'pre-effect failure removed the original copy'
+          rc=0
+          FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+            "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/pending.out" 2> "$dir/pending.err" || rc=$?
+          [ "$rc" -ne 0 ] || fail 'pending existing copy disposal was blindly retried'
+          assert_present "$dir/worktree/sentinel" 'uncertain existing copy was removed on retry'
+          jq -e '.phases.directory_return.state=="pending"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'pending copy obligation was lost'
+          [ "$(cat "$dir/runtime.log")" = "$before_runtime" ] || fail 'pending copy replayed endpoint'
+          continue
+        fi
+        assert_absent "$dir/worktree" 'fixture did not interrupt after the actual disposal effect'
+        jq -e '.phases.directory_return.state=="pending"' "$dir/home/state/$id.cleanup.json" >/dev/null \
+          || fail 'uncertain disposal lost its retained intent'
+        rm "$dir/fakebin/git"
+      fi
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/released.out" 2> "$dir/released.err" \
+        || fail "eligible retained copy was not disposed: $(cat "$dir/released.err")"
+      assert_absent "$dir/worktree" 'eligible retained copy remains after confirmed disposal'
+      jq -e '.phases.directory_return.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'copy disposal was not confirmed'
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" >/dev/null || fail 'copy-only confirmed retry did not converge'
+      [ "$(cat "$dir/runtime.log")" = "$before_runtime" ] || fail 'later copy follow-through repeated endpoint effects'
+      assert_absent "$dir/home/state/$id.meta" 'copy-only recreated business metadata'
+    fi
+  done
+  pass 'retired copy-only follow-through disposes original content after integration; protected copies, replacement identity, reports and archived uncertain business effects stay intact without endpoint replay'
+}
+
+test_retained_copy_only_followthrough
 test_completed_pool_uncertain_ownership_retains_copy
 test_completed_copy_preservation_ignores_force
 test_completed_endpoint_ignores_historical_admission_gates

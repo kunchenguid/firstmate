@@ -825,6 +825,7 @@ function validateRecordAtPath(path, record) {
     validateCompletedReceipt(record.receipt);
   } else if (parent === "inbound-event-ids" && record.schema === "fm-feishu-processed-inbound-id.v1") {
     requireSafeInteger(record.binding_generation, "processed inbound generation", { min: 1 });
+    requireNullableString(record.content_digest ?? null, "processed inbound content digest", RECORD_HASH);
   } else if (parent === "inbound-event-ids") {
     if (record.schema !== "fm-feishu-inbound-event-id.v1") throw new Error("invalid Feishu event-id record schema");
     requireString(record.event_id_hash, "inbound event-id hash", RECORD_HASH);
@@ -2014,6 +2015,7 @@ function finishInboundCleanupLocked(paths) {
   atomicJson(join(paths.inboundEventIds, `${sha(`processed\0${intent.delivery_ref}`)}.json`), {
     schema: "fm-feishu-processed-inbound-id.v1",
     binding_generation: intent.binding_generation,
+    content_digest: ledger?.content_digest ?? prior?.content_digest ?? null,
   });
   removeIndexedFile(join(paths.inbox, intent.filename));
   removeInboundPendingIndex(paths, intent.filename);
@@ -2306,6 +2308,64 @@ export function findInboundByDeliveryRef(home, deliveryRef) {
   });
 }
 
+export function nativeIngressContentDigest(content) {
+  const hash = createHash("sha256");
+  const field = (value) => {
+    const bytes = Buffer.from(value, "utf8");
+    hash.update(`${bytes.length}:`);
+    hash.update(bytes);
+  };
+  if (typeof content === "string") {
+    hash.update("s;");
+    field(content);
+    return `sha256:${hash.digest("hex")}`;
+  }
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  hash.update(`p${content.length};`);
+  for (const part of content) {
+    if (!part || typeof part !== "object") return undefined;
+    if (part.type === "text") {
+      if (typeof part.text !== "string") return undefined;
+      hash.update("t;");
+      field(part.text);
+    } else if (part.type === "image") {
+      if (typeof part.data !== "string" || typeof part.mimeType !== "string") return undefined;
+      hash.update("i;");
+      field(part.mimeType);
+      field(part.data);
+    } else {
+      return undefined;
+    }
+  }
+  return `sha256:${hash.digest("hex")}`;
+}
+
+
+export const NATIVE_FEISHU_CUSTOM_TYPE = "firstmate-feishu-inbound";
+export const NATIVE_FEISHU_DETAILS_SCHEMA = "fm-feishu-pi-message.v1";
+
+export function nativeFeishuMessageMarker(message) {
+  if (message?.role !== "custom" || message.customType !== NATIVE_FEISHU_CUSTOM_TYPE ||
+      message.details?.schema !== NATIVE_FEISHU_DETAILS_SCHEMA) return undefined;
+  const { deliveryRef, bindingGeneration } = message.details;
+  if (typeof deliveryRef !== "string" || !/^in_[a-f0-9]{24}$/.test(deliveryRef) ||
+      !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1) return undefined;
+  return { deliveryRef, bindingGeneration };
+}
+
+// Session routing uses the dispatch owner's immutable delivery/content proof.
+// This verifies authority only; it never offers or replays a delivery.
+export function verifyFeishuSessionMessage(home, message) {
+  if (message?.type !== "custom_message") return false;
+  const marker = nativeFeishuMessageMarker({ ...message, role: "custom" });
+  if (!marker) return false;
+  const contentDigest = nativeIngressContentDigest(message.content);
+  if (!contentDigest) return false;
+  const evidence = findInboundDeliveryEvidence(home, marker.deliveryRef);
+  return Boolean(evidence && evidence.event.delivery_ref === marker.deliveryRef &&
+    evidence.event.binding_generation === marker.bindingGeneration && evidence.contentDigest === contentDigest);
+}
+
 export function recordInboundContentDigest(home, deliveryRef, contentDigest) {
   const paths = ensurePrivateLayout(home);
   requireString(deliveryRef, "inbound delivery ref", DELIVERY_REF);
@@ -2326,7 +2386,11 @@ export function findInboundDeliveryEvidence(home, deliveryRef) {
   return withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
     const processed = processedInboundIdentity(paths, deliveryRef);
-    if (processed) return { event: { delivery_ref: deliveryRef, binding_generation: processed.binding_generation }, bodyAvailable: false };
+    if (processed) return {
+      event: { delivery_ref: deliveryRef, binding_generation: processed.binding_generation },
+      contentDigest: typeof processed.content_digest === "string" ? processed.content_digest : undefined,
+      bodyAvailable: false,
+    };
     const found = readInboundByDeliveryRef(paths, deliveryRef);
     if (!found) return undefined;
     return {

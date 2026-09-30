@@ -284,7 +284,7 @@ A captain instruction to merge is explicit authority; outside the BITS lifecycle
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-Retire a lifecycle-enrolled ship task only after semantic acceptance or explicit archive; the completed path closes its exact worker pane while retaining any copy that is not safe to dispose.
+Retire a lifecycle-enrolled ship only through the [task completion and resource cleanup contract](docs/task-lifecycle.md) after semantic acceptance or explicit archive; business completion may precede independent pane and copy cleanup, and unsafe copies remain retained.
 For a legacy ship record, tear down only after landing is confirmed, and treat a refusal for uncommitted or unlanded work as a stop-and-investigate result rather than an obstacle to bypass.
 Never force legacy teardown without explicit discard authority, and never use force to bypass completed-copy preservation.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
@@ -416,7 +416,7 @@ It tracks work items only, never agents.
 A decision is simply a task held for the captain: create the task with `bin/fm-tasks-axi.sh add` when needed, then always hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers it.
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or structured reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
-When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
+When the automatic transition gate applies, dispatch, business completion, and resource cleanup move the item themselves - `bin/fm-spawn.sh`, `bin/fm-task-retire.sh`, and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.

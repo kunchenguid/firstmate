@@ -1013,7 +1013,7 @@ fm_backlog_close_marker_validate() {  # <marker-path> <authorized-data-dir> <exp
     return 1
   fi
   case "$mode" in
-    close|retain|cleanup-only) ;;
+    close|retain|cleanup-only|complete-only) ;;
     *)
       FM_BACKLOG_TRANSITION_ERROR="invalid transition mode in pending-close record $marker"
       return 1
@@ -1193,6 +1193,9 @@ fm_backlog_close_marker_stage() {  # <temporary-path> <id> <data-dir> <spawn-gen
   elif [ "${1:-}" = --cleanup-only ]; then
     mode=cleanup-only
     shift
+  elif [ "${1:-}" = --complete-only ]; then
+    mode=complete-only
+    shift
   fi
   for arg in "$@"; do
     if [ "$previous_arg" = --note ] && [ "$arg" = "local main" ]; then
@@ -1260,6 +1263,24 @@ fm_backlog_completed_cleanup_receipt() {
     fm_task_lifecycle_owner_receipt "$id" "$generation" cleanup "$facts" locked
 }
 
+# A validated close may outlive tasks-axi prune. Reuse the disposition owner
+# only after an explicit current NOT_FOUND; prove terminal task/generation and
+# preserved artifact before acknowledging bookkeeping. Never recreate a row,
+# replay resource effects, or erase an unapplied delivery reference.
+fm_backlog_archived_done() {  # <data> <id> <state> <generation> [artifact-pair]
+  local data=$1 id=$2 state=$3 generation=$4 artifact=${6:-} lifecycle snapshot disposition
+  [ "$FM_BACKLOG_ROW_RESULT" = not_found ] || return 1
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-disposition-lib.sh"
+  snapshot=$(fm_task_disposition_snapshot "$data" "$artifact") || return 1
+  disposition=$(fm_task_disposition_for "$snapshot" "$id") || return 1
+  [ "$disposition" = archive_done ] || return 1
+  lifecycle=$(FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" read "$id") || return 1
+  printf '%s' "$lifecycle" | jq -e --arg generation "$generation" \
+    '.execution_generation==$generation and (.disposition=="accepted" or .disposition=="archived")' >/dev/null
+}
+
 fm_backlog_replay_transition() {
   local mode=$1 marker=$2 data=$3 id=$4 state=$5 generation=$6 disposition=$7
   shift 7
@@ -1270,7 +1291,12 @@ fm_backlog_replay_transition() {
   if [ "$mode" = retain ]; then
     fm_backlog_retain "$data" "$id" "$@" || return 1
   else
-    fm_backlog_done "$data" "$id" "$@" || return 1
+    if ! fm_backlog_done "$data" "$id" "$@"; then
+      fm_backlog_row_probe "$data" "$id" || {
+        fm_backlog_archived_done "$data" "$id" "$state" "$generation" "$@" || return 1
+      }
+      [ "$FM_BACKLOG_ROW_RESULT" = not_found ] || return 1
+    fi
   fi
   fm_backlog_completed_cleanup_receipt "$state" "$id" "$data" "$generation" "$disposition" || return 1
   fm_backlog_close_marker_remove "$marker" "$state"
@@ -1299,13 +1325,13 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   cleanup_incomplete=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_INCOMPLETE
   cleanup_disposition=$FM_BACKLOG_CLOSE_VALIDATED_CLEANUP_DISPOSITION
   mode=$FM_BACKLOG_CLOSE_VALIDATED_MODE
-  case "$mode" in retain) mode_flags=(--retain) ;; cleanup-only) mode_flags=(--cleanup-only) ;; esac
+  case "$mode" in retain) mode_flags=(--retain) ;; cleanup-only) mode_flags=(--cleanup-only) ;; complete-only) mode_flags=(--complete-only) ;; esac
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   if [ "${args[0]-}" = --note ]; then
     args[1]="local main"
   fi
   meta="$state/$id.meta"
-  if [ "$mode" = cleanup-only ]; then
+  if [ "$mode" = cleanup-only ] || [ "$mode" = complete-only ]; then
     # This paired transition closes the business row, never the resource
     # record. Restart recovery must not re-run endpoint/directory effects.
     local lifecycle cleanup_kind receipt
@@ -1315,8 +1341,21 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       '.execution_generation==$generation and (.disposition=="accepted" or .disposition=="archived") and .cleanup_ref!=null' >/dev/null || return 1
     receipt=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
       python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" cleanup-read "$id") || return 1
-    printf '%s' "$receipt" | jq -e '.phases.pane_close.state=="confirmed"' >/dev/null || return 1
-    fm_backlog_row_probe "$data" "$id" || return 1
+    if [ "$mode" = complete-only ]; then
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+        python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" completion-read "$id" >/dev/null || return 1
+    else
+      printf '%s' "$receipt" | jq -e '.phases.pane_close.state=="confirmed"' >/dev/null || return 1
+    fi
+    if ! fm_backlog_row_probe "$data" "$id"; then
+      fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" "${args[@]+"${args[@]}"}" || return 1
+      # shellcheck source=bin/fm-teardown-endpoint-lib.sh
+      . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-teardown-endpoint-lib.sh"
+      fm_teardown_cleanup_record_closed "$state" "$id" "$data" || return 1
+      fm_backlog_close_marker_remove "$marker" "$state" || return 1
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed_incomplete
+      return 0
+    fi
     cleanup_kind=close
     [ "$FM_BACKLOG_ROW_HOLD_KIND" != captain ] || cleanup_kind=retain
     if [ "$cleanup_kind" = retain ]; then
@@ -1362,6 +1401,16 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   else
     if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
       FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+      return 1
+    fi
+    if fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" "${args[@]+"${args[@]}"}"; then
+      fm_backlog_completed_cleanup_receipt "$state" "$id" "$data" "$marker_spawn_gen" "$cleanup_disposition" || return 1
+      fm_backlog_close_marker_remove "$marker" "$state" || return 1
+      FM_BACKLOG_CLOSE_REPLAY_RESULT=closed
+      return 0
+    fi
+    if [ -n "$cleanup_disposition" ]; then
+      FM_BACKLOG_TRANSITION_ERROR="missing task $id has no matching terminal generation and archived delivery evidence; preserving its pending-close record"
       return 1
     fi
     if [ "${#args[@]}" -eq 2 ] && [ "${args[0]}" = --pr ] \

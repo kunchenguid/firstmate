@@ -4,7 +4,7 @@
 // Accepted Feishu events are offered to Pi's own steering queue after
 // exact binding, generation, transport, and live-session checks.
 import { execFile, spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,10 @@ import {
   completeAssistantOutboundIntent,
   findInboundByDeliveryRef,
   findInboundDeliveryEvidence,
+  nativeIngressContentDigest as ingressContentDigest,
+  nativeFeishuMessageMarker,
+  NATIVE_FEISHU_CUSTOM_TYPE,
+  NATIVE_FEISHU_DETAILS_SCHEMA,
   liveSessionOwnsBinding,
   loadFeishuIngressContent,
   offerFeishuIngress,
@@ -51,8 +55,8 @@ export interface FeishuMarker {
   bindingGeneration: number;
 }
 
-export const FEISHU_INBOUND_CUSTOM_TYPE = "firstmate-feishu-inbound";
-export const FEISHU_INBOUND_DETAILS_SCHEMA = "fm-feishu-pi-message.v1";
+export const FEISHU_INBOUND_CUSTOM_TYPE = NATIVE_FEISHU_CUSTOM_TYPE;
+export const FEISHU_INBOUND_DETAILS_SCHEMA = NATIVE_FEISHU_DETAILS_SCHEMA;
 
 export interface FeishuInboundDetails {
   schema: typeof FEISHU_INBOUND_DETAILS_SCHEMA;
@@ -177,51 +181,8 @@ export function parseFeishuMarker(text: unknown): FeishuMarker | undefined {
   return { deliveryRef: match[1], bindingGeneration };
 }
 
-function feishuDetails(value: unknown): FeishuMarker | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const details = value as { schema?: unknown; deliveryRef?: unknown; bindingGeneration?: unknown };
-  if (details.schema !== FEISHU_INBOUND_DETAILS_SCHEMA || typeof details.deliveryRef !== "string" || !/^in_[a-f0-9]{24}$/.test(details.deliveryRef)) return undefined;
-  if (!Number.isSafeInteger(details.bindingGeneration) || Number(details.bindingGeneration) <= 0) return undefined;
-  return { deliveryRef: details.deliveryRef, bindingGeneration: Number(details.bindingGeneration) };
-}
-
 export function parseFeishuMessage(message: unknown): FeishuMarker | undefined {
-  if (!message || typeof message !== "object") return undefined;
-  const candidate = message as { role?: unknown; customType?: unknown; details?: unknown };
-  if (candidate.role !== "custom" || candidate.customType !== FEISHU_INBOUND_CUSTOM_TYPE) return undefined;
-  return feishuDetails(candidate.details);
-}
-
-function ingressContentDigest(content: unknown): string | undefined {
-  const hash = createHash("sha256");
-  const field = (value: string) => {
-    const bytes = Buffer.from(value, "utf8");
-    hash.update(`${bytes.length}:`);
-    hash.update(bytes);
-  };
-  if (typeof content === "string") {
-    hash.update("s;");
-    field(content);
-    return `sha256:${hash.digest("hex")}`;
-  }
-  if (!Array.isArray(content) || content.length === 0) return undefined;
-  hash.update(`p${content.length};`);
-  for (const part of content) {
-    if (!part || typeof part !== "object") return undefined;
-    if (part.type === "text") {
-      if (typeof part.text !== "string") return undefined;
-      hash.update("t;");
-      field(part.text);
-    } else if (part.type === "image") {
-      if (typeof part.data !== "string" || typeof part.mimeType !== "string") return undefined;
-      hash.update("i;");
-      field(part.mimeType);
-      field(part.data);
-    } else {
-      return undefined;
-    }
-  }
-  return `sha256:${hash.digest("hex")}`;
+  return nativeFeishuMessageMarker(message);
 }
 
 const verifiedClassifications = new Map<string, { marker: FeishuMarker; contentDigest: string }>();
@@ -410,7 +371,7 @@ function sessionMarkers(ctx: ExtensionContext, identity: SessionIdentity): Array
   const markers: Array<FeishuMarker & { sessionId: string }> = [];
   for (const entry of ctx.sessionManager.getEntries()) {
     const marker = entry.type === "custom_message"
-      ? (entry.customType === FEISHU_INBOUND_CUSTOM_TYPE ? feishuDetails(entry.details) : undefined)
+      ? parseFeishuMessage({ ...entry, role: "custom" })
       : entry.type === "message" && entry.message.role === "user"
         ? parseFeishuMarker(messageText(entry.message))
         : undefined;

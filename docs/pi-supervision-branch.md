@@ -56,18 +56,19 @@ MAIN uses the native tool's `inspect` and `assess` actions to bind evidence and 
 For an authenticated follow-up, `route` with `update_brief:true` appends the exact input through that same owner, so the following steer does not require a hand-authored reconciliation document.
 The existing watcher offers due eligible rows before native lifecycle and shell tool operations; decisions, uncertain results and other MAIN-only rows remain durably actionable in the original queue.
 The full lifecycle read and legacy reconciliation interface remain available for recovery and explicit delegation changes.
-Enrollment is limited to current task briefs named by an input route, wake claim, or processed outcome, with no historical fleet migration.
+Enrollment is limited to existing task briefs named by explicit task intake, a task update, wake claim, or processed outcome, with no historical fleet migration.
 MAIN supplies the evidence-backed disposition, outcome, remaining gap and next action, including a genuine blocker with responsible owner and observable release evidence.
 The lifecycle owner derives identifiers, hashes, timestamps, counters and verified executor receipts, while the existing merge and cleanup owners append generation-bound result receipts without changing semantic acceptance.
 A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
 The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
 Attempted and uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
-The Pi extension preserves separate input receipts through compaction, checks pending obligations before logical-run settlement, and uses the existing heartbeat coordinator's tick for bounded rechecks.
+The Pi extension checks existing task obligations before logical-run settlement and uses the existing heartbeat coordinator's tick for bounded rechecks.
+Chat remains native transcript evidence; only an explicit task intent update stages a recoverable append transaction, with no independent message goal or answer bookkeeping.
 Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly archived goals stay quiet.
 Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
 The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
 The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
-Before releasing a logical Pi run, the existing heartbeat coordinator actually reads current obligations and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
+Before releasing a logical Pi run with actionable obligations, the existing heartbeat coordinator actually reads them and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
 After two delivered requests without a verified continuation, the main session durably presents one initial coordination-failure follow-up and starts an executable main turn, including when full heartbeat maintenance is disabled.
 The initial request budget stays exhausted, but if the durable observation remains unchanged after that turn, the same clock schedules deduplicated recovery turns with increasing delay until authoritative observation changes; reload, compaction, and unrelated input preserve that pace.
 A lifecycle observation refusal never infers a receiver or execution state: it presents an explicit reconciliation request and follows the same persisted recovery pacing until canonical observation succeeds.
@@ -77,7 +78,7 @@ Between due recovery turns, the same clock continues bounded readback without bl
 A MAIN admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
 Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
-`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, authenticated intent updates, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
+`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, ordinary-chat exclusion, authenticated intent updates, bounded incremental session indexing, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
 `tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` cover the existing handoff, continuation and live-runtime boundaries.
 
 ## Components and their owners
@@ -306,7 +307,7 @@ MAIN alone classifies new user input, decides scope and authority, dispatches ne
 Candidate, conflict and blocked prechecks return to MAIN for judgment; routine progress and healthy executor readback do not open a MAIN model turn.
 The initial delegation contract does not permit spawn or executor replacement, interrupt/exit/relaunch, lifecycle control, merge, archival, operation or short grants, or independent short-result routing.
 
-Unclassified original input receipts prevent new delegated effects while allowing readback.
+A pending intent append prevents new delegated effects for that exact task while allowing readback; unrelated chat does not create a fleet-wide barrier.
 MAIN revokes the old delegation before changing a brief or goal, then issues a new revision after classification.
 Status questions read the named task and its evidence without enrolling or sweeping historical work.
 Expired, revoked, stale-generation and mismatched task bindings refuse at the actual mutation boundary.

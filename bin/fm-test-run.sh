@@ -1312,6 +1312,12 @@ families_for_changed_path() {
     tests/lifecycle-native.mjs)
       printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"
       ;;
+    tests/retirement-business.py)
+      printf '%s\n' "__script__:fm-backlog-atomicity.test.sh"
+      ;;
+    tests/retirement-observations.py)
+      printf '%s\n' "__script__:fm-task-lifecycle.test.sh"
+      ;;
     bin/fm-stow-run.sh|bin/fm-heartbeat-receipt.py)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"
       printf '%s\n' real-herdr-gated

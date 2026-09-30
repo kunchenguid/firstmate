@@ -7,13 +7,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
-import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
+import { classifyFirstmateOperationalText, encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
+import { NATIVE_FEISHU_CUSTOM_TYPE, verifyFeishuSessionMessage } from "../../../bin/fm-feishu-state.mjs";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; revision?: number; delegated?: boolean };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type OwnershipDeferral = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string;
-  update_brief?: boolean; pending?: boolean; route_entry_id?: string };
+  update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
 type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
@@ -61,8 +62,8 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   const { root, home, state, owns } = options;
   const data = process.env.FM_DATA_OVERRIDE || join(home, "data");
   const inputs = new Map<string, InputReceipt>();
-  // Unrouted input pacing is session-owned. Task admission and semantic truth
-  // remain in the canonical lifecycle owner, independent of this runtime.
+  // Only explicitly assigned intent transactions are recovered from the session.
+  // Chat remains in the native transcript, never a separately supervised goal.
   const pacing = new Map<string, InputPacing>();
   const submitted = new Set<string>();
   const delivered = new Map<string, number>();
@@ -70,7 +71,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   let checking: Promise<Admission | undefined> | null = null;
   let context: ExtensionContext | undefined;
   let cursor = 0;
-  let inputCursor = 0;
   let scanScope: string[] = [];
 
   async function command(args: string[]) {
@@ -104,22 +104,39 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  function capture(text: string, key?: string): string {
-    if (!owns()) return "";
-    const id = key || randomUUID();
-    if (!inputs.has(id)) {
-      const receipt = { id, text };
-      pi.appendEntry(INPUT_ENTRY, receipt);
-      inputs.set(id, receipt);
+  // Compatibility for dialog adapters: the native transcript owns chat evidence.
+  // Capturing a message does not enroll work or create an input obligation.
+  function capture(_text: string, _key?: string): string { return ""; }
+
+  function originalInput(ctx: ExtensionContext, id?: string): InputReceipt {
+    const entries = ctx.sessionManager.getBranch();
+    for (const entry of [...entries].reverse()) {
+      if (id && entry.id !== id && !(entry.type === "custom" && entry.customType === INPUT_ENTRY && (entry.data as InputReceipt)?.id === id)) continue;
+      // Historical unassigned capture is selectable only by exact receipt id
+      // after ordinary intake has supplied the task. It gains no clock or goal.
+      if (id && entry.type === "custom" && entry.customType === INPUT_ENTRY) {
+        const value = entry.data as InputReceipt;
+        if (value.id === id && !value.task && !value.answer && value.text?.trim()) return { id, text: value.text };
+      }
+      let content: unknown;
+      if (entry.type === "message" && entry.message.role === "user") content = entry.message.content;
+      else if (entry.type === "custom_message" && entry.customType === NATIVE_FEISHU_CUSTOM_TYPE) {
+        if (!verifyFeishuSessionMessage(home, entry)) throw new Error("original Feishu message needs immutable delivery proof; retain the task update for exact readback");
+        content = entry.content;
+      } else continue;
+      const text = typeof content === "string" ? content : Array.isArray(content)
+        ? content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("") : "";
+      if (!text.trim() || classifyFirstmateOperationalText(text)) continue;
+      return { id: entry.id, source_entry_id: entry.id, text };
     }
-    return id;
+    throw new Error("Select an original user message from the current session; ambiguous task routing requires clarification through ordinary intake.");
   }
 
   function instruction(lines: string[]): string {
     return "Live task continuation obligations (presentation acknowledgements do not close these):\n" +
       lines.join("\n") + "\nUse fm_task_continuation inspect/assess for semantic judgments and tool-derived CAS/evidence. " +
-      "For each input receipt, route every requested task to its durable brief with action=route (task), " +
-      "or record a substantive informational answer with action=answer (answer). " +
+      "Persistence belongs to existing tasks. Create actual new work through ordinary task intake; " +
+      "route a selected original message only to update that task. Chat needs no answer or route bookkeeping. " +
       "Main coordinates and judges acceptance; executors perform the operation chain. " +
       "Observe exact handled inbox receipt/current state; queued handoffs stay pending and use only their existing retry id. " +
       "Uncertain effects require readback, never blind replay. Genuine blockers need owner, dependency, " +
@@ -149,13 +166,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const observations: Observation[] = [];
     const reconciliations: Reconciliation[] = [];
     const deferrals: OwnershipDeferral[] = [];
-    const unrouted = [...inputs.values()].filter((value) => value.pending || !value.task && !value.answer);
-    for (let i = 0; i < Math.min(BATCH, unrouted.length); i++) {
-      const value = unrouted[(inputCursor + i) % unrouted.length];
-      observations.push({ task_id: `input:${value.id}`,
-        state: "pending", reason: value.text.slice(0, 1200), key: value.id });
-    }
-    inputCursor = unrouted.length ? (inputCursor + BATCH) % unrouted.length : 0;
     const ids = existsSync(data) ? readdirSync(data).filter((id) => atom(id) &&
       existsSync(join(data, id, "lifecycle.json"))).sort() : [];
     scanScope = ids;
@@ -198,7 +208,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     const { observations, reconciliations, deferrals } = await collect();
     if (!current()) throw new Error("readback receiver generation changed");
     const pending = observations.filter((item) => !["accepted", "archived", "running", "blocked"].includes(item.state));
-    if (!scanScope.length && !pending.length && !reconciliations.length && !deferrals.length) return;
+    if (!pending.length && !reconciliations.length && !deferrals.length) return;
     // Boundary drafts are persisted without message_end. Read the actual
     // session branch before acknowledging their reserved admission.
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -273,47 +283,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       for (const item of pending) {
         if (!current()) throw new Error("readback receiver generation changed");
         let admission: string | undefined;
-        if (item.task_id.startsWith("input:")) {
-          // Unrouted input is session-owned; tasks use only canonical CAS below.
-          let pace = pacing.get(item.task_id);
-          if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: 0, after: 0 };
-          const at = pace.reserved ? delivered.get(pace.reserved) : undefined;
-          if (at !== undefined) {
-            pace.reserved = undefined;
-            pace.after = Math.max(pace.after, at + INTERVAL_MS * 2 ** (pace.attempts - 1));
-          }
-          if (!pace.reserved && pace.attempts < ATTEMPTS && Date.now() >= pace.after) {
-            pace.attempts++;
-            pace.after = Date.now() + INTERVAL_MS * 2 ** (pace.attempts - 1);
-            pace.reserved = `input.${item.key}.${pace.attempts}`;
-          }
-          if (!pace.reserved && pace.attempts === ATTEMPTS) {
-            const id = `e.${item.key}`;
-            pace.escalatedAt ??= delivered.get(id);
-            if (pace.escalatedAt === undefined && !submitted.has(id)) {
-              escalations.push({ id, task: item.task_id, reason: "input has not been routed to a task or substantively answered" });
-            } else if (pace.escalatedAt !== undefined) {
-              pace.recoveryAttempts ??= 0;
-              pace.recoveryAfter ??= pace.escalatedAt + 60_000;
-              const at = pace.recoveryReserved ? delivered.get(pace.recoveryReserved) : undefined;
-              if (at !== undefined) {
-                pace.recoveryReserved = undefined;
-                pace.recoveryAfter = Math.max(pace.recoveryAfter, at + Math.min(900_000, 60_000 * 2 ** Math.min(pace.recoveryAttempts, 4)));
-              }
-              if (!pace.recoveryReserved && Date.now() >= pace.recoveryAfter) {
-                if (pace.recoveryAttempts >= Number.MAX_SAFE_INTEGER) throw new Error("input recovery counter exhausted");
-                pace.recoveryReserved = `r.${item.key}.${++pace.recoveryAttempts}`;
-              }
-              if (pace.recoveryReserved && !submitted.has(pace.recoveryReserved)) {
-                escalations.push({ id: pace.recoveryReserved, task: item.task_id,
-                  reason: "input remains unrouted after exhausted coordination", recovery: true });
-              }
-            }
-          }
-          pacing.set(item.task_id, pace);
-          pi.appendEntry(PACING_ENTRY, { id: item.task_id, ...pace });
-          admission = pace.reserved;
-        } else {
           try {
             const coordinated = await command(["coordinate", item.task_id, "--expected-revision", String(item.revision), "--record", proofFile]);
             clearOwnershipDeferral(item.task_id);
@@ -353,7 +322,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
             // Other tasks in this bounded batch still receive coordination.
             continue;
           }
-        }
         if (admission && !submitted.has(admission) && !delivered.has(admission)) {
           lines.push(`${item.task_id}: ${item.state}: ${item.reason}`);
           admissions.push(admission);
@@ -464,11 +432,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
       if (entry.type === "custom" && entry.customType === PACING_ENTRY) {
         const pace = entry.data as InputPacing & { id: string };
-        if (typeof pace?.id === "string") pacing.set(pace.id, pace);
+        if (typeof pace?.id === "string" && /^(ownership|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
       }
       if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
       const value = entry.data as InputReceipt;
-      if (typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id,
+      if (value?.task && typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id,
         value.update_brief && !value.route_entry_id ? { ...value, route_entry_id: entry.id } : value);
     }
   };
@@ -496,15 +464,15 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Inspect evidence and submit semantic assessments without lifecycle JSON or hashes. inspect binds evidence paths (include authority/payload/blocker paths); assess submits the returned basis and a judgment. route with update_brief appends the exact authenticated input and synchronizes intent under the existing lock; retry the same input after an interrupted update. No operation accepts a goal from process success or executes a prepared action.",
+    description: "Inspect evidence and submit semantic assessments without lifecycle JSON or hashes. inspect binds evidence paths (include authority/payload/blocker paths); assess submits the returned basis and a judgment. route with task and update_brief appends a selected original user message and synchronizes intent under the existing lock; retry the same input after an interrupted update. No operation accepts a goal from process success or executes a prepared action.",
     executionMode: "sequential",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("enroll"), Type.Literal("route"), Type.Literal("answer"), Type.Literal("inspect"), Type.Literal("assess"), Type.Literal("refresh")]),
-      task: Type.Optional(Type.String()), input: Type.Optional(Type.String()), answer: Type.Optional(Type.String()),
+    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("enroll"), Type.Literal("route"), Type.Literal("inspect"), Type.Literal("assess"), Type.Literal("refresh")]),
+      task: Type.Optional(Type.String()), input: Type.Optional(Type.String()),
       update_brief: Type.Optional(Type.Boolean()), basis: Type.Optional(Type.String()),
       evidence: Type.Optional(Type.Array(Type.String())),
       judgment: Type.Optional(Type.Object({ disposition: Type.Union([Type.Literal("open"), Type.Literal("accepted"), Type.Literal("archived")]),
         outcome: Type.String(), remaining_gap: Type.String(), authority_ref: Type.String(), evidence: Type.Array(Type.String()),
-        intent_changed: Type.Optional(Type.Boolean()), revoke_delegation: Type.Optional(Type.Boolean()),
+        intent_changed: Type.Optional(Type.Boolean()), revoke_delegation: Type.Optional(Type.Boolean()), supersede_prepared: Type.Optional(Type.Boolean()),
         next_action: Type.Optional(Type.Union([Type.Null(), Type.Object({ kind: Type.Union([Type.Literal("steer"), Type.Literal("readback"), Type.Literal("wait"), Type.Literal("decision"), Type.Literal("spawn"), Type.Literal("relaunch")]),
           payload_ref: Type.String(), recheck_at: Type.String(), deadline: Type.String(), attempt_limit: Type.Optional(Type.Number()),
           blocker: Type.Optional(Type.Object({ owner: Type.String(), dependency: Type.String(), release_ref: Type.String() })) })])) })) }),
@@ -513,7 +481,32 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (!owns()) throw new Error("this session does not own the fleet lock");
         let result: unknown;
         if (params.action === "list") {
-          result = { inputs: [...inputs.values()], tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use inspect with evidence paths, then assess with its basis and semantic judgment. Use route update_brief for additional authenticated user intent. A report or provider terminal state is not acceptance." };
+          // Recover presentation after a successful canonical commit followed by
+          // interruption. This acknowledges persistence, never goal acceptance.
+          for (const routed of [...inputs.values()].filter(value => value.pending)) {
+            try {
+              const readback = await command(["inspect", routed.task!]);
+              const update = Object.values(readback.intent_updates || {}).find((value: any) =>
+                value.phase === "confirmed" && value.proof?.input === routed.id &&
+                value.proof?.entry_id === routed.route_entry_id &&
+                value.proof?.session_file === _ctx.sessionManager.getSessionFile());
+              if (update) {
+                const confirmed = { ...routed, pending: false };
+                pi.appendEntry(INPUT_ENTRY, confirmed);
+                inputs.set(routed.id, confirmed);
+              }
+            } catch { /* Exact recovery stays pending until its owner can read it. */ }
+          }
+          const historical = new Map<string, InputReceipt>();
+          for (const entry of _ctx.sessionManager.getBranch()) {
+            if (entry.type === "custom" && entry.customType === INPUT_ENTRY) {
+              const value = entry.data as InputReceipt;
+              if (value?.id && value.text) historical.set(value.id, value);
+            }
+          }
+          const unassigned = [...historical.values()].filter(value => !value.task && !value.answer);
+          result = { historical_intake_evidence: unassigned.slice(-BATCH).map(({ id, text }) => ({ id, text })),
+            historical_intake_total: unassigned.length, historical_intake_truncated: unassigned.length > BATCH, pending_updates: [...inputs.values()].filter(value => value.task && value.pending), tasks: existsSync(data) ? readdirSync(data).filter((id) => atom(id) && existsSync(join(data, id, "lifecycle.json"))) : [], instructions: "Use inspect with evidence paths, then assess with its basis and semantic judgment. New work uses ordinary task intake. Use route with task, update_brief:true and the original session entry id for task changes; omitted input selects the latest original user message. Chat needs no bookkeeping. Historical unassigned receipts are read-only intake evidence; classify real work through ordinary intake before an explicit task route. A report or provider terminal state is not acceptance." };
         } else if (params.action === "enroll") {
           await enroll(params.task || "");
           result = await command(["inspect", params.task || ""]);
@@ -524,37 +517,32 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         } else if (params.action === "refresh") {
           result = await command(["refresh", params.task || ""]);
         } else {
-          const input = inputs.get(params.input || "");
-          if (!input || input.answer || input.task && !(params.action === "route" && params.task === input.task && params.update_brief && input.update_brief)) throw new Error("input is absent or already routed/answered");
-          if (params.action === "route") {
-            if (!input.task) await enroll(params.task || "");
-            if (params.update_brief) {
-              const sessionFile = _ctx.sessionManager.getSessionFile();
-              if (!sessionFile) throw new Error("intent update requires a persisted native input session");
-              let routed = input;
-              if (!input.route_entry_id) {
-                routed = { ...input, task: params.task, update_brief: true, pending: true };
-                pi.appendEntry(INPUT_ENTRY, routed);
-                const entry = _ctx.sessionManager.getBranch().at(-1);
-                if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("native route receipt was not persisted");
-                routed = { ...routed, route_entry_id: entry.id };
-                inputs.set(input.id, routed);
-              }
-              const updated = await command(["update-brief", params.task || "", "--session-file", sessionFile,
-                "--entry-id", routed.route_entry_id!, "--input", input.id]);
-              result = { ...routed, pending: false };
-              pi.appendEntry(INPUT_ENTRY, result);
-              inputs.set(input.id, result as InputReceipt);
-              return { content: [{ type: "text" as const, text: JSON.stringify(updated) }], details: undefined };
-            } else {
-              result = { ...input, task: params.task };
-            }
-          } else {
-            if (!params.answer?.trim()) throw new Error("substantive informational answer required; task work must be routed");
-            result = { ...input, answer: params.answer };
+          if (params.action !== "route" || !atom(params.task || "") || params.update_brief !== true) {
+            throw new Error("Task updates require an explicit existing task and update_brief:true; chat is answered normally.");
           }
-          pi.appendEntry(INPUT_ENTRY, result);
-          inputs.set(input.id, result as InputReceipt);
+          const input = params.input && inputs.get(params.input) || originalInput(_ctx, params.input);
+          const sessionFile = _ctx.sessionManager.getSessionFile();
+          if (!sessionFile) throw new Error("task update requires a persisted original session");
+          // Existing prepared updates must reach their owner before normal reads,
+          // which deliberately refuse while the atomic intent transaction is pending.
+          if (!inputs.has(input.id)) await enroll(params.task!);
+          let routed = inputs.get(input.id);
+          if (routed && routed.task !== params.task) throw new Error("original intent update belongs to another task");
+          if (!routed) {
+            routed = { ...input, task: params.task, update_brief: true, pending: true };
+            pi.appendEntry(INPUT_ENTRY, routed);
+            const entry = _ctx.sessionManager.getBranch().at(-1);
+            if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent receipt was not persisted");
+            routed = { ...routed, route_entry_id: entry.id };
+            inputs.set(input.id, routed);
+          }
+          result = await command(["update-brief", params.task!, "--session-file", sessionFile,
+            "--entry-id", routed.route_entry_id!, "--input", input.id]);
+          if (routed.pending) {
+            routed = { ...routed, pending: false };
+            pi.appendEntry(INPUT_ENTRY, routed);
+            inputs.set(input.id, routed);
+          }
         }
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
       } catch (error) {
@@ -562,5 +550,5 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     },
   });
-  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: () => [...inputs.values()].some((input) => input.pending || !input.task && !input.answer) };
+  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: (task?: string) => [...inputs.values()].some((input) => input.task === task && input.pending) };
 }

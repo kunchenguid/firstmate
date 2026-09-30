@@ -440,11 +440,14 @@ call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','F
 revoked=copy.deepcopy(r);revoked['delegation']['revision']+=1;revoked['delegation']['revoked']=True;r=reconcile(revoked)
 r['delegation']['expires_at']='2099-01-01T00:00:00Z';r['delegation']['revision']+=1;r['delegation']['revoked']=False;r=reconcile(r)
 
-call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',extra={'FM_BRANCH_INPUT_BARRIER':'1'},ok=False)
-session.write_text('{"type":"session","id":"s"}\n'+json.dumps(dict(type='custom',id='i1',parentId=None,customType='fm-continuation-input',data=dict(id='new',text='Change scope')))+'\n')
+session.write_text('{"type":"session","id":"s"}\n'+json.dumps(dict(type='custom',id='i1',parentId=None,customType='fm-continuation-input',data=dict(id='new',text='Change scope',task='source',pending=True)))+'\n')
 call('fm-send.sh','source','--action-id',a['id'],'--expected-generation','g1','Fill the existing acceptance evidence.',actor='branch',ok=False)
 assert not (home/'state/source.inbox').exists()
-with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i2',parentId='i1',customType='fm-continuation-input',data=dict(id='new',text='Change scope',answer='Classified informational input')))+'\n')
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i2',parentId='i1',customType='fm-continuation-input',data=dict(id='new',text='Change scope',task='source',pending=False)))+'\n')
+# Ordinary chat and another task's pending intent cannot veto this task.
+with session.open('a') as f:
+    f.write(json.dumps(dict(type='custom',id='chat',parentId='i2',customType='fm-continuation-input',data=dict(id='chat',text='How does configuration work?')))+'\n')
+    f.write(json.dumps(dict(type='custom',id='other-update',parentId='chat',customType='fm-continuation-input',data=dict(id='other',text='Change other task',task='other',pending=True)))+'\n')
 # Inject a process boundary failure after the real enqueue, before receipt binding.
 owner=bin/'fm-task-lifecycle.py';candidate=owner.read_text()
 owner.write_text(candidate.replace("        elif args.operation == 'bind-inbox':", "        elif args.operation == 'bind-inbox':\n            raise Refusal('fixture crash after enqueue')"))
@@ -480,10 +483,10 @@ call('fm-task-handoff.sh','send','source','target','--id','dependency-one','--ac
 assert not (home/'state/target.inbox').exists()
 # A queued old branch instruction cannot bypass the input barrier when MAIN's
 # lease release automatically retries its original durable handoff.
-with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i3',parentId='i2',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent')))+'\n')
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i3',parentId='other-update',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent',task='source',pending=True)))+'\n')
 call('fm-lease.sh','release','target','--actor','main')
 assert not (home/'state/target.inbox').exists()
-with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i4',parentId='i3',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent',answer='Independent informational input')))+'\n')
+with session.open('a') as f:f.write(json.dumps(dict(type='custom',id='i4',parentId='i3',customType='fm-continuation-input',data=dict(id='newer',text='Classify this new intent',task='source',pending=False)))+'\n')
 call('fm-task-handoff.sh','retry','dependency-one',actor='branch')
 (home/'state/task-handoffs/status/dependency-one.state').unlink()
 call('fm-task-handoff.sh','retry','dependency-one',actor='branch')

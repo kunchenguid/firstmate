@@ -330,6 +330,35 @@ reset()
 before={p:p.read_bytes() for p in root.iterdir()}
 assert due() is False, 'complete historical operation receipt kept cleanup due'
 assert before=={p:p.read_bytes() for p in root.iterdir()}, 'readback modified operation evidence'
+# A stale cleanup pointer may name a resolved refusal while the accepted
+# assessment already binds one later complete operation chain.
+stale='short-'+hashlib.sha256(b'legacy-cleanup-stale').hexdigest()
+stale_root=home/'state/short-agents'/stale;stale_root.mkdir(parents=True)
+stale_request=copy.deepcopy(request);stale_request.update(id=stale,nonce='stale-nonce')
+stale_request['input']['key']='legacy-cleanup-stale'
+stale_result=copy.deepcopy(result);stale_result.update(id=stale,evidence=str(stale_root))
+stale_receipt=copy.deepcopy(receipt);stale_receipt.update(id=stale,nonce='stale-nonce',state='refused')
+for name,value in [('request.json',stale_request),('result.json',stale_result),('operation-0.receipt.json',stale_receipt)]:write(stale_root/name,value)
+mixed=json.loads((directory/'lifecycle.json').read_text());mixed['cleanup_ref']=str(stale_root/'result.json')
+mixed['assessment']['evidence'].append({'ref':str(stale_root/'result.json'),'sha256':hashlib.sha256((stale_root/'result.json').read_bytes()).hexdigest()})
+write(directory/'lifecycle.json',mixed)
+proofs_before={p:p.read_bytes() for p in (*root.iterdir(),*stale_root.iterdir())}
+assert due() is False, 'stale refused cleanup pointer hid the unique assessed completion chain'
+assert proofs_before=={p:p.read_bytes() for p in proofs_before}, 'mixed receipt readback modified operation evidence'
+current_request=json.loads((root/'request.json').read_text());current_request['operationBindings'][0]['spawn_gen']='other';write(root/'request.json',current_request)
+assert due() is True, 'generation-mismatched assessed completion chain closed cleanup'
+reset()
+duplicate='short-'+hashlib.sha256(b'legacy-cleanup-duplicate').hexdigest()
+duplicate_root=home/'state/short-agents'/duplicate;duplicate_root.mkdir(parents=True)
+duplicate_request=copy.deepcopy(request);duplicate_request.update(id=duplicate,nonce='duplicate-nonce')
+duplicate_request['input']['key']='legacy-cleanup-duplicate'
+duplicate_result=copy.deepcopy(result);duplicate_result.update(id=duplicate,evidence=str(duplicate_root))
+duplicate_receipt=copy.deepcopy(receipt);duplicate_receipt.update(id=duplicate,nonce='duplicate-nonce')
+for name,value in [('request.json',duplicate_request),('result.json',duplicate_result),('operation-0.receipt.json',duplicate_receipt)]:write(duplicate_root/name,value)
+ambiguous=json.loads((directory/'lifecycle.json').read_text())
+ambiguous['assessment']['evidence'].append({'ref':str(duplicate_root/'result.json'),'sha256':hashlib.sha256((duplicate_root/'result.json').read_bytes()).hexdigest()})
+write(directory/'lifecycle.json',ambiguous)
+assert due() is True, 'multiple complete assessed cleanup chains were treated as unique'
 for version in (1,2,'future-compatible'):
     reset();r=copy.deepcopy(request);r['version']=version;r['diagnostics']={'writer':'future'};write(root/'request.json',r)
     r=copy.deepcopy(receipt);r['evidence']['diagnostics']={'elapsed':3};write(root/'operation-0.receipt.json',r)
@@ -431,3 +460,6 @@ fm_treehouse_slot_owner_state "$SLOT" same s-new
 [ "$FM_TREEHOUSE_SLOT_OWNER" = unsafe ]
 SHSLOT
 pass 'missing or old generation cannot release a reused same-task slot; duplicate claim remains unsafe'
+
+# Terminal release/ack semantics exercise the real scan and receipt owners.
+python3 "$ROOT/tests/retirement-observations.py" "$ROOT" "$TMP_ROOT/retirement-observations"

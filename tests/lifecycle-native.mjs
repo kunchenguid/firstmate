@@ -1,6 +1,6 @@
 // Real installed SessionManager, isolated home, and public native tool callbacks.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
@@ -75,14 +75,45 @@ async function install() {
 }
 let owner = await install();
 async function tool(params, ok = true) {
-  await fire('tool_call', { type: 'tool_call', toolName: 'fm_task_continuation', input: params });
-  const result = await tools.get('fm_task_continuation').execute('call', params, undefined, undefined, ctx());
+  const result = await rawTool(params);
   assert.equal(Boolean(result.isError), !ok, JSON.stringify(result));
   return ok ? JSON.parse(result.content[0].text) : result.content[0].text;
 }
+async function rawTool(params) {
+  await fire('tool_call', { type: 'tool_call', toolName: 'fm_task_continuation', input: params });
+  return tools.get('fm_task_continuation').execute('call', params, undefined, undefined, ctx());
+}
+async function convergeRoute(params, limit = 6) {
+  for (let attempt = 1; attempt <= limit; attempt += 1) {
+    const result = await rawTool(params);
+    if (!result.isError) return { attempts: attempt, value: JSON.parse(result.content[0].text) };
+    assert.match(result.content[0].text, /index catch-up incomplete/);
+  }
+  assert.fail('bounded session index did not converge');
+}
+async function waitForProbeStatus(status) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (existsSync(readProbe)) {
+      const rows = readFileSync(readProbe, 'utf8').trim().split(/\n/).filter(Boolean).map(JSON.parse);
+      if (rows.some((row) => row.status === status)) return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.fail(`session read probe did not report ${status}`);
+}
 await tool({ action: 'enroll', task: 'task' });
-const a = owner.capture('Add condition A.', 'a');
-const b = owner.capture('Add condition B.', 'b');
+const beforeChat = session.getBranch().length;
+for (const text of ['你好', '怎样配置工作目录？', '谢谢', '继续', '批准合并', '停止这个任务']) owner.capture(text);
+assert.equal(session.getBranch().length, beforeChat, 'chat capture created durable message goals');
+const ordinaryChatEntriesAdded = session.getBranch().length - beforeChat;
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition A.' }], timestamp: Date.now() });
+const a = session.getLeafId();
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition B.' }], timestamp: Date.now() });
+const b = session.getLeafId();
+const readProbe = home + '/session-read-probe.jsonl';
+process.env.FM_TASK_SESSION_READ_PROBE = readProbe;
+assert.match(await tool({ action: 'route', input: a, update_brief: true }, false), /explicit existing task/);
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
 writeFileSync(home + '/state/task.status', 'working: routine progress\n');
 writeFileSync(home + '/state/.wake-queue', '1\t1\tsignal\ttask.status\tsignal: routine progress\n2\t2\tcheck\tpermission\tcheck: MAIN-only permission decision\n');
 await tool({ action: 'route', task: 'task', input: a, update_brief: true });
@@ -95,15 +126,164 @@ await fire('session_shutdown', { reason: 'reload' });
 session = SessionManager.open(session.getSessionFile());
 owner = await install();
 await tool({ action: 'route', task: 'task', input: a, update_brief: true });
+// A prepared observation can become stale after handled task instructions.
+// Reconcile it explicitly with new authority; no effect is executed or replayed.
+const waitEvidence = 'data/task/wait.txt';
+writeFileSync(home + '/' + waitEvidence, 'Previous delivery wait; read exact current delivery before continuing.');
+let current = await tool({ action: 'inspect', task: 'task', evidence: [waitEvidence, 'data/task/brief.md'] });
+await tool({ action: 'assess', task: 'task', basis: current.basis, judgment: {
+  disposition: 'open', outcome: 'Waiting on previous delivery', remaining_gap: 'Corrected work still required; previously persisted input ' + a, 
+  authority_ref: 'data/task/brief.md', evidence: [waitEvidence, 'data/task/brief.md'],
+  next_action: { kind: 'wait', payload_ref: waitEvidence, recheck_at: '2000-01-01T00:00:00Z', deadline: '2099-01-01T00:00:00Z' }
+} });
+assert.match(await tool({ action: 'route', task: 'task', input: b, update_brief: true }, false), /outstanding action/);
+writeFileSync(home + '/data/task/correction.txt', 'The old wait is superseded by the acknowledged correction; continue the same task.');
+current = await tool({ action: 'inspect', task: 'task', evidence: [waitEvidence, 'data/task/correction.txt'] });
+await tool({ action: 'assess', task: 'task', basis: current.basis, judgment: {
+  disposition: 'open', outcome: 'Old prepared wait reconciled', remaining_gap: 'Corrected work still required; previously persisted input ' + a, 
+  authority_ref: 'data/task/correction.txt', evidence: [waitEvidence, 'data/task/correction.txt'],
+  next_action: null, supersede_prepared: true
+} });
+assert.equal((await tool({ action: 'inspect', task: 'task' })).next_action, null);
+// An unrelated large output transcript used to make all routing fail at 16 MiB.
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'X'.repeat(9 * 1024 * 1024) }], timestamp: Date.now() });
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Y'.repeat(9 * 1024 * 1024) }], timestamp: Date.now() });
+// Crash after canonical commit but before native presentation acknowledges it.
+const append = session.appendCustomEntry.bind(session);
+let failPresentation = true;
+session.appendCustomEntry = (name, value) => {
+  if (name === 'fm-continuation-input' && value.pending === false && failPresentation) {
+    failPresentation = false; throw Error('fixture: interrupted after canonical commit');
+  }
+  return append(name, value);
+};
+assert.match(await tool({ action: 'route', task: 'task', input: b, update_brief: true }, false), /interrupted/);
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
+const stable = session.getBranch().length;
+await tool({ action: 'list' });
 await tool({ action: 'route', task: 'task', input: b, update_brief: true });
+assert.equal(session.getBranch().length, stable, 'confirmed retry accumulated presentation evidence');
+const reads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse).filter(({ status }) => status !== 'start');
+assert(reads.some(({ bytes }) => bytes > 18 * 1024 * 1024 && bytes <= 32 * 1024 * 1024), 'large transcript delta was not read within its byte bound');
+assert(reads.at(-1).bytes < 64 * 1024, `indexed retry reread ${reads.at(-1).bytes} session bytes`);
 const brief = readFileSync(home + '/data/task/brief.md', 'utf8');
 assert.equal(brief.split('Add condition A.').length, 2);
 assert.equal(brief.split('Add condition B.').length, 2);
 assert.equal(owner.inputBarrier(), false);
+rmSync(home + '/state/task-session-index', { recursive: true, force: true });
+writeFileSync(readProbe, '');
+for (const value of ['L', 'M', 'N']) {
+  session.appendMessage({ role: 'user', content: [{ type: 'text', text: value.repeat(15 * 1024 * 1024) }], timestamp: Date.now() });
+}
+const coldText = 'Preserve the cold-session requirement exactly.';
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: coldText }], timestamp: Date.now() });
+const coldInput = session.getLeafId();
+const coldSessionBytes = statSync(session.getSessionFile()).size;
+assert(coldSessionBytes > 43 * 1024 * 1024, 'cold session fixture did not exceed 43 MiB');
+const cold = await convergeRoute({ action: 'route', task: 'task', input: coldInput, update_brief: true });
+assert(cold.attempts > 1, 'cold session did not exercise resumable catch-up');
+await tool({ action: 'route', task: 'task', input: coldInput, update_brief: true });
+const coldReads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse).filter(({ status }) => status !== 'start');
+assert(coldReads.some(({ status }) => status === 'checkpoint'), 'cold session did not persist a bounded checkpoint');
+assert(coldReads.every(({ bytes }) => bytes <= 33 * 1024 * 1024), `cold recovery exceeded its measured read bound: ${JSON.stringify(coldReads)}`);
+assert(coldReads.filter(({ status }) => status === 'checkpoint').every(({ records }) => records > 0), 'cold recovery checkpoint made no complete-record progress');
+assert(coldReads.at(-1).status === 'success' && coldReads.at(-1).bytes < 64 * 1024, 'cold session repeat did not use indexed readback');
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split(coldText).length, 2);
+
+rmSync(home + '/state/task-session-index', { recursive: true, force: true });
+writeFileSync(readProbe, '');
+const concurrentText = 'Preserve the concurrent-append requirement exactly.';
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: concurrentText }], timestamp: Date.now() });
+const concurrentInput = session.getLeafId();
+const raced = rawTool({ action: 'route', task: 'task', input: concurrentInput, update_brief: true });
+await waitForProbeStatus('start');
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Unrelated message appended during session indexing.' }], timestamp: Date.now() });
+const racedResult = await raced;
+assert.equal(Boolean(racedResult.isError), true, JSON.stringify(racedResult));
+assert.match(racedResult.content[0].text, /session changed during readback/);
+assert.equal(readdirSync(home + '/state/task-session-index').length, 0, 'changed snapshot published a session index');
+const recoveredRace = await convergeRoute({ action: 'route', task: 'task', input: concurrentInput, update_brief: true });
+assert(recoveredRace.attempts > 1, 'clean concurrent-append retry did not exercise bounded catch-up');
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split(concurrentText).length, 2);
+// Task intake and explicit updates use one ordinary task identity.
+mkdirSync(home + '/data/separate-work', { recursive: true });
+writeFileSync(home + '/data/separate-work/brief.md', "# Task\n## Captain's intent\nExplain the cause and implement the bounded change\n\n## Firstmate spec\nVerify the same task\n");
+writeFileSync(home + '/.tasks.toml', 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
+const intake = spawnSync('tasks-axi', ['add', 'separate-work', 'Separate actual work', '--kind', 'scout', '--file', home + '/data/backlog.md'], {
+  cwd: home, encoding: 'utf8', env: { ...process.env, TASKS_AXI_FILE: home + '/data/backlog.md', TASKS_AXI_BACKEND: 'markdown' }
+});
+assert.equal(intake.status, 0, intake.stderr);
+await tool({ action: 'enroll', task: 'separate-work' });
+for (const text of ['Approve the bounded task scope.', 'Stop this task and preserve the report.']) {
+  session.appendMessage({ role: 'user', content: [{ type: 'text', text }], timestamp: Date.now() });
+  await tool({ action: 'route', task: 'separate-work', input: session.getLeafId(), update_brief: true });
+}
+const stopped = 'data/separate-work/stop.txt';
+writeFileSync(home + '/' + stopped, 'Stop this task and preserve the report.');
+const stopBasis = await tool({ action: 'inspect', task: 'separate-work', evidence: [stopped, 'data/separate-work/brief.md'] });
+await tool({ action: 'assess', task: 'separate-work', basis: stopBasis.basis, judgment: {
+  disposition: 'archived', outcome: 'Explicitly stopped', remaining_gap: 'Earlier requested implementation remains unfinished',
+  authority_ref: stopped, evidence: [stopped, 'data/separate-work/brief.md']
+} });
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+const stoppedAgain = await tool({ action: 'inspect', task: 'separate-work' });
+assert.equal(stoppedAgain.disposition, 'archived');
+assert.match(stoppedAgain.assessment.remaining_gap, /unfinished/);
+assert.equal(readFileSync(home + '/data/backlog.md', 'utf8').split('Separate actual work').length, 2);
+// Four legacy assigned receipts may outlive their already confirmed appends.
+// Recover their exact proofs without rewriting a private store or accepting work.
+mkdirSync(home + '/data/legacy', { recursive: true });
+writeFileSync(home + '/data/legacy/brief.md', "# Task\n## Captain's intent\nExisting legacy work\n\n## Firstmate spec\nKeep unfinished work\n");
+await tool({ action: 'enroll', task: 'legacy' });
+for (let index = 0; index < 4; index++) {
+  const id = 'legacy-input-' + index, text = 'Exact original requirement ' + index;
+  session.appendCustomEntry('fm-continuation-input', { id, text });
+  const entryId = session.appendCustomEntry('fm-continuation-input', { id, text, task: 'legacy', pending: true, update_brief: true });
+  command('fm-task-state.sh', ['update-brief', 'legacy', '--session-file', session.getSessionFile(), '--entry-id', entryId, '--input', id]);
+}
+await fire('session_shutdown', { reason: 'reload' });
+session = SessionManager.open(session.getSessionFile());
+owner = await install();
+assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
+const recoveredEntries = session.getBranch().length;
+await tool({ action: 'list' });
+await tool({ action: 'route', task: 'legacy', input: 'legacy-input-3', update_brief: true });
+assert.equal(session.getBranch().length, recoveredEntries);
+assert.equal((await tool({ action: 'inspect', task: 'legacy' })).disposition, 'open');
+// A historical unassigned real ask remains selectable after ordinary task intake.
+session.appendCustomEntry('fm-continuation-input', { id: 'old-unassigned', text: 'Also preserve the report summary.' });
+await fire('session_tree');
+assert.equal((await tool({ action: 'list' })).historical_intake_evidence.at(-1).id, 'old-unassigned');
+await tool({ action: 'route', task: 'legacy', input: 'old-unassigned', update_brief: true });
+assert.equal((await tool({ action: 'list' })).historical_intake_evidence.length, 0);
+// Invalid Feishu authority must not silently select an earlier local request.
+session.appendCustomMessageEntry('firstmate-feishu-inbound', 'Unverifiable latest message.', true,
+  { schema: 'fm-feishu-pi-message.v1', deliveryRef: 'in_' + 'a'.repeat(24), bindingGeneration: 1 });
+const beforeUntrusted = session.getBranch().length;
+assert.match(await tool({ action: 'route', task: 'legacy', update_brief: true }, false), /immutable delivery proof/);
+assert.equal(session.getBranch().length, beforeUntrusted);
+// Original-message words, not just a selected receipt id, authenticate an update.
+mkdirSync(home + '/data/auth-guard', { recursive: true });
+writeFileSync(home + '/data/auth-guard/brief.md', "# Task\n## Captain's intent\nPreserve authority\n\n## Firstmate spec\nReject altered original words\n");
+await tool({ action: 'enroll', task: 'auth-guard' });
+session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Actual original words.' }], timestamp: Date.now() });
+const original = session.getLeafId();
+const bad = session.appendCustomEntry('fm-continuation-input', { id: original, source_entry_id: original,
+  text: 'Different substituted words.', task: 'auth-guard', pending: true, update_brief: true });
+const rejected = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'auth-guard',
+  '--session-file', session.getSessionFile(), '--entry-id', bad, '--input', original], { encoding: 'utf8', env: process.env });
+assert.notEqual(rejected.status, 0);
+assert.match(rejected.stderr, /differ from original/);
+assert.equal(readFileSync(home + '/data/auth-guard/brief.md', 'utf8').includes('substituted'), false);
 const evidence = 'data/task/brief.md';
 const inspected = await tool({ action: 'inspect', task: 'task', evidence: [evidence] });
-assert.match(inspected.assessment.remaining_gap, /a/);
-assert.match(inspected.assessment.remaining_gap, /b/);
+assert.ok(inspected.assessment.remaining_gap.includes(a));
+assert.ok(inspected.assessment.remaining_gap.includes(b));
 const judgment = { disposition: 'accepted', outcome: 'Verified both conditions', remaining_gap: '',
   authority_ref: evidence, evidence: [evidence] };
 const accepted = await tool({ action: 'assess', task: 'task', basis: inspected.basis, judgment });
@@ -111,5 +291,14 @@ assert.equal(accepted.disposition, 'accepted');
 assert.equal('coordination' in accepted, false);
 await tool({ action: 'assess', task: 'task', basis: inspected.basis, judgment }, false);
 await fire('session_shutdown', { reason: 'quit' });
+console.log('evidence - task continuation IO ' + JSON.stringify({
+  ordinaryChatEntriesAdded,
+  largeTranscriptMaxReadBytes: Math.max(...reads.map(({ bytes }) => bytes)),
+  indexedRetryReadBytes: reads.at(-1).bytes,
+  coldSessionBytes,
+  coldSessionMaxReadBytes: Math.max(...coldReads.map(({ bytes }) => bytes)),
+  coldSessionCheckpoints: coldReads.filter(({ status }) => status === 'checkpoint').length,
+  coldSessionIndexedRetryReadBytes: coldReads.at(-1).bytes,
+}));
 console.log('ok - installed Pi SDK native workflow: routine event handled before authenticated update; MAIN-only event retained; two inputs, reload, retry and inspect/assess CAS without lifecycle JSON or hashes');
 console.log('operator workflow: authenticated update + successful send = 2 calls; evidence inspection + semantic acceptance = 2 calls (setup, recovery probes and automatic event-owner commands excluded)');

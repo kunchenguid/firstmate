@@ -32,6 +32,10 @@ teardown_endpoint_receipt() { # <phase> <pending|confirmed|retained> <reason>
     jq -n --arg id "$ID" --arg generation "$ENDPOINT_GENERATION" --argjson goal "$ENDPOINT_GOAL" \
       '{schema:"fm-task-cleanup.v1",task_id:$id,spawn_gen:$generation,goal_revision:$goal,phases:{}}' > "$tmp"
   fi
+  if jq -e --arg phase "$phase" --arg status "$status" --arg reason "$reason" \
+      '.phases[$phase].state==$status and .phases[$phase].reason_code==$reason' "$tmp" >/dev/null; then
+    rm -f "$tmp"; return 0
+  fi
   local updated
   updated=$(jq --arg phase "$phase" --arg status "$status" --arg reason "$reason" \
     '.phases[$phase]={state:$status,reason_code:$reason}' "$tmp") || { rm -f "$tmp"; return 1; }
