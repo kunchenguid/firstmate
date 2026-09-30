@@ -105,6 +105,7 @@ await tool({ action: 'enroll', task: 'task' });
 const beforeChat = session.getBranch().length;
 for (const text of ['你好', '怎样配置工作目录？', '谢谢', '继续', '批准合并', '停止这个任务']) owner.capture(text);
 assert.equal(session.getBranch().length, beforeChat, 'chat capture created durable message goals');
+const ordinaryChatEntriesAdded = session.getBranch().length - beforeChat;
 session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition A.' }], timestamp: Date.now() });
 const a = session.getLeafId();
 session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition B.' }], timestamp: Date.now() });
@@ -180,7 +181,8 @@ for (const value of ['L', 'M', 'N']) {
 const coldText = 'Preserve the cold-session requirement exactly.';
 session.appendMessage({ role: 'user', content: [{ type: 'text', text: coldText }], timestamp: Date.now() });
 const coldInput = session.getLeafId();
-assert(statSync(session.getSessionFile()).size > 43 * 1024 * 1024, 'cold session fixture did not exceed 43 MiB');
+const coldSessionBytes = statSync(session.getSessionFile()).size;
+assert(coldSessionBytes > 43 * 1024 * 1024, 'cold session fixture did not exceed 43 MiB');
 const cold = await convergeRoute({ action: 'route', task: 'task', input: coldInput, update_brief: true });
 assert(cold.attempts > 1, 'cold session did not exercise resumable catch-up');
 await tool({ action: 'route', task: 'task', input: coldInput, update_brief: true });
@@ -289,5 +291,14 @@ assert.equal(accepted.disposition, 'accepted');
 assert.equal('coordination' in accepted, false);
 await tool({ action: 'assess', task: 'task', basis: inspected.basis, judgment }, false);
 await fire('session_shutdown', { reason: 'quit' });
+console.log('evidence - task continuation IO ' + JSON.stringify({
+  ordinaryChatEntriesAdded,
+  largeTranscriptMaxReadBytes: Math.max(...reads.map(({ bytes }) => bytes)),
+  indexedRetryReadBytes: reads.at(-1).bytes,
+  coldSessionBytes,
+  coldSessionMaxReadBytes: Math.max(...coldReads.map(({ bytes }) => bytes)),
+  coldSessionCheckpoints: coldReads.filter(({ status }) => status === 'checkpoint').length,
+  coldSessionIndexedRetryReadBytes: coldReads.at(-1).bytes,
+}));
 console.log('ok - installed Pi SDK native workflow: routine event handled before authenticated update; MAIN-only event retained; two inputs, reload, retry and inspect/assess CAS without lifecycle JSON or hashes');
 console.log('operator workflow: authenticated update + successful send = 2 calls; evidence inspection + semantic acceptance = 2 calls (setup, recovery probes and automatic event-owner commands excluded)');

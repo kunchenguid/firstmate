@@ -1759,47 +1759,52 @@ class Task:
         ref = record.get('cleanup_ref')
         if not ref:
             return False
-        try:
-            path = Path(ref)
-            if not path.is_absolute():
-                path = self.home / path
-            root = self.state / 'short-agents'
-            require(path.name == 'result.json' and path.parent.parent == root and
-                    re.fullmatch(r'short-[a-f0-9]{64}', path.parent.name), 'not a ShortTask result')
-            require(path.resolve(strict=True) == path, 'unsafe ShortTask result path')
-            evidence = [item for item in record['assessment']['evidence']
-                        if (self.home / item['ref']).resolve() == path]
-            require(len(evidence) == 1, 'unbound historical cleanup result')
-            self.reference(str(path), evidence[0]['sha256'])
-            result = load(path)
-            request = load(path.parent / 'request.json')
-            require(result.get('id') == request.get('id') == path.parent.name and
-                    result.get('state') == 'completed' and result.get('evidence') == str(path.parent),
-                    'historical cleanup result identity conflict')
-            require(atom(request.get('nonce')), 'missing ShortTask nonce')
-            require(text(request['input'].get('key')) and
-                    request['id'] == 'short-' + digest(request['input']['key'].encode()), 'ShortTask key conflict')
-            steps = request['input']['operations']['steps']
-            bindings = request['operationBindings']
-            require(isinstance(steps, list) and isinstance(bindings, list) and
-                    len(steps) == len(bindings), 'invalid historical operation chain')
-            indices = [i for i, step in enumerate(steps) if isinstance(step, dict) and
-                       step.get('action') == 'cleanup' and step.get('task') == self.id]
-            require(len(indices) == 1, 'ambiguous cleanup step')
-            index = indices[0]
-            binding = bindings[index]
-            require(binding.get('spawn_gen') == record['execution_generation'] and
-                    binding.get('endpoint_task_id', self.id) == self.id, 'cleanup generation conflict')
-            receipt = load(path.parent / f'operation-{index}.receipt.json')
-            require(receipt.get('id') == request['id'] and receipt.get('nonce') == request['nonce'] and
-                    type(receipt.get('index')) is int and receipt['index'] == index and
-                    receipt.get('action') == 'cleanup' and receipt.get('state') == 'completed',
-                    'historical cleanup effect identity conflict')
-            return complete_cleanup_facts(receipt.get('evidence'))
-        except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
-            # Missing/conflicting evidence retains the existing readback duty;
-            # no shape mismatch is permission to replay an uncertain operation.
-            return False
+        refs = [ref] + [item.get('ref') for item in record['assessment']['evidence']]
+        completed = set()
+        for ref in refs:
+            try:
+                path = Path(ref)
+                if not path.is_absolute():
+                    path = self.home / path
+                root = self.state / 'short-agents'
+                require(path.name == 'result.json' and path.parent.parent == root and
+                        re.fullmatch(r'short-[a-f0-9]{64}', path.parent.name), 'not a ShortTask result')
+                require(path.resolve(strict=True) == path, 'unsafe ShortTask result path')
+                evidence = [item for item in record['assessment']['evidence']
+                            if (self.home / item['ref']).resolve() == path]
+                require(len(evidence) == 1, 'unbound historical cleanup result')
+                self.reference(str(path), evidence[0]['sha256'])
+                result = load(path)
+                request = load(path.parent / 'request.json')
+                require(result.get('id') == request.get('id') == path.parent.name and
+                        result.get('state') == 'completed' and result.get('evidence') == str(path.parent),
+                        'historical cleanup result identity conflict')
+                require(atom(request.get('nonce')), 'missing ShortTask nonce')
+                require(text(request['input'].get('key')) and
+                        request['id'] == 'short-' + digest(request['input']['key'].encode()), 'ShortTask key conflict')
+                steps = request['input']['operations']['steps']
+                bindings = request['operationBindings']
+                require(isinstance(steps, list) and isinstance(bindings, list) and
+                        len(steps) == len(bindings), 'invalid historical operation chain')
+                indices = [i for i, step in enumerate(steps) if isinstance(step, dict) and
+                           step.get('action') == 'cleanup' and step.get('task') == self.id]
+                require(len(indices) == 1, 'ambiguous cleanup step')
+                index = indices[0]
+                binding = bindings[index]
+                require(binding.get('spawn_gen') == record['execution_generation'] and
+                        binding.get('endpoint_task_id', self.id) == self.id, 'cleanup generation conflict')
+                receipt = load(path.parent / f'operation-{index}.receipt.json')
+                require(receipt.get('id') == request['id'] and receipt.get('nonce') == request['nonce'] and
+                        type(receipt.get('index')) is int and receipt['index'] == index and
+                        receipt.get('action') == 'cleanup' and receipt.get('state') == 'completed',
+                        'historical cleanup effect identity conflict')
+                if complete_cleanup_facts(receipt.get('evidence')):
+                    completed.add(path)
+            except (Refusal, OSError, ValueError, TypeError, KeyError, AttributeError):
+                # Missing/conflicting evidence retains the existing readback duty;
+                # no shape mismatch is permission to replay an uncertain operation.
+                continue
+        return len(completed) == 1
 
     def cleanup_read(self):
         record = self.read()
