@@ -1394,6 +1394,55 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
+# Resolved origin of a project checkout.
+# Status 0 prints that identity. Status 1 means the checkout has no origin.
+# Status 2 means an origin is configured but its local path cannot be
+# canonicalized; callers that must fail closed treat that as unresolved.
+fm_project_origin_identity() {  # <project-dir>
+  local project=$1 origin
+  [ -d "$project" ] || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
+  [ -n "$origin" ] || return 1
+  case "$origin" in
+    /*)
+      if [ -d "$origin" ]; then
+        origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 2
+      fi
+      ;;
+    *://*|*:* ) ;;
+    *)
+      if [ -d "$project/$origin" ]; then
+        origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 2
+      fi
+      ;;
+  esac
+  printf '%s\n' "$origin"
+}
+
+# Two checkouts reserve the same remote when their resolved origins match,
+# even if their working trees are different directories.
+fm_projects_share_origin() {  # <left> <right>
+  local left=$1 right=$2 origin_left origin_right
+  origin_left=$(fm_project_origin_identity "$left") || return 1
+  origin_right=$(fm_project_origin_identity "$right") || return 1
+  [ "$origin_left" = "$origin_right" ]
+}
+
+# Path identity still counts. A shared origin counts even when the paths differ.
+# A missing checkout falls back to the recorded path string.
+fm_project_reservations_overlap() {  # <left> <right>
+  local left=$1 right=$2 left_real right_real
+  left_real=$(CDPATH='' cd -- "$left" 2>/dev/null && pwd -P) || left_real=$left
+  if right_real=$(CDPATH='' cd -- "$right" 2>/dev/null && pwd -P); then
+    if [ "$right_real" = "$left_real" ]; then
+      return 0
+    fi
+  elif [ "$right" = "$left" ]; then
+    return 0
+  fi
+  fm_projects_share_origin "$left" "$right"
+}
+
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
 # It is anchored in the local root home's state directory so that every home on
@@ -1403,18 +1452,14 @@ fm_firstmate_root_home() {
 # separate clones of one origin share a single lock; an origin-less local-only
 # project falls back to its own worktree top instead of failing to resolve.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top bare
+  local project=$1 root origin identity hash top bare origin_status
   [ -d "$project" ] || return 1
   root=$(fm_firstmate_root_home "$FM_HOME") || return 1
-  origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
-  if [ -n "$origin" ]; then
-    case "$origin" in
-      /*) [ ! -d "$origin" ] || origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1 ;;
-      *://*|*:* ) ;;
-      *) [ ! -d "$project/$origin" ] || origin=$(CDPATH='' cd -- "$project/$origin" 2>/dev/null && pwd -P) || return 1 ;;
-    esac
+  origin_status=0
+  origin=$(fm_project_origin_identity "$project") || origin_status=$?
+  if [ "$origin_status" -eq 0 ]; then
     identity=$origin
-  else
+  elif [ "$origin_status" -eq 1 ]; then
     bare=$(git -C "$project" rev-parse --is-bare-repository 2>/dev/null || echo false)
     if [ "$bare" = true ]; then
       identity=$(git -C "$project" rev-parse --absolute-git-dir 2>/dev/null) || return 1
@@ -1424,6 +1469,8 @@ fm_treehouse_project_lock_path() {  # <project-dir>
       top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
       identity=$top
     fi
+  else
+    return 1
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
   [ -d "$root/state" ] || return 1

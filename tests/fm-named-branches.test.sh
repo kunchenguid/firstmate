@@ -559,12 +559,106 @@ test_scout_review_uses_a_local_base_when_origin_lacks_it() {
   pass "fm-review-diff: a scout uses its local named base when origin lacks it"
 }
 
+test_promote_accepts_a_base_chosen_for_an_unbased_scout() {
+  local home project id
+  home="$TMP_ROOT/promote-new-base/home"
+  project="$home/project"
+  id=named-promote-new-base
+  mkdir -p "$home/state" "$home/data" "$project"
+  git init -q -b main "$project"
+  git_identity "$project"
+  commit_file "$project" base base base
+  git -C "$project" checkout -qb office
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\n' "$id" "$project" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/chosen --base-branch office >/dev/null
+  assert_grep 'kind=ship' "$home/state/$id.meta" "promotion of an unbased scout did not publish ship metadata"
+  assert_grep 'base_branch=office' "$home/state/$id.meta" "promotion did not record the base selected at promotion"
+  assert_grep 'Base branch contract: base_branch=office' "$home/data/$id/ship-instructions.md" \
+    "promotion omitted the base selected at promotion"
+  pass "fm-promote: an unbased scout accepts the base selected at promotion"
+}
+
+test_reservations_cover_clones_of_one_origin() {
+  local home remote left right solo fakebin id out status
+  home="$TMP_ROOT/origin-reserve/home"
+  remote="$TMP_ROOT/origin-reserve/remote.git"
+  left="$TMP_ROOT/origin-reserve/left"
+  right="$TMP_ROOT/origin-reserve/proj"
+  solo="$TMP_ROOT/origin-reserve/solo"
+  fakebin="$TMP_ROOT/origin-reserve/bin"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$fakebin"
+  printf 'claude\n' > "$home/config/crew-harness"
+  printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  printf -- '- proj [local-only] - named branch fixture (added 2026-01-01)\n' > "$home/data/projects.md"
+  git init -q --bare "$remote"
+  git init -q -b main "$left"
+  git_identity "$left"
+  commit_file "$left" base base base
+  git -C "$left" checkout -qb office
+  git -C "$left" remote add origin "$remote"
+  git -C "$left" push -q origin main office
+  git clone -q "$remote" "$right"
+  git -C "$right" checkout -q office
+  printf 'kind=ship\nproject=%s\nbranch=feature/widget\n' "$(cd "$left" && pwd -P)" \
+    > "$home/state/named-origin-other.meta"
+
+  id=named-origin-spawn
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/widget --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$right" --mode local-only --yolo off \
+    --branch-name feature/widget --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "a shared origin launched a crew branch already reserved on another clone"
+  assert_contains "$out" "already assigned to task named-origin-other" "the occupying clone was not named"
+  assert_absent "$home/state/$id.meta" "a cross-clone collision published a task record"
+
+  git init -q -b main "$solo"
+  git_identity "$solo"
+  commit_file "$solo" base base base
+  git -C "$solo" checkout -qb office
+  git -C "$solo" remote add origin "$TMP_ROOT/origin-reserve/elsewhere.git"
+  printf 'kind=ship\nproject=%s\nbranch=feature/solo\n' "$(cd "$solo" && pwd -P)" \
+    > "$home/state/named-origin-solo.meta"
+  id=named-origin-distinct
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/solo --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$right" --mode local-only --yolo off \
+    --branch-name feature/solo --base-branch office 2>&1); status=$?
+  assert_not_contains "$out" "already assigned" "a different origin was treated as the same reservation"
+  if [ "$status" -ne 0 ]; then
+    fail "a different origin refused the launch: $out"
+  fi
+
+  id=named-origin-promote
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\nbase_branch=office\n' "$id" "$right" "$right" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/widget --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "promotion reused a crew branch reserved on another clone of the same origin"
+  assert_contains "$out" "already assigned to task named-origin-other" "the occupying clone was not named at promotion"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "cross-clone promotion collision published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "cross-clone promotion collision published ship instructions"
+  pass "named branch reservations cover every clone of one origin"
+}
+
 test_brief_names_the_crew_and_base_branches
 test_brief_refuses_unusable_branch_selections
 test_bare_originless_project_lock_resolves
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
+test_promote_accepts_a_base_chosen_for_an_unbased_scout
 test_promote_rejects_base_changes_and_branch_collisions
+test_reservations_cover_clones_of_one_origin
 test_local_merge_lands_on_the_recorded_base
 test_local_merge_refuses_a_linked_landing_checkout
 test_local_merge_refuses_a_bare_linked_landing_checkout

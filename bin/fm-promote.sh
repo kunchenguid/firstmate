@@ -248,10 +248,10 @@ if [ "$BASE_BRANCH_SET" -eq 0 ]; then
   BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
 else
   RECORDED_BASE=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
-  [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
-    echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=${RECORDED_BASE:-<none>} to preserve the existing worktree" >&2
+  if [ -n "$RECORDED_BASE" ] && [ "$BASE_BRANCH" != "$RECORDED_BASE" ]; then
+    echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=$RECORDED_BASE to preserve the existing worktree" >&2
     exit 1
-  }
+  fi
 fi
 if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
   echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
@@ -307,13 +307,12 @@ promote_meta_value() {
 }
 
 refuse_promoted_branch_collision() {
-  local meta other_branch other_project other_kind other_real proj_real other_id remote_refs
+  local meta other_branch other_project other_kind other_id remote_refs
   [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
   [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
     echo "error: cannot verify crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
     return 1
   }
-  proj_real=$(cd "$PROMOTE_PROJECT" 2>/dev/null && pwd -P) || proj_real=$PROMOTE_PROJECT
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     other_id=${meta##*/}
@@ -325,11 +324,7 @@ refuse_promoted_branch_collision() {
     [ "$other_branch" = "$BRANCH" ] || continue
     other_project=$(promote_meta_value "$meta" project)
     [ -n "$other_project" ] || continue
-    if other_real=$(cd "$other_project" 2>/dev/null && pwd -P); then
-      [ "$other_real" = "$proj_real" ] || continue
-    else
-      [ "$other_project" = "$PROMOTE_PROJECT" ] || continue
-    fi
+    fm_project_reservations_overlap "$PROMOTE_PROJECT" "$other_project" || continue
     echo "error: crew branch $BRANCH is already assigned to task $other_id; refusing promotion with a shared branch" >&2
     return 1
   done

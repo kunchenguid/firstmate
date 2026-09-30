@@ -3259,8 +3259,9 @@ elif [ "$KIND" = scout ]; then
 fi
 
 # Named base and crew-branch occupancy are proven before a pane exists. A
-# missing base or a branch already assigned to another ship for this project
-# stops here, so a later freshen failure cannot leave an endpoint behind.
+# missing base, or a branch already assigned to another ship for this checkout
+# or another clone of the same origin, stops here, so a later freshen failure
+# cannot leave an endpoint behind.
 # Resolved remote.origin.* variables cover Git's effective include/includeIf chain; raw headers are also detected in the worktree config and any included file Git names through another variable. Git cannot enumerate a variable-less included file, so an empty origin section that is its only content remains indistinguishable from absence and intentionally proceeds rather than reimplementing Git's config parser.
 spawn_worktree_has_origin_config() { # <worktree>
   local worktree=$1 config origin key seen=$'\n'
@@ -3276,11 +3277,10 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 refuse_shared_crew_branch() {
-  local meta other_branch other_project other_kind other_real proj_real other_id
+  local meta other_branch other_project other_kind other_id
   [ "$KIND" = ship ] || return 0
   [ -n "${BRANCH:-}" ] || return 0
   [ -d "$STATE" ] || return 0
-  proj_real=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || proj_real=$PROJ_ABS
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     other_id=${meta##*/}
@@ -3292,11 +3292,7 @@ refuse_shared_crew_branch() {
     [ "$other_branch" = "$BRANCH" ] || continue
     other_project=$(fm_meta_get "$meta" project)
     [ -n "$other_project" ] || continue
-    if other_real=$(cd "$other_project" 2>/dev/null && pwd -P); then
-      [ "$other_real" = "$proj_real" ] || continue
-    else
-      [ "$other_project" = "$PROJ_ABS" ] || continue
-    fi
+    fm_project_reservations_overlap "$PROJ_ABS" "$other_project" || continue
     echo "error: crew branch $BRANCH is already assigned to task $other_id; refusing to launch a fresh task with a shared branch" >&2
     return 1
   done

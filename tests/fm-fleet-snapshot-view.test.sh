@@ -585,6 +585,9 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-title-local - Release local office (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-named-note - Done Named Note (repo: delta, done 2026-07-11) (kind: ship)
   local office
+- [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
+  Kept the office change.
+  local office
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -700,6 +703,12 @@ EOF
     | .title == "Done Named Note"
       and .local_note == "local office"
   ' >/dev/null || fail "a named local landing note body was not projected"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-body-note")
+    | .title == "Done Body Note"
+      and .local_note == "local office"
+      and .body_excerpt == "Kept the office change. local office"
+  ' >/dev/null || fail "a local landing note beside other body text was dropped"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -719,6 +728,8 @@ EOF
     "view should preserve an ordinary completed title ending in local office"
   assert_contains "$view" "| done-named-note | Done Named Note | delta | ship | - | local office |" \
     "view should render the named local landing note body"
+  assert_contains "$view" "| done-body-note | Done Body Note | delta | ship | - | local office |" \
+    "view should keep a local landing note when the completed row has other body text"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 
