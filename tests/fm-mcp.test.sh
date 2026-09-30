@@ -100,6 +100,11 @@ assert_equals "replay $note_id" "$(printf '%s' "$replay" | jq_py '"%s %s" % (r["
 
 pending=$(ok_text "note_replies pending" "$(call firstmate_note_replies "{\"note_id\":\"$note_id\"}")")
 assert_equals "false null" "$(printf '%s' "$pending" | jq_py '"%s %s" % (json.dumps(r["acknowledged"]), json.dumps(r["reply"]))')" "an unhandled note has no reply yet"
+assert_equals "[via firstmate MCP]|please build X" "$(printf '%s' "$pending" | jq_py '"|".join(r["body"].strip().splitlines())')" "a client request_id still gets the MCP provenance line"
+auto=$(ok_text "send_note auto id" "$(call firstmate_send_note '{"message":"no id given"}')")
+auto_body=$(ok_text "auto body" "$(call firstmate_note_replies "{\"note_id\":\"$(printf '%s' "$auto" | jq_py 'r["id"]')\"}")" | jq_py 'r["body"].splitlines()[0]')
+assert_equals "[via firstmate MCP]" "$auto_body" "an auto request_id note gets the MCP provenance line"
+"$ROOT/bin/fm-inbox.sh" drain --ack "$(printf '%s' "$auto" | jq_py 'r["id"]')" >/dev/null || fail "could not ack the auto note"
 assert_contains "$(ok_text "status" "$(call firstmate_status)")" "1 note(s) waiting" "status counts the waiting note"
 
 "$ROOT/bin/fm-inbox.sh" drain --ack "$note_id" >/dev/null || fail "firstmate could not ack the note"
@@ -109,6 +114,20 @@ assert_equals "true on it" "$(printf '%s' "$handled" | jq_py '"%s %s" % (json.du
 assert_equals "on it" "$(ok_text "note_replies all" "$(call firstmate_note_replies)" | jq_py 'r["replies"][0]["body"]')" "receipts without a note id list the reply"
 pass "send_note: one idempotent note, and firstmate's reply returns"
 
+# More than one bound of replies: no cursor shows the newest, after pages forward.
+for i in $(seq 1 24); do
+  id=$(printf 'bulk %s' "$i" | "$ROOT/bin/fm-inbox.sh" note --json - | jq_py 'r["id"]')
+  "$ROOT/bin/fm-inbox.sh" drain --ack "$id" >/dev/null || fail "could not ack bulk note $i"
+  "$ROOT/bin/fm-inbox.sh" reply "$id" "answer $i" >/dev/null || fail "could not reply to bulk note $i"
+done
+latest=$(ok_text "note_replies newest" "$(call firstmate_note_replies)")
+assert_equals "20 answer 5 answer 24" "$(printf '%s' "$latest" | jq_py '"%d %s %s" % (len(r["replies"]), r["replies"][0]["body"], r["replies"][-1]["body"])')" "no cursor returns the newest 20 replies"
+assert_equals "[]" "$(printf '%s' "$latest" | jq_py '[o["reveal"] for o in r["omitted"] if "--" in o["reveal"]]')" "hints name only this tool's options"
+first=$(printf '%s' "$latest" | jq_py 'r["replies"][0]["cursor"]')
+assert_equals "answer 6" "$(ok_text "note_replies after" "$(call firstmate_note_replies "{\"after\":\"$first\"}")" | jq_py 'r["replies"][0]["body"]')" "after returns only newer replies"
+assert_equals "[]" "$(ok_text "note_replies head" "$(call firstmate_note_replies "{\"after\":\"$(printf '%s' "$latest" | jq_py 'r["reply_cursor"]')\"}")" | jq_py 'r["replies"]')" "the newest reply_cursor has nothing newer"
+pass "note_replies: newest replies first page, after cursor pages forward"
+
 is_error "empty note" "$(call firstmate_send_note '{"message":"   "}')"
 is_error "unknown note" "$(call firstmate_note_replies '{"note_id":"nope"}')"
 is_error "missing argument" "$(call firstmate_backlog_show)"
@@ -117,6 +136,8 @@ is_error "non-string argument" "$(call firstmate_send_note '{"message":42}')"
 pass "bad input is a tool error, never a note"
 
 # --- reads ------------------------------------------------------------------
+
+wakes=$(grep -c . "$H/state/.wake-queue")
 
 st=$(ok_text "status" "$(call firstmate_status)")
 assert_contains "$st" "demo" "status lists in-flight work"
@@ -138,6 +159,6 @@ rm "$H/state/home-summary.json"
 is_error "missing summary" "$(call firstmate_home_summary)"
 pass "ids cannot escape the home, and missing files are errors"
 
-# The reads above changed nothing: the only wake is the note's own.
-assert_equals "1" "$(grep -c . "$H/state/.wake-queue")" "no tool but send_note appended a wake"
-pass "authority boundary: one note, one wake"
+# The reads above changed nothing: every wake is a note's own.
+assert_equals "$wakes" "$(grep -c . "$H/state/.wake-queue")" "no tool but send_note appended a wake"
+pass "authority boundary: reads append no wake"

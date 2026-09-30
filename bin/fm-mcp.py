@@ -6,7 +6,8 @@ stdio server. It wraps firstmate's own scripts and published files and nothing
 else: no network listener, no credentials, and no direct writes to firstmate's
 files. It never spawns, steers, merges, tears down, or edits backlog or state.
 Every action request becomes an inbox note (fm-inbox.sh note), and firstmate's
-own rules decide what happens next.
+own rules decide what happens next. Each such note's body starts with the fixed
+line "[via firstmate MCP]" so firstmate can tell it from a note the captain typed.
 
 Usage:
   fm-mcp.py            serve MCP over stdin/stdout (newline-delimited JSON-RPC)
@@ -44,6 +45,8 @@ BIN = Path(__file__).resolve().parent
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 TIMEOUT = 60
+MARKER = "[via firstmate MCP]"
+REPLIES = 20
 
 INSTRUCTIONS = (
     "Talk to firstmate, the supervising agent that runs the captain's fleet of coding agents."
@@ -100,12 +103,23 @@ def valid_id(value):
 def send_note(message, request_id=None):
     if not message.strip():
         raise ToolError("message is empty")
-    return run("fm-inbox.sh", "note", "--request-id", request_id or f"mcp-{uuid.uuid4().hex}", "--json", "-", stdin=message)
+    return run("fm-inbox.sh", "note", "--request-id", request_id or f"mcp-{uuid.uuid4().hex}", "--json", "-", stdin=f"{MARKER}\n{message}")
 
 
 def note_replies(note_id=None, after=None):
     if note_id is None:
-        return run("fm-inbox.sh", "receipts", *(["--after", after] if after else []))
+        receipts = json.loads(run("fm-inbox.sh", "receipts", *(["--after", after] if after else ["--all-replies"])))
+        for entry in receipts["omitted"]:
+            if entry["reveal"] == "pass --all-replies":
+                entry["reveal"] = "call again with after set to reply_cursor"
+            elif entry["reveal"].startswith("pass --all-"):
+                entry["reveal"] = "pass note_id to read one note"
+        older = len(receipts["replies"]) - REPLIES
+        if not after and older > 0:
+            receipts["replies"] = receipts["replies"][-REPLIES:]
+            receipts["omitted"].append({"surface": f"older replies omitted: {older}",
+                                        "reveal": "pass note_id to read one note's reply"})
+        return json.dumps(receipts)
     receipts = json.loads(run("fm-inbox.sh", "receipts", "--all-pending", "--all-handled"))
     for note in receipts["pending"] + receipts["handled"]:
         if note["id"] == note_id:
@@ -155,6 +169,8 @@ TOOLS = {
     "firstmate_send_note": (
         send_note,
         "Send firstmate a message and wake it (fm-inbox.sh note).\n\n"
+        f"The queued note's body always starts with the line \"{MARKER}\", so firstmate can tell"
+        " it came through this server rather than from the captain directly.\n"
         "Use this for everything you want firstmate to do or know: questions, new work,"
         " approvals, steering a crew, merges, cancellations. The note is only a request;"
         " this tool itself never spawns, steers, merges, tears down, or edits backlog or state -"
@@ -172,8 +188,9 @@ TOOLS = {
         "Read firstmate's replies to notes and whether each note is still pending (fm-inbox.sh receipts).\n\n"
         "With note_id: returns that note with acknowledged (firstmate has taken it) and"
         " reply (firstmate's answer, or null while none is recorded yet)."
-        " Without: returns recent pending and handled notes plus replies; pass the previous"
-        " reply_cursor as `after` to see only newer replies." + NOTE_ONLY,
+        " Without: returns recent pending and handled notes plus the newest replies (oldest"
+        " first); pass the previous reply_cursor as `after` to see only newer replies, paged"
+        " oldest first." + NOTE_ONLY,
         {"note_id": param("Note id returned by firstmate_send_note"),
          "after": param("reply_cursor from a previous call")},
         [],
