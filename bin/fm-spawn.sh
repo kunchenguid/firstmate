@@ -5121,6 +5121,24 @@ if [ -n "$WORKER_ACCOUNT" ]; then
 elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# A Gemini pane can predate Firstmate's current Vertex environment. Pin only
+# Gemini's Vertex selection and ADC file path to this spawn's environment so
+# the destination daemon cannot silently choose another authentication path.
+# This also clears stale pane values when the invoking process has none.
+# The assignments survive the optional env -i boundary below.
+if [ "$HARNESS" = gemini ]; then
+  GEMINI_VERTEX_UNSETS=
+  GEMINI_VERTEX_ASSIGNMENTS=
+  for env_name in GOOGLE_APPLICATION_CREDENTIALS GOOGLE_CLOUD_PROJECT \
+    GOOGLE_CLOUD_LOCATION GOOGLE_GENAI_USE_VERTEXAI; do
+    if [ "${!env_name+x}" = x ]; then
+      GEMINI_VERTEX_ASSIGNMENTS="$GEMINI_VERTEX_ASSIGNMENTS $env_name=$(shell_quote "${!env_name}")"
+    else
+      GEMINI_VERTEX_UNSETS="$GEMINI_VERTEX_UNSETS -u $env_name"
+    fi
+  done
+  LAUNCH="env$GEMINI_VERTEX_UNSETS$GEMINI_VERTEX_ASSIGNMENTS $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
