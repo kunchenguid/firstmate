@@ -2386,8 +2386,7 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 ### Gemini half-block composer on Herdr
 
 On 2026-09-30, installed Gemini CLI 0.62.0 on macOS and Herdr client/server 0.7.4 produced a three-row half-block composer with an asterisk prompt and a styled placeholder.
-The shared classifier requires native Gemini idle/done identity plus that envelope; it refuses working/blocked identities, unavailable identity, lower shell prompts and draft input.
-Trailing furniture is accepted only as the complete `workspace (/directory) branch sandbox /model` header and an absolute-path, branch, `no sandbox`, `Auto` value row; other footer layouts or trailing activity are refused.
+[`_fm_composer_gemini_halfblock` in the shared classifier](../../bin/fm-composer-lib.sh) owns the identity, envelope, footer and draft-input safety contract.
 This proof currently applies to Herdr's identity-capable surface; tmux's composer identity probe remains Pi-only, and backends without native Gemini identity refuse this shape.
 Refresh with the read-only guard against an existing idle endpoint:
 

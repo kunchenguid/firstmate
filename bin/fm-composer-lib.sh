@@ -33,8 +33,8 @@
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
 #               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
-#               shape stays `unknown`.
+#               Pi's blank separated composer and Gemini's half-block
+#               composer provable; with identity=0 those shapes stay `unknown`.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -77,6 +77,9 @@
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
 #                pair carries the shape and no identity is needed.
+#   half-block - gemini: an asterisk row between matching half-block rules.
+#                The asterisk alone proves nothing; the identity and footer
+#                safety contract is owned by _fm_composer_gemini_halfblock.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -1612,11 +1615,15 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-# Gemini's half-block composer requires native identity as well as geometry.
+# Gemini's half-block composer requires native Gemini idle/done identity as
+# well as geometry.
 # The asterisk is not a generic agent glyph: accepting it globally would make
 # arbitrary transcript bullets injectable. Only the final three-row envelope
 # is eligible, with no lower prompt or structure; blocked/working identities
 # never authorize lifecycle text, even when the input region looks empty.
+# Only a complete workspace/branch/sandbox/model footer proves the trailing
+# rows are furniture: its values must name an absolute path, branch, no sandbox
+# and Auto model selection. Other layouts fail closed until verified.
 _fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <identity> <cursor>
   local screen=$1 plain=$2 styled=$3 has_identity=$4 identity=$5 cy=$6
   local row=0 top=-1 input=-1 bottom=-1 line trimmed width=0 content agent status footer=0
