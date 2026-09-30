@@ -3184,6 +3184,7 @@ test_host_relaunch_records_terminal_predecessor() {
   expect_code 0 "$rc" "host relaunch with retained predecessor receipt: $out"
   assert_equals dead-after-start "$(sed -n 's/^phase=//p' "$dir/home/state/sm62.seat-operation.g-sm-old")" "the host forgot its predecessor's terminal outcome"
   assert_equals s.test.new "$(meta_field "$dir" sm62 spawn_gen)" "host relaunch did not publish the replacement"
+  assert_equals started "$(sed -n 's/^phase=//p' "$dir/home/state/sm62.seat-operation.s.test.new")" "fractional host startup wait did not confirm its receipt"
   pass "host relaunch persists the predecessor's terminal outcome before endpoint reuse"
 }
 
@@ -3302,11 +3303,58 @@ test_standalone_relaunch_completes_the_predecessor_handoff() {
       fi
       out=$(probe_seat "$dir" "$model"); rc=$?
       expect_code 4 "$rc" "standalone replacement lost its seat: $out"
+      if [ "$kind" = secondmate ]; then
+        assert_equals true "$(case_seats "$dir" show rl64 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .startup_confirmed')" "fractional startup wait did not confirm the supervisor"
+      fi
       case_seats "$dir" confirm rl64 --generation "$gen" >/dev/null || fail "observing the running replacement"
       old=$gen
     done
   done
   pass "standalone worker and supervisor relaunches release exact predecessors before replacement delivery"
+}
+
+test_fractional_supervisor_startup_timeout_retains_the_launch() {
+  local dir out rc gen
+  dir=$(new_case fractional-timeout sm65)
+  sm_case "$dir" sm65
+  printf 'bash' > "$dir/fake/command"
+  printf 'bash' > "$dir/fake/becomes"
+  out=$(FM_CONTROL_LAUNCH_WAIT=0.05 FM_CONTROL_POLL=0.01 run_spawn "$dir" sm65 --relaunch --harness claude --model pool-model-a); rc=$?
+  expect_code 1 "$rc" "fractional startup timeout: $out"
+  assert_contains "$out" "startup was not confirmed" "the fractional wait failed outside startup polling"
+  gen=$(meta_field "$dir" sm65 spawn_gen)
+  assert_equals true "$(case_seats "$dir" show sm65 | jq --arg g "$gen" 'any(.incarnations[]; .generation == $g and .lifecycle == "reserved" and .startup_confirmed == false and .launch_phase == "dispatching" and .route.spawn_gen == $g)')" "timeout lost its dispatched generation or route"
+  out=$(probe_seat "$dir" pool-model-a); rc=$?
+  expect_code 4 "$rc" "a fractional timeout freed its submitted seat: $out"
+  pass "fractional supervisor startup timeouts retain the exact submitted generation and route"
+}
+
+test_legacy_predecessors_relaunch_through_the_control_plane() {
+  local dir kind old st name out rc gen
+  for kind in ship scout secondmate; do
+    dir=$(new_case "legacy-$kind" rl66)
+    mkdir -p "$dir/home/config"
+    if [ "$kind" = secondmate ]; then
+      sm_case "$dir" rl66
+      old=g-sm-old
+    else
+      add_ship_task "$dir" rl66 claude
+      pool_case "$dir" rl66
+      old=g-old
+      [ "$kind" != scout ] || perl -pi -e 's/^kind=ship/kind=scout/' "$dir/home/state/rl66.meta"
+    fi
+    st=$(cd "$dir/home/state" && pwd -P)
+    name=$(printf '%s\t%s' "$st" rl66 | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+    mkdir -p "$st/fleet-seats/legacy"
+    printf 'state=%s\ntask=rl66\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$st" > "$st/fleet-seats/legacy/$name.seat"
+    out=$(run_control "$dir" rl66 relaunch --harness claude --model pool-model-a --note "resume imported predecessor"); rc=$?
+    expect_code 0 "$rc" "legacy $kind predecessor handoff: $out"
+    gen=$(meta_field "$dir" rl66 spawn_gen)
+    assert_equals released "$(case_seats "$dir" show rl66 | jq -r --arg g "$old" '.incarnations[] | select(.generation == $g) | .lifecycle')" "legacy predecessor was not confirmed and released"
+    assert_equals confirmed "$(case_seats "$dir" show rl66 | jq -r --arg g "$gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" "replacement of a legacy predecessor did not confirm"
+    assert_absent "$st/fleet-seats/legacy/$name.seat" "legacy record was not imported once"
+  done
+  pass "legacy worker and supervisor routes support ordinary confirmation and control relaunch"
 }
 
 test_pooled_relaunch_reserves_its_destination_before_stopping
@@ -3408,3 +3456,6 @@ test_host_relaunch_records_terminal_predecessor
 test_observed_predecessors_and_opt_out_successors
 
 test_standalone_relaunch_completes_the_predecessor_handoff
+
+test_fractional_supervisor_startup_timeout_retains_the_launch
+test_legacy_predecessors_relaunch_through_the_control_plane

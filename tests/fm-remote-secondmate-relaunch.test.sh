@@ -96,6 +96,9 @@ if [ "$action" = disposition ]; then
   case "$FM_FAKE_DISPOSITION" in
     dead) disposition dead-after-start true false "$op" ;;
     dead-other) disposition dead-after-start true false other-generation other-generation ;;
+    existing) disposition existing true false "$FM_FAKE_ACTUAL_GENERATION" ;;
+    dead-existing) disposition dead-after-start true false "$FM_FAKE_ACTUAL_GENERATION" ;;
+    wrong-existing) disposition existing true false "$FM_FAKE_ACTUAL_GENERATION" foreign-operation ;;
     unknown) disposition unknown false false ;;
     *) disposition started true false "$op" ;;
   esac
@@ -173,7 +176,7 @@ chmod +x "$FAKEBIN/fake-ssh"
 run_relaunch() {  # <args...>
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" \
     FM_FAKE_RELAUNCH_MODE="${FM_FAKE_RELAUNCH_MODE:-}" FM_FAKE_DISPOSITION="${FM_FAKE_DISPOSITION:-}" \
-    FM_FAKE_HOST_GENERATION="${FM_FAKE_HOST_GENERATION:-}" \
+    FM_FAKE_HOST_GENERATION="${FM_FAKE_HOST_GENERATION:-}" FM_FAKE_ACTUAL_GENERATION="${FM_FAKE_ACTUAL_GENERATION:-}" \
     "$ROOT/bin/fm-remote-secondmate-relaunch.sh" "$@" 2>&1
 }
 
@@ -189,7 +192,7 @@ seed_pool() {  # a primary pool of one whose only remote has a complete, empty c
 
 seats() {
   env FM_HOME="$HOME_DIR" FM_SSH_BIN="$FAKEBIN/fake-ssh" FM_FAKE_DISPOSITION="${FM_FAKE_DISPOSITION:-}" \
-    "$ROOT/bin/fm-fleet-seats.sh" "$@"
+    FM_FAKE_ACTUAL_GENERATION="${FM_FAKE_ACTUAL_GENERATION:-}" "$ROOT/bin/fm-fleet-seats.sh" "$@"
 }
 
 probe_pool() {  # reserve for another worker, then give the probe back
@@ -467,6 +470,88 @@ expect_code 4 "$RC" "the restored remote policy did not count the successor: $OU
 pass "remote opt-out handoffs record their successor and release the proven predecessor"
 
 
+reset_meta
+seed_pool
+FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+  "$SEATS" reserve ios --generation request-existing --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+  route="$FM_HOME/state/existing-route"
+  (umask 077 && printf "{\"placement\":\"remote\",\"backend\":\"herdr\",\"target\":null,\"home\":\"/srv/fm-home\",\"host\":\"remote-mac\",\"remote_root\":\"/srv/fm\",\"operation\":\"request-existing\"}\n" > "$route")
+  "$SEATS" dispatch ios --generation request-existing --route-file "$route" >/dev/null
+' || fail "could not dispatch the existing-generation request"
+jq -n '{schema:"fm-remote-seat-operation.v2",task:"ios",operation:"request-existing",requested_generation:"request-existing",actual_generation:"actual-existing",previous_generation:null,disposition:"existing",startup_confirmed:true,old_stopped:false,route:{placement:"remote",backend:"herdr",target:"fm-remote:w1:p1"},actual_model:"pool-model-a",complete:true}' > "$TMP/existing-response"
+chmod 0600 "$TMP/existing-response"
+seats reconcile-remote ios --generation request-existing --response-file "$TMP/existing-response" >/dev/null || fail "could not import the existing generation"
+assert_equals released "$(ios_lifecycle request-existing)" "the unused request candidate kept its seat"
+assert_equals request-existing "$(seats show ios | jq -r '.incarnations[] | select(.generation == "actual-existing") | .route.operation')" "import lost the observing operation"
+OUT=$(FM_FAKE_DISPOSITION=wrong-existing FM_FAKE_ACTUAL_GENERATION=actual-existing seats reclaim ios --generation actual-existing 2>&1); RC=$?
+expect_code 3 "$RC" "a foreign request binding: $OUT"
+OUT=$(FM_FAKE_DISPOSITION=existing FM_FAKE_ACTUAL_GENERATION=another-generation seats reclaim ios --generation actual-existing 2>&1); RC=$?
+expect_code 3 "$RC" "a foreign actual generation: $OUT"
+assert_equals confirmed "$(ios_lifecycle actual-existing)" "a foreign binding changed the imported generation"
+OUT=$(FM_FAKE_DISPOSITION=existing FM_FAKE_ACTUAL_GENERATION=actual-existing seats reclaim ios --generation actual-existing 2>&1); RC=$?
+expect_code 0 "$RC" "the imported generation's own existing receipt: $OUT"
+assert_contains "$OUT" 'confirmed id=ios generation=actual-existing' "a live imported generation was mistaken for reclamation"
+OUT=$(FM_FAKE_DISPOSITION=unknown seats reclaim ios --generation actual-existing 2>&1); RC=$?
+expect_code 3 "$RC" "an uncertain imported generation: $OUT"
+OUT=$(probe_pool); RC=$?
+expect_code 4 "$RC" "the imported generation stopped counting: $OUT"
+OUT=$(FM_FAKE_DISPOSITION=dead-existing FM_FAKE_ACTUAL_GENERATION=actual-existing run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "relaunch after an imported generation's own death: $OUT"
+assert_equals reclaimed "$(ios_lifecycle actual-existing)" "recovery stranded the imported generation"
+assert_equals confirmed "$(ios_lifecycle "$(ios_generation)")" "recovery did not confirm the replacement"
+OUT=$(seats reconcile-remote ios --generation actual-existing --response-file "$TMP/existing-response" 2>&1); RC=$?
+[ "$RC" -ne 0 ] || fail "a stale existing receipt revived the terminal generation"
+assert_equals reclaimed "$(ios_lifecycle actual-existing)" "a stale receipt revived the terminal generation"
+pass "an imported existing remote generation reconciles through its original operation without rebinding"
+
+reset_meta
+seed_pool
+FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+  "$SEATS" reserve ios --generation request-existing --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+  "$SEATS" dispatch ios --generation request-existing --route-file "$FM_HOME/state/existing-route" >/dev/null
+' || fail "could not dispatch a second existing-generation request"
+jq '.disposition="dead-after-start"' "$TMP/existing-response" > "$TMP/existing-dead-response"
+chmod 0600 "$TMP/existing-dead-response"
+OUT=$(seats reconcile-remote ios --generation request-existing --response-file "$TMP/existing-dead-response" 2>&1); RC=$?
+expect_code 0 "$RC" "existing generation dying before parent publication: $OUT"
+assert_equals released "$(ios_lifecycle request-existing)" "the unused candidate stayed counted"
+assert_equals reclaimed "$(ios_lifecycle actual-existing)" "death before publication stranded the existing generation"
+pass "an existing generation dying before import retains its terminal history"
+
+for LEGACY_ROUTE in valid invalid; do
+  reset_meta
+  seed_pool
+  perl -pi -e 's/^model=.*/model=pool-model-a/' "$HOME_DIR/state/ios.meta"
+  printf 'fleet_seat_generation=legacy-remote\nremote_spawn_gen=legacy-remote\n' >> "$HOME_DIR/state/ios.meta"
+  if [ "$LEGACY_ROUTE" = invalid ]; then
+    perl -pi -e 's/^remote_host=.*/remote_host=foreign-host/' "$HOME_DIR/state/ios.meta"
+  fi
+  ST=$(cd "$HOME_DIR/state" && pwd -P)
+  NAME=$(printf '%s\t%s' "$ST" ios | cksum | tr -s ' ' '-' | cut -d- -f1-2)
+  mkdir -p "$ST/fleet-seats/legacy"
+  printf 'state=%s\ntask=ios\nmodel=pool-model-a\npid=99999999\npid_identity=\n' "$ST" > "$ST/fleet-seats/legacy/$NAME.seat"
+  OUT=$(probe_pool); RC=$?
+  expect_code 4 "$RC" "importing a $LEGACY_ROUTE legacy remote route: $OUT"
+  assert_absent "$ST/fleet-seats/legacy/$NAME.seat" "legacy remote source was not imported once"
+  if [ "$LEGACY_ROUTE" = invalid ]; then
+    assert_equals true "$(seats show ios | jq 'any(.incarnations[]; .generation == "legacy-remote" and .route == null and .startup_confirmed == false)')" "a foreign legacy registry route became recoverable"
+    OUT=$(seats reclaim ios --generation legacy-remote 2>&1); RC=$?
+    expect_code 3 "$RC" "a legacy route without ownership evidence: $OUT"
+    assert_equals reserved "$(ios_lifecycle legacy-remote)" "missing route evidence freed the legacy remote"
+  else
+    assert_equals true "$(seats show ios | jq 'any(.incarnations[]; .generation == "legacy-remote" and .route.placement == "remote" and .route.operation == .generation and .route.host == "remote-mac")')" "legacy remote import discarded its recovery route"
+    OUT=$(FM_FAKE_DISPOSITION=unknown seats reclaim ios --generation legacy-remote 2>&1); RC=$?
+    expect_code 3 "$RC" "an absent legacy host receipt: $OUT"
+    assert_equals reserved "$(ios_lifecycle legacy-remote)" "missing host evidence freed the legacy remote"
+    seats reclaim ios --generation legacy-remote >/dev/null || fail "legacy remote startup could not confirm through its route"
+    assert_equals confirmed "$(ios_lifecycle legacy-remote)" "legacy remote startup was not confirmed"
+    OUT=$(FM_FAKE_DISPOSITION=dead seats reclaim ios --generation legacy-remote 2>&1); RC=$?
+    expect_code 0 "$RC" "legacy remote death through its own operation: $OUT"
+    assert_equals reclaimed "$(ios_lifecycle legacy-remote)" "legacy remote recovery stranded its generation"
+  fi
+done
+pass "legacy remote routes reconcile only through matching registry and generation evidence"
+
 # --- host side: token-scoped operation receipts and dispositions --------------
 # bin/fm-remote-secondmate-control.sh answers for exactly one operation token
 # from its durable receipt and control journal; an absent or foreign receipt
@@ -478,7 +563,8 @@ printf 'ios\n' > "$HOST_HOME/.fm-secondmate-home"
 
 host_control() {  # <args...>
   env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    FM_HOME="$HOST_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
+    FM_HOME="$HOST_HOME" PATH="$FAKEBIN:$PATH" FM_TEST_HERDR_STATE="$TMP/herdr-state" \
+    "$ROOT/bin/fm-remote-secondmate-control.sh" "$@" 2>&1
 }
 
 host_disposition() {  # <operation>: the disposition word the host reports
@@ -506,10 +592,50 @@ printf 'exit_result=stopped\n' >> "$HOST_HOME/state/parent-route/ios.control-rel
 assert_equals "cancelled true" "$(host_disposition op2)" "a stopped predecessor with an unsubmitted candidate was not cancelled"
 host_journal op2 failed:stopping
 assert_equals "unknown false" "$(host_disposition op2)" "an interrupted stop was not left unknown"
+cat > "$FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  'status --json') printf '{"client":{"version":"0.9.0","protocol":22},"server":{"running":true}}\n' ;;
+  'pane get') printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' "$3" "$FM_HOME" ;;
+  'agent get')
+    case "$(cat "$FM_TEST_HERDR_STATE")" in
+      alive) printf '{"result":{"agent":{"agent_status":"idle"}}}\n' ;;
+      dead) printf '{"error":{"code":"agent_not_found"}}\n' ;;
+      *) printf '{"error":{"code":"transport_unavailable"}}\n' ;;
+    esac ;;
+  'pane process-info') printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' "$4" ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/herdr"
+printf 'alive\n' > "$TMP/herdr-state"
+fm_write_meta "$HOST_HOME/state/parent-route/ios.meta" \
+  kind=secondmate harness=claude backend=herdr window=fm-remote:w1:p1 endpoint_task_id=ios \
+  herdr_session=fm-remote herdr_workspace_id=w1 herdr_tab_id=w1:t1 herdr_pane_id=w1:p1 \
+  "worktree=$HOST_HOME" "project=$ROOT" "home=$HOST_HOME" spawn_gen=s-older model=pool-model-a
 host_receipt op3 launch existing
 printf 'actual_generation=s-older\nroute_backend=herdr\nroute_target=fm-remote:w1:p1\nactual_model=pool-model-a\n' \
   >> "$HOST_HOME/state/parent-route/ios.seat-operation.op3"
 assert_equals "existing false" "$(host_disposition op3)" "a reused live endpoint was not reported as existing"
+perl -pi -e 's/^spawn_gen=.*/spawn_gen=s-newer/' "$HOST_HOME/state/parent-route/ios.meta"
+assert_equals "unknown false" "$(host_disposition op3)" "an existing receipt rebound to a newer live generation"
+printf 'dead\n' > "$TMP/herdr-state"
+assert_equals "unknown false" "$(host_disposition op3)" "a newer generation's death settled an existing receipt"
+perl -pi -e 's/^spawn_gen=.*/spawn_gen=s-older/' "$HOST_HOME/state/parent-route/ios.meta"
+printf 'unknown\n' > "$TMP/herdr-state"
+assert_equals "unknown false" "$(host_disposition op3)" "unreadable evidence replayed a stale existing outcome"
+printf 'dead\n' > "$TMP/herdr-state"
+assert_equals "dead-after-start false" "$(host_disposition op3)" "an existing generation's own death was not reconciled"
+DISP=$(host_control disposition ios --operation op3 | sed -n 's/^seat_disposition=//p' | tail -1)
+assert_equals 'op3 s-older' "$(printf '%s\n' "$DISP" | jq -r '.requested_generation + " " + .actual_generation')" "death lost the operation-to-actual-generation binding"
+printf 'alive\n' > "$TMP/herdr-state"
+perl -pi -e 's/^spawn_gen=.*/spawn_gen=s-newer/' "$HOST_HOME/state/parent-route/ios.meta"
+assert_equals "dead-after-start false" "$(host_disposition op3)" "a terminal existing operation revived on a reused endpoint"
+OUT=$(host_control launch ios claude pool-model-a medium herdr --operation op3); RC=$?
+[ "$RC" -ne 0 ] || fail "a delayed existing token launched again"
+assert_contains "$OUT" "already handled" "a delayed existing token was treated as a fresh launch"
+assert_grep 'spawn_gen=s-newer' "$HOST_HOME/state/parent-route/ios.meta" "a delayed token changed the newer incarnation"
+pass "existing host receipts re-probe their actual generation and preserve its terminal outcome"
 # A busy episode may be running this very token: unknown, never a refusal.
 bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
   _ "$ROOT" "$HOST_HOME/state/parent-route" "$TMP/host-episode" &
