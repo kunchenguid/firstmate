@@ -714,7 +714,7 @@ _fm_recovery_marker_write_locked() {
 # next restart does not reopen that same unwatched stretch all over again.
 _fm_recovery_marker_publish() {
   local marker=$1 kind=${2:-downtime} bound=${3:-} source=${4:-watcher}
-  local lock saved_token generation='' status=pending previous_append_token='' fresh_episode=0
+  local lock saved_token generation='' status=pending previous_append_token=''
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$source" in watcher|close|append) ;; *) return 1 ;; esac
   if [ "$source" = append ]; then
@@ -753,8 +753,6 @@ _fm_recovery_marker_publish() {
           if [ "$source" != append ]; then
             generation=${FM_RECOVERY_MARKER_TOKEN##*:}
             status=announced
-          else
-            fresh_episode=1
           fi
           ;;
         acked:downtime:*)
@@ -771,9 +769,6 @@ _fm_recovery_marker_publish() {
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
     return 1
-  fi
-  if [ "$fresh_episode" = 1 ]; then
-    rm -f -- "${marker}.reopen-count" 2>/dev/null || true
   fi
   if [ -n "$previous_append_token" ] \
     && [ "$previous_append_token" != "$FM_RECOVERY_MARKER_WRITTEN_TOKEN" ]; then
@@ -2118,6 +2113,9 @@ fm_wake_append_locked() {
   if [ "$status" -ne 0 ]; then
     _fm_wake_append_recovery_restore_locked || true
   else
+    case "$FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN" in
+      announced:downtime:*) rm -f -- "${recovery_marker}.reopen-count" 2>/dev/null || true ;;
+    esac
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi

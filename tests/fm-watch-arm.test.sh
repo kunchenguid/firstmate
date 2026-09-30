@@ -1584,6 +1584,26 @@ test_append_fresh_episode_resets_reopen_budget() {
   pass "watch-arm: an append that mints a fresh episode resets the reopen budget"
 }
 
+# A failed append restores the announced episode, so it must keep that
+# episode's reopen count rather than grant it a fresh budget.
+test_failed_append_keeps_reopen_count() {
+  local dir state
+  dir=$(make_case failed-append-keeps-reopen-count)
+  state="$dir/state"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
+  mkdir -p "$state/.wake-queue.seq"
+
+  ! append_wake "$state" check failed-append 'check: failed append row' 2>/dev/null \
+    || fail "an append whose sequence write failed reported success"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:seedgen1' ] \
+    || fail "a failed append did not restore the announced episode: $(cat "$state/.watcher-down" 2>/dev/null)"
+  [ "$(cat "$state/.watcher-down.reopen-count" 2>/dev/null || true)" = 1 ] \
+    || fail "a failed append cleared the restored episode's reopen count"
+  pass "watch-arm: a failed append keeps the restored episode's reopen count"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1598,6 +1618,7 @@ test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row
 test_stale_zero_row_ack_keeps_bound_settle
 test_invalid_reopen_limit_falls_back_to_default
 test_append_fresh_episode_resets_reopen_budget
+test_failed_append_keeps_reopen_count
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
