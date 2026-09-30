@@ -10,7 +10,7 @@ The skill owns the procedure; this record supplies dated evidence from bounded e
 On 2026-09-29 UTC on `optimus0` (Linux 6.8.0-139-generic x86_64, python 3.12.3, curl 8.5.0) the procedure was applied to `ledgerbox`, a stdlib-only CLI and HTTP service, and the generated recipe and feature map were driven live.
 Two entry points were driven independently - the `add` CLI write path and the `GET /balance` service path - so one smoke could not stand in for the map.
 The same run then exercised drift and gaps: a stale Drive command in the recipe, a helper that refused `doctor` and `stop`, a mapped path whose `sqlite3` prerequisite is absent, and a `summary` feature added after the map was written.
-A later review pass found two instance-ownership defects in the helper, reproduced and fixed on 2026-09-30 in the isolated lab described below.
+A later review pass found three instance-ownership defects in the helper, reproduced and fixed on 2026-09-30 in the isolated lab described below.
 `bin/fm-doc-audience-check.sh` and `tests/fm-documentation-audiences.test.sh` consume this prose structurally; they are not behavioral evidence and are reported separately from the outcomes below.
 
 ## Fixture
@@ -292,7 +292,7 @@ Each verified row was driven against its own `LEDGERBOX_HOME`, and the two insta
 
 ## Instance-ownership defects found in review
 
-Both were reproduced on 2026-09-30 in an isolated lab directory outside any project checkout, with an unrelated `ledgerbox` service started independently of the helper.
+All three were reproduced on 2026-09-30 in an isolated lab directory outside any project checkout, with an unrelated `ledgerbox` service started independently of the helper.
 
 **Defect: `doctor` guessed the default port.** With an instance started on 8782 the documented invocation `ledgerbox-instance.sh doctor <instance-dir>` exited 1 reporting `health=degraded detail=process alive but the endpoint does not answer`, while `curl http://127.0.0.1:8782/balance` returned `{"balance": 0}` from the same healthy instance. `start` persisted only `service.pid`, so `doctor` fell back to 8781.
 After the fix `start` also persists `service.port`, and the same sequence reports `health=ok pid=1604999 port=8782` with exit 0.
