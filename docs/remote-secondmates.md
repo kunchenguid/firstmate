@@ -652,7 +652,9 @@ The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, 
 It passes them explicitly because `config/secondmate-harness` is not inherited into a second mate's home, and the file on that host belongs to a different home.
 Letting the far side re-resolve it would silently move the mate onto another runtime.
 SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
-Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reserves a primary fleet seat before host control, reads the confirmed identity back from the host's endpoint record, and republishes the primary's own route metadata to match. An uncertain host result or failed parent publication keeps the reservation counted; a confirmed prelaunch refusal or failed replacement launch releases it.
+Move a live remote second mate onto a newly pinned harness, model, or effort with [`bin/fm-remote-secondmate-relaunch.sh`](../bin/fm-remote-secondmate-relaunch.sh) rather than calling `relaunch` through `fm-on.sh` directly: the wrapper reserves the replacement's primary fleet seat before host control, reads the confirmed identity back from the host's endpoint record, and republishes the primary's own route metadata to match.
+When fleet seat pools are configured, this wrapper is the required path: the host refuses a supervisor relaunch that does not carry the primary's seat operation.
+The wrapper's header and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh)'s header own the operation token and host outcome mechanics.
 
 ### Firstmate code convergence
 

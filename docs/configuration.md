@@ -2106,8 +2106,16 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 **What a seat is**
 
 - A seat is one active agent slot, never an inference request, so the endpoint's own request concurrency is a separate limit this file does not measure.
-- A ship or scout on a pooled model holds a seat from spawn until cleanup removes its task record, including while it waits for review or merge; a relaunch onto another model frees it, and a relaunch on the same route keeps it even when the pool is full.
-- Every live secondmate supervisor on a pooled model holds a seat, even when its busy record says idle. This strict capacity choice reserves room for its next turn; a proven local session death, removal of a remote supervisor record, or a move to an unpooled model releases it. Ambiguous remote liveness keeps the seat counted.
+- Every launch holds its seat per incarnation: the launch's generation is reserved before anything else, and it counts while reserved or confirmed.
+- A ship or scout on a pooled model holds a seat from spawn until cleanup releases exactly its generation, including while it waits for review or merge.
+- A relaunch reserves the replacement before the old agent is touched: on the same pool it keeps one seat even when the pool is full, and onto another pool it needs a destination seat first and frees the old seat only after the old agent's stop is proven.
+- Every live secondmate supervisor on a pooled model holds a seat, even when its busy record says idle.
+- This strict capacity choice reserves room for its next turn.
+- A secondmate spawn succeeds only once its exact endpoint reads alive, within the control launch wait (90 seconds by default); an unconfirmed startup fails the spawn and keeps the seat counted with its endpoint recorded for recovery.
+- A submitted launch keeps its seat through the spawner's death and through an endpoint that shows only a shell, because a buffered launch line can still start an agent there.
+- Its seat frees only when startup is confirmed and the agent later dies, or when that exact endpoint is proven destroyed; nothing is ever stopped to free a seat.
+- Supervisor recovery reclaims only the exact generation it probed, inside that mate's single lifecycle episode, so a stale death reading can never free a newer replacement.
+- Ambiguous liveness, a transport failure, or a timeout keeps the seat counted.
 - The primary supervisor holds a seat while its session is live, when `primary_model` names a pooled model; no primary busy record exists, so a live primary is indeterminate and counts.
 - While any pool is configured, every launch needs an explicit, verified `--model`. A harness default on any adapter or a raw launch command is refused because its actual model cannot be counted reliably. With no declaration, those launches behave as before.
 
@@ -2117,8 +2125,14 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - The count includes every pooled agent recorded in the primary and in local secondmates reached through each home's `data/secondmates.md`, including nested homes and agents launched before the pool was declared.
 - A live legacy ship, scout, or secondmate record with a default, empty, or missing model occupies a seat in every declared pool until its model is resolved or the record is retired. A record with a resolved unpooled model occupies none.
 - A remote secondmate shares the same capacity through the existing primary-to-remote transport: while a declaration exists or needs clearing, the primary's watcher delivers the current pool declaration to each remote about every 30 seconds while holding the fleet lock, and a pooled remote launch files a seat request in its own home and waits for that answer.
-- An initial remote secondmate launch or relaunch reserves at the primary before host launch control starts. Its seat remains counted until the primary publishes the confirmed route; an uncertain host result or failed parent publication retains the reservation for reconciliation. A confirmed prelaunch refusal releases the new hold. When the host confirms that the old agent stopped and replacement launch failed, the primary records the dead supervisor without deleting its route and releases its seat; a later successful launch clears that dead state. An unpublished hold is reclaimed only after a bounded host state read confirms the agent is dead or its endpoint record is missing. A retry records the model the host confirms it is running and reports a mismatch with the requested model.
-- The primary grants no pooled seat while any registered remote has not confirmed the current declaration or its holder snapshot is absent. It counts each remote's seats from that remote's last answer, so an unreachable remote keeps its seats counted rather than freeing them.
+- A remote secondmate's own seat belongs to the primary: an initial launch or relaunch reserves its generation at the primary before the host is asked anything, and the host reports one outcome bound to that generation.
+- A host refusal before launch releases only the new candidate and leaves the old agent's seat alone.
+- A confirmed start counts the model the host actually runs, reports any mismatch with the requested model, and survives a failed update of the primary's own record.
+- A lost reply or an unknown outcome keeps the candidate counted until the primary's watcher reads the host's outcome for that generation.
+- While seat pools are configured, a host refuses a supervisor launch or relaunch that did not come through the primary's accounting.
+- The primary grants no pooled seat while any registered remote has a pending delivery or no complete confirmation of the current declaration.
+- Each delivery invalidates the remote's previous confirmation before it is sent and restores it only from a complete, matching answer, so a lost or late answer keeps admission refused rather than trusting stale counts.
+- An unreachable remote keeps its last counted seats rather than freeing them, and a remote running an older version stays unconfirmed until it is updated.
 - An in-flight seat remains counted by its recorded model when that model moves between pools, including before the agent publishes a task record.
 - Once a nonempty policy is delivered, remote launches wait for the next primary serve to confirm the current declaration, including models the last policy called unpooled; a request from an old declaration or old pool is refused. Before first delivery, an inherited declaration can identify a pooled launch that must refuse until delivery. A home with no declaration, or a delivered empty declaration, launches as before.
 - A remote request the primary does not answer within 90 seconds is withdrawn and refused, and removing this file clears every remote on the next delivery.
@@ -2130,7 +2144,8 @@ The pool names, capacities, and models are the operator's own choice; nothing is
 - An unreachable, unconfirmed, unreadable, locked, or malformed authority also refuses, including a missing registered local home, missing remote snapshot, or unparseable secondmate registry record, because an uncounted seat is never treated as free.
 - A running agent, including a primary that starts while the pool is full, is never refused or preempted; new pooled launches refuse until the count is back under capacity.
 - No refusal changes the route: firstmate picks the overflow route from `config/crew-dispatch.json` at its own model and effort, or holds the task.
-- A reservation left by a launch that died before publishing its record is reclaimed at the next reservation; a live task record is never reclaimed.
+- A reservation whose launching process died is resolved by the watcher's periodic seat maintenance once evidence proves it never launched or its endpoint is gone; until then it stays counted, so an orphan can briefly hold capacity.
+- A live task record is never reclaimed.
 
 **Delivery**
 

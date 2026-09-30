@@ -546,6 +546,26 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+
+# teardown_release_seat <state-dir> <home> <config> <data> <id> <generation>: after this
+# cleanup removed the task record, release exactly that generation's fleet
+# seat through its owner (bin/fm-fleet-seats.sh). A stale generation never
+# releases a successor, and a release that cannot be proven keeps the seat
+# counted and says so.
+teardown_release_seat() {
+  local seat_state=$1 seat_home=$2 seat_config=$3 seat_data=$4 seat_id=$5 seat_gen=$6
+  [ -n "$seat_gen" ] || return 0
+  if [ ! -d "$seat_state" ]; then
+    echo "warning: $seat_id's fleet seat generation $seat_gen stays counted: its state directory is gone, so the release cannot be recorded" >&2
+    return 0
+  fi
+  FM_HOME=$seat_home FM_STATE_OVERRIDE=$seat_state FM_CONFIG_OVERRIDE=$seat_config \
+    FM_DATA_OVERRIDE=$seat_data "$SCRIPT_DIR/fm-fleet-seats.sh" release "$seat_id" \
+    --generation "$seat_gen" --reason teardown >/dev/null \
+    || echo "warning: $seat_id's fleet seat generation $seat_gen could not be released and stays counted until reconciliation" >&2
+}
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -624,7 +644,7 @@ teardown_release_locks() {
     META_LOCK_HELD=0
   fi
   if [ -n "${SM_LIVENESS_LOCK:-}" ]; then
-    fm_lock_release "$SM_LIVENESS_LOCK" || true
+    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
     SM_LIVENESS_LOCK=
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
@@ -639,6 +659,16 @@ teardown_release_locks() {
   return "$status"
 }
 trap teardown_release_locks EXIT
+# A secondmate's retirement joins its supervisor lifecycle episode first (the
+# fleet order is episode, then control, then metadata), waiting a bounded time
+# for a running liveness recovery or launch to finish rather than interleaving.
+if [ -f "$META" ] && [ ! -L "$META" ] && [ "$(fm_meta_get "$META" kind 2>/dev/null || true)" = secondmate ]; then
+  fm_supervisor_lifecycle_acquire "$STATE" "$ID" 30 || {
+    echo "error: a secondmate liveness check is in progress for $ID (lifecycle episode pid ${FM_LOCK_HELD_PID:-unknown}); nothing was changed - retry teardown" >&2
+    exit 1
+  }
+  SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
+fi
 fm_lock_try_acquire "$CONTROL_LOCK" || {
   echo "error: another lifecycle action is already running for task $ID; nothing was changed" >&2
   exit 1
@@ -669,13 +699,17 @@ TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 # serialize on this lock; retirement holds it to the end so no probe or relaunch
 # can act on the route mid-teardown, and its relaunch ledger and park marker are
 # removed with the route instead of surviving for a reused id.
-if [ "$TEARDOWN_META_KIND" = secondmate ]; then
-  fm_lock_try_acquire "$STATE/.secondmate-liveness-$ID.lock" || {
+if [ "$TEARDOWN_META_KIND" = secondmate ] && [ -z "$SM_LIVENESS_LOCK" ]; then
+  fm_supervisor_lifecycle_acquire "$STATE" "$ID" 0 || {
     echo "error: a secondmate liveness check is in progress for $ID; nothing was changed - retry teardown" >&2
     exit 1
   }
   SM_LIVENESS_LOCK="$STATE/.secondmate-liveness-$ID.lock"
 fi
+# The fleet seat generation this cleanup ends (the parent-owned generation for
+# a remote route, else the recorded spawn_gen).
+TEARDOWN_SEAT_GEN=$(fm_meta_get "$META" fleet_seat_generation)
+[ -n "$TEARDOWN_SEAT_GEN" ] || TEARDOWN_SEAT_GEN=$(fm_meta_get "$META" spawn_gen)
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -1216,6 +1250,7 @@ remote_secondmate_teardown() {
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   teardown_retire_status "$STATE" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
+  teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" "$TEARDOWN_SEAT_GEN"
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
     "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" \
     "$STATE/.secondmate-relaunch-$ID" "$STATE/.secondmate-relaunch-bound-$ID"
@@ -3445,7 +3480,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot
+  local home=$1 archive_parent=${2:-$ID} sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_rex_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_pool_slot child_seat_gen
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3565,7 +3600,10 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     teardown_retire_status "$sub_state" "$child_id" "$archive_parent/children/$child_id" || return 1
     fm_wake_queue_prune_task "$sub_state" "$child_id" "$child_t" 2>/dev/null || true
+    child_seat_gen=$(meta_value "$child_meta" fleet_seat_generation)
+    [ -n "$child_seat_gen" ] || child_seat_gen=$(meta_value "$child_meta" spawn_gen)
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
+    teardown_release_seat "$sub_state" "${sub_state%/state}" "${sub_state%/state}/config" "${sub_state%/state}/data" "$child_id" "$child_seat_gen"
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$(fm_wake_signal_seen_path "$sub_state" "$sub_state/$child_id.turn-ended")" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -4166,6 +4204,7 @@ else
     exit 1
   fi
 fi
+teardown_release_seat "$STATE" "$FM_HOME" "$CONFIG" "$DATA" "$ID" "$TEARDOWN_SEAT_GEN"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

@@ -2,8 +2,9 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
-#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
+#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent] [--operation <gen> --previous <gen|->]
+#   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|-> [--operation <gen> --previous <gen|->]
+#   fm-remote-secondmate-control.sh disposition <id> --operation <gen>
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
 #   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
@@ -47,6 +48,33 @@
 # which reads this block to keep the parent's own record in sync) still gets
 # the confirmed identity.
 #
+# Fleet seat operations. When the parent accounts for this supervisor's fleet
+# seat (bin/fm-fleet-seats.sh "REMOTE SUPERVISORS"), launch and relaunch carry
+# its generation as --operation (plus the generation it replaces). This host
+# then runs the whole episode inside its own lifecycle mutex for the
+# parent-route record (bin/fm-secondmate-liveness-lib.sh), persists the token
+# in the operation receipt <state>/parent-route/<id>.seat-operation.<gen> BEFORE any
+# stop or launch, hands the generation to the host-local launch owner (which
+# records dispatch and startup in the same receipt and consumes the parent's
+# seat rather than reserving another), and ends every outcome - success,
+# refusal, or failure - with one "seat_disposition=<json>" line:
+#   {schema:"fm-remote-seat-operation.v2", task, operation,
+#    requested_generation, actual_generation, previous_generation,
+#    disposition, startup_confirmed, old_stopped, route, actual_model,
+#    complete:true}
+# with disposition prelaunch | started | existing | cancelled |
+# dead-after-start | unknown. A same-token retry reports the durable episode
+# and never launches twice; `disposition` rereads it (a busy mutex or an absent
+# or foreign receipt is unknown, never a refusal). While this home has seat
+# pools, a launch or relaunch with no operation refuses before touching
+# anything: the parent wrapper must account for it. Each operation keeps its
+# own receipt, so a later operation never erases the one that answers for the
+# running generation; opening a receipt prunes every other receipt except the
+# running generation's. Receipt keys: schema,
+# operation, verb, requested_generation, previous_generation, phase
+# (received | prelaunch | existing | dispatched | started), actual_generation,
+# route_backend, route_target, actual_model.
+#
 # The optional launch traceparent is the per-task W3C trace-context carrier the
 # PARENT home resolved for this secondmate; this host only delivers it to the
 # pane, and fm-spawn validates it (bin/fm-trace-context-lib.sh). Omitting it is
@@ -85,8 +113,23 @@ fi
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 
-prelaunch_die() { printf 'relaunch_failure=prelaunch\n' >&2; die "$1"; }
+# Seat operation of the running launch/relaunch, when the parent passed one.
+SEAT_OP=
+SEAT_PREV=-
+SEAT_LIFECYCLE_ID=
+prelaunch_die() {
+  if [ -n "$SEAT_OP" ]; then
+    seat_receipt_set phase=prelaunch 2>/dev/null || true
+    seat_emit prelaunch false false
+  fi
+  printf 'relaunch_failure=prelaunch\n' >&2
+  die "$1"
+}
 
 validate_home() { # <id> [allow-absent]
   local id=$1 allow_absent=${2:-no} marker
@@ -100,6 +143,223 @@ validate_home() { # <id> [allow-absent]
 }
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
+
+# --- fleet seat operation receipts ----------------------------------------------
+
+receipt_path() { printf '%s/%s.seat-operation.%s\n' "$CONTROL_STATE" "$1" "${2:-$SEAT_OP}"; }
+
+receipt_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }
+
+host_pools_enabled() {
+  local delivered="$TARGET_HOME/state/fleet-seats/policy.json"
+  if [ -e "$delivered" ] || [ -L "$delivered" ]; then
+    cmp -s "$delivered" <(printf '{"pools":[]}\n') && return 1
+    return 0
+  fi
+  [ -e "$TARGET_HOME/config/fleet-seats" ] || [ -L "$TARGET_HOME/config/fleet-seats" ]
+}
+
+json_str() {  # <value>: a JSON string, or null when empty
+  local v=$1
+  [ -n "$v" ] || { printf 'null'; return 0; }
+  case "$v" in *[[:cntrl:]]*) printf 'null'; return 0 ;; esac
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  printf '"%s"' "$v"
+}
+
+# seat_parse_operation <args...>: split trailing --operation/--previous from a
+# verb's positional arguments into SEAT_OP/SEAT_PREV and SEAT_ARGS.
+seat_parse_operation() {
+  SEAT_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --operation) [ "$#" -ge 2 ] || usage; SEAT_OP=$2; shift 2 ;;
+      --previous) [ "$#" -ge 2 ] || usage; SEAT_PREV=$2; shift 2 ;;
+      *) SEAT_ARGS+=("$1"); shift ;;
+    esac
+  done
+  case "$SEAT_OP" in *[!A-Za-z0-9.]*) die "invalid seat operation token" ;; esac
+  case "$SEAT_PREV" in -|*[!A-Za-z0-9._-]*) [ "$SEAT_PREV" = - ] || die "invalid previous seat generation" ;; esac
+}
+
+# seat_receipt_open <id> <verb>: persist the token-scoped receipt before any
+# endpoint effect. Must run inside the host lifecycle episode.
+seat_receipt_open() {
+  local id=$1 receipt tmp running old
+  receipt=$(receipt_path "$id")
+  running=$(fm_meta_get "$(meta_path "$id")" spawn_gen 2>/dev/null || true)
+  for old in "$CONTROL_STATE/$id.seat-operation."*; do
+    [ -f "$old" ] || continue
+    case "$old" in *.tmp.*) continue ;; esac
+    [ "$old" != "$receipt" ] || continue
+    if [ -n "$running" ] && [ "$old" = "$(receipt_path "$id" "$running")" ]; then
+      continue
+    fi
+    rm -f "$old"
+  done
+  tmp="$receipt.tmp.$$"
+  (umask 077 && {
+    echo "schema=fm-remote-seat-receipt.v1"
+    echo "operation=$SEAT_OP"
+    echo "verb=$2"
+    echo "requested_generation=$SEAT_OP"
+    echo "previous_generation=$SEAT_PREV"
+    echo "phase=received"
+  } > "$tmp") && mv -f "$tmp" "$receipt"
+}
+
+seat_receipt_set() {  # <key=value>...
+  fm_remote_seat_receipt_update "$(receipt_path "$SEAT_LIFECYCLE_ID")" "$SEAT_OP" "$SEAT_OP" "$@"
+}
+
+# seat_emit <disposition> <startup-confirmed> <old-stopped> [actual-gen] [backend] [target] [model]
+seat_emit() {
+  local route=null
+  if [ -n "${6:-}" ]; then
+    route="{\"placement\":\"remote\",\"backend\":$(json_str "${5:-herdr}"),\"target\":$(json_str "$6"),\"home\":$(json_str "$TARGET_HOME"),\"host\":null,\"remote_root\":null,\"spawn_gen\":$(json_str "${4:-}")}"
+  fi
+  local prev=null
+  [ "$SEAT_PREV" = - ] || prev=$(json_str "$SEAT_PREV")
+  printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":%s,"operation":%s,"requested_generation":%s,"actual_generation":%s,"previous_generation":%s,"disposition":%s,"startup_confirmed":%s,"old_stopped":%s,"route":%s,"actual_model":%s,"complete":true}\n' \
+    "$(json_str "$SEAT_LIFECYCLE_ID")" "$(json_str "$SEAT_OP")" "$(json_str "$SEAT_OP")" \
+    "$(json_str "${4:-}")" "$prev" "$(json_str "$1")" "$2" "$3" "$route" "$(json_str "${7:-}")"
+}
+
+# seat_endpoint_state <backend> <target>: recovery-grade state, with a
+# `missing` reading upgraded to `gone` only on the backend's absence proof.
+seat_endpoint_state() {
+  local state verdict
+  [ -n "$1" ] && [ -n "$2" ] || { printf 'unreadable'; return 0; }
+  state=$(fm_backend_agent_state "$1" "$2" 2>/dev/null || printf 'unreadable')
+  if [ "$state" = missing ]; then
+    verdict=$(fm_control_endpoint_absence_verdict "$1" "$2")
+    case "${verdict%%$'\t'*}" in
+      gone) state=gone ;;
+      dead) state=dead ;;
+      alive) state=alive ;;
+      *) state=unproven ;;
+    esac
+  fi
+  printf '%s' "$state"
+}
+
+# seat_decide <id>: compute and emit the disposition of operation SEAT_OP from
+# the durable receipt, the control journal, and a fresh generation-bound
+# endpoint observation. The caller holds the host lifecycle mutex. Sets
+# SEAT_DECIDED to the disposition.
+seat_decide() {
+  local id=$1 receipt meta journal phase verb gen meta_gen backend target model state jphase jop rollback old_stopped=false
+  receipt=$(receipt_path "$id")
+  meta=$(meta_path "$id")
+  SEAT_DECIDED=unknown
+  if [ ! -f "$receipt" ] || [ -L "$receipt" ] || [ "$(receipt_field "$receipt" operation)" != "$SEAT_OP" ]; then
+    seat_emit unknown false false
+    return 0
+  fi
+  [ -n "$(receipt_field "$receipt" previous_generation)" ] && SEAT_PREV=$(receipt_field "$receipt" previous_generation)
+  phase=$(receipt_field "$receipt" phase)
+  verb=$(receipt_field "$receipt" verb)
+  gen=$SEAT_OP
+  meta_gen=
+  model=
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    meta_gen=$(fm_meta_get "$meta" spawn_gen)
+    model=$(fm_meta_get "$meta" model)
+  fi
+  backend=$(receipt_field "$receipt" route_backend)
+  target=$(receipt_field "$receipt" route_target)
+  if [ "$phase" = existing ]; then
+    SEAT_DECIDED=existing
+    seat_emit existing true false "$(receipt_field "$receipt" actual_generation)" "$backend" "$target" "$(receipt_field "$receipt" actual_model)"
+    return 0
+  fi
+  if [ "$verb" = relaunch ]; then
+    journal="$CONTROL_STATE/$id.control-relaunch"
+    jop=$(sed -n 's/^seat_operation=//p' "$journal" 2>/dev/null | tail -1)
+    jphase=$(sed -n 's/^phase=//p' "$journal" 2>/dev/null | tail -1)
+    rollback=$(sed -n 's/^rollback=//p' "$journal" 2>/dev/null | tail -1)
+    if [ "$jop" = "$SEAT_OP" ]; then
+      case "${jphase#failed:}" in
+        exited|launching|complete) old_stopped=true ;;
+        stopping)
+          case "$rollback" in
+            prior-record-kept-agent-dead) old_stopped=true ;;
+            instructions-restored-agent-alive) ;;
+            *)
+              if [ "$phase" = received ] || [ "$phase" = prelaunch ]; then
+                SEAT_DECIDED=unknown
+                seat_emit unknown false false
+                return 0
+              fi
+              ;;
+          esac
+          ;;
+      esac
+    fi
+  fi
+  case "$phase" in
+    prelaunch|received)
+      if [ "$old_stopped" = true ]; then
+        # The old agent stopped but the candidate was never submitted.
+        SEAT_DECIDED=cancelled
+        seat_emit cancelled false true
+      else
+        SEAT_DECIDED=prelaunch
+        seat_emit prelaunch false false
+      fi
+      ;;
+    dispatched|started)
+      state=$(seat_endpoint_state "$backend" "$target")
+      if [ "$state" = alive ] && [ "$meta_gen" = "$gen" ]; then
+        seat_receipt_set phase=started "actual_generation=$gen" 2>/dev/null || true
+        SEAT_DECIDED=started
+        seat_emit started true "$old_stopped" "$gen" "$backend" "$target" "$model"
+      elif [ "$phase" = started ] && { [ "$state" = dead ] || [ "$state" = gone ]; }; then
+        SEAT_DECIDED=dead-after-start
+        seat_emit dead-after-start true "$old_stopped" "$gen" "$backend" "$target" "$model"
+      elif [ "$phase" = dispatched ] && [ "$state" = gone ]; then
+        SEAT_DECIDED=cancelled
+        seat_emit cancelled false "$old_stopped" "" "$backend" "$target"
+      else
+        SEAT_DECIDED=unknown
+        seat_emit unknown false "$old_stopped" "" "$backend" "$target"
+      fi
+      ;;
+    *)
+      seat_emit unknown false "$old_stopped"
+      ;;
+  esac
+}
+
+# seat_enter <id> <verb>: parse-time checks done, join the host lifecycle
+# episode, answer a same-token retry from its durable episode (returns 3), or
+# open a fresh receipt (returns 0). Refuses a pooled launch with no operation.
+seat_enter() {
+  local id=$1 verb=$2 receipt
+  SEAT_LIFECYCLE_ID=$id
+  if [ -z "$SEAT_OP" ]; then
+    if host_pools_enabled; then
+      prelaunch_die "this home has fleet seat pools, so a supervisor $verb must come from the parent's seat operation (bin/fm-remote-secondmate-relaunch.sh or fm-spawn); nothing was changed"
+    fi
+    return 0
+  fi
+  mkdir -p "$CONTROL_STATE" "$CONTROL_DATA" 2>/dev/null \
+    || prelaunch_die "remote endpoint directories could not be created"
+  if ! fm_supervisor_lifecycle_acquire "$CONTROL_STATE" "$id" 30; then
+    # Another episode may be running this very token; never call it refused.
+    seat_emit unknown false false
+    die "another lifecycle episode for remote secondmate $id is running on this host"
+  fi
+  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  receipt=$(receipt_path "$id")
+  if [ -f "$receipt" ] && [ ! -L "$receipt" ] && [ "$(receipt_field "$receipt" operation)" = "$SEAT_OP" ]; then
+    seat_decide "$id"
+    return 3
+  fi
+  seat_receipt_open "$id" "$verb" || prelaunch_die "the seat operation receipt could not be written"
+  return 0
+}
 
 remote_endpoint_load() {
   local id=$1 herdr_session
@@ -160,6 +420,8 @@ print_route() { # <id>
   printf 'model=%s\n' "$model"
   printf 'effort=%s\n' "$effort"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
+  printf 'spawn_gen=%s\n' "$(fm_meta_get "$REMOTE_ENDPOINT_META" spawn_gen)"
+  [ -z "$SEAT_OP" ] || printf 'seat_operation=%s\n' "$SEAT_OP"
 }
 
 cmd_route() {
@@ -175,10 +437,18 @@ cmd_route() {
 
 cmd_launch() {
   local id=$1 harness=$2 model=$3 effort=$4 selected_backend=$5 traceparent=${6:-}
-  local current meta out herdr_session
+  local current meta out herdr_session enter_rc=0
 
   validate_id "$id"
+  SEAT_LIFECYCLE_ID=$id
   ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
+  seat_enter "$id" launch || enter_rc=$?
+  if [ "$enter_rc" -eq 3 ]; then
+    case "$SEAT_DECIDED" in
+      started|existing) remote_endpoint_load "$id" && print_route "$id"; return 0 ;;
+      *) die "seat operation $SEAT_OP was already handled on this host ($SEAT_DECIDED)" ;;
+    esac
+  fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
@@ -192,22 +462,28 @@ cmd_launch() {
   # the GUI login session, so the endpoint survives every SSH disconnection that
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) prelaunch_die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
-  mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
+  mkdir -p "$CONTROL_STATE" "$CONTROL_DATA" || prelaunch_die "remote endpoint directories could not be created"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
-    remote_endpoint_require "$id"
+    remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
     current=$(fm_backend_agent_state "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null || printf 'unreadable\n')
     case "$current" in
       alive)
+        if [ -n "$SEAT_OP" ]; then
+          seat_receipt_set phase=existing "actual_generation=$(fm_meta_get "$meta" spawn_gen)" \
+            "route_backend=$REMOTE_ENDPOINT_BACKEND" "route_target=$REMOTE_ENDPOINT_TARGET" \
+            "actual_model=$(fm_meta_get "$meta" model)" 2>/dev/null || true
+          seat_decide "$id"
+        fi
         print_route "$id"
         return 0
         ;;
       dead)
         fm_backend_kill "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" 2>/dev/null \
-          || die "could not remove the confirmed agent-less endpoint"
+          || prelaunch_die "could not remove the confirmed agent-less endpoint"
         ;;
       missing) ;;
-      *) die "remote endpoint state is $current; refusing duplicate launch" ;;
+      *) prelaunch_die "remote endpoint state is $current; refusing duplicate launch" ;;
     esac
   fi
   # The parent owns both convergence legs before it asks for this launch: it
@@ -221,11 +497,13 @@ cmd_launch() {
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
-    FM_SKIP_SECONDMATE_SYNC=1 \
+    FM_SKIP_SECONDMATE_SYNC=1 FM_REMOTE_SEAT_OPERATION="$SEAT_OP" FM_SPAWN_SEAT_GENERATION="$SEAT_OP" \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ -z "$SEAT_OP" ] || seat_decide "$id"
     die "remote host-local secondmate launch failed"
   fi
+  [ -z "$SEAT_OP" ] || seat_decide "$id"
   [ -f "$meta" ] || die "remote launch returned without endpoint metadata"
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
@@ -247,11 +525,19 @@ cmd_launch() {
 # re-resolve it here would silently drift the mate onto another runtime. `default`
 # explicitly clears an absent parent pin; `-` remains its compatibility spelling.
 cmd_relaunch() {
-  local id=$1 harness=$2 model=$3 effort=$4
+  local id=$1 harness=$2 model=$3 effort=$4 enter_rc=0 control_rc=0
   local -a control_args
 
   validate_id "$id"
+  SEAT_LIFECYCLE_ID=$id
   ( validate_home "$id" ) || prelaunch_die "remote secondmate home validation failed"
+  seat_enter "$id" relaunch || enter_rc=$?
+  if [ "$enter_rc" -eq 3 ]; then
+    case "$SEAT_DECIDED" in
+      started) remote_endpoint_load "$id" && print_route "$id"; return 0 ;;
+      *) die "seat operation $SEAT_OP was already handled on this host ($SEAT_DECIDED)" ;;
+    esac
+  fi
   case "$harness" in
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|omp) ;;
     *) prelaunch_die "unverified remote secondmate harness: $harness" ;;
@@ -262,7 +548,7 @@ cmd_relaunch() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$harness" "$model" "$effort" \
       || prelaunch_die "remote secondmate native effort validation failed"
   fi
-  remote_endpoint_require "$id"
+  remote_endpoint_load "$id" || prelaunch_die "$REMOTE_ENDPOINT_ERROR"
   [ "$model" != - ] || model=default
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
@@ -273,8 +559,11 @@ cmd_relaunch() {
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
-    FM_SKIP_SECONDMATE_SYNC=1 \
-    "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}"
+    FM_SKIP_SECONDMATE_SYNC=1 FM_REMOTE_SEAT_OPERATION="$SEAT_OP" \
+    FM_SPAWN_SEAT_GENERATION="$SEAT_OP" \
+    "$SCRIPT_DIR/fm-control.sh" "${control_args[@]}" || control_rc=$?
+  [ -z "$SEAT_OP" ] || seat_decide "$id"
+  [ "$control_rc" -eq 0 ] || exit "$control_rc"
   # A parent tracking this route needs the identity the relaunch actually
   # produced, not the one it asked for, so it can republish its own record the
   # same way cmd_launch's caller already does. Reading it back from the
@@ -282,6 +571,25 @@ cmd_relaunch() {
   # values - is what makes that record correct even when relaunch resolved
   # "default" against a configured pin this call never saw.
   print_route "$id"
+}
+
+cmd_disposition() {
+  local id=$1
+  validate_id "$id"
+  SEAT_LIFECYCLE_ID=$id
+  [ "${2:-}" = --operation ] && [ -n "${3:-}" ] || usage
+  SEAT_OP=$3
+  case "$SEAT_OP" in *[!A-Za-z0-9.]*) die "invalid seat operation token" ;; esac
+  if ! ( validate_home "$id" ) 2>/dev/null; then
+    seat_emit unknown false false
+    return 0
+  fi
+  if [ ! -d "$CONTROL_STATE" ] || ! fm_supervisor_lifecycle_acquire "$CONTROL_STATE" "$id" 0; then
+    seat_emit unknown false false
+    return 0
+  fi
+  trap 'fm_supervisor_lifecycle_release "$CONTROL_STATE" "$SEAT_LIFECYCLE_ID"' EXIT
+  seat_decide "$id"
 }
 
 cmd_send_body() {
@@ -461,8 +769,19 @@ cmd_retire() {
 }
 
 case "${1:-}" in
-  launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;
-  relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
+  launch)
+    shift
+    seat_parse_operation "$@"
+    [ "${#SEAT_ARGS[@]}" -ge 5 ] && [ "${#SEAT_ARGS[@]}" -le 6 ] || usage
+    cmd_launch "${SEAT_ARGS[@]}"
+    ;;
+  relaunch)
+    shift
+    seat_parse_operation "$@"
+    [ "${#SEAT_ARGS[@]}" -eq 4 ] || usage
+    cmd_relaunch "${SEAT_ARGS[@]}"
+    ;;
+  disposition) shift; [ "$#" -eq 3 ] || usage; cmd_disposition "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
   send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;

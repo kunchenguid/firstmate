@@ -42,9 +42,17 @@
 #          check; repair still happens, but inside fm-spawn's launch gate only
 #          when a relaunch is actually authorized.
 #
-# Concurrency: fm_secondmate_liveness_lock serializes probe+kill+relaunch per
-# task across the bootstrap sweep and the watcher tick, so a concurrent
-# relaunch can never be observed mid-flight as a dead endpoint and killed.
+# Concurrency: .secondmate-liveness-<id>.lock is the ONE supervisor lifecycle
+# episode mutex for that task in this home. The bootstrap sweep and watcher
+# tick take it without waiting and skip a busy mate; initial and recovery
+# secondmate spawn, local relaunch and exit, the parent remote relaunch
+# wrapper, and the host-local remote control verbs join it too, so a stale
+# death probe can never act on a generation another episode already replaced.
+# A nested lifecycle process (liveness -> spawn, control -> spawn, host control
+# -> control -> spawn) adopts the owner's hold through the verified carrier
+# below instead of acquiring or releasing it. Acquisition order across the
+# fleet is: this episode mutex, then the control/spawn/registry locks, then the
+# task metadata lock, then the fleet seat lock (bin/fm-fleet-seats.sh).
 # A separate per-home lock serializes relaunches of different mates, since each
 # fresh spawn owns the same task-set lock. The watcher uses its spawn timeout
 # as the lock-wait bound; an untimed sweep defaults to 600 seconds.
@@ -76,13 +84,183 @@ fm_sm_live_require_locks() {
 }
 
 fm_secondmate_liveness_lock() {  # <id>
-  fm_sm_live_require_locks || return 1
-  fm_lock_try_acquire "$STATE/.secondmate-liveness-$1.lock"
+  fm_supervisor_lifecycle_acquire "$STATE" "$1" 0
 }
 
 fm_secondmate_liveness_unlock() {  # <id>
+  fm_supervisor_lifecycle_release "$STATE" "$1"
+}
+
+# --- supervisor lifecycle episode mutex ---------------------------------------
+#
+# fm_supervisor_lifecycle_acquire <state-dir> <id> <wait-secs>
+#   Take the episode mutex (0 = try once, the automatic callers' skip-if-busy
+#   shape; N = bounded wait for a manual caller). On success it publishes the
+#   inheritance carrier FM_SUPERVISOR_LIFECYCLE_CARRIER for child lifecycle
+#   processes and returns 0; a busy mutex returns 1 with FM_LOCK_HELD_PID set.
+# fm_supervisor_lifecycle_adopt <state-dir> <id>
+#   Verify an inherited carrier for exactly this mutex and adopt it without
+#   taking or releasing anything. Returns 0 when adopted, 1 when no carrier
+#   names this mutex, and 2 when a carrier names it but fails verification
+#   (wrong holder, process identity, episode token, or an owner that is not
+#   this process's ancestor) - a caller must refuse rather than acquire then.
+# fm_supervisor_lifecycle_enter <state-dir> <id> <wait-secs>
+#   Adopt when a verified carrier names the mutex, else acquire; a failed
+#   carrier verification refuses.
+# fm_supervisor_lifecycle_release <state-dir> <id>
+#   Release only a hold this process acquired; an adopted hold stays with its
+#   owner, whose exit path releases it.
+#
+# The carrier is "<canonical-lock-path>|<pid>|<pid-identity-cksum>|<episode>".
+# The episode token lives in the sidecar file <lock>.episode, written by the
+# holder after it owns the lock, so a stale carrier from an earlier episode
+# never matches a newer hold of the same path.
+FM_SUPERVISOR_LIFECYCLE_HELD=
+
+fm_supervisor_lifecycle_lock_path() {  # <state-dir> <id>
+  local dir
+  case "${2-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  dir=$(cd "${1-}" 2>/dev/null && pwd -P) || return 1
+  printf '%s/.secondmate-liveness-%s.lock\n' "$dir" "$2"
+}
+
+fm_sm_lifecycle_identity() {  # <pid>
+  local identity
+  identity=$(fm_pid_identity "$1" 2>/dev/null) || return 1
+  printf '%s' "$identity" | cksum | tr -s ' ' '-' | cut -d- -f1-2
+}
+
+# fm_sm_lifecycle_is_ancestor <pid>: <pid> is this process or one of its
+# ancestors. Bounded walk; any unreadable step answers no.
+fm_sm_lifecycle_is_ancestor() {  # <pid>
+  local want=$1 cur depth=0 next
+  fm_current_pid cur || return 1
+  while [ "$depth" -lt 64 ]; do
+    [ "$cur" != "$want" ] || return 0
+    case "$cur" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    next=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ') || return 1
+    [ -n "$next" ] && [ "$next" != "$cur" ] || return 1
+    cur=$next
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+fm_supervisor_lifecycle_acquire() {  # <state-dir> <id> <wait-secs>
+  local lock wait=${3:-0} me identity episode
+  fm_sm_live_require_locks || return 1
+  lock=$(fm_supervisor_lifecycle_lock_path "$1" "$2") || return 1
+  case "$wait" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$wait" -gt 0 ]; then
+    fm_lock_acquire_wait_max "$lock" "$wait" || return 1
+  else
+    fm_lock_try_acquire "$lock" || return 1
+  fi
+  fm_current_pid me || { fm_lock_release "$lock" 2>/dev/null || true; return 1; }
+  identity=$(fm_sm_lifecycle_identity "$me") || identity=unknown
+  episode="e$(date +%s).$me.$RANDOM$RANDOM"
+  if ! { printf '%s\n' "$episode" > "$lock.episode.tmp.$me" \
+      && mv -f "$lock.episode.tmp.$me" "$lock.episode"; } 2>/dev/null; then
+    rm -f "$lock.episode.tmp.$me" 2>/dev/null || true
+    fm_lock_release "$lock" 2>/dev/null || true
+    return 1
+  fi
+  FM_SUPERVISOR_LIFECYCLE_HELD="$FM_SUPERVISOR_LIFECYCLE_HELD$lock
+"
+  FM_SUPERVISOR_LIFECYCLE_CARRIER="$lock|$me|$identity|$episode"
+  export FM_SUPERVISOR_LIFECYCLE_CARRIER
+  return 0
+}
+
+fm_supervisor_lifecycle_adopt() {  # <state-dir> <id>
+  local lock carrier c_lock c_pid c_identity c_episode rest holder now
+  carrier=${FM_SUPERVISOR_LIFECYCLE_CARRIER:-}
+  [ -n "$carrier" ] || return 1
+  lock=$(fm_supervisor_lifecycle_lock_path "$1" "$2") || return 2
+  c_lock=${carrier%%|*}
+  rest=${carrier#*|}
+  [ "$c_lock" = "$lock" ] || return 1
+  c_pid=${rest%%|*}
+  rest=${rest#*|}
+  c_identity=${rest%%|*}
+  c_episode=${rest#*|}
+  case "$c_pid" in ''|*[!0-9]*) return 2 ;; esac
+  [ -n "$c_episode" ] && [ "$c_episode" != "$rest" ] || return 2
+  fm_sm_live_require_locks || return 2
+  holder=$(cat "$lock/pid" 2>/dev/null || true)
+  [ "$holder" = "$c_pid" ] || return 2
+  fm_pid_alive "$c_pid" || return 2
+  now=$(fm_sm_lifecycle_identity "$c_pid") || now=unknown
+  [ "$now" = "$c_identity" ] || return 2
+  [ "$(cat "$lock.episode" 2>/dev/null || true)" = "$c_episode" ] || return 2
+  fm_sm_lifecycle_is_ancestor "$c_pid" || return 2
+  return 0
+}
+
+fm_supervisor_lifecycle_enter() {  # <state-dir> <id> <wait-secs>
+  local rc=0
+  fm_supervisor_lifecycle_adopt "$1" "$2" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) fm_supervisor_lifecycle_acquire "$1" "$2" "${3:-0}" ;;
+    *) return 2 ;;
+  esac
+}
+
+fm_supervisor_lifecycle_release() {  # <state-dir> <id>
+  local lock me held='' kept='' one
+  lock=$(fm_supervisor_lifecycle_lock_path "$1" "$2") || return 0
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    if [ "$one" = "$lock" ]; then
+      held=1
+    else
+      kept="$kept$one
+"
+    fi
+  done <<EOF_HELD
+$FM_SUPERVISOR_LIFECYCLE_HELD
+EOF_HELD
+  [ -n "$held" ] || return 0
   fm_sm_live_require_locks || return 0
-  fm_lock_release "$STATE/.secondmate-liveness-$1.lock" 2>/dev/null || true
+  fm_current_pid me || return 0
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$me" ]; then
+    rm -f "$lock.episode" 2>/dev/null || true
+    fm_lock_release "$lock" 2>/dev/null || true
+  fi
+  FM_SUPERVISOR_LIFECYCLE_HELD=$kept
+  case "${FM_SUPERVISOR_LIFECYCLE_CARRIER:-}" in
+    "$lock|"*) unset FM_SUPERVISOR_LIFECYCLE_CARRIER ;;
+  esac
+  return 0
+}
+
+# fm_remote_seat_receipt_update <receipt> <operation> <generation> <key=value>...
+#
+# The host operation receipt (<host-state>/parent-route/<id>.seat-operation.<gen>) is
+# opened by bin/fm-remote-secondmate-control.sh, which owns its schema, before
+# any endpoint effect; a host-local launch inside that same episode records its
+# delivery and startup through this one writer. Refuses unless the receipt is
+# a regular file naming exactly <operation> and <generation>; values never
+# carry newlines.
+fm_remote_seat_receipt_update() {
+  local receipt=$1 op=$2 gen=$3 tmp kv key
+  shift 3
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  [ "$(sed -n 's/^operation=//p' "$receipt" | head -1)" = "$op" ] || return 1
+  [ "$(sed -n 's/^requested_generation=//p' "$receipt" | head -1)" = "$gen" ] || return 1
+  tmp="$receipt.tmp.$$"
+  (umask 077 && cp "$receipt" "$tmp") || return 1
+  for kv in "$@"; do
+    case "$kv" in *=*) ;; *) rm -f "$tmp"; return 1 ;; esac
+    case "$kv" in *$'\n'*) rm -f "$tmp"; return 1 ;; esac
+    key=${kv%%=*}
+    if ! { { grep -v "^$key=" "$tmp" || true; printf '%s\n' "$kv"; } > "$tmp.next" && mv -f "$tmp.next" "$tmp"; }; then
+      rm -f "$tmp" "$tmp.next"
+      return 1
+    fi
+  done
+  chmod 0600 "$tmp" && mv -f "$tmp" "$receipt"
 }
 
 fm_sm_live_first_line() {
@@ -131,6 +309,9 @@ fm_secondmate_liveness_recent_attempts() {  # <id> <window-secs>
 #   FM_SM_LIVE_WHERE   backend=<b> or host=<h>, on relaunchable
 #   FM_SM_LIVE_REASON  exact skip suffix, on skipped
 #   FM_SM_LIVE_LINE    verbose already-live line body, on alive
+#   FM_SM_LIVE_GENERATION  the incarnation the record names (its fleet seat
+#                      generation, else spawn_gen), so a verdict is bound to it
+#   FM_SM_LIVE_ROUTE   the exact endpoint or host route the verdict is about
 #
 # `silent` means the meta records no endpoint at all - that shape is owned by
 # secondmate-provisioning recovery, not liveness.
@@ -141,11 +322,19 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
   local meta=$1 id=$2 mode=$3
   FM_SM_LIVE_STATUS=skipped FM_SM_LIVE_STATE=unknown FM_SM_LIVE_KILL=0 FM_SM_LIVE_RESUME=0
   FM_SM_LIVE_CAUSE='' FM_SM_LIVE_WHERE='' FM_SM_LIVE_REASON='' FM_SM_LIVE_LINE=''
+  FM_SM_LIVE_GENERATION='' FM_SM_LIVE_ROUTE=''
   local window harness remote_host remote_rc out agent_state readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || { FM_SM_LIVE_STATUS=silent; return 0; }
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
+  FM_SM_LIVE_GENERATION=$(fm_meta_get "$meta" fleet_seat_generation)
+  [ -n "$FM_SM_LIVE_GENERATION" ] || FM_SM_LIVE_GENERATION=$(fm_meta_get "$meta" spawn_gen)
+  if [ -n "$remote_host" ]; then
+    FM_SM_LIVE_ROUTE="remote:$remote_host:$(fm_meta_get "$meta" remote_target)"
+  else
+    FM_SM_LIVE_ROUTE="$(fm_backend_of_meta "$meta"):$(fm_backend_target_of_meta "$meta"):$window"
+  fi
   if [ -n "$remote_host" ]; then
     if [ "$mode" = full ]; then
       remote_rc=0
@@ -270,26 +459,57 @@ fm_secondmate_liveness_probe() {  # <meta> <id> <full|poll>
 
 # fm_secondmate_liveness_relaunch <meta> <id> [timeout-secs]
 #
-# Acts on a `relaunchable` probe verdict for <id>: takes the per-home relaunch
-# lock, records the attempt, kills a confirmed-dead local endpoint if required
-# (FM_SM_LIVE_KILL), runs the guarded spawn, then records its outcome.
+# Acts on a `relaunchable` probe verdict for <id>. It first reloads the record
+# and re-probes under the same episode: a verdict whose generation or route
+# changed, or that no longer reads dead or missing, is abandoned rather than
+# acted on. It then asks the fleet seat owner to reclaim exactly the probed
+# generation (bin/fm-fleet-seats.sh reclaim, which collects its own endpoint
+# or host evidence); a generation that cannot be proven finished - for example
+# a submitted launch whose endpoint still holds only a shell - stays counted
+# and nothing is killed or spawned. Only then does it take the per-home relaunch
+# lock, record the attempt, and kill a confirmed-dead local endpoint if required
+# (FM_SM_LIVE_KILL). It runs the guarded spawn, which reserves a new generation
+# inside this same episode, then records its outcome in the per-mate ledger.
 # On t3code a close that cannot be proven stops there: the thread and its
 # metadata stay as recorded, the verdict becomes skipped, and nothing is
 # spawned, because a second thread beside a live one is the duplicate
 # supervisor recovery must never create. Other backends keep their existing
 # best-effort kill. FM_SM_LIVE_RESUME instead sends the endpoint's backend
-# resume turn and spawns nothing.
-# The header owns the lock-wait bounds. A positive timeout separately
-# wraps the spawn in fm_run_timed so a watcher poll stays bounded; 124/137 mean
-# the bound fired. Returns the spawn exit status; combined spawn output is in
-# FM_SM_LIVE_OUT and the status in FM_SM_LIVE_RC. When the lock wait expires,
-# the ledger cannot be read, or the attempt row cannot be appended, nothing is
-# killed or spawned and no attempt is recorded: the verdict becomes
+# resume turn and spawns nothing. The header owns lock-wait bounds. A positive
+# timeout wraps the spawn in fm_run_timed so a watcher poll stays bounded;
+# 124/137 mean the bound fired. Returns the spawn exit status; combined spawn
+# output is in FM_SM_LIVE_OUT and status in FM_SM_LIVE_RC. When the verdict is
+# abandoned, the seat cannot be reclaimed, the lock wait expires, the ledger
+# cannot be read, or the attempt row cannot be appended, nothing is killed or
+# spawned and no attempt is recorded: the verdict becomes
 # FM_SM_LIVE_STATUS=skipped with FM_SM_LIVE_REASON set and this returns 1.
 # Caller holds the liveness lock and owns reporting.
 fm_secondmate_liveness_relaunch() {  # <meta> <id> [timeout-secs]
-  local meta=$1 id=$2 timeout=${3:-} relaunch_lock wait_seconds rc=0
+  local meta=$1 id=$2 timeout=${3:-} probed_gen probed_route seat_out seat_rc relaunch_lock wait_seconds rc=0
   FM_SM_LIVE_OUT='' FM_SM_LIVE_RC=0
+  probed_gen=$FM_SM_LIVE_GENERATION
+  probed_route=$FM_SM_LIVE_ROUTE
+  fm_secondmate_liveness_probe "$meta" "$id" poll
+  if [ "$FM_SM_LIVE_STATUS" != relaunchable ] || [ "$FM_SM_LIVE_GENERATION" != "$probed_gen" ] \
+    || [ "$FM_SM_LIVE_ROUTE" != "$probed_route" ]; then
+    FM_SM_LIVE_STATUS=skipped
+    FM_SM_LIVE_REASON="the recorded incarnation or its endpoint changed since it was probed (now $FM_SM_LIVE_STATE); left for the next check"
+    FM_SM_LIVE_RC=1
+    return 1
+  fi
+  if [ -n "$probed_gen" ]; then
+    local seat_home=$FM_HOME seat_config=${CONFIG:-$FM_HOME/config} seat_data=${DATA:-$FM_HOME/data}
+    seat_rc=0
+    seat_out=$(FM_HOME="$seat_home" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_OVERRIDE="$seat_config" FM_DATA_OVERRIDE="$seat_data" \
+      "$FM_SM_LIVE_LIB_DIR/fm-fleet-seats.sh" reclaim "$id" --generation "$probed_gen" 2>&1) || seat_rc=$?
+    if [ "$seat_rc" -ne 0 ]; then
+      FM_SM_LIVE_STATUS=skipped
+      FM_SM_LIVE_REASON="its fleet seat generation $probed_gen was not reclaimed, so no replacement was launched: $(printf '%s\n' "$seat_out" | tail -1)"
+      FM_SM_LIVE_RC=1
+      return 1
+    fi
+  fi
   if ! fm_secondmate_liveness_recent_attempts "$id" 0 >/dev/null; then
     FM_SM_LIVE_STATUS=skipped
     FM_SM_LIVE_REASON="relaunch ledger $STATE/.secondmate-relaunch-$id is unreadable; endpoint left $FM_SM_LIVE_STATE"
