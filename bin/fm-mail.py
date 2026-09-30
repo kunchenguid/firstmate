@@ -395,19 +395,22 @@ def cmd_read():
         print('fm-mail read error:', e)
         return 1
 
+def send_message(to, subj, body, timeout=MAIL_TIMEOUT):
+    m = EmailMessage()
+    m['From'] = USER
+    m['To'] = to
+    m['Subject'] = subj
+    m['Date'] = formatdate(localtime=True)
+    m.set_content(body)
+    with smtplib.SMTP_SSL(STH, STP, context=CTX, timeout=timeout) as s:
+        s.login(USER, PW)
+        s.send_message(m)
+
 def cmd_send(to, subj, body):
     try:
         if body == '-':
             body = sys.stdin.read().rstrip('\n')
-        m = EmailMessage()
-        m['From'] = USER
-        m['To'] = to
-        m['Subject'] = subj
-        m['Date'] = formatdate(localtime=True)
-        m.set_content(body)
-        with smtplib.SMTP_SSL(STH, STP, context=CTX, timeout=MAIL_TIMEOUT) as s:
-            s.login(USER, PW)
-            s.send_message(m)
+        send_message(to, subj, body)
         print('sent to', to)
         return 0
     except Exception as e:
@@ -531,26 +534,56 @@ def disarm_poll_deadline():
     if hasattr(signal, 'setitimer'):
         signal.setitimer(signal.ITIMER_REAL, 0)
 
+AWAY_READ_ATTEMPTS = 3
+
 def load_away_scan(path, identity):
     """Return the highest uid already examined under this away posture and
-    mailbox generation; any other identity starts the scan from the beginning."""
+    mailbox generation, plus failed reads awaiting retry as
+    {uid: (attempts, owner)}; any other identity starts the scan afresh."""
     if not path:
-        return 0
+        return 0, {}
     try:
         lines = open(path, encoding='utf-8').read().splitlines()
     except OSError:
-        return 0
-    if len(lines) != 2 or lines[0] != identity or not lines[1].isdigit():
-        return 0
-    return int(lines[1])
+        return 0, {}
+    if len(lines) < 2 or lines[0] != identity or not lines[1].isdigit():
+        return 0, {}
+    pending = {}
+    for line in lines[2:]:
+        fields = line.split(' ')
+        if len(fields) == 3 and all(field.isdigit() for field in fields):
+            pending[fields[0]] = (int(fields[1]), fields[2] == '1')
+    return int(lines[1]), pending
 
-def save_away_scan(path, identity, high):
+def save_away_scan(path, identity, high, pending):
     if not path:
         return
     tmp = path + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as f:
         f.write('%s\n%d\n' % (identity, high))
+        for uid in sorted(pending, key=int):
+            attempts, owner = pending[uid]
+            f.write('%s %d %d\n' % (uid, attempts, 1 if owner else 0))
     os.replace(tmp, path)
+
+def send_unreadable_reply_alert(recipient, uid, seconds):
+    """Tell the owner one reply could not be read, without any message content."""
+    try:
+        arm_poll_deadline(seconds)
+        send_message(
+            recipient,
+            'Firstmate away alert: one reply could not be read',
+            'Firstmate could not read one of your email replies (mail UID %s) after %d attempts '
+            'and stopped retrying it. It remains unread in the inbox; please resend your answer.'
+            % (uid, AWAY_READ_ATTEMPTS),
+            timeout=max(0.5, min(MAIL_TIMEOUT, seconds)),
+        )
+        return True
+    except Exception as error:
+        print('fm-mail: away unreadable-reply alert was not sent:', error, file=sys.stderr)
+        return False
+    finally:
+        disarm_poll_deadline()
 
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
@@ -609,15 +642,22 @@ def cmd_poll_list():
         away_scan_path = os.environ.get('FM_MAIL_AWAY_SCAN', '')
         away_scan_identity = ''
         away_high = 0
+        away_pending = {}
         away_processed = []
         away_skipped = set()
         away_held = set()
+        away_owner_failed = set()
         if away_mode:
             away_scan_identity = 'away-scan\t%s\t%s' % (
                 uidv, afk_record_field('entered_epoch') or '')
-            away_high = load_away_scan(away_scan_path, away_scan_identity)
+            away_high, away_pending = load_away_scan(away_scan_path, away_scan_identity)
+            unseen_set = set(unseen)
+            away_pending = {u: v for u, v in away_pending.items()
+                            if u in unseen_set or v[0] >= AWAY_READ_ATTEMPTS}
             new_set = set(new_uids)
             new_candidates = sorted(
+                (u for u, v in away_pending.items() if v[0] < AWAY_READ_ATTEMPTS), key=int)
+            new_candidates += sorted(
                 (u for u in unseen if u.isdigit() and int(u) > away_high), key=int)
             retry_window = []
             retry_candidates = []
@@ -669,7 +709,7 @@ def cmd_poll_list():
                     if new_emitted + retry_emitted >= cap:
                         break
                     away_processed.append(u)
-                    if not is_retry and u not in new_set:
+                    if not is_retry and u not in new_set and u not in away_pending:
                         away_skipped.add(u)
                         continue
                 elif is_retry:
@@ -757,6 +797,7 @@ def cmd_poll_list():
                             raise AfkBodyFetchError('configured sender body fetch failed') from error
                 except AfkBodyFetchError:
                     away_held.add(u)
+                    away_owner_failed.add(u)
                     if is_retry:
                         continue
                     out.append((uid, idate, fr, subj, 'degraded'))
@@ -766,6 +807,7 @@ def cmd_poll_list():
                     break
                 except Exception:
                     if afk_email_active:
+                        away_held.add(u)
                         out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
                         if is_retry:
                             retry_emitted += 1
@@ -828,6 +870,7 @@ def cmd_poll_list():
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=os.environ.copy(),
+                    timeout=max(0.5, deadline + 0.7 * budget - time.monotonic()),
                 )
                 handoff_failed = result.returncode != 0
             except (OSError, subprocess.SubprocessError):
@@ -835,6 +878,7 @@ def cmd_poll_list():
             if handoff_failed:
                 failed_uids = {message['uid'] for message in afk_messages}
                 away_held |= failed_uids
+                away_owner_failed |= failed_uids
                 out = [
                     (uid, idate, fr, subj, 'degraded' if uid in failed_uids else status)
                     for uid, idate, fr, subj, status in out
@@ -921,12 +965,33 @@ def cmd_poll_list():
         if away_mode:
             row_uids = {row[0] for row in out}
             high = away_high
+            pending = dict(away_pending)
             for u in away_processed:
-                if u in away_held or (u not in row_uids and u not in away_skipped):
+                if u in away_held:
+                    attempts, owner = pending.get(u, (0, False))
+                    pending[u] = (attempts + 1, owner or u in away_owner_failed)
+                elif u in row_uids:
+                    pending.pop(u, None)
+                elif u not in away_skipped:
                     break
-                high = int(u)
-            if high != away_high:
-                save_away_scan(away_scan_path, away_scan_identity, high)
+                if int(u) > high:
+                    high = int(u)
+            exhausted = sorted(
+                (u for u, v in pending.items() if v[0] >= AWAY_READ_ATTEMPTS), key=int)
+            for u in exhausted:
+                if not pending[u][1] or recipient is None:
+                    del pending[u]
+            if high != away_high or pending != away_pending:
+                save_away_scan(away_scan_path, away_scan_identity, high, pending)
+            alerted = [
+                u for u in exhausted if u in pending
+                and send_unreadable_reply_alert(
+                    recipient, u, deadline + 0.9 * budget - time.monotonic())
+            ]
+            if alerted:
+                for u in alerted:
+                    del pending[u]
+                save_away_scan(away_scan_path, away_scan_identity, high, pending)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures

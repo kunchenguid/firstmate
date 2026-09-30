@@ -688,7 +688,13 @@ auth = 'Authentication-Results: mx.google.com; dkim=pass header.d=gmail.com\r\n'
 body = b'From: johnpoyser@gmail.com\r\nSubject: reply\r\n\r\nFM-AFK-REPLY test answer'
 slow = {}
 search_delay = 0
-if scenario == 'spoofed':
+body_failures = {}
+if scenario in ('transient', 'permanent', 'handoff-timeout'):
+    uids = ['1', '2', '3']
+    authentic = {'1', '2'}
+    body_failures = {'1': 1 if scenario == 'transient' else (99 if scenario == 'permanent' else 0)}
+    os.environ['FM_MAIL_POLL_BUDGET'] = '1'
+elif scenario == 'spoofed':
     uids = [str(u) for u in range(1, 27)]
     authentic = {'26'}
 elif scenario == 'retry':
@@ -718,6 +724,7 @@ class FakeConn:
     untagged_responses = {'UIDVALIDITY': [b'777']}
     searches = []
     header_fetches = []
+    body_fetches = []
     other_commands = []
     connect_timeouts = []
     def __init__(self):
@@ -741,6 +748,10 @@ class FakeConn:
             extra = auth if number in authentic else ''
             header = f'From: {owner}\r\n{extra}Subject: mail {number}\r\n\r\n'.encode()
             return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), header)])
+        self.body_fetches.append(number)
+        if body_failures.get(number, 0) > 0:
+            body_failures[number] -= 1
+            return ('NO', [])
         return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), body)])
     def store(self, *args):
         self.other_commands.append(('store', args))
@@ -753,8 +764,12 @@ def fake_imap(*args, **kwargs):
 imaplib.IMAP4_SSL = fake_imap
 import subprocess
 handoffs = []
+handoff_timeouts = []
 def fake_run(*args, **kwargs):
     if kwargs.get('input'):
+        handoff_timeouts.append(kwargs.get('timeout'))
+        if scenario == 'handoff-timeout' and len(handoff_timeouts) == 1:
+            raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
         handoffs.extend(message['uid'] for message in json.loads(kwargs['input']))
     return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 subprocess.run = fake_run
@@ -763,6 +778,8 @@ spec = importlib.util.spec_from_file_location('fm_mail', mail_py)
 mail = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mail)
 mail.afk_record_field = lambda name: '1700000000'
+alerts = []
+mail.send_message = lambda to, subj, text, timeout=None: alerts.append((to, subj, text))
 
 def poll(away):
     """Run one poll and, like fm-mail.sh, record surfaced non-ignored rows in the cursor."""
@@ -783,7 +800,22 @@ def poll(away):
 def status(rows):
     return ','.join(f'{row[0]}:{row[4]}' for row in rows)
 
-if scenario == 'spoofed':
+if scenario in ('transient', 'handoff-timeout'):
+    rc, rows, first, _, _ = poll(True)
+    print(f'first rc={rc} rows={status(rows)} handoffs={handoffs}')
+    rc, rows, second, _, _ = poll(True)
+    print(f'second rc={rc} fetched={",".join(second)} handoffs={handoffs} alerts={len(alerts)}')
+    print('handoff_timeouts_bounded=%s' % all(0 < t <= 2 for t in handoff_timeouts))
+elif scenario == 'permanent':
+    fetched_total = []
+    for _ in range(4):
+        rc, rows, fetched, _, _ = poll(True)
+        assert rc == 0, rc
+        fetched_total += fetched
+    print(f'handoffs={handoffs} owner_fetches={fetched_total.count("1")} spoof_fetches={fetched_total.count("3")}')
+    print(f'alerts={len(alerts)} to={alerts[0][0] if alerts else ""}')
+    print(f'alert_has_body={any("FM-AFK-REPLY" in text or "test answer" in text for _, _, text in alerts)}')
+elif scenario == 'spoofed':
     fetched_total = []
     polls = 0
     while polls < 4 and '26' not in handoffs:
@@ -847,6 +879,26 @@ test_away_retry_mail_examined_once() {
   assert_contains "$out" 'second_fetched=' "a second away poll is recorded"
   assert_not_contains "$out" 'second_fetched=5' "an ignored retry uid is not examined again while away"
   pass "fm-mail: away retry mail is examined once per away posture"
+}
+
+test_away_owner_read_failures_retry_then_alert() {
+  local out
+  write_away_poll_harness "$TMP_ROOT/away-poll-harness.py"
+  out=$(run_away_poll_harness transient)
+  assert_contains "$out" "first rc=0 rows=1:degraded,2:ok,3:ignored handoffs=['2']" \
+    "a failed owner read does not block later mail"
+  assert_contains "$out" "second rc=0 fetched=1 handoffs=['2', '1'] alerts=0" \
+    "a transient owner read failure is retried and delivered"
+  out=$(run_away_poll_harness permanent)
+  assert_contains "$out" "handoffs=['2'] owner_fetches=3 spoof_fetches=1" \
+    "a permanently unreadable owner reply is tried three times while later mail is processed"
+  assert_contains "$out" 'alerts=1 to=johnpoyser@gmail.com' "one alert is sent to the owner after three failed reads"
+  assert_contains "$out" 'alert_has_body=False' "the alert carries no message body"
+  out=$(run_away_poll_harness handoff-timeout)
+  assert_contains "$out" "second rc=0 fetched=1,2 handoffs=['1', '2']" \
+    "a timed-out handoff retains the reply for the next poll"
+  assert_contains "$out" 'handoff_timeouts_bounded=True' "the reply handoff is bounded by the poll budget"
+  pass "fm-mail: failed away owner reads retry, then alert once"
 }
 
 test_away_poll_budget_bounds_wall_clock() {
@@ -2914,6 +2966,7 @@ test_poll_cap_one_turn_not_saved_before_emit
 test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails
 test_away_spoofed_owner_backlog_cannot_block_reply
 test_away_retry_mail_examined_once
+test_away_owner_read_failures_retry_then_alert
 test_away_poll_budget_bounds_wall_clock
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
