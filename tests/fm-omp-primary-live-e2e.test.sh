@@ -92,9 +92,16 @@ reap_lab() {
 # cleanup reaps it only while that pid still names a broker.
 LAB_BROKER_PID_FILE="$PROJECT/state/tool-shell-parent-pid"
 reap_lab_broker() {
-  local pid
+  local pid ancestor
   pid=$(tr -d '[:space:]' < "$LAB_BROKER_PID_FILE" 2>/dev/null || true)
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  ancestor=$pid
+  for _ in 1 2 3 4 5 6 7 8; do
+    [ "$ancestor" = "$OMP_PID" ] && break
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+    case "$ancestor" in ''|*[!0-9]*) return 0 ;; esac
+  done
+  [ "$ancestor" = "$OMP_PID" ] || return 0
   case "$(ps -o args= -p "$pid" 2>/dev/null)" in
     *' __omp_worker_daemon_broker') kill -TERM "$pid" 2>/dev/null || true ;;
   esac

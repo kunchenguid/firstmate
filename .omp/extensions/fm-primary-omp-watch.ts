@@ -221,10 +221,7 @@ function ompWorkerHelper(pid: string): boolean {
   const comm = psField(pid, "comm=");
   const args = psField(pid, "args=");
   if (comm.split("/").pop() !== "omp") return false;
-  const space = args.indexOf(" ");
-  if (space < 0) return false;
-  const rest = args.startsWith(`${comm} `) ? args.slice(comm.length + 1) : args.slice(space + 1);
-  return rest.startsWith("__omp_worker_");
+  return /(?:^|\/)omp __omp_worker_/.test(args);
 }
 
 function pidAlive(pid: string): boolean {

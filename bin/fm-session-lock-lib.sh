@@ -66,6 +66,11 @@ fm_harness_path_name() {  # <path>
 fm_harness_is_omp_worker_helper() {  # <comm> <args>
   local comm=$1 args=$2 rest
   [ "${comm##*/}" = omp ] || return 1
+  if [ "$comm" = omp ] && [[ "$args" == */omp\ * ]]; then
+    args=${args#*/omp }
+    case "$args" in __omp_worker_*) return 0 ;; esac
+    return 1
+  fi
   case "$args" in
     "$comm "*) rest=${args#"$comm "} ;;
     *' '*) rest=${args#* } ;;
@@ -329,17 +334,28 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid pids pid owner_pid owner_comm owner_args parent_comm
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  fm_harness_pid_alive "$lock_pid" || return 1
+  if fm_harness_pid_alive "$lock_pid"; then
+    owner_pid=$lock_pid
+  else
+    owner_comm=$(ps -o comm= -p "$lock_pid" 2>/dev/null) || return 1
+    owner_args=$(ps -o args= -p "$lock_pid" 2>/dev/null)
+    fm_harness_is_omp_worker_helper "$owner_comm" "$owner_args" || return 1
+    owner_pid=$(ps -o ppid= -p "$lock_pid" 2>/dev/null | tr -d ' ')
+    case "$owner_pid" in ''|*[!0-9]*) return 1 ;; esac
+    parent_comm=$(ps -o comm= -p "$owner_pid" 2>/dev/null) || return 1
+    [ "${parent_comm##*/}" = omp ] || return 1
+    fm_harness_pid_alive "$owner_pid" || return 1
+  fi
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 1
+    [ "$pid" = "$lock_pid" ] || [ "$pid" = "$owner_pid" ] && return 1
   done <<EOF
 $pids
 EOF

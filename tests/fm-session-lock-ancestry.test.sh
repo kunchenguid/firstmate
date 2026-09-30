@@ -316,7 +316,7 @@ case "$pid:$field" in
   1:ppid=) printf '%s\n' 0 ;;
   *:comm=) printf '%s\n' bash ;;
   *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
-  *:ppid=) printf '%s\n' 36954 ;;
+  *:ppid=) printf '%s\n' "${FM_TEST_FOREIGN:+500}"; [ -n "${FM_TEST_FOREIGN:-}" ] || printf '%s\n' 36954 ;;
 esac
 SH
   chmod +x "$fakebin/ps"
@@ -334,6 +334,13 @@ SH
     fi
   done
 
+  # Linux procps reports the bare executable name in comm while args retains
+  # the full executable path, including spaces.
+  sed -i.bak 's#^omp=/Users/u/.local/bin/omp$#omp=/Users/u/Install With Spaces/omp#' "$fakebin/ps"
+  rm -f "$fakebin/ps.bak"
+  FM_TEST_OMP_SHAPE=linux lib_eval "$fakebin" 'fm_harness_ancestry_pids' >/dev/null \
+    || fail "a spaced omp install path hid the worker broker"
+
   printf '26445\n' > "$dir/state/.lock"
   lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
     || fail "the omp session did not own the lock recorded with its own pid"
@@ -349,6 +356,13 @@ SH
   fi
   got=$(lib_eval "$fakebin" "fm_session_lock_inspect '$dir/state'; printf '%s' \"\$FM_LOCK_INSPECT_STATE\"")
   [ "$got" != held ] || fail "a broker-recorded lock was inspected as held by a live harness"
+
+  # A different session must still refuse while the broker's omp parent is
+  # live, even though the helper itself is deliberately not a session owner.
+  printf '36954\n' > "$dir/state/.lock"
+  FM_TEST_FOREIGN=1 FM_TEST_BROKER_PARENT=26445 lib_eval "$fakebin" \
+    "fm_session_lock_foreign_owner_live '$dir/state'" \
+    || fail "a different session treated a live omp parent of the broker as stale"
 
   for parent in 1 500; do
     if FM_TEST_BROKER_PARENT=$parent lib_eval "$fakebin" 'fm_harness_ancestry_pids'; then
