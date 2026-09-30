@@ -67,9 +67,10 @@
 #            home, even outside those roots. Nothing is matched by name;
 #            bin/fm-teardown.sh owns which roots it supplies.
 #            For each candidate, bin/fm-procevent.sh retire --if-task checks
-#            the machine-wide claim and local registration before mutation;
-#            its ownership contract preserves another home's claim or another
-#            task's registration. Only eligible sources are retired FIRST,
+#            the machine-wide claim and known local-home registrations before
+#            mutation; its ownership contract requires a matching task owner
+#            for an existing local registration and preserves foreign or
+#            uncertain ownership. Only eligible sources are retired FIRST,
 #            so the end is never delivered as a
 #            `session_ended` wake for a task that no longer exists, and then
 #            `lavish-axi end` closes the session on the server its saved URL
@@ -396,6 +397,10 @@ end_one_board() (  # <task-id> <file> <source-id> <open-session-files>
   claim=$(fm_procevent_claim_path "$id")
   if [ -e "$claim" ] || [ -L "$claim" ] || [ -e "$rec" ] || [ -L "$rec" ]; then
     printf 'kept: %s (its source was acquired again)\n' "$file"
+    return 0
+  fi
+  if ! out=$(fm_procevent_task_home_exclusive_locked "${FM_STATE_OVERRIDE:-$FM_HOME/state}" "$id" 2>&1); then
+    printf 'kept: %s (%s)\n' "$file" "$out"
     return 0
   fi
   if ! out=$( (apply_session_host "$file" && lavish-axi end "$file") 2>&1); then

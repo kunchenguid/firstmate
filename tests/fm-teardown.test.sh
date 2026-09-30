@@ -4828,6 +4828,106 @@ SH
   done
 }
 
+test_lavish_unclaimed_foreign_registrations_stay_open() {
+  local case_dir foreign board id selection variant rc
+  for selection in root registered; do
+    for variant in foreign unknown; do
+      case_dir=$(make_case "lavish-unclaimed-$selection-$variant")
+      land_lavish_case "$case_dir"
+      lavish_board_fixture "$case_dir"
+      board="$case_dir/data/task-x1/board.html"
+      [ "$selection" != registered ] || board="$case_dir/home-board.html"
+      id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$board")
+      if [ "$selection" = registered ]; then
+        lavish_register_source "$case_dir" task-x1 "$board" >/dev/null || fail "cannot register local board"
+        cp "$case_dir/state/procevent/$id.source" "$case_dir/local-before.source"
+      fi
+      foreign="$case_dir/foreign-home"
+      mkdir -p "$foreign/state" "$foreign/data"
+      fm_write_meta "$foreign/state/task-y.meta" 'window=firstmate:fm-task-y' 'kind=ship' \
+        "worktree=$case_dir/foreign-wt" "project=$case_dir/project"
+      printf -- '- foreign - Other home (home: %s; scope: review; projects: none; added 2026-09-30)\n' \
+        "$foreign" > "$case_dir/data/secondmates.md"
+      lavish_register_source "$foreign" task-y "$board" >/dev/null || fail "cannot register foreign board"
+      cp "$foreign/state/procevent/$id.source" "$case_dir/foreign-before.source"
+      if [ "$variant" = unknown ]; then
+        printf -- '- malformed registry entry\n' > "$case_dir/data/secondmates.md"
+      fi
+      rc=0
+      FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims" run_teardown_lavish "$case_dir" \
+        > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+      expect_code 0 "$rc" "unclaimed board should not block teardown: $(cat "$case_dir/stderr")"
+      if grep -Fq "end $(lavish_real_path "$board") " "$case_dir/lavish.log"; then
+        fail "unclaimed $selection board ended with $variant ownership"
+      fi
+      cmp -s "$foreign/state/procevent/$id.source" "$case_dir/foreign-before.source" \
+        || fail "unclaimed foreign registration changed"
+      if [ "$selection" = registered ]; then
+        cmp -s "$case_dir/state/procevent/$id.source" "$case_dir/local-before.source" \
+          || fail "local registration changed with $variant ownership"
+      fi
+      assert_absent "$case_dir/claims/$id.claim" "fixture unexpectedly acquired a claim"
+      pass "unclaimed $selection board stays open with $variant ownership"
+    done
+  done
+}
+
+test_lavish_home_level_registration_under_task_root_stays_open() {
+  local case_dir board id rc
+  case_dir=$(make_case lavish-home-owner)
+  land_lavish_case "$case_dir"
+  lavish_board_fixture "$case_dir"
+  board=$(lavish_real_path "$case_dir/data/task-x1/board.html")
+  id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$board")
+  FM_HOME="$case_dir" "$ROOT/bin/fm-procevent.sh" register lavish "$id" -- \
+    "$ROOT/bin/fm-procevent-lavish.sh" poll "$board" >/dev/null || fail "cannot register home board"
+  cp "$case_dir/state/procevent/$id.source" "$case_dir/before.source"
+  rc=0
+  run_teardown_lavish "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "home board should not block teardown"
+  cmp -s "$case_dir/state/procevent/$id.source" "$case_dir/before.source" \
+    || fail "teardown retired a home-level registration"
+  if grep -Fq "end $board " "$case_dir/lavish.log"; then fail "teardown ended a home-level board"; fi
+  pass "home-level board under the task root keeps its session and registration"
+}
+
+test_refused_child_return_preserves_lavish_boards() {
+  local case_dir home board id lock rc
+  case_dir=$(make_case lavish-child-lock-refused)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  cp -R "$ROOT/bin" "$home/bin"
+  lavish_board_fixture "$case_dir"
+  board="$case_dir/child-a-wt/board.html"
+  printf '<html>child review</html>\n' > "$board"
+  board=$(lavish_real_path "$board")
+  jq --arg file "$board" \
+    '.sessions.child = {file: $file, status: "open", url: "http://127.0.0.1:47391/session/bbbbbbbbbbbbbbbb"}' \
+    "$case_dir/lavish-state/state.json" > "$case_dir/lavish-state/next.json"
+  mv "$case_dir/lavish-state/next.json" "$case_dir/lavish-state/state.json"
+  id=$(lavish_register_source "$home" child-a "$board") || fail "cannot register child board"
+  cp "$home/state/procevent/$id.source" "$case_dir/before.source"
+  add_persistent_lock_treehouse "$case_dir"
+  add_lsof_live_holder "$case_dir"
+  lock=$(git_index_lock_path "$case_dir/child-a-wt")
+  : > "$lock"
+  rc=0
+  FM_HOME="$ROOT" LAVISH_AXI_STATE_DIR="$case_dir/lavish-state" FM_TEST_LAVISH_LOG="$case_dir/lavish.log" \
+    FM_TREEHOUSE_RETURN_LOCK_RETRIES=0 FM_TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS=0 \
+    FM_STALE_WORKTREE_LOCK_AGE_SECS=3600 run_teardown "$case_dir" --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "child return accepted a live git lock"
+  assert_grep 'not provably stale' "$case_dir/stderr" "child refusal did not name the lock: $(cat "$case_dir/stderr")"
+  [ ! -s "$case_dir/lavish.log" ] || fail "refused child return ended a board"
+  cmp -s "$home/state/procevent/$id.source" "$case_dir/before.source" \
+    || fail "refused child return retired its source"
+  assert_present "$home/state/child-a.meta" "refused child lost its record"
+  assert_present "$board" "refused child lost its board file"
+  assert_present "$lock" "refused child lost its live lock"
+  pass "refused child return leaves its Lavish sessions and sources untouched"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4941,3 +5041,6 @@ test_lavish_inventory_resolution_in_manual_mode
 test_lavish_migrated_inventory_uses_the_captain_hold_resolver
 test_forced_secondmate_cleanup_ends_child_lavish_boards_before_return
 test_teardown_preserves_lavish_boards_owned_by_another_home
+test_lavish_unclaimed_foreign_registrations_stay_open
+test_lavish_home_level_registration_under_task_root_stays_open
+test_refused_child_return_preserves_lavish_boards

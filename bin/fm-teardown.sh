@@ -2325,58 +2325,12 @@ teardown_live_slot_path() {
   canonical_existing_dir "$WT"
 }
 
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
-}
-
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot states state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
-  collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+  states=$(fm_firstmate_local_states "$FM_HOME" "$record_state") || return 1
+  while IFS= read -r state_dir; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       # Identity, not spelling: the same record reached through a differently
@@ -2396,7 +2350,9 @@ require_exclusive_worktree_slot_record() {
         return 1
       done
     done
-  done
+  done <<EOF
+$states
+EOF
 }
 
 require_exclusive_task_worktree_slot() {
@@ -3309,7 +3265,11 @@ cleanup_firstmate_home_children() {
           require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
         fi
         case "$child_owner_rc" in
-          0) child_roots+=("$child_wt") ;;
+          0)
+            validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+            cleanup_stale_lock_for_safety_check "$child_wt" || return $?
+            child_roots+=("$child_wt")
+            ;;
           "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
           *) require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1 ;;
         esac
@@ -3328,7 +3288,6 @@ cleanup_firstmate_home_children() {
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -3341,7 +3300,6 @@ cleanup_firstmate_home_children() {
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
         :
       else
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"

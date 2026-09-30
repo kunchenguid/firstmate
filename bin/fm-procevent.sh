@@ -114,7 +114,9 @@
 #            exists, and --if-owner removes only the exact extension registration
 #            token printed by register-extension, so a stale owner cannot retire
 #            a replacement generation. --if-task preserves foreign-home claims
-#            and registrations owned by another task, returning 3 without mutation.
+#            and registrations without the matching task owner, returning 3
+#            without mutation. Foreign registrations in the local home tree or
+#            uncertain home ownership are also preserved.
 # sweep-home Retire a bounded snapshot of this home's registrations and owned
 #            claims, then refuse unless no registration, runner record, or owned
 #            claim remains. Used by supported Firstmate home retirement.
@@ -2162,6 +2164,10 @@ cmd_retire() {
   esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$condition" = --if-task ]; then
+    if ! fm_procevent_task_home_exclusive_locked "$STATE" "$id"; then
+      fm_procevent_source_lock_release "$id"
+      return 3
+    fi
     if [ -e "$(fm_procevent_claim_path "$id")" ] || [ -L "$(fm_procevent_claim_path "$id")" ]; then
       if ! fm_procevent_claim_load_locked "$id"; then
         fm_procevent_source_lock_release "$id"
@@ -2175,9 +2181,10 @@ cmd_retire() {
       fi
     fi
     round_owner=$(source_owner_task "$id" 2>/dev/null || true)
-    if [ -n "$round_owner" ] && [ "$round_owner" != "$expected_task" ]; then
+    if { [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; } \
+      && [ "$round_owner" != "$expected_task" ]; then
       fm_procevent_source_lock_release "$id"
-      printf 'source %s belongs to task %s\n' "$id" "$round_owner"
+      printf 'source %s does not belong to task %s (owner: %s)\n' "$id" "$expected_task" "${round_owner:-home or unknown}"
       return 3
     fi
   fi

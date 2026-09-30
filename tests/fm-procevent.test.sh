@@ -239,6 +239,37 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
+# Conditional retirement is a task-ownership contract, including registrations
+# created without --for. Drive the public command and compare persisted records.
+test_retire_if_task_requires_a_matching_owner() {
+  local home="$TMP_ROOT/conditional-retire" owner rc
+  new_home "$home"
+  for owner in home other-task matching-task; do
+    if [ "$owner" = home ]; then
+      pe_register "$home" lavish conditional-src -- "$BLOCKER" "$home/trigger" >/dev/null
+    else
+      new_task_endpoint "$home" "$owner"
+      pe "$home" register-task lavish conditional-src "$owner" -- "$BLOCKER" "$home/trigger" >/dev/null
+    fi
+    cp "$home/state/procevent/conditional-src.source" "$home/before.source"
+    rc=0
+    pe "$home" retire conditional-src --if-task matching-task > "$home/retire.out" 2>&1 || rc=$?
+    if [ "$owner" = matching-task ]; then
+      [ "$rc" -eq 0 ] || fail "matching task could not retire its source"
+      assert_absent "$home/state/procevent/conditional-src.source" "matching task source was retained"
+    else
+      [ "$rc" -eq 3 ] || fail "--if-task accepted a $owner registration (rc=$rc)"
+      cmp -s "$home/before.source" "$home/state/procevent/conditional-src.source" \
+        || fail "--if-task changed a $owner registration"
+      pe "$home" retire conditional-src >/dev/null
+    fi
+  done
+  pe "$home" retire conditional-src --if-task matching-task >/dev/null \
+    || fail "conditional retirement of an absent source is not idempotent"
+  pass "conditional retirement requires an exact task owner and preserves home-level sources"
+}
+test_retire_if_task_requires_a_matching_owner
+
 # --- a blocking source completes into exactly one normalized event ----------
 H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 TRIG="$TMP_ROOT/trigger-one"
