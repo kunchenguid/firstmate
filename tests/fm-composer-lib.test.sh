@@ -1029,7 +1029,7 @@ test_queued_enter_verdict_does_not_convert_other_states
 
 # Real Gemini 0.58.0 layout captured on Herdr 0.7.4, 2026-09-30.
 test_gemini_halfblock_identity() {
-  local screen typed
+  local screen typed trailing candidate
   screen=$'transcript\n▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄\n* '"${ESC}[38;2;92;99;112m Type your message or @path/to/file${ESC}[0m"$'\n▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\nworkspace (/directory)   branch   sandbox   /model\n/repo   main   no sandbox   Auto'
   assert_screen "Gemini idle requires lazy identity" need-identity "$CAPS_STYLED" "$screen"
   assert_screen "Gemini live done halfblock" empty "$CAPS_STYLED" "$screen" '' $'gemini\tdone'
@@ -1043,6 +1043,18 @@ test_gemini_halfblock_identity() {
   typed=${typed//38;2;92;99;112/38;2;171;178;191}
   assert_screen "Gemini draft stays pending" pending "$CAPS_STYLED" "$typed" '' $'gemini\tdone'
   assert_screen "Gemini stale box above shell" unknown "$CAPS_STYLED" "$screen"$'\n$ ' '' $'gemini\tdone'
+  for trailing in 'jacob@host ~ %' 'jacob@host:~/repo$' '[root@host repo]#' \
+    'PS C:\repo>' 'Working on request...' 'unrecognized footer' '❯' \
+    '/repo main no sandbox Auto jacob@host ~ %' '/repo main no sandbox Unknown' \
+    '/repo main sandbox Auto'; do
+    candidate=${screen%$'\n'*}$'\n'"$trailing"
+    assert_screen "Gemini unproven footer: $trailing" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+    assert_screen "Gemini activity below footer: $trailing" unknown "$CAPS_STYLED" "$screen"$'\n'"$trailing" '' $'gemini\tidle'
+  done
+  candidate=${screen%$'\n'*}
+  assert_screen "Gemini incomplete footer" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
+  candidate=${screen/workspace (\/directory)   branch   sandbox   \/model/workspace (\/directory) arbitrary sandbox \/model}
+  assert_screen "Gemini unproven footer header" unknown "$CAPS_STYLED" "$candidate" '' $'gemini\tdone'
   pass "Gemini halfblock composer binds geometry, styling and native idle identity"
 }
 test_gemini_halfblock_identity

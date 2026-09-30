@@ -1620,6 +1620,8 @@ EOF
 _fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <identity> <cursor>
   local screen=$1 plain=$2 styled=$3 has_identity=$4 identity=$5 cy=$6
   local row=0 top=-1 input=-1 bottom=-1 line trimmed width=0 content agent status footer=0
+  local header_re='^workspace \(/directory\)[[:space:]]+branch[[:space:]]+sandbox[[:space:]]+/model$'
+  local values_re='^/[^[:space:]]+[[:space:]]+[A-Za-z0-9_./-]+[[:space:]]+no sandbox[[:space:]]+Auto$'
   while IFS= read -r line; do
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
@@ -1635,13 +1637,17 @@ _fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <i
         [ "$top" -ge 0 ] && [ "$row" -eq "$((top + 1))" ] && input=$row
         ;;
     esac
-    if [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ]; then
+    if [ "$input" -ge 0 ] && [ "$bottom" -ge 0 ] && [ "$row" -gt "$bottom" ]; then
       if fm_composer_row_has_edge "$trimmed" \
-         || fm_composer_leading_prompt_glyph_var content "$trimmed"; then return 1; fi
+         || fm_composer_leading_prompt_glyph_var content "$trimmed"; then printf unknown; return 0; fi
       if [ "$row" -eq "$((bottom + 1))" ]; then
-        case "$trimmed" in 'workspace (/directory)'*sandbox*'/model') footer=1 ;; *) return 1 ;; esac
-      elif [ "$footer" != 1 ] || [ "$row" -ne "$((bottom + 2))" ]; then
-        return 1
+        [[ "$trimmed" =~ $header_re ]] || { printf unknown; return 0; }
+        footer=1
+      elif [ "$footer" = 1 ] && [ "$row" -eq "$((bottom + 2))" ]; then
+        [[ "$trimmed" =~ $values_re ]] || { printf unknown; return 0; }
+        footer=2
+      else
+        printf unknown; return 0
       fi
     fi
     row=$((row + 1))
@@ -1649,6 +1655,7 @@ _fm_composer_gemini_halfblock() {  # <screen> <plain> <styled> <has-identity> <i
 $plain
 EOF
   [ "$input" -ge 0 ] && [ "$bottom" -ge 0 ] && [ "$((row - bottom))" -le 3 ] || return 1
+  [ "$footer" != 1 ] || { printf unknown; return 0; }
   [ -z "$cy" ] || [ "$cy" = "$input" ] || return 1
   [ "$has_identity" = 1 ] || { printf unknown; return 0; }
   [ -n "$identity" ] || { printf need-identity; return 0; }
