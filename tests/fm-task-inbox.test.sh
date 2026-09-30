@@ -26,6 +26,12 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Every record ends in one framing newline (issue #6091), so a strict
+#      line-reading consumer never drops a final unterminated line the way it
+#      would against a legacy pre-fix record; the framing newline is stripped
+#      back off on read regardless of whether the message itself ends in a
+#      real newline, and a legacy record with no framing newline still reads
+#      back byte-exact and still dedups.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -799,6 +805,97 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 }
 
 test_write_is_durable_and_exact
+
+# Issue #6091: a single-line steer with no trailing newline could be silently
+# dropped by a worker that reads its inbox with a strict line loop, because
+# such a loop never runs its body for a final line that hits EOF before a
+# newline. The write side now terminates every record with one framing
+# newline so any strict consumer sees the whole message.
+test_strict_line_consumer_drops_legacy_record_but_not_a_fixed_one() {
+  local state legacy_rec new_rec text
+  state="$TMP_ROOT/strict-consumer/state"; mkdir -p "$state/t1.inbox/handled"
+  text="please continue"
+  legacy_rec="$state/t1.inbox/001.msg"
+  # Reproduces the pre-fix write path verbatim: header lines end in
+  # newlines, but the body itself has none.
+  {
+    printf 'schema=fm-task-inbox.v1\n'
+    printf 'at=2020-01-01T00:00:00Z\n'
+    printf -- '--\n'
+    printf '%s' "$text"
+  } > "$legacy_rec"
+  new_rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
+    || fail "fixed-path write failed"
+  strict_read() {  # <record-path> -> last line the loop body actually ran for
+    local line last=''
+    while IFS= read -r line; do
+      last=$line
+    done < "$1"
+    printf '%s' "$last"
+  }
+  [ "$(strict_read "$legacy_rec")" != "$text" ] \
+    || fail "fixture invalid: the pre-fix record should already reproduce the drop"
+  [ "$(strict_read "$new_rec")" = "$text" ] \
+    || fail "a strict line-reading consumer dropped the last line of a newly written record"
+  pass "inbox: the fixed write path survives a strict line-reading consumer that drops a legacy record's last line"
+}
+
+test_new_record_file_ends_with_newline() {
+  local state rec
+  state="$TMP_ROOT/framing-newline/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue") \
+    || fail "inbox write failed"
+  [ "$(tail -c1 "$rec" | wc -l | tr -d ' ')" = 1 ] \
+    || fail "a newly written record must end in a trailing newline"
+  pass "inbox: a newly written record ends with exactly one trailing newline"
+}
+
+test_body_round_trips_when_message_itself_ends_in_a_newline() {
+  local state rec text expected actual
+  state="$TMP_ROOT/trailing-newline-body/state"; mkdir -p "$state"
+  # The message's own trailing newline plus the write side's framing newline
+  # must collapse back to exactly the original message: only ONE newline is
+  # framing.
+  text=$'line one\nline two\n'
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
+    || fail "inbox write failed"
+  expected="$state/expected.body"; actual="$state/actual.body"
+  printf '%s' "$text" > "$expected"
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" \
+    || fail "record body could not be read"
+  cmp -s "$expected" "$actual" \
+    || fail "a message ending in its own newline did not round-trip byte-exact"
+  pass "inbox: a message that itself ends in a newline round-trips byte-exact through the framing newline"
+}
+
+test_legacy_record_reads_byte_exact_and_dedups() {
+  local state legacy_rec body_out text dup count
+  state="$TMP_ROOT/legacy-dedup/state"; mkdir -p "$state/t1.inbox/handled"
+  text="legacy steer, no framing newline"
+  legacy_rec="$state/t1.inbox/001.msg"
+  {
+    printf 'schema=fm-task-inbox.v1\n'
+    printf 'at=2020-01-01T00:00:00Z\n'
+    printf -- '--\n'
+    printf '%s' "$text"
+  } > "$legacy_rec"
+  body_out=$(inbox_lib "$state" fm_task_inbox_body "$legacy_rec") \
+    || fail "reading a legacy record's body failed"
+  [ "$body_out" = "$text" ] \
+    || fail "a legacy record with no framing newline did not read back byte-exact, got: $body_out"
+  dup=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "$text") \
+    || fail "idempotent write against an existing legacy record failed"
+  [ "$dup" = "$legacy_rec" ] \
+    || fail "an idempotent re-enqueue of a legacy record's exact body should dedup onto it, got $dup"
+  count=$(find "$state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "deduping against a legacy record created a duplicate"
+  pass "inbox: a legacy record with no framing newline still reads back byte-exact and still dedups"
+}
+
+test_strict_line_consumer_drops_legacy_record_but_not_a_fixed_one
+test_new_record_file_ends_with_newline
+test_body_round_trips_when_message_itself_ends_in_a_newline
+test_legacy_record_reads_byte_exact_and_dedups
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent

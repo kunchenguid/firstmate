@@ -38,6 +38,12 @@
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
+#   <one trailing newline, pure framing, not part of the message>
+#
+# The trailing newline is written by every current record and stripped back
+# off by fm_task_inbox_body, so the body round-trips byte-exact. A record
+# written before this framing existed has no trailing newline to strip and
+# still reads back byte-exact unchanged.
 #
 # Sequence numbers are never reused within a task: allocation scans both the
 # inbox root and handled/, so a message is processed at most once per worker
@@ -154,7 +160,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     printf -- '--\n'
-    printf '%s' "$text"
+    printf '%s\n' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
   [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
   printf '%s' "$rec"
@@ -238,13 +244,22 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
   printf '%s' "$rec"
 }
 
-# The exact enqueued text back out of a record.
+# The exact enqueued text back out of a record. The write side (above) always
+# appends one trailing newline as pure framing, not part of the message, so
+# this strips exactly one trailing newline if present; a legacy record
+# written before that framing existed has none to strip and reads back
+# byte-exact unchanged. A sentinel byte protects any trailing newlines that
+# are genuinely part of the body (command substitution alone would eat all of
+# them).
 fm_task_inbox_body() {  # <record-path>
-  local line
+  local line body
   [ -f "$1" ] || return 1
   while IFS= read -r line; do
     if [ "$line" = -- ]; then
-      cat
+      body=$(cat; printf 'x')
+      body=${body%x}
+      [ "${body: -1}" != $'\n' ] || body=${body%$'\n'}
+      printf '%s' "$body"
       return 0
     fi
   done < "$1"
