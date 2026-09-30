@@ -72,6 +72,7 @@ import {
   persistAssistantOutboundIntent,
   publishFeishuInbound,
   receiptOutbound,
+  verifyFeishuSessionMessage,
   registerAssistantOutbound,
   writeTransportHealth,
   IDEMPOTENCY_WINDOW_MS,
@@ -273,6 +274,8 @@ assert(!existsSync(deliveredInboundPath), "delivered inbound JSON file survived 
 assert(!existsSync(postedOutboundPath), "posted outbound JSON file survived cleanup");
 for (const path of [join(paths.inboundLedger, deliveredInboundName), join(paths.inboundDeliveryMap, deliveredMapName), join(paths.outboundLedger, postedOutboundName)]) assert(!existsSync(path), `processed ledger/map survived: ${path}`);
 assert.deepEqual(counts(), { inbox: 2, inboundLedger: 2, inboundDeliveryMap: 2, outbox: 3, outboundLedger: 3, outboundReceipts: 2 });
+assert.equal(verifyFeishuSessionMessage(home, entries[0]), true, "processed inbound lost immutable session-routing proof");
+assert.equal(verifyFeishuSessionMessage(home, { ...entries[0], content: [{ type: "text", text: "altered body" }] }), false, "processed inbound accepted altered session content");
 console.log("evidence - record classes", JSON.stringify({ before, after: counts() }));
 
 assert.equal(findInboundByDeliveryRef(home, delivered.deliveryRef), undefined, "deleted inbound message remained readable as a tombstone");

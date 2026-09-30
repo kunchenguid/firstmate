@@ -148,6 +148,11 @@ MAX_BYTES = 262144
 MAX_INT = 9007199254740991
 KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision', 'cleanup', 'remote-followup'}
 PHASES = {'prepared', 'attempted', 'confirmed', 'refused', 'uncertain'}
+SESSION_INDEX_SCHEMA = 'fm-task-session-index.v1'
+SESSION_SCAN_BYTES = 33554432
+SESSION_RECORD_BYTES = 16777216
+SESSION_INDEX_BYTES = 16777216
+SESSION_INDEX_ENTRIES = 50000
 
 
 class Refusal(Exception):
@@ -192,57 +197,153 @@ def unique_object(pairs):
     return result
 
 
-def native_session(path, selected_entry=None, input_id=None):
-    """Bound work by entries, record size and elapsed time, not transcript age.
-
-    Keep only ancestry metadata and task intent receipts, then read the selected
-    original message by its indexed offset. Large unrelated output never becomes
-    a second in-memory conversation. The caller still verifies the current branch.
-    """
+def native_session(path, index_directory, selected_entry=None, input_id=None):
+    """Incrementally index bounded session deltas and read current-branch records."""
     require(path.is_absolute(), 'native session path must be absolute')
     started = time.monotonic()
     fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(fd, 'rb') as stream:
         st = os.fstat(stream.fileno())
         require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid(), 'unsafe native input session file identity')
-        entries, offsets, retained_bytes = [], {}, 0
+        index_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        index_st = index_directory.lstat()
+        require(stat.S_ISDIR(index_st.st_mode) and index_st.st_uid == os.getuid() and not index_directory.is_symlink(),
+                'unsafe native session index directory')
+        index_path = index_directory / (digest(str(path).encode()) + '.json')
+        cached = None
+        if index_path.exists() or index_path.is_symlink():
+            index_file_st = index_path.lstat()
+            require(stat.S_ISREG(index_file_st.st_mode) and index_file_st.st_nlink == 1 and
+                    index_file_st.st_uid == os.getuid() and index_file_st.st_size <= SESSION_INDEX_BYTES,
+                    'unsafe native session index')
+            try:
+                candidate = json.loads(index_path.read_bytes(), object_pairs_hook=unique_object)
+                candidate_entries = candidate.get('entries')
+                require(candidate.get('schema') == SESSION_INDEX_SCHEMA and candidate.get('path') == str(path) and
+                        candidate.get('device') == st.st_dev and candidate.get('inode') == st.st_ino and
+                        integer(candidate.get('indexed_size')) and candidate['indexed_size'] <= st.st_size and
+                        isinstance(candidate_entries, list) and len(candidate_entries) <= SESSION_INDEX_ENTRIES,
+                        'stale native session index')
+                offsets = {}
+                for item in candidate_entries:
+                    require(isinstance(item, dict) and text(item.get('id'), 512) and
+                            (item.get('parentId') is None or text(item.get('parentId'), 512)) and
+                            integer(item.get('offset')) and integer(item.get('length'), 1) and
+                            bool(re.fullmatch(r'[a-f0-9]{64}', str(item.get('sha256', '')))),
+                            'invalid native session index entry')
+                    require(item['id'] not in offsets, 'duplicate native session index identity')
+                    offsets[item['id']] = item
+                boundary_length = min(4096, candidate['indexed_size'])
+                boundary = os.pread(stream.fileno(), boundary_length, candidate['indexed_size'] - boundary_length)
+                require(digest(boundary) == candidate.get('boundary_sha256'), 'native session index boundary changed')
+                if candidate['indexed_size'] == st.st_size:
+                    require(candidate.get('mtime_ns') == st.st_mtime_ns, 'native session changed without append')
+                cached = candidate
+            except (Refusal, ValueError, TypeError, KeyError, AttributeError):
+                cached = None
+        index = cached or {'schema': SESSION_INDEX_SCHEMA, 'path': str(path), 'device': st.st_dev,
+                           'inode': st.st_ino, 'indexed_size': 0, 'header': None, 'entries': [], 'leaf_id': None}
+        offsets = {item['id']: item for item in index['entries']}
+        stream.seek(index['indexed_size'])
+        scanned_bytes = 0
+        scanned_records = 0
         while True:
             require(time.monotonic() - started < 10, 'native session bounded readback deadline exceeded')
             offset = stream.tell()
-            raw = stream.readline(16777217)
+            raw = stream.readline(SESSION_RECORD_BYTES + 1)
             if not raw:
                 break
-            require(len(raw) <= 16777216, 'native session record exceeds bounded readback')
+            scanned_bytes += len(raw)
+            require(scanned_bytes <= SESSION_SCAN_BYTES, 'native session incremental readback exceeds byte bound')
+            require(len(raw) <= SESSION_RECORD_BYTES, 'native session record exceeds bounded readback')
             if not raw.strip():
                 continue
-            require(len(entries) < 200000, 'native session ancestry exceeds bounded readback')
             entry = json.loads(raw, object_pairs_hook=unique_object)
-            if not entries:
+            scanned_records += 1
+            if index['header'] is None:
                 require(entry.get('type') == 'session', 'missing session identity')
-            if 'id' in entry:
-                require(entry['id'] not in offsets, 'duplicate session entry identity')
-                offsets[entry['id']] = offset
+                index['header'] = {'offset': offset, 'length': len(raw), 'sha256': digest(raw)}
+                continue
+            require(len(index['entries']) < SESSION_INDEX_ENTRIES, 'native session index exceeds entry bound')
+            entry_id = entry.get('id')
+            parent_id = entry.get('parentId')
+            require(text(entry_id, 512) and (parent_id is None or text(parent_id, 512)), 'invalid native session ancestry')
+            require(entry_id not in offsets, 'duplicate session entry identity')
             receipt = entry.get('type') == 'custom' and entry.get('customType') == 'fm-continuation-input'
-            keep = receipt and (input_id is None or entry.get('data', {}).get('id') == input_id) or entry.get('id') == selected_entry
+            item = {'id': entry_id, 'parentId': parent_id, 'type': entry.get('type'), 'offset': offset,
+                    'length': len(raw), 'sha256': digest(raw)}
+            if receipt:
+                item.update({'customType': 'fm-continuation-input', 'input_id': entry.get('data', {}).get('id'),
+                             'task': entry.get('data', {}).get('task'), 'pending': entry.get('data', {}).get('pending')})
+            index['entries'].append(item)
+            offsets[entry_id] = item
+            index['leaf_id'] = entry_id
+        require(index['header'] is not None, 'missing session identity')
+        index['indexed_size'] = st.st_size
+        index['mtime_ns'] = st.st_mtime_ns
+        boundary_length = min(4096, st.st_size)
+        index['boundary_sha256'] = digest(os.pread(stream.fileno(), boundary_length, st.st_size - boundary_length))
+        if scanned_bytes or cached is None:
+            raw_index = (json.dumps(index, ensure_ascii=False, separators=(',', ':')) + '\n').encode()
+            require(len(raw_index) <= SESSION_INDEX_BYTES, 'native session index exceeds byte bound')
+            temporary_fd, temporary = tempfile.mkstemp(prefix='.session-index.', dir=index_directory)
+            try:
+                with os.fdopen(temporary_fd, 'wb') as output:
+                    output.write(raw_index); output.flush(); os.fsync(output.fileno())
+                os.replace(temporary, index_path)
+            finally:
+                if os.path.exists(temporary): os.unlink(temporary)
+
+        chain, seen = [], set()
+        entry_id = index['leaf_id']
+        while entry_id is not None:
+            require(entry_id not in seen, 'invalid session ancestry')
+            seen.add(entry_id)
+            item = offsets.get(entry_id)
+            require(item is not None, 'incomplete session ancestry')
+            chain.append(item)
+            entry_id = item['parentId']
+        chain.reverse()
+        require(selected_entry is None or selected_entry in seen, 'route receipt is outside the current session branch')
+
+        session_bytes = scanned_bytes
+        def read_indexed(item):
+            nonlocal session_bytes
+            raw = os.pread(stream.fileno(), item['length'], item['offset'])
+            session_bytes += len(raw)
+            require(len(raw) == item['length'] and digest(raw) == item['sha256'], 'native session indexed entry changed')
+            return json.loads(raw, object_pairs_hook=unique_object)
+
+        header = read_indexed(index['header'])
+        full = set()
+        if selected_entry is not None:
+            full.add(selected_entry)
+            route = read_indexed(offsets[selected_entry])
+            source_id = route.get('data', {}).get('source_entry_id')
+            if source_id is not None:
+                require(source_id in seen, 'original message is outside the current session branch')
+                full.add(source_id)
+        entries = [header]
+        retained_bytes = 0
+        for item in chain:
+            receipt = item.get('customType') == 'fm-continuation-input'
+            keep = item['id'] in full or receipt and (input_id is None or item.get('input_id') == input_id)
             if keep:
-                retained_bytes += len(raw)
-                require(retained_bytes <= 16777216, 'native task receipts exceed bounded readback')
+                entry = route if selected_entry == item['id'] else read_indexed(item)
+                retained_bytes += item['length']
+                require(retained_bytes <= SESSION_RECORD_BYTES, 'native task receipts exceed bounded readback')
                 if input_id is None and receipt:
                     entry['data'] = {key: entry.get('data', {})[key] for key in ('id', 'task', 'pending') if key in entry.get('data', {})}
-            entries.append(entry if keep or entry.get('type') == 'session' else
-                {key: entry[key] for key in ('id', 'parentId', 'type') if key in entry})
-        route = next((e for e in entries if selected_entry is not None and e.get('id') == selected_entry), None)
-        source_id = (route or {}).get('data', {}).get('source_entry_id')
-        if source_id in offsets:
-            stream.seek(offsets[source_id])
-            source = json.loads(stream.readline(16777217), object_pairs_hook=unique_object)
-            for index, entry in enumerate(entries):
-                if entry.get('id') == source_id:
-                    entries[index] = source
-                    break
+                entries.append(entry)
+            else:
+                entries.append({key: item[key] for key in ('id', 'parentId', 'type') if key in item})
         final = os.fstat(stream.fileno())
         require((st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) ==
                 (final.st_dev, final.st_ino, final.st_size, final.st_mtime_ns), 'native session changed during readback')
+        probe = os.environ.get('FM_TASK_SESSION_READ_PROBE')
+        if probe:
+            with open(probe, 'a', encoding='utf-8') as output:
+                output.write(json.dumps({'bytes': session_bytes, 'records': scanned_records}) + '\n')
         return entries
 
 
@@ -326,10 +427,10 @@ class Task:
         require(len(values) == 1 and values[0] in ('ship', 'scout'), 'completion needs a known task kind')
         return values[0]
 
-    def captain_call_completion(self):
+    def captain_call_completion(self, record=None):
         meta = self.state / (self.id + '.meta')
         if not meta.exists() and not meta.is_symlink():
-            return None
+            return (record or self.read(current=False) or {}).get('captain_call_completion')
         reviewed = None
         keys = None
         for line in regular(meta).decode().splitlines():
@@ -404,7 +505,7 @@ class Task:
                     reports.append(item['sha256'])
             require(len(set(reports)) == 1, 'accepted scout needs its assessed final report')
             delivery = {'report_ref': identity, 'report_sha256': reports[0],
-                        'captain_calls': dependency.captain_call_completion()}
+                        'captain_calls': dependency.captain_call_completion(record)}
         elif record['disposition'] == 'accepted' and task_kind == 'ship':
             delivery = {'merge': [proof for proof in record.get('owner_receipts', {}).get('merge', [])
                 if proof['execution_generation'] == record['execution_generation'] and
@@ -434,6 +535,14 @@ class Task:
         require(record.get('cleanup_observation_key') is None or
                 bool(re.fullmatch('[a-f0-9]{64}', str(record['cleanup_observation_key']))),
                 'invalid cleanup observation binding')
+        completion = record.get('captain_call_completion')
+        require(completion is None or isinstance(completion, dict) and
+                set(completion) == {'decisions_reviewed', 'decision_keys', 'verified'} and
+                completion['decisions_reviewed'] is True and completion['verified'] is True and
+                isinstance(completion['decision_keys'], list) and
+                all(atom(key) for key in completion['decision_keys']) and
+                completion['decision_keys'] == sorted(set(completion['decision_keys'])),
+                'invalid retained captain-call completion')
         assessment = record.get('assessment')
         require(isinstance(assessment, dict), 'missing assessment')
         require(text(assessment.get('outcome')) and text(assessment.get('remaining_gap'), empty=True), 'missing outcome/gap')
@@ -585,7 +694,7 @@ class Task:
         # snapshot alone misses input arriving during a long bash command.
         path = Path(session_file)
         require(path.is_absolute(), 'branch effects require the original MAIN input receipt session')
-        entries = native_session(path)
+        entries = native_session(path, self.state / 'task-session-index')
         by_id = {e['id']: e for e in entries if 'id' in e}
         chain, seen = [], set()
         entry = entries[-1] if entries else {}
@@ -1024,7 +1133,7 @@ class Task:
             require(parent > 1, 'input caller is outside owning session')
         require(str(parent) == pid, 'input owner ancestry exceeded')
         path = Path(args.session_file)
-        entries = native_session(path, args.entry_id, args.input)
+        entries = native_session(path, self.state / 'task-session-index', args.entry_id, args.input)
         by_id = {e['id']: e for e in entries[1:] if 'id' in e}
         chain, seen = [], set()
         route = by_id.get(args.entry_id)
@@ -1500,10 +1609,12 @@ class Task:
             require(any(self.authority_identity(item['ref']) == (str(report.resolve()), sha)
                         and item['sha256'] == sha for item in record['assessment']['evidence']),
                     'accepted scout needs its assessed final report')
-            gate = subprocess.run([str(Path(__file__).with_name('fm-captain-hold.sh')), 'verify', self.id],
-                env=dict(os.environ, FM_HOME=str(self.home), FM_DATA_OVERRIDE=str(self.data),
-                         FM_STATE_OVERRIDE=str(self.state)), capture_output=True, text=True, timeout=10, check=False)
-            require(gate.returncode == 0, 'scout captain-call completion gate: ' + gate.stderr.strip())
+            completion = self.captain_call_completion(record)
+            require(completion is not None, 'scout captain-call completion gate is not verified')
+            if record.get('captain_call_completion') != completion:
+                record['captain_call_completion'] = completion
+                record['revision'] += 1
+                self.write(record)
         else:
             proofs = [p for p in record.get('owner_receipts', {}).get('merge', [])
                       if p['execution_generation'] == record['execution_generation']]

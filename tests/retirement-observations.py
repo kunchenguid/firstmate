@@ -278,7 +278,14 @@ if process.poll() is None:
 stdout, stderr = process.communicate(timeout=10)
 assert observed and intermediate_quiet, 'incomplete captain-call verification released scout dependency'
 assert process.returncode == 0, stderr or stdout
-assert due('captain-gate-parent')['due'], 'completed captain-call inventory did not release scout dependency'
+release_before_retirement = due('captain-gate-parent')
+assert release_before_retirement['due'], 'completed captain-call inventory did not release scout dependency'
+json.loads(run(sys.executable, lib, 'completion-read', 'captain-gate-dependency'))
+(home / 'state/captain-gate-dependency.meta').unlink()
+release_after_retirement = due('captain-gate-parent')
+assert release_after_retirement['due'], 'metadata retirement hid verified scout delivery'
+assert release_after_retirement['reconciliation_key'] == release_before_retirement['reconciliation_key'], \
+    'metadata retirement changed verified scout delivery identity'
 run(scan, 'scan', '--startup')
 gate_release = receipts()
 for _ in range(4):
@@ -289,4 +296,4 @@ gate_release = receipts()
 for _ in range(4):
     run(scan, 'scan', '--startup')
 assert receipts() == gate_release and not pending('captain-gate-parent')
-print('ok - scout captain-call completion gate releases once and unchanged scans stay quiet')
+print('ok - scout captain-call completion survives metadata retirement and releases once')

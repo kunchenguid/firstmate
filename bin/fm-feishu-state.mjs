@@ -825,6 +825,7 @@ function validateRecordAtPath(path, record) {
     validateCompletedReceipt(record.receipt);
   } else if (parent === "inbound-event-ids" && record.schema === "fm-feishu-processed-inbound-id.v1") {
     requireSafeInteger(record.binding_generation, "processed inbound generation", { min: 1 });
+    requireNullableString(record.content_digest ?? null, "processed inbound content digest", RECORD_HASH);
   } else if (parent === "inbound-event-ids") {
     if (record.schema !== "fm-feishu-inbound-event-id.v1") throw new Error("invalid Feishu event-id record schema");
     requireString(record.event_id_hash, "inbound event-id hash", RECORD_HASH);
@@ -2014,6 +2015,7 @@ function finishInboundCleanupLocked(paths) {
   atomicJson(join(paths.inboundEventIds, `${sha(`processed\0${intent.delivery_ref}`)}.json`), {
     schema: "fm-feishu-processed-inbound-id.v1",
     binding_generation: intent.binding_generation,
+    content_digest: ledger?.content_digest ?? prior?.content_digest ?? null,
   });
   removeIndexedFile(join(paths.inbox, intent.filename));
   removeInboundPendingIndex(paths, intent.filename);
@@ -2360,7 +2362,7 @@ export function verifyFeishuSessionMessage(home, message) {
   const contentDigest = nativeIngressContentDigest(message.content);
   if (!contentDigest) return false;
   const evidence = findInboundDeliveryEvidence(home, marker.deliveryRef);
-  return Boolean(evidence?.bodyAvailable && evidence.event.delivery_ref === marker.deliveryRef &&
+  return Boolean(evidence && evidence.event.delivery_ref === marker.deliveryRef &&
     evidence.event.binding_generation === marker.bindingGeneration && evidence.contentDigest === contentDigest);
 }
 
@@ -2384,7 +2386,11 @@ export function findInboundDeliveryEvidence(home, deliveryRef) {
   return withLock(paths, "inbound-state", () => {
     repairInboundPublicationsLocked(paths);
     const processed = processedInboundIdentity(paths, deliveryRef);
-    if (processed) return { event: { delivery_ref: deliveryRef, binding_generation: processed.binding_generation }, bodyAvailable: false };
+    if (processed) return {
+      event: { delivery_ref: deliveryRef, binding_generation: processed.binding_generation },
+      contentDigest: typeof processed.content_digest === "string" ? processed.content_digest : undefined,
+      bodyAvailable: false,
+    };
     const found = readInboundByDeliveryRef(paths, deliveryRef);
     if (!found) return undefined;
     return {

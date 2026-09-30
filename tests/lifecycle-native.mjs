@@ -88,6 +88,8 @@ session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condi
 const a = session.getLeafId();
 session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Add condition B.' }], timestamp: Date.now() });
 const b = session.getLeafId();
+const readProbe = home + '/session-read-probe.jsonl';
+process.env.FM_TASK_SESSION_READ_PROBE = readProbe;
 assert.match(await tool({ action: 'route', input: a, update_brief: true }, false), /explicit existing task/);
 assert.deepEqual((await tool({ action: 'list' })).pending_updates, []);
 writeFileSync(home + '/state/task.status', 'working: routine progress\n');
@@ -142,6 +144,9 @@ const stable = session.getBranch().length;
 await tool({ action: 'list' });
 await tool({ action: 'route', task: 'task', input: b, update_brief: true });
 assert.equal(session.getBranch().length, stable, 'confirmed retry accumulated presentation evidence');
+const reads = readFileSync(readProbe, 'utf8').trim().split(/\n/).map(JSON.parse);
+assert(reads.some(({ bytes }) => bytes > 18 * 1024 * 1024 && bytes <= 32 * 1024 * 1024), 'large transcript delta was not read within its byte bound');
+assert(reads.at(-1).bytes < 64 * 1024, `indexed retry reread ${reads.at(-1).bytes} session bytes`);
 const brief = readFileSync(home + '/data/task/brief.md', 'utf8');
 assert.equal(brief.split('Add condition A.').length, 2);
 assert.equal(brief.split('Add condition B.').length, 2);

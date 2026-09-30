@@ -376,7 +376,7 @@ teardown_completed_task() (
   fm_lock_acquire_wait "$lock"
   trap 'fm_lock_release "$lock"; if [ "$copy_lock_held" = 1 ]; then fm_lock_release "$copy_lock"; fi' EXIT
   fm_backend_validate_task_endpoint "$meta" "$ID" || exit 1
-  case "$(fm_task_lifecycle mode "$ID")" in accepted|archived) ;; *) exit 1 ;; esac
+  lifecycle=$(fm_task_lifecycle completion-read "$ID") || exit 1
   [ -z "$ENDPOINT_EXPECTED_GEN" ] || [ "$(fm_meta_get "$meta" spawn_gen)" = "$ENDPOINT_EXPECTED_GEN" ] || exit 1
   KIND=$(fm_meta_get "$meta" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -416,8 +416,7 @@ teardown_completed_task() (
     printf 'completed task pane removed: %s; copy and report retained\n' "$ID"
     exit 0
   fi
-  local lifecycle ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
-  lifecycle=$(fm_task_lifecycle read "$ID") || exit 1
+  local ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
   ENDPOINT_GENERATION=$generation
   ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
   ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
