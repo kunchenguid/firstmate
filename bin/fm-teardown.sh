@@ -99,9 +99,10 @@
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
 # collision itself, whichever record is stale. The one exception is a slot whose
-# owner claim (below) names another task: this teardown is then records-only and
-# touches nothing under the slot, so the scan is skipped rather than stranding
-# the stale record and, with it, the claimant's own teardown.
+# owner claim (below) names another task and that is not a persistent secondmate
+# home (below): this teardown is then records-only and touches nothing under the
+# slot, so the scan is skipped rather than stranding the stale record and, with
+# it, the claimant's own teardown.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -126,6 +127,22 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# A persistent secondmate home seeded into a reused slot is the one owner a
+# claim alone cannot settle: a home seeded before bin/fm-home-seed.sh published
+# its own claim still carries the claim of whichever task used the slot before,
+# and completed scouts' stale records still name it. So a slot showing a
+# durable Treehouse lease or a secondmate identity marker or parent binding is
+# never returned, reset, or reaped by an ordinary task: while the claim
+# would still make this task its owner, teardown refuses, even with --force,
+# and names bin/fm-home-seed.sh claim-slot when the home's ownership is
+# otherwise proved. Once the claim names the persistent owner that
+# bin/fm-wake-lib.sh's fm_treehouse_secondmate_slot_proof proves, the
+# reassigned-slot cleanup above applies; a completed scout (no --force) whose
+# exact recorded endpoint the backend's recovery-grade classifier reads dead or
+# missing may take it even while other ordinary records, or the owner's own
+# record, name the home. Any other record naming it, a live or unreadable
+# endpoint, and the report, decision-inventory, incarnation, backlog, and
+# public-follow-up gates still refuse exactly as before.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2356,16 +2373,30 @@ collect_local_firstmate_states() {
   done
 }
 
+# With [owner-id] [owner-home], the slot is that secondmate's proved persistent
+# home and the caller touches nothing under it (teardown_persistent_slot_gate):
+# another ordinary record naming the slot, or the owner's own record in its
+# registering home, is then reported and left for its own cleanup rather than
+# refused. Any other secondmate record naming the slot still refuses.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local owner_id=${5:-} owner_home=${6:-} owner_state=
   local slot state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
+  if [ -n "$owner_id" ]; then
+    owner_state=$(canonical_existing_dir "$owner_home/state") || owner_state=
+  fi
   # A slot whose owner claim names another task was reassigned, so this record's
   # teardown is records-only and touches nothing under it; another record naming
   # the slot is then no hazard, and refusing would strand this stale record and
-  # block the claimant's own teardown behind it.
-  fm_treehouse_slot_owner_state "$slot" "$record_id"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  # block the claimant's own teardown behind it. A persistent secondmate home is
+  # the exception: its claim alone never excuses another record, so the scan
+  # below still runs, narrowed only by the owner teardown_persistent_slot_gate
+  # proved.
+  if ! fm_treehouse_slot_persistent_evidence "$slot"; then
+    fm_treehouse_slot_owner_state "$slot" "$record_id"
+    [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  fi
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2381,6 +2412,13 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if [ -n "$owner_id" ] \
+           && { [ "$(fm_meta_get "$other" kind)" != secondmate ] \
+                || { [ "$other_id" = "$owner_id" ] && [ -n "$owner_state" ] \
+                     && [ "$(canonical_existing_dir "$state_dir" || true)" = "$owner_state" ]; }; }; then
+          echo "warning: task $other_id's recorded $field also names $slot, which is secondmate $owner_id's proved persistent home; this cleanup touches nothing under it, so $other_id's record is left for its own cleanup." >&2
+          continue 2
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
@@ -2393,7 +2431,65 @@ require_exclusive_worktree_slot_record() {
 require_exclusive_task_worktree_slot() {
   local slot
   slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  if [ "$TEARDOWN_SLOT_PERSISTENT_NO_TOUCH" = 1 ]; then
+    require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot" \
+      "$TEARDOWN_SLOT_PERSISTENT_OWNER" "$TEARDOWN_SLOT_PERSISTENT_PARENT"
+  else
+    require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
+  fi
+}
+
+# Persistent secondmate homes (see the script header). A pool slot showing a
+# durable lease or a secondmate marker is a home no ordinary task may return,
+# reset, or reap, so a claim that would still make this task its owner (its own
+# or none) refuses, even with --force. Only a positive
+# fm_treehouse_secondmate_slot_proof whose persistent owner the claim already
+# names records that owner; a completed scout (no --force) whose exact recorded
+# endpoint is then conclusively dead or missing may take the existing
+# no-slot-touch cleanup even while another record names the slot. Every other
+# shape keeps the ordinary exclusivity and ownership checks unchanged.
+TEARDOWN_SLOT_PERSISTENT_OWNER=
+TEARDOWN_SLOT_PERSISTENT_PARENT=
+TEARDOWN_SLOT_PERSISTENT_NO_TOUCH=0
+teardown_persistent_slot_gate() {
+  local slot claim_home endpoint
+  slot=$(teardown_live_slot_path) || return 0
+  fm_treehouse_slot_persistent_evidence "$slot" || return 0
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  if fm_treehouse_secondmate_slot_proof "$PROJ" "$slot"; then
+    claim_home=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || claim_home=
+    if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] \
+       && [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$FM_TREEHOUSE_SECONDMATE_SLOT_ID" ] \
+       && [ "$claim_home" = "$FM_TREEHOUSE_SECONDMATE_SLOT_PARENT" ]; then
+      TEARDOWN_SLOT_PERSISTENT_OWNER=$FM_TREEHOUSE_SECONDMATE_SLOT_ID
+      TEARDOWN_SLOT_PERSISTENT_PARENT=$FM_TREEHOUSE_SECONDMATE_SLOT_PARENT
+      [ "$KIND" = scout ] && [ "$FORCE" != --force ] || return 0
+      if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
+        endpoint=missing
+      else
+        endpoint=$(fm_backend_agent_state "$BACKEND" "$T")
+      fi
+      case "$endpoint" in
+        dead|missing) TEARDOWN_SLOT_PERSISTENT_NO_TOUCH=1 ;;
+      esac
+      return 0
+    fi
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      mine|absent)
+        echo "REFUSED: task $ID's recorded worktree $slot is secondmate $FM_TREEHOUSE_SECONDMATE_SLOT_ID's leased persistent home, but that slot's owner claim still names ${FM_TREEHOUSE_SLOT_OWNER_ID:-no task}; returning or resetting it would discard that home, so nothing was changed - not even with --force." >&2
+        echo "Reconcile the claim from its registering home (FM_HOME=$FM_TREEHOUSE_SECONDMATE_SLOT_PARENT bin/fm-home-seed.sh claim-slot $FM_TREEHOUSE_SECONDMATE_SLOT_ID), then re-run teardown." >&2
+        return 1
+        ;;
+    esac
+    return 0
+  fi
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|absent)
+      echo "REFUSED: task $ID's recorded worktree $slot shows a persistent secondmate home (a durable Treehouse lease or a secondmate marker), but its ownership cannot be proved: $FM_TREEHOUSE_SECONDMATE_SLOT_ERROR. Returning or resetting it could discard that home, so nothing was changed - not even with --force." >&2
+      echo "Reconcile the home's lease, identity marker, parent binding, and registry route, then re-run teardown." >&2
+      return 1
+      ;;
+  esac
 }
 
 # Positive slot ownership, read from the claim the task that took the slot wrote
@@ -2986,7 +3082,15 @@ preflight_descendant_treehouse_slots() {
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0)
+        # A child that would take its slot back must not take a persistent
+        # secondmate home with it (teardown_persistent_slot_gate).
+        if fm_treehouse_slot_persistent_evidence "$(canonical_existing_dir "$worktree")"; then
+          echo "REFUSED: child $task_id's recorded worktree $worktree shows a persistent secondmate home (a durable Treehouse lease or a secondmate marker) while its slot-owner claim names no other owner; forced teardown changed nothing - reconcile that home's claim with bin/fm-home-seed.sh claim-slot from its registering home first." >&2
+          return 1
+        fi
+        ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -3332,8 +3436,13 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+teardown_persistent_slot_gate || exit 1
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+if [ "$TEARDOWN_SLOT_PERSISTENT_NO_TOUCH" = 1 ] && teardown_owns_worktree; then
+  echo "REFUSED: task $ID's recorded worktree $WT changed owner while teardown held its locks; nothing was changed" >&2
+  exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

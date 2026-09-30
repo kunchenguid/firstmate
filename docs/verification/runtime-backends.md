@@ -1681,6 +1681,25 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 `tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
+### Persistent-home scout cleanup
+
+Measured 2026-09-30 on macOS aarch64 against Herdr 0.9.1 in an isolated `fm-lab-` session, with no agent launched.
+Teardown lets a completed scout whose record still names a proved persistent secondmate home skip the duplicate-record refusal only when `fm_backend_agent_state` reads its exact recorded pane `dead` or `missing`.
+A process whose argv0 is `claude` stands in for a harness, and `herdr pane report-agent` registers it.
+Refresh with:
+
+```sh
+tests/fm-teardown-persistent-slot-herdr-e2e.test.sh
+```
+
+Observed 2026-09-30:
+
+```text
+evidence: herdr 0.9.1 endpoint states: shell-only=dead closed=missing registered-claude=alive unregistered-claude=unreadable
+ok - real Herdr: a live or unreadable old endpoint keeps the duplicate-record refusal on a reconciled persistent home
+ok - real Herdr: completed scouts whose endpoints are dead or missing finish without touching the reconciled persistent home
+```
+
 ### Stale agent registration
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
