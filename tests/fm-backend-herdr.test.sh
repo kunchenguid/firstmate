@@ -5399,6 +5399,33 @@ EOF
   pass "fm_backend_herdr_create_task: the label-collision startup-workspace scenario (2026-07-02 incident) leaves the captain's live tab untouched"
 }
 
+test_prune_seeded_tab_label_reverification() {
+  local dir log state fb label agent expected remaining i=0
+  for label in '1' '1 · firstmate' 'my shell' '1-other'; do
+    for agent in idle working; do
+      i=$((i + 1))
+      dir="$TMP_ROOT/prune-label-$i"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+      fb=$(make_herdr_statefake "$dir")
+      jq -n --arg label "$label" --arg agent "$agent" '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:$label,workspace_id:"w1",pane_id:"w1:p1"},{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{"w1:p1":$agent}}' > "$state"
+      PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1' "$ROOT" \
+        || fail "seeded prune failed for label '$label', agent '$agent'"
+      expected=1
+      if [ "$agent" = idle ]; then
+        case "$label" in '1'|'1 · firstmate') expected=0 ;; esac
+      fi
+      remaining=$(jq '[.tabs[] | select(.tab_id == "w1:t1")] | length' "$state")
+      [ "$remaining" = "$expected" ] || fail "seeded label '$label', agent '$agent': expected $expected seeded tabs, got $remaining"
+      jq -e '.tabs[] | select(.tab_id == "w1:t2")' "$state" >/dev/null \
+        || fail "prune closed a tab other than the captured seeded id"
+      if [ "$expected" = 1 ]; then
+        assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "prune closed a renamed or working seeded tab"
+      fi
+    done
+  done
+  pass "seeded prune accepts default and cwd-derived labels, preserves renamed and working tabs, and closes only the captured id"
+}
+
 test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   # Defense in depth (not the primary safety mechanism): even for a
   # freshly-created workspace with a genuine non-empty seeded default tab id,
@@ -5795,6 +5822,7 @@ test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
+test_prune_seeded_tab_label_reverification
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
