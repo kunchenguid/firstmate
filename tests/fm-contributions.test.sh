@@ -1098,8 +1098,68 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+test_contribution_input_large_backlog_preserves_ownership() {
+  local home n size
+  home=$(new_home large-input)
+  forge_home "$home"
+  printf -- '- [ ] duplicate - Shared https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  record "$home" retired 11 open mergeable
+  # Saved ownership survives a row's retirement from the current backlog.
+  awk '!/^- \[ \] retired -/' "$home/data/backlog.md" > "$home/current.md"
+  mv "$home/current.md" "$home/data/backlog.md"
+  printf 'kind=ship\npr=https://github.com/o/r/pull/12\npr_head=%s\n' "$HEAD_B" > "$home/state/meta-only.meta"
+  cp "$home/data/delivery/contributions.json" "$home/delivery-before.json"
+  cp "$home/data/retired/contributions.json" "$home/retired-before.json"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/small-input.json" \
+    || fail 'small contribution input failed'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/small-input.json" --all > "$home/small-coverage.json" \
+    || fail 'small contribution coverage failed'
+  jq -e '.known == 3 and .checked == 1 and (.rows | map({tasks,url}) | sort_by(.url)) == [
+    {tasks:["retired"],url:"https://github.com/o/r/pull/11"},
+    {tasks:["meta-only"],url:"https://github.com/o/r/pull/12"},
+    {tasks:["delivery","duplicate"],url:"https://github.com/o/r/pull/8"}]' "$home/small-coverage.json" >/dev/null \
+    || fail 'small input changed backlog, metadata, shared-URL or saved ownership'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm --if-owned >/dev/null \
+    || fail 'small owned input could not arm native monitoring'
+  cp "$home/state/contributions.check.sh" "$home/small-check.sh"
+  cp "$home/state/contributions.check-trust" "$home/small-check-trust"
+
+  # Ordinary completed rows and evidence notes expand the canonical JSON past
+  # Linux's per-argument limit without introducing any contribution owners.
+  printf '\n## Done\n' >> "$home/data/backlog.md"
+  for ((n=0; n<300; n++)); do
+    printf -- '- [x] historical-%s - Completed operational repair %s (repo: firstmate) (kind: ship) (done: 2026-09-15)\n' "$n" "$n"
+    printf '  Evidence: native monitoring recovered with contribution ownership preserved; lint and targeted checks passed.\n'
+  done >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/large-input.json" \
+    || fail 'large contribution input failed'
+  size=$(jq '.backlog | tojson | length' "$home/large-input.json")
+  [ "$size" -gt 131072 ] || fail 'large fixture did not exceed the Linux per-argument limit'
+  jq -e --slurpfile small "$home/small-input.json" '
+    (.backlog.records | length) == 302 and .tasks == $small[0].tasks
+    and .backlog.records[:2] == $small[0].backlog.records
+    and .backlog.records[-1].id == "historical-299"
+    and (.backlog.records[-1].body_lines | length) == 1' "$home/large-input.json" >/dev/null \
+    || fail 'large transport lost canonical backlog or metadata evidence'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/large-input.json" --all > "$home/large-coverage.json" \
+    || fail 'large contribution coverage failed'
+  jq -e --slurpfile small "$home/small-coverage.json" '. == $small[0]' "$home/large-coverage.json" >/dev/null \
+    || fail 'large input changed contribution ownership or observation evidence'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm --if-owned >/dev/null \
+    || fail 'large owned input could not arm native monitoring'
+  if ! cmp -s "$home/small-check.sh" "$home/state/contributions.check.sh" \
+    || ! cmp -s "$home/small-check-trust" "$home/state/contributions.check-trust"; then
+    fail 'large input changed the native observer or its trust binding'
+  fi
+  if ! cmp -s "$home/delivery-before.json" "$home/data/delivery/contributions.json" \
+    || ! cmp -s "$home/retired-before.json" "$home/data/retired/contributions.json"; then
+    fail 'input collection or arming mutated saved contribution evidence'
+  fi
+  pass 'small and large native contribution inputs preserve ownership, evidence and authenticated observer'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_contribution_input_large_backlog_preserves_ownership test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
