@@ -15,7 +15,7 @@ A later review pass found two instance-ownership defects in the helper, reproduc
 
 ## Fixture
 
-These files are byte-identical to the revision exercised (fixture `88c401c243ceaba3`, helper `ac64ff2b5e3ad035`).
+These files are byte-identical to the revision exercised (fixture `88c401c243ceaba3`, helper `c58e1523282760`).
 
 ```bash
 mkdir -p ledgerbox-exercise/fixture ledgerbox-exercise/generated/helpers
@@ -267,7 +267,7 @@ chmod +x ledgerbox-exercise/generated/helpers/ledgerbox-instance.sh
 ```
 
 Fixture sha256 `88c401c243ceaba3e9fc20d91bf2cfd875a66b39a16ec07293d58a9bcd272c43`; helper sha256 `c58e15232827602c6b85f4dbcc1573690a9f6050b456327687f2413fc4ad26cf`.
-The entry-point drives below ran with the earlier helper revision `00d3c2e4677c848b`, before the ownership defects recorded further down were found; every ownership claim made here is re-proven against this helper revision.
+The entry-point drives below ran with the earlier helper revision `00d3c2e4677c848b`, before the ownership defects recorded further down were found; every ownership claim made here is re-proven against the current helper revision.
 
 ## Entry-point outcomes
 
