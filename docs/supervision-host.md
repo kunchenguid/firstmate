@@ -265,7 +265,7 @@ So it never stops the owner's host or watcher or releases its leases.
 ### A host that dies without a close
 
 The host's owner retries it.
-Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
+Grok's model, Codex's Stop auto-arm, and Codex's failure-path checkpoint see it as a failed cycle and start the next one.
 Before it arms, the next host does two things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
@@ -275,7 +275,7 @@ Before it arms, the next host does two things:
 
 The host stays parked across every close it handled itself and exits only when main is needed.
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
-Cursor's `stop` hook carries the same tracked 28,800-second registration.
+Cursor's `stop` hook and Codex's async Stop auto-arm carry the same tracked 28,800-second registration.
 A plain watcher park rarely lasts that long, because heartbeat closes wake main.
 But a host absorbs its own wakes, so it ends its park itself before that registration.
 
@@ -293,6 +293,7 @@ Main drains and acknowledges, and the owner starts the next park:
 | Primary | When the next park starts |
 |---|---|
 | Claude and Cursor | At the next turn end. |
+| Codex | At the end of the queued `watcher:` turn that carried the boundary line. |
 | OpenCode and omp | At once. |
 | Grok | At the model's re-arm. |
 
@@ -304,7 +305,8 @@ One short main turn per boundary is the cost of never losing the park silently.
 
 ### Codex checkpoint bound
 
-Codex has no asynchronous wake, so its checkpoint's own bound is the park.
+This applies only to the failure-path foreground checkpoint; the Stop auto-arm parks under the ordinary boundary above.
+A foreground checkpoint blocks the model, so its own bound is the park.
 The checkpoint passes it as the boundary and reports the boundary as its ordinary quiet line (`checkpoint: no actionable wake within <n>s`).
 
 | Posture | Checkpoint bound |
