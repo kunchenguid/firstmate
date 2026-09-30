@@ -524,7 +524,7 @@ mail_poll() {
   # interrupted between its phases (mail_heal), so an overlapping poll or an
   # interrupted run can never lose a mail. wake_for owns the remaining
   # kill-window duplicate residual.
-  local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0
+  local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0 capped=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -533,6 +533,7 @@ mail_poll() {
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
+  rm -f "$AWAY_SCAN.next"
   if ! list="$(run_py poll_list)"; then
     # The poll engine already printed its cause on stderr; just release the
     # lock and fail instead of letting set -e abort the whole script with the
@@ -624,6 +625,7 @@ mail_poll() {
       # bounds the durable wake queue instead of flooding firstmate.
       if [ "$woke" -ge "$MAIL_MAX_WAKES" ]; then
         echo "fm-mail: per-poll wake cap ($MAIL_MAX_WAKES) reached; remaining mail surfaces on the next poll" >&2
+        capped=1
         break
       fi
       if [ "$status" = degraded ]; then
@@ -659,6 +661,11 @@ mail_poll() {
       fi
     fi
   done <<< "$list"
+  if [ -f "$AWAY_SCAN.next" ] && [ "$capped" -eq 0 ] && ! mv -f "$AWAY_SCAN.next" "$AWAY_SCAN"; then
+    echo "fm-mail: could not commit the away-scan cursor; mail is examined again on the next poll" >&2
+    fm_lock_release "$STATE_DIR/.mail-seen.lock"
+    return 1
+  fi
   fm_lock_release "$STATE_DIR/.mail-seen.lock"
   if [ "$woke" -eq 0 ]; then
     echo "fm-mail: no new mail"

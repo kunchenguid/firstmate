@@ -556,6 +556,8 @@ def load_away_scan(path, identity):
     return int(lines[1]), pending
 
 def save_away_scan(path, identity, high, pending):
+    """Stage the next away-scan state; fm-mail.sh commits it only after every
+    emitted row has been published."""
     if not path:
         return
     tmp = path + '.tmp'
@@ -564,7 +566,7 @@ def save_away_scan(path, identity, high, pending):
         for uid in sorted(pending, key=int):
             attempts, owner = pending[uid]
             f.write('%s %d %d\n' % (uid, attempts, 1 if owner else 0))
-    os.replace(tmp, path)
+    os.replace(tmp, path + '.next')
 
 def send_unreadable_reply_alert(recipient, uid, seconds):
     """Tell the owner one reply could not be read, without any message content."""
@@ -647,6 +649,7 @@ def cmd_poll_list():
         away_skipped = set()
         away_held = set()
         away_owner_failed = set()
+        away_retained = set()
         if away_mode:
             away_scan_identity = 'away-scan\t%s\t%s' % (
                 uidv, afk_record_field('entered_epoch') or '')
@@ -824,8 +827,9 @@ def cmd_poll_list():
                     continue
                 status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
                 if not ignored and afk_email_active and not afk_enabled:
-
                     status = 'degraded'
+                    if away_mode and afk_record_field('reach_channels') == 'email':
+                        away_retained.add(u)
                 out.append((uid, idate, fr, subj, status))
                 if status != 'ignored':
                     if is_retry:
@@ -836,10 +840,6 @@ def cmd_poll_list():
                         new_emitted += 1
         except TimeoutError:
             pass
-        disarm_poll_deadline()
-        sock = getattr(m, 'sock', None)
-        if sock is not None:
-            sock.settimeout(1)
         # Finish every IMAP round-trip before emit or persist so a hung
         # logout cannot run after the retry-scan position advances. Then emit
         # the mailbox generation guard and each message row (uid, date, from,
@@ -854,9 +854,15 @@ def cmd_poll_list():
         # restarting from the old head. The persist block below owns when the
         # retry-scan position advances, including under a new-mail flood.
         try:
+            remaining = max(0.1, deadline - time.monotonic())
+            arm_poll_deadline(remaining)
+            sock = getattr(m, 'sock', None)
+            if sock is not None:
+                sock.settimeout(min(MAIL_TIMEOUT, remaining))
             m.logout()
         except Exception:
             pass
+        disarm_poll_deadline()
         m = None
         row_uids = {row[0] for row in out}
         afk_messages = [message for message in afk_messages if message['uid'] in row_uids]
@@ -877,8 +883,7 @@ def cmd_poll_list():
                 handoff_failed = True
             if handoff_failed:
                 failed_uids = {message['uid'] for message in afk_messages}
-                away_held |= failed_uids
-                away_owner_failed |= failed_uids
+                away_retained |= failed_uids
                 out = [
                     (uid, idate, fr, subj, 'degraded' if uid in failed_uids else status)
                     for uid, idate, fr, subj, status in out
@@ -970,6 +975,8 @@ def cmd_poll_list():
                 if u in away_held:
                     attempts, owner = pending.get(u, (0, False))
                     pending[u] = (attempts + 1, owner or u in away_owner_failed)
+                elif u in away_retained:
+                    pending[u] = (pending.get(u, (0, True))[0], True)
                 elif u in row_uids:
                     pending.pop(u, None)
                 elif u not in away_skipped:

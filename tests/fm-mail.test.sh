@@ -689,7 +689,7 @@ body = b'From: johnpoyser@gmail.com\r\nSubject: reply\r\n\r\nFM-AFK-REPLY test a
 slow = {}
 search_delay = 0
 body_failures = {}
-if scenario in ('transient', 'permanent', 'handoff-timeout'):
+if scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage'):
     uids = ['1', '2', '3']
     authentic = {'1', '2'}
     body_failures = {'1': 1 if scenario == 'transient' else (99 if scenario == 'permanent' else 0)}
@@ -770,6 +770,8 @@ def fake_run(*args, **kwargs):
         handoff_timeouts.append(kwargs.get('timeout'))
         if scenario == 'handoff-timeout' and len(handoff_timeouts) == 1:
             raise subprocess.TimeoutExpired(args[0], kwargs['timeout'])
+        if scenario == 'handoff-fails' and len(handoff_timeouts) <= 4:
+            return type('Result', (), {'returncode': 1, 'stdout': '', 'stderr': ''})()
         handoffs.extend(message['uid'] for message in json.loads(kwargs['input']))
     return type('Result', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
 subprocess.run = fake_run
@@ -777,13 +779,13 @@ import importlib.util
 spec = importlib.util.spec_from_file_location('fm_mail', mail_py)
 mail = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mail)
-mail.afk_record_field = lambda name: '1700000000'
+mail.afk_record_field = lambda name: 'email' if name == 'reach_channels' else '1700000000'
 alerts = []
 mail.send_message = lambda to, subj, text, timeout=None: alerts.append((to, subj, text))
 
-def poll(away):
+def poll(away, recipient=owner):
     """Run one poll and, like fm-mail.sh, record surfaced non-ignored rows in the cursor."""
-    mail.afk_email_context = (lambda: (owner, True, False)) if away else (lambda: (None, False, False))
+    mail.afk_email_context = (lambda: (recipient, True, False)) if away else (lambda: (None, False, False))
     FakeConn.header_fetches.clear()
     output, error = StringIO(), StringIO()
     started = time.monotonic()
@@ -795,6 +797,9 @@ def poll(away):
         for row in rows:
             if row[4] not in ('ignored', 'retry'):
                 cursor.write(row[0] + '\n')
+    staged = os.environ['FM_MAIL_AWAY_SCAN'] + '.next'
+    if os.path.exists(staged):
+        os.replace(staged, os.environ['FM_MAIL_AWAY_SCAN'])
     return rc, rows, list(FakeConn.header_fetches), elapsed, error.getvalue()
 
 def status(rows):
@@ -806,6 +811,16 @@ if scenario in ('transient', 'handoff-timeout'):
     rc, rows, second, _, _ = poll(True)
     print(f'second rc={rc} fetched={",".join(second)} handoffs={handoffs} alerts={len(alerts)}')
     print('handoff_timeouts_bounded=%s' % all(0 < t <= 2 for t in handoff_timeouts))
+elif scenario == 'handoff-fails':
+    for _ in range(5):
+        rc, rows, fetched, _, _ = poll(True)
+        assert rc == 0, rc
+    print(f'handoffs={sorted(set(handoffs))} alerts={len(alerts)}')
+elif scenario == 'config-outage':
+    rc, rows, first, _, _ = poll(True, None)
+    print(f'outage rows={status(rows)} handoffs={handoffs}')
+    rc, rows, second, _, _ = poll(True)
+    print(f'restored fetched={",".join(second)} handoffs={handoffs}')
 elif scenario == 'permanent':
     fetched_total = []
     for _ in range(4):
@@ -898,7 +913,47 @@ test_away_owner_read_failures_retry_then_alert() {
   assert_contains "$out" "second rc=0 fetched=1,2 handoffs=['1', '2']" \
     "a timed-out handoff retains the reply for the next poll"
   assert_contains "$out" 'handoff_timeouts_bounded=True' "the reply handoff is bounded by the poll budget"
+  out=$(run_away_poll_harness handoff-fails)
+  assert_contains "$out" "handoffs=['1', '2'] alerts=0" \
+    "repeated handoff failures stay retryable and never count as unreadable replies"
+  out=$(run_away_poll_harness config-outage)
+  assert_contains "$out" "outage rows=1:degraded,2:degraded,3:ignored handoffs=[]" \
+    "owner replies are not read while mail configuration is missing"
+  assert_contains "$out" "restored fetched=1,2 handoffs=['1', '2']" \
+    "owner replies are retained and delivered once configuration returns"
   pass "fm-mail: failed away owner reads retry, then alert once"
+}
+
+test_away_cursor_commits_only_after_publication() {
+  local fakebin pub_home out rc=0
+  fakebin=$(fm_fakebin "$TMP_ROOT")
+  pub_home="$TMP_ROOT/away-publication-home"
+  mkdir -p "$pub_home/bin" "$pub_home/state"
+  ln -s "$ROOT/bin/fm-wake-lib.sh" "$pub_home/bin/fm-wake-lib.sh"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'away-scan\t777\t1700000000\n5\n' > "$FM_MAIL_AWAY_SCAN.next"
+printf 'uidvalidity\t777\n'
+printf '5\t\tjohnpoyser@gmail.com\t[away-mode reply not processed: message body exceeds 256 KiB] reply\tok\n'
+SH
+  chmod +x "$fakebin/python3"
+  printf 'away-scan\t777\t1700000000\n0\n' > "$pub_home/state/.mail-away-scan"
+  : > "$pub_home/state/.wake-queue.seq"
+  chmod 0000 "$pub_home/state/.wake-queue.seq"
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$pub_home" PATH="$fakebin:$PATH" "$MAIL" poll 2>&1) || rc=$?
+  chmod 0600 "$pub_home/state/.wake-queue.seq"
+  expect_code 1 "$rc" "a failed owner-mail wake fails the poll"
+  assert_contains "$(sed -n 2p "$pub_home/state/.mail-away-scan")" "0" \
+    "the away cursor is unchanged when the owner-mail wake was not published"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$pub_home" PATH="$fakebin:$PATH" "$MAIL" poll 2>&1) || rc=$?
+  expect_code 0 "$rc" "the next poll publishes the owner-mail wake"
+  assert_contains "$out" "woke for 5" "the owner message is examined again and woken"
+  assert_contains "$(sed -n 2p "$pub_home/state/.mail-away-scan")" "5" \
+    "the away cursor advances after the wake is published"
+  pass "fm-mail: the away cursor commits only after emitted rows are published"
 }
 
 test_away_poll_budget_bounds_wall_clock() {
@@ -2967,6 +3022,7 @@ test_poll_cap_one_turn_not_saved_when_retry_pos_write_fails
 test_away_spoofed_owner_backlog_cannot_block_reply
 test_away_retry_mail_examined_once
 test_away_owner_read_failures_retry_then_alert
+test_away_cursor_commits_only_after_publication
 test_away_poll_budget_bounds_wall_clock
 test_poll_retry_surfaces_under_new_mail_flood
 test_poll_resurfaces_degraded_uid_whose_wake_never_recorded
