@@ -3,7 +3,8 @@
 // Each test mocks the world beneath the plugin noun by noun: the environment that
 // names the Firstmate home, an in-memory file system for the per-home preference, the
 // engine's own draw for every component the mod passes through, and a journal of every
-// call the mod makes on `$` (blits, toasts, redraws, the command it registers).
+// call the mod makes on `$` (blits, toasts, redraws, transcript lines, the command it
+// registers).
 import type { On, SessionMessage } from "claude-code";
 import { mock, type MockClock } from "claude-code/testing";
 
@@ -27,16 +28,22 @@ export type Journal = {
   sessionMessageReads: number;
   /** Number of `/config` listings that reached the mocked menu. */
   configLists: number;
+  /** Every `$.ui.log` line, in order. */
+  logs: string[];
 };
 
 export type World = {
   clock: MockClock;
   files: Map<string, string>;
+  /** A file's modification time, overriding the default stamp derived from its content. */
+  mtimes: Map<string, number>;
   journal: Journal;
   /** Set to deny every `$.ui.blit` from now on, as an unmounted site does. */
   denyBlits: (reason: string | undefined) => void;
   /** Set to reject every `$.fs.write` from now on. */
   failWrites: (reason: string | undefined) => void;
+  /** Set the id `$.session.id()` answers from now on, as a new or resumed session has. */
+  setSessionId: (id: string) => void;
 };
 
 export type WorldOptions = {
@@ -66,7 +73,10 @@ export function world(on: On, options: WorldOptions = {}): World {
     ...(functionHooks === undefined ? {} : { CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: functionHooks }),
   });
   const clock = mock.clock(on);
+  mock.store(on);
+  let sessionId = "session-1";
   const files = new Map<string, string>();
+  const mtimes = new Map<string, number>();
   if (options.preference !== undefined) files.set(PREFERENCE, options.preference);
   const journal: Journal = {
     commands: [],
@@ -77,6 +87,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     fsReads: [],
     sessionMessageReads: 0,
     configLists: 0,
+    logs: [],
   };
   let theme: unknown = "theme" in options ? options.theme : "dark";
   let blitDenial: string | undefined;
@@ -85,6 +96,20 @@ export function world(on: On, options: WorldOptions = {}): World {
   on("fs.read", async (_$, e) => {
     journal.fsReads.push(e.path);
     return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };
+  });
+  on("fs.exists", async (_$, e) => ({ value: files.has(e.path) }));
+  // A file's time is its content's hash unless a test sets it, so every changed content restamps it.
+  on("fs.stat", async (_$, e) => {
+    const text = files.get(e.path);
+    if (text === undefined) return { deny: `ENOENT: ${e.path}` };
+    let mtimeMs = 0;
+    for (const char of text) mtimeMs = (mtimeMs * 31 + char.codePointAt(0)!) % 2147483647;
+    mtimeMs = mtimes.get(e.path) ?? mtimeMs;
+    return { value: { kind: "file" as const, size: text.length, mtimeMs } };
+  });
+  on("ui.log", async (_$, e) => {
+    journal.logs.push(e.text);
+    return { value: undefined };
   });
   on("fs.write", async (_$, e) => {
     if (writeFailure !== undefined) return { deny: writeFailure };
@@ -112,6 +137,7 @@ export function world(on: On, options: WorldOptions = {}): World {
     return { value: [...(options.messages ?? [])] as SessionMessage[] };
   });
   on("session.start", async (_$, e) => ({ cwd: e.cwd }));
+  on("session.id", async () => ({ value: sessionId }));
   on("config.list", async () => {
     journal.configLists += 1;
     return {
@@ -141,12 +167,16 @@ export function world(on: On, options: WorldOptions = {}): World {
   return {
     clock,
     files,
+    mtimes,
     journal,
     denyBlits: (reason) => {
       blitDenial = reason;
     },
     failWrites: (reason) => {
       writeFailure = reason;
+    },
+    setSessionId: (id) => {
+      sessionId = id;
     },
   };
 }

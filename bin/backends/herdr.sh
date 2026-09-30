@@ -68,7 +68,7 @@
 # default (the firstmate repo root - never a secondmate home, so
 # fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
-FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+FM_BACKEND_HERDR_ROOT="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
@@ -2999,6 +2999,30 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
     '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
   [ "$matches" = "$workspace_id" ]
+}
+
+# fm_backend_herdr_projection_token_workspace_gone: true only when the named
+# session's workspace list was read and parsed successfully and no workspace
+# label still carries the journal's token. A version 1 attempt journal binds no
+# pane, so its projected workspace is confirmed gone only by this token absence;
+# any read or jq error - including a malformed entry that leaves the query
+# ambiguous - is unknown, not gone, so the session-start sweep keeps the journal.
+fm_backend_herdr_projection_token_workspace_gone() {  # <session> <journal> <task-id>
+  local session=$1 journal=$2 id=$3 token list verdict
+  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  # A single jq verdict: "unknown" when the list is not an array or any entry is
+  # not an object with an absent/string label (a malformed entry could itself be
+  # the token-bearing workspace in a shape we cannot read), "present" when a
+  # label carries the token, else "gone". jq errors and empty output both fall
+  # through the guard below to unknown, keeping the journal.
+  verdict=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" '
+    if (.result.workspaces | type) != "array" then "unknown"
+    elif any(.result.workspaces[]; (type != "object") or (has("label") and (.label | type != "string"))) then "unknown"
+    elif any(.result.workspaces[]; (.label // "") | endswith($suffix)) then "present"
+    else "gone"
+    end' 2>/dev/null) || return 1
+  [ "$verdict" = "gone" ]
 }
 
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself

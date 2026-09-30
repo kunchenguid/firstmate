@@ -2,15 +2,23 @@
 # fm-supervision-engine-lib.sh - which headless engine runs the supervision
 # host's branch session, and how one engine turn runs (one owner of both).
 #
-# Sourced, never executed. docs/supervision-host.md owns the host design and
+# Sourced, and executed only for the home-gate query below.
+# docs/supervision-host.md owns the host design and
 # bin/fm-supervision-host.sh the loop; this file owns two contracts, plus the
 # main-session key (fm_supervision_host_main_key) and the attended readiness
 # check (fm_supervision_host_attended_ready) the host's parts share.
 #
-# THE HOME OPT-IN (config/supervision-host). docs/configuration.md
-# "Supervision host" owns the file's schema and its no-engine outcome; this
-# file implements it (fm_supervision_host_config) and holds the verified-engine
-# list and each engine's default model (docs/supervision-host.md "Engines").
+# THE HOME GATE (config/supervision-host). docs/configuration.md
+# "Supervision host" owns the file's schema, its default on a Claude primary,
+# its `off` opt-out, and its no-engine outcome; this file implements them
+# (fm_supervision_host_enabled, fm_supervision_host_config) and holds the
+# verified-engine list and each engine's default model
+# (docs/supervision-host.md "Engines"). Every reader of the file asks
+# fm_supervision_host_enabled rather than testing the file itself, and a
+# reader outside bash runs this file:
+#   bash fm-supervision-engine-lib.sh enabled <config-dir> <primary-harness>
+# which exits 0 when that home runs the host for that primary and 1
+# otherwise, printing nothing (2 on a usage error).
 #
 # ONE ENGINE TURN (fm_supervision_engine_turn). One prompt to one engine
 # conversation, bounded, from the tracked code root, with the environment the
@@ -31,15 +39,44 @@
 # process group of its own. docs/supervision-host.md "Engines" owns the
 # verified engine facts each argument list below is built from.
 #
-# Test seam: FM_SUPERVISION_ENGINE_CLAUDE_BIN names the claude executable
+# Test seams: FM_SUPERVISION_ENGINE_CLAUDE_BIN names the claude executable
 # (default: claude on PATH), so a hermetic test can run a stub engine through
-# the real argument construction.
+# the real argument construction. FM_TEST_HARNESS pins the primary harness
+# fm_supervision_host_primary reports when FM_TEST_SEAM=1 and its value is a
+# known harness token; otherwise detection remains real (tests/lib.sh arms
+# the marker for isolated suites).
 
 FM_SUPERVISION_ENGINES_VERIFIED='claude'
 
-# fm_supervision_host_enabled <config-dir>: 0 iff this home opted in.
+# fm_supervision_host_primary: print the primary harness the home gate judges
+# (bin/fm-harness.sh, whose supervision-branch pin names the primary inside an
+# engine turn), or "unknown".
+fm_supervision_host_primary() {
+  if [ "${FM_TEST_SEAM:-}" = 1 ]; then
+    case "${FM_TEST_HARNESS:-}" in
+      claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin | unknown)
+        printf '%s\n' "$FM_TEST_HARNESS"
+        return
+        ;;
+    esac
+  fi
+  "$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" 2>/dev/null || printf 'unknown\n'
+}
+
+# fm_supervision_host_enabled <config-dir> [<primary-harness>]: 0 iff this home
+# runs the supervision host. A file whose first word is "off" opts out on
+# every primary; any other file opts in; with no file, a Claude primary runs
+# the host at its default engine and every other primary does not. The
+# primary is detected (fm_supervision_host_primary) only when the file is
+# absent and the caller did not name one.
 fm_supervision_host_enabled() {
-  [ -f "$1/supervision-host" ]
+  local word='' rest
+  if [ -f "$1/supervision-host" ]; then
+    read -r word rest < "$1/supervision-host" 2>/dev/null || true
+    [ "$word" != off ]
+    return
+  fi
+  [ "${2-$(fm_supervision_host_primary)}" = claude ]
 }
 
 fm_supervision_engine_verified() {  # <engine>
@@ -57,7 +94,8 @@ fm_supervision_engine_default_model() {  # <engine>
 }
 
 # fm_supervision_host_config <config-dir> <primary-harness>
-# Returns 1 when the home did not opt in. Otherwise returns 0 and sets
+# Returns 1 when the home does not run the host (fm_supervision_host_enabled).
+# Otherwise returns 0 and sets
 # FM_SUPERVISION_ENGINE and FM_SUPERVISION_ENGINE_MODEL for a usable engine, or
 # leaves both empty and sets FM_SUPERVISION_ENGINE_PROBLEM to one plain
 # sentence naming why this home has no engine.
@@ -67,9 +105,10 @@ fm_supervision_host_config() {
   FM_SUPERVISION_ENGINE=''
   FM_SUPERVISION_ENGINE_MODEL=''
   FM_SUPERVISION_ENGINE_PROBLEM=''
-  fm_supervision_host_enabled "$config" || return 1
+  fm_supervision_host_enabled "$config" "$primary" || return 1
   line=
-  IFS= read -r line < "$config/supervision-host" 2>/dev/null || true
+  [ ! -f "$config/supervision-host" ] \
+    || IFS= read -r line < "$config/supervision-host" 2>/dev/null || true
   engine='' model='' extra=''
   read -r engine model extra <<EOF
 $line
@@ -113,7 +152,9 @@ EOF
 # checked later, by the feed that renders the wake.
 fm_supervision_host_attended_ready() {
   FM_SUPERVISION_HOST_UNREADY=
-  if ! fm_supervision_host_config "$1" "$2" || [ -z "$FM_SUPERVISION_ENGINE" ]; then
+  if ! fm_supervision_host_config "$1" "$2"; then
+    FM_SUPERVISION_HOST_UNREADY="the home does not run the supervision host"
+  elif [ -z "$FM_SUPERVISION_ENGINE" ]; then
     FM_SUPERVISION_HOST_UNREADY="no supervision engine"
   elif ! fm_supervision_engine_bin "$FM_SUPERVISION_ENGINE" >/dev/null 2>&1; then
     FM_SUPERVISION_HOST_UNREADY="the $FM_SUPERVISION_ENGINE engine executable is missing"
@@ -132,12 +173,14 @@ fm_supervision_host_attended_ready() {
 
 # fm_supervision_host_outcomes_drained <config-dir>: 0 when main processes the
 # supervision session's outcomes through the drain's BRANCH OUTCOMES section
-# (bin/fm-wake-drain.sh): the home opted in and its primary is not Pi, whose
-# branch extension owns that path. The drain and the return
+# (bin/fm-wake-drain.sh): the home runs the host and its primary is not Pi,
+# whose branch extension owns that path. The drain and the return
 # (bin/fm-afk-return.sh) share this check.
 fm_supervision_host_outcomes_drained() {
-  fm_supervision_host_enabled "$1" || return 1
-  case "$("$(dirname "${BASH_SOURCE[0]}")/fm-harness.sh" 2>/dev/null)" in pi|pi-signed) return 1 ;; esac
+  local primary
+  primary=$(fm_supervision_host_primary)
+  case "$primary" in pi|pi-signed) return 1 ;; esac
+  fm_supervision_host_enabled "$1" "$primary"
 }
 
 # fm_supervision_host_main_key <state-dir>: print the key of the current main
@@ -167,6 +210,11 @@ fm_supervision_host_health_key() {
   key=$(fm_supervision_host_main_key "$1") || return 1
   printf '%s|%s|%s\n' "$key" "$FM_SUPERVISION_ENGINE" "$FM_SUPERVISION_ENGINE_MODEL"
 }
+
+# The latch's first cooldown in seconds: the host's initial trip sets it, and
+# each failed probe after that doubles it.
+# shellcheck disable=SC2034 # Shared with the sourcing host and return brief.
+FM_SUPERVISION_HOST_COOLDOWN=300
 
 # fm_supervision_host_paused_until <state-dir>: while that latch holds, from
 # the trip until a probe succeeds, print the epoch from which the next wake
@@ -394,3 +442,13 @@ fm_supervision_engine_result() {
     *) return 1 ;;
   esac
 }
+
+# The home-gate query (THE HOME GATE above), when this file is executed.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "$#" -eq 3 ] && [ "$1" = enabled ]; then
+    fm_supervision_host_enabled "$2" "$3"
+    exit
+  fi
+  echo "usage: fm-supervision-engine-lib.sh enabled <config-dir> <primary-harness>" >&2
+  exit 2
+fi

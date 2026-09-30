@@ -9,11 +9,16 @@
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+# Every scratch file this script mints (.main-eligible-rows.tmp.*,
+# .wake-rows.consume.*, .wake-queue.retire.*, .wake-queue.ack.*,
+# .wake-queue.actor-view.*) is created and removed under the queue lock, so one
+# found while taking that lock was left by a drain that died mid-write; each
+# locked drain rotates such leftovers away before doing anything else.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
 # presentation-path locks (default 10); queue mutation locks remain blocking.
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -26,6 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 # shellcheck source=bin/fm-supervision-engine-lib.sh
 . "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+# shellcheck source=bin/fm-afk-contract.sh
+. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -73,6 +80,16 @@ ELIGIBLE_OWNER_FILE="$STATE/.branch-eligible-owner"
 MAIN_ROWS_FILE="$STATE/.main-eligible-rows"
 
 rows_file_valid() { fm_wake_grant_rows_valid "$1"; }
+
+# rotate_scratch_locked: remove scratch a dead drain left behind (header).
+rotate_scratch_locked() {
+  local scratch
+  for scratch in "$STATE"/.main-eligible-rows.tmp.* "$STATE"/.wake-rows.consume.* \
+    "$STATE"/.wake-queue.retire.* "$STATE"/.wake-queue.ack.* "$STATE"/.wake-queue.actor-view.*; do
+    [ -e "$scratch" ] || [ -L "$scratch" ] || continue
+    rm -f -- "$scratch"
+  done
+}
 
 reclaim_stale_branch_grant_locked() {
   [ -e "$ELIGIBLE_ROWS_FILE" ] || [ -L "$ELIGIBLE_ROWS_FILE" ] || return 0
@@ -559,8 +576,9 @@ EOF
 # main last drained (docs/supervision-host.md "Captain outcomes"). Off Pi this
 # presentation is what the Pi branch's transcript entries are. It runs only for
 # main, only where fm_supervision_host_outcomes_drained holds (the Pi branch
-# extension owns this path on Pi), and never while the away-posture record
-# exists, because those outcomes wait for the return. Bounded, and silent when
+# extension owns this path on Pi), and never while an away record exists,
+# because those outcomes wait for the return; quiet mode's record is a present
+# captain (bin/fm-afk-contract.sh AWAY OR QUIET). Bounded, and silent when
 # nothing is new or unprocessed.
 #   - Captain outcomes come first and never wait behind routine ones. Every
 #     unprocessed captain row is presented on every drain until main
@@ -572,12 +590,19 @@ EOF
 #     mark-processed target, the newest presented row, acknowledges exactly
 #     what was presented and always at least the oldest row. An unprocessed
 #     captain row is never adopted as processed, so a home that opts in
-#     mid-session cannot lose its first captain outcome.
-#   - Routine outcomes are listed once, for awareness, the way the Pi branch's
-#     routine notes reach main's transcript without a turn; silent fleet
-#     reviews never appear. The newest that fit a byte cap are listed, and the
-#     older ones collapse into a count, since bin/fm-branch-outcome.sh list
-#     keeps them all.
+#     mid-session cannot lose its first captain outcome. Each line names how
+#     long ago its row was recorded (the store's "recordedAgo"), because a row
+#     main never acknowledged can come back long after its situation settled
+#     (after a harness or posture switch, or an upgrade whose earlier
+#     presenter never advanced the read cursor), and the section asks main to
+#     check the task's current state first and reply to the captain only
+#     about outcomes still open, as if settled ones had never been listed,
+#     then acknowledge every presented outcome, settled and open alike.
+#   - Visible routine outcomes are listed once, for awareness, the way the Pi
+#     branch's routine notes reach main's transcript without a turn; silent
+#     routine outcomes never appear. The newest visible rows that fit a byte
+#     cap are listed, and older visible rows collapse into a count, since
+#     bin/fm-branch-outcome.sh list keeps them all.
 # Once the section is printed, the store's read cursor advances through every
 # presented row, which is what lets mark-processed accept main's
 # acknowledgement and keeps a routine row from repeating; a drain stopped
@@ -596,7 +621,7 @@ print_branch_outcomes_section() {
   config=${FM_CONFIG_OVERRIDE:-$FM_HOME/config}
   fm_supervision_host_outcomes_drained "$config" || return 0
   [ -s "$STATE/branch-outcomes.jsonl" ] || return 0
-  [ ! -f "$STATE/.afk-contract" ] || return 0
+  ! fm_afk_contract_away_present "$STATE" || return 0
   if ! command -v jq >/dev/null 2>&1; then
     printf 'BRANCH OUTCOMES SKIPPED: jq is not installed, so the outcome store cannot be presented; nothing was marked read, and these outcomes are presented once jq is back.\n' >&2
     return 1
@@ -611,7 +636,7 @@ print_branch_outcomes_section() {
       map(select(.verdict == "captain")) | sort_by(.seq)
       | reduce .[] as $r ({count: {}, lines: []};
           .count[$r.task] += 1
-          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end)] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
+          | .lines += ["\($r.seq)\t\($r.task)\t[seq \($r.seq)\(if .count[$r.task] > 1 then ", newest of \(.count[$r.task]) for this task" else "" end), recorded \($r.recordedAgo) ago] \($r.task): \($r.summary | gsub("[\t\n\r]"; " "))"])
       | .lines[]' 2>/dev/null) \
     || ! routine=$(printf '%s\n' "$rows" | jq -rs 'map(select(.unread and .verdict == "routine" and .silent != true)) | sort_by(.seq) | reverse | .[]
       | "[seq \(.seq)] \(.task): \(.summary | gsub("[\t\n\r]"; " "))"' 2>/dev/null) \
@@ -646,7 +671,7 @@ print_branch_outcomes_section() {
 $captain
 ROWS
   if [ "$shown" -gt 0 ]; then
-    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first - process each as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker):
+    text="BRANCH OUTCOMES (captain outcomes the supervision session recorded for you, one line per task, oldest first; each says what was true when it was recorded, so check the task's current state first, including its still-open decisions listed above under OPEN DECISIONS, and sort them into still open and already settled, such as a decision since answered, a PR since merged, or a task since finished - process the still-open ones as firstmate: tell the captain, land or merge what is ready, answer or escalate a decision, or act on a blocker; your reply to the captain covers only those, as if the settled ones had never been listed, and a settled one needs only the acknowledgement):
 "
     for line in "${captain_lines[@]}"; do
       text="$text$line
@@ -814,6 +839,7 @@ else
   exit 1
 fi
 DRAIN_LOCK_HELD=true
+rotate_scratch_locked
 reclaim_stale_branch_grant_locked || exit 1
 [ "$ACTOR" != main ] || retire_unconsumable_rows_locked
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1

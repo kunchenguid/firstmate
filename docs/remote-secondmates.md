@@ -82,6 +82,7 @@ On macOS the worker is `dev.firstmate.remote-job`, an Aqua-scoped LaunchAgent at
 After that bootstrap, every non-doctor `fm-on.sh` target runs through that worker in the remote account's GUI session.
 It never runs in the SSH process or a Herdr pane.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
+When idle, the worker checks for newly staged work about once per second; after a lane starts or finishes it checks more frequently for a short period.
 
 ### Job lanes and preemption
 
@@ -90,7 +91,7 @@ The worker serves one lane per staged home:
 - Jobs for the same home follow the staging-order contract owned by [`bin/fm-remote-job-lib.sh`](../bin/fm-remote-job-lib.sh).
 - Different homes' lanes run concurrently, so one home's long job never delays another home's commands.
 
-Within a home's lane, the worker preempts a running reply long-poll as soon as any command other than another reply long-poll is queued for that home.
+Within a home's lane, the worker preempts a running reply long-poll on its next queue check when any command other than another reply long-poll is queued for that home.
 As a result, interactive commands and startup checks are never serialized behind a poll window.
 
 `bin/fm-remote-job-lib.sh` owns that preemption contract.
@@ -98,6 +99,7 @@ It distinguishes preemption from a wait window that closes with no data:
 
 - Only a genuinely quiet window proves channel freshness.
 - Either outcome can re-arm without losing data.
+- The parent's reply listener polls again under the same claim after either one, so a same-home command such as the per-cycle liveness probe never tears the listener down; [`bin/fm-procevent-remote-reply.sh`](../bin/fm-procevent-remote-reply.sh) owns that mapping.
 
 ### Cancelled and orphaned jobs
 
@@ -507,6 +509,10 @@ A process-event source takes these steps:
 - It fetches the documents a line explicitly offers through the confined reader.
 - It mirrors content-bearing lines into the primary status channel.
 - It does not carry blank separators.
+
+The listener holds its claim across an empty wait and across a delta it re-arms, so a line appended during either is collected without waiting for the next supervision cycle.
+It stops when that registration is retired, the registered command changes, or the home's owner lease lapses.
+`bin/fm-procevent.sh` owns the generic relisten rule, and `bin/fm-procevent-remote-reply.sh` owns this adapter's answer.
 
 Only a structured `report=data/....md` pointer offers a document.
 A bare path inside prose is a mention.

@@ -22,11 +22,12 @@
 # submits its Stop-hook rewake inside <task-notification>, with no other field
 # to tell it from a typed prompt (tests/fm-host-mirror-live-e2e.test.sh proves
 # it).
-# Every writer is a silent no-op unless this home opted into the supervision
-# host (config/supervision-host, checked before anything else runs), the hook
-# runs in a genuine primary checkout, and this session holds the fleet lock, so
-# a home without the file, a crewmate worktree, and a read-only second session
-# write nothing and print nothing.
+# Every writer is a silent no-op unless this home runs the supervision host
+# for the writer's primary (fm_supervision_host_enabled, checked before
+# anything else runs: by default on Claude, never with an `off` file), the
+# hook runs in a genuine primary checkout, and this session holds the fleet
+# lock, so a home that opted out or never opted in, a crewmate worktree, and a
+# read-only second session write nothing and print nothing.
 #
 # FILE. $STATE/.host-mirror.jsonl, one JSON object per line:
 #   {"seq":N,"epoch":N,"key":"<main session>","id":"<source id>",
@@ -73,11 +74,15 @@
 #   fm-host-mirror.sh hook <harness>        a prompt-submit or turn-end hook payload on stdin
 #   fm-host-mirror.sh feed <session> new|resume
 #   fm-host-mirror.sh commit
+#   fm-host-mirror.sh check
 #   fm-host-mirror.sh verified <harness>
 # hook and commit always exit 0 and print nothing; feed exits 1 when
 # the mirror is missing, could not be read, or holds an invalid entry, or the
 # main session cannot be identified, and prints nothing when there is nothing
-# to feed; verified exits 0 or 1 and prints nothing.
+# to feed; check (bin/fm-afk-launch.sh quiet-check's mirror test) exits 1 when
+# the mirror is missing, could not be read, or holds an invalid entry, and
+# otherwise 0, printing nothing and staging no cursor; verified exits 0 or 1
+# and prints nothing.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,6 +96,9 @@ MIRROR_CAP=4000
 MIRROR_KEEP=200
 FEED_CAP=16000
 
+# shellcheck source=bin/fm-supervision-engine-lib.sh
+. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
+
 usage() {
   sed -n '/^# Usage:/,/^# hook and commit/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//' >&2
   exit 2
@@ -103,24 +111,22 @@ case "${1:-}" in
     exit 1
     ;;
   hook)
-    # The opt-in gate runs before anything is sourced or created, so a home
-    # without the file, and a crewmate worktree with no config/, stay inert.
-    [ -f "$CONFIG/supervision-host" ] || exit 0
+    # The home gate runs before anything else is sourced or created, so a
+    # home that does not run the host stays inert.
+    fm_supervision_host_enabled "$CONFIG" "${2:-}" || exit 0
     ;;
-  feed|commit) ;;
+  feed|commit|check) ;;
   -h|--help) sed -n '2,/^set -u/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) usage ;;
 esac
 
 if ! command -v jq >/dev/null 2>&1 || [ ! -d "$STATE" ]; then
-  [ "$1" != feed ] || exit 1
+  case "$1" in feed|check) exit 1 ;; esac
   exit 0
 fi
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-supervision-engine-lib.sh
-. "$SCRIPT_DIR/fm-supervision-engine-lib.sh"
 
 umask 077
 MIRROR="$STATE/.host-mirror.jsonl"
@@ -255,6 +261,14 @@ case "$1" in
     mv -f "$STAGED" "$CURSOR" 2>/dev/null || true
     fm_lock_release "$LOCK"
     exit 0
+    ;;
+  check)
+    [ "$#" -eq 1 ] || usage
+    [ -f "$MIRROR" ] && fm_lock_acquire_wait "$LOCK" || exit 1
+    rc=0
+    jq -Rs "$ENTRIES" "$MIRROR" >/dev/null 2>&1 || rc=1
+    fm_lock_release "$LOCK"
+    exit "$rc"
     ;;
 esac
 

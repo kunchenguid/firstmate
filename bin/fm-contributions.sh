@@ -56,7 +56,8 @@
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
-# never re-read, stays fresh, and a stale error beside it is cleared once.
+# never re-read, stays fresh, and every owner's saved row converges on that
+# observation, with a stale error beside it cleared.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -88,6 +89,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$SCRIPT_DIR/fm-path-lib.sh"
 
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -121,7 +124,7 @@ jq_lib() { # jq options/program via final argument
 }
 
 read_saved() {
-  local file
+  local file dir task
   : > "$TMP/saved.jsonl"
   ERRORS=0
   if [ -L "$DATA" ]; then
@@ -129,14 +132,16 @@ read_saved() {
   fi
   for file in "$DATA"/*/contributions.json; do
     [ -e "$file" ] || [ -L "$file" ] || continue
-    if [ -L "$file" ] || [ -L "$(dirname "$file")" ] || [ ! -f "$file" ] \
+    fm_dirname_to dir "$file"
+    fm_basename_to task "$dir"
+    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] \
       || [ "$(wc -c < "$file")" -gt 1048576 ] \
       || ! jq_lib -ne --slurpfile record "$file" '($record | length) == 1 and ($record[0] | valid_record)' >/dev/null 2>&1; then
       ERRORS=$((ERRORS + 1))
       continue
     fi
     # A file's task identity must match its durable directory, not arbitrary JSON.
-    if ! jq -e --arg task "$(basename "$(dirname "$file")")" '.task == $task' "$file" >/dev/null; then
+    if ! jq -e --arg task "$task" '.task == $task' "$file" >/dev/null; then
       ERRORS=$((ERRORS + 1)); continue
     fi
     jq -c . "$file" >> "$TMP/saved.jsonl"
@@ -334,8 +339,9 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       jq -n --slurpfile final "$TMP/final.json" '
         $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
-    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
-      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
+    elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
+      jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
+        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done

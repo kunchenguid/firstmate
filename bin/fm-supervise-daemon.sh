@@ -57,8 +57,8 @@
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
 #     ends that routing. A captain-held transfer is not rechecked at all while
-#     the away-posture record (state/.afk-contract) exists: nobody is there to
-#     answer it, and the return brief lists it.
+#     an away record (state/.afk-contract, never quiet mode's) exists: nobody
+#     is there to answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -107,7 +107,7 @@
 #                                   recheck (default 14400, four hours); an
 #                                   `until` time cannot extend this bound, and a
 #                                   captain-held transfer is never rechecked
-#                                   while the away-posture record exists
+#                                   while an away record exists
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
@@ -1285,7 +1285,7 @@ housekeeping() {  # <state>
     due="$state/.subsuper-pause-until-due-$key"
     until=
     bounded_until=0
-    if status_is_captain_held "$last" && fm_afk_contract_present "$state"; then
+    if status_is_captain_held "$last" && fm_afk_contract_away_present "$state"; then
       continue
     fi
     if until=$(status_paused_until "$last"); then
