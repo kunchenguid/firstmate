@@ -20,6 +20,8 @@ The existing wake queue, actor claims, task inbox, control transaction, provider
 [`fm-inactive-reconcile.sh`](../bin/fm-inactive-reconcile.sh) discovers current tasks through metadata, cleanup receipts and the configured backlog within its existing scan deadline and cursor.
 It never traverses historical task directories to find work.
 The Pi adapter batches record reads off the UI thread with a bounded subprocess and returns uncertain tasks to main.
+For explicit intent updates, the lifecycle owner incrementally indexes the native session, scans bounded appended deltas, and rereads only the selected current-branch records.
+An incomplete cold catch-up retains its safe checkpoint for the same operation to retry, while a concurrent session change refuses without publishing a partial snapshot; the script header owns the numeric bounds.
 
 ## Intake and evidence reconciliation
 
@@ -70,7 +72,7 @@ An attempted or uncertain cleanup action still requires exact readback before cl
 Concrete cleanup metadata keeps a terminal goal due for reconciliation until the cleanup owner records the complete generation-bound receipt; that supervision does not authorize business execution to resume.
 A complete cleanup receipt makes the terminal goal quiet without erasing its retained evidence.
 The due reader evaluates the required cleanup postconditions semantically: additive diagnostics and historical ShortTask request version labels do not change the verdict, while persisted receipt bytes remain immutable evidence.
-Business completion is independent of physical cleanup.
+Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
 Open goals, unmerged required delivery and incomplete scout decision inventories refuse that closure.
 If tasks-axi has already pruned the exact Done row, the existing backlog-close owner can acknowledge bookkeeping from the configured Done archive only with matching terminal execution generation and preserved delivery reference.
@@ -128,7 +130,9 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 ## Verification
 
-[`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unassigned requests, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, terminal cleanup receipts and exact outcome replay.
+[`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, lost wake recovery, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, relevant-change-only terminal observations and exact outcome replay.
+[`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh) covers ordinary-chat exclusion, authenticated task intent updates, interrupted append recovery, and bounded incremental indexing for warm and cold native sessions.
+[`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh) covers business closure with resources retained, false-closure refusal, interruption recovery, and exact Done-history convergence.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.
 [`tests/fm-short-operations-herdr.test.sh`](../tests/fm-short-operations-herdr.test.sh) is the current real-Herdr completed-cleanup guard; the [runtime evidence](verification/runtime-backends.md#independent-task-workspace-cleanup) owns its environment, observed results and limits.

@@ -78,7 +78,7 @@ Between due recovery turns, the same clock continues bounded readback without bl
 A MAIN admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
 Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
 This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
-`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, authenticated intent updates, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
+`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, ordinary-chat exclusion, authenticated intent updates, bounded incremental session indexing, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
 `tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` cover the existing handoff, continuation and live-runtime boundaries.
 
 ## Components and their owners
