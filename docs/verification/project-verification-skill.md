@@ -3,18 +3,19 @@
 Audience: maintainer verification.
 
 This record supports the active guarantee that the internal [`project-verification` skill](../../.agents/skills/project-verification/SKILL.md) leads to a discoverable project recipe whose drive, evidence, and maintenance rules work against a real user surface.
-The skill owns the procedure; this record supplies dated evidence from one bounded exercise and makes no claim beyond it.
+The skill owns the procedure; this record supplies dated evidence from bounded exercises and makes no claim beyond them.
 
 ## What ran
 
 On 2026-09-29 UTC on `optimus0` (Linux 6.8.0-139-generic x86_64, python 3.12.3, curl 8.5.0) the procedure was applied to `ledgerbox`, a stdlib-only CLI and HTTP service, and the generated recipe and feature map were driven live.
 Two entry points were driven independently - the `add` CLI write path and the `GET /balance` service path - so one smoke could not stand in for the map.
 The same run then exercised drift and gaps: a stale Drive command in the recipe, a helper that refused `doctor` and `stop`, a mapped path whose `sqlite3` prerequisite is absent, and a `summary` feature added after the map was written.
+A later review pass found two instance-ownership defects in the helper, reproduced and fixed on 2026-09-30 in the isolated lab described below.
 `bin/fm-doc-audience-check.sh` and `tests/fm-documentation-audiences.test.sh` consume this prose structurally; they are not behavioral evidence and are reported separately from the outcomes below.
 
 ## Fixture
 
-These files are byte-identical to the revision exercised (fixture `88c401c243ceaba3`, corrected helper `00d3c2e4677c848b`).
+These files are byte-identical to the revision exercised (fixture `88c401c243ceaba3`, helper `ac64ff2b5e3ad035`).
 
 ```bash
 mkdir -p ledgerbox-exercise/fixture ledgerbox-exercise/generated/helpers
@@ -155,57 +156,102 @@ cat >ledgerbox-exercise/generated/helpers/ledgerbox-instance.sh <<'HELPER_EOF'
 #   ledgerbox-instance.sh doctor <instance-dir>
 #   ledgerbox-instance.sh stop   <instance-dir>
 #
-# start records the launched PID in <instance-dir>/service.pid and only returns once
-# the HTTP endpoint answers. stop signals exactly that recorded PID; it never matches
-# processes by name, so it cannot kill an unrelated instance.
+# Each instance owns the state it needs to be inspected later: start records the launched PID
+# and the port it was given inside <instance-dir>, so doctor and stop never guess a default.
+# start refuses a port that is already served, so it can never report readiness borrowed from
+# another process, and it only reports ready once the listening socket on that port belongs to
+# the process it launched. stop signals only the recorded PID, and only while that PID owns the
+# port; it never matches processes by name.
 set -eu
 
 ACTION=${1:?usage: ledgerbox-instance.sh start|doctor|stop <instance-dir> [port]}
 DIR=${2:?usage: ledgerbox-instance.sh start|doctor|stop <instance-dir> [port]}
-PORT=${3:-8781}
 PIDFILE="$DIR/service.pid"
+PORTFILE="$DIR/service.port"
 LOGFILE="$DIR/service.log"
+
+# port_owner <port> prints the PID listening on that TCP port, or "free", or "unknown".
+port_owner() {
+  python3 - "$1" <<'PY'
+import glob, os, sys
+port = int(sys.argv[1])
+inode = None
+for line in open('/proc/net/tcp'):
+    fields = line.split()
+    if len(fields) > 9 and fields[1].endswith(':%04X' % port) and fields[3] == '0A':
+        inode = fields[9]
+if inode is None:
+    print('free')
+    raise SystemExit
+for path in glob.glob('/proc/[0-9]*/fd/*'):
+    try:
+        target = os.readlink(path)
+    except OSError:
+        continue
+    if target == 'socket:[%s]' % inode:
+        print(path.split('/')[2])
+        raise SystemExit
+print('unknown')
+PY
+}
 
 case "$ACTION" in
   start)
     FIXTURE=${LEDGERBOX_FIXTURE:?set LEDGERBOX_FIXTURE to the fixture root}
+    PORT=${3:-8781}
     mkdir -p "$DIR"
     [ -e "$PIDFILE" ] && { echo "instance already recorded at $PIDFILE" >&2; exit 2; }
+    owner=$(port_owner "$PORT")
+    [ "$owner" = free ] || { echo "port $PORT is already served by pid $owner; refusing to start" >&2; exit 2; }
     LEDGERBOX_HOME="$DIR/state" python3 "$FIXTURE/ledgerbox" serve "$PORT" >"$LOGFILE" 2>&1 &
-    echo $! >"$PIDFILE"
-    for _ in $(seq 1 50); do
-      if curl -fsS "http://127.0.0.1:$PORT/balance" >/dev/null 2>&1; then
-        echo "ready port=$PORT pid=$(cat "$PIDFILE")"
+    pid=$!
+    echo "$pid" >"$PIDFILE"
+    echo "$PORT" >"$PORTFILE"
+    for _ in $(seq 1 100); do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        echo "instance exited before taking port $PORT; see $LOGFILE" >&2
+        exit 1
+      fi
+      if [ "$(port_owner "$PORT")" = "$pid" ]; then
+        echo "ready port=$PORT pid=$pid"
         exit 0
       fi
       sleep 0.1
     done
-    echo "instance did not become ready; see $LOGFILE" >&2
+    echo "instance never took ownership of port $PORT; see $LOGFILE" >&2
     exit 1
     ;;
   doctor)
     [ -s "$PIDFILE" ] || { echo "health=unknown detail=no-recorded-pid"; exit 1; }
+    [ -s "$PORTFILE" ] || { echo "health=unknown detail=no-recorded-port"; exit 1; }
     pid=$(cat "$PIDFILE")
-    if ! kill -0 "$pid" 2>/dev/null; then
-      echo "health=down detail=pid $pid is not running"
-      exit 1
-    fi
-    if curl -fsS "http://127.0.0.1:$PORT/balance" >/dev/null 2>&1; then
-      echo "health=ok pid=$pid port=$PORT"
+    port=$(cat "$PORTFILE")
+    kill -0 "$pid" 2>/dev/null || { echo "health=down detail=pid $pid is not running"; exit 1; }
+    owner=$(port_owner "$port")
+    if [ "$owner" = "$pid" ]; then
+      echo "health=ok pid=$pid port=$port"
       exit 0
     fi
-    echo "health=degraded detail=process alive but the endpoint does not answer"
+    echo "health=degraded detail=pid $pid is alive but port $port is served by $owner"
     exit 1
     ;;
   stop)
     [ -s "$PIDFILE" ] || { echo "nothing to stop: no $PIDFILE"; exit 0; }
     pid=$(cat "$PIDFILE")
+    port=$(cat "$PORTFILE" 2>/dev/null || true)
+    if [ -n "$port" ]; then
+      owner=$(port_owner "$port")
+      if [ "$owner" != "$pid" ] && [ "$owner" != free ]; then
+        echo "refusing to signal pid $pid: port $port is served by $owner" >&2
+        exit 1
+      fi
+    fi
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 50); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done
-    rm -f "$PIDFILE"
+    rm -f "$PIDFILE" "$PORTFILE"
     echo "stopped pid=$pid"
     ;;
   *)
@@ -217,7 +263,8 @@ HELPER_EOF
 chmod +x ledgerbox-exercise/generated/helpers/ledgerbox-instance.sh
 ```
 
-Fixture sha256 `88c401c243ceaba3e9fc20d91bf2cfd875a66b39a16ec07293d58a9bcd272c43`; helper sha256 `00d3c2e4677c848b887b263054acb50ce8157c74e98cd921cff2111e6c41364b`.
+Fixture sha256 `88c401c243ceaba3e9fc20d91bf2cfd875a66b39a16ec07293d58a9bcd272c43`; helper sha256 `ac64ff2b5e3ad035d60dee04ebdc7bf86af808daa9d7b7c6752b46aaddeb8bdb`.
+The entry-point drives below ran with the earlier helper revision `00d3c2e4677c848b`, before the ownership defects recorded further down were found; every ownership claim made here is re-proven against this helper revision.
 
 ## Entry-point outcomes
 
@@ -236,15 +283,28 @@ Each verified row was driven against its own `LEDGERBOX_HOME`, and the two insta
 
 **Stale Drive command.** The recipe's CLI drive was changed to `ledgerbox add --amount 250 --memo coffee`, an interface the app never accepted. The drive exited 2 with the usage line while `ledgerbox balance` still answered, which classifies the failure as recipe drift rather than a product regression; the failed iteration left no state, and re-driving the restored invocation exited 0 with `{"balance": 250}`.
 
-**Helper gap.** `ledgerbox-instance.sh doctor` and `stop` exited 1 with `LEDGERBOX_FIXTURE: set LEDGERBOX_FIXTURE to the fixture root`, leaving the service running. The helper read that variable before dispatching, so it required a value only `start` needs; after moving the requirement into the `start` branch, `doctor` reported `health=ok pid=3475584 port=8781`, `stop` reported `stopped pid=3475584`, and the recorded PID was gone.
+**First helper gap.** `ledgerbox-instance.sh doctor` and `stop` exited 1 with `LEDGERBOX_FIXTURE: set LEDGERBOX_FIXTURE to the fixture root`, leaving the service running. The helper read that variable before dispatching, so it required a value only `start` needs; after moving the requirement into the `start` branch, `doctor` reported `health=ok pid=3475584 port=8781`, `stop` reported `stopped pid=3475584`, and the recorded PID was gone.
 
 **Completeness.** A surface scan of the fixture's registered subcommands and routes against the map found `summary` and `/summary` uncited, so full coverage was refused; after adding `features/memo-summary.md` and its index row the same scan reported full coverage. Both passes are recorded, and the added surface was driven live before it was recorded as verified.
 
-**Cleanup.** Instances were stopped only through the PID each recorded for itself, never by process name; both ports then refused connections and every artifact remained readable.
+## Instance-ownership defects found in review
+
+Both were reproduced on 2026-09-30 in an isolated lab directory outside any project checkout, with an unrelated `ledgerbox` service started independently of the helper.
+
+**Defect: `doctor` guessed the default port.** With an instance started on 8782 the documented invocation `ledgerbox-instance.sh doctor <instance-dir>` exited 1 reporting `health=degraded detail=process alive but the endpoint does not answer`, while `curl http://127.0.0.1:8782/balance` returned `{"balance": 0}` from the same healthy instance. `start` persisted only `service.pid`, so `doctor` fell back to 8781.
+After the fix `start` also persists `service.port`, and the same sequence reports `health=ok pid=1604999 port=8782` with exit 0.
+
+**Defect: an occupied port was accepted as readiness.** With an unrelated service already answering on 8791, `start <instance-dir> 8791` exited 0 printing `ready port=8791 pid=1601976`. The launched process died within about half a second with `OSError: [Errno 98] Address already in use`, the recorded PID owned nothing, and port 8791 was owned by the unrelated PID 1601794; a later `stop` merely signalled the dead recorded PID. The unrelated service was neither adopted nor killed, but the helper's ownership claim and the stop expectation were both wrong.
+After the fix the same command exits 2 with `port 8791 is already served by pid 1605151; refusing to start`, records nothing, and leaves the unrelated service answering.
+
+**Fixed behaviour, re-proven in the same lab.** `start` refuses an occupied port before launching anything; it reports ready only once the listening socket on that port belongs to the process it launched; `doctor` reads the persisted port and reports `health=degraded` when a live PID does not own it; `stop` signals the recorded PID only while that PID owns the port. Two instances then ran at once on 8781 and 8782 with separate state (`{"balance": 40}` and `{"balance": 0}`), both reported `health=ok`, and both were stopped by their recorded PIDs with both ports closed afterwards.
+
+The commands to repeat these cases, in order, are: create the fixture above; start an unrelated `ledgerbox serve 8791` yourself; run `ledgerbox-instance.sh start <dir> 8791` and observe the refusal; run `start <dir> 8782` then `doctor <dir>` and observe `health=ok ... port=8782`; run a second `start <other-dir> 8781` and confirm both report `health=ok`; then `stop` each instance and confirm both ports refuse connections.
 
 ## Limits
 
 One fixture on one platform, generated and driven by the same agent rather than a separate cold consumer.
+Ownership is established from `/proc/net/tcp` plus `/proc/<pid>/fd` on Linux, so the helper's ownership checks are Linux-specific; the recipe's claims are not extended to other platforms on this evidence.
 No filesystem or network confinement is exercised, and this is not evidence for web, desktop, mobile, or sandboxed surfaces.
 The blocked `import` path is recorded as blocked with its prerequisite and was not counted as coverage.
-Exact raw transcripts of each command above live in the exercise directory outside this repository; this record reproduces the fixture and every command needed to repeat them.
+Raw transcripts of every command above live in exercise directories outside this repository; this record reproduces the fixture and the commands needed to repeat them.

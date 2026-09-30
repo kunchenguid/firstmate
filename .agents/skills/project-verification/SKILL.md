@@ -11,7 +11,7 @@ metadata:
 # Project verification
 
 This skill is the single owner of Firstmate's project-verification procedure: turning "verify it in the app" into a step any agent can execute in a project repo with no setup conversation.
-It adapts the create-and-maintain verification practices of Cursor's Pstack plugin and consumes Firstmate's existing evidence contracts by reference rather than restating them.
+It takes a deliberately narrow adaptation of the create-and-maintain verification practices of Cursor's Pstack plugin and consumes Firstmate's existing evidence contracts by reference rather than restating them; it claims no parity with Pstack's shipping or automation system.
 Firstmate applies it when dispatching or supervising ships that touch a user-facing app surface, and the implementation worker uses it to build and prove the project's verification slice.
 Instance isolation here means separate instances and cleanup, not filesystem or network confinement; sandbox and Orca runtime integration stay separate work.
 
@@ -41,10 +41,14 @@ Every entry point pairs its action with the observable result that proves it wor
 The map is the repo's maintained verification source, and a proof that drives one convenient entry point is incomplete when the map lists others.
 The map states its own coverage boundary and any unreachable prerequisite instead of quietly narrowing the denominator.
 
-## Prove it end to end before handoff
+## Prove the skill, then the map
 
-Run the generated skill once before handoff as a smoke test: launch, doctor, drive one mapped feature, capture evidence, clean up.
-That single pass proves the skill runs end to end; it is not full coverage, so every other path the feature map lists must also be driven before handoff.
+Two different passes, and the first never substitutes for the second:
+
+- **Smoke pass** - run the generated skill once: launch, doctor, drive one mapped feature, capture evidence, clean up. It proves the recipe executes end to end. It is not coverage.
+- **Complete pass** - drive every other path the feature map lists, or record that path as blocked with its unmet prerequisite in the same evidence.
+
+Only the complete pass supports a full-coverage claim, so a handoff that stops at the smoke pass states plainly which mapped paths remain undriven.
 The evidence must survive cleanup.
 A generated skill that was never executed is a draft, not a deliverable.
 
