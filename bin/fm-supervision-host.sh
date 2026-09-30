@@ -8,8 +8,8 @@
 #
 # A primary's arm owner runs this in place of bin/fm-watch-arm.sh when the home
 # runs the host (by default on Claude, by config/supervision-host elsewhere,
-# never with an `off` file; docs/configuration.md "Supervision host"): the
-# Claude Stop auto-arm
+# never with config/supervision-host-off; docs/configuration.md "Supervision
+# host"): the Claude Stop auto-arm
 # (bin/fm-claude-stop-autoarm.sh), the Cursor stop-hook park
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
@@ -491,11 +491,19 @@ stream_ready_line() {
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
+  local i
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
-    sleep "$POLL"
+    # The arm's exit is probed at a tenth of a second between POLL-cadence
+    # checks: the close is read as soon as the arm dies instead of up to POLL
+    # seconds late, while refresh keeps its per-second cadence.
+    i=$((POLL * 10))
+    while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
+      sleep 0.1
+      i=$((i - 1))
+    done
   done
   wait "$ARM_PID" 2>/dev/null || true
   ARM_TEXT=$(cat "$ARM_OUT" 2>/dev/null || true)

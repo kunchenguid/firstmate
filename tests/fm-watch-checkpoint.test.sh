@@ -160,13 +160,13 @@ test_host_checkpoint_passes_a_handback_and_reports_a_stand_down() {
 }
 
 # The Codex owner stays file-gated: without config/supervision-host, or with
-# a file that says off, the checkpoint never runs the host.
+# config/supervision-host-off, the checkpoint never runs the host.
 test_host_checkpoint_needs_the_file_and_honors_off() {
   local home line
   home=$(make_host_home host-gate)
   for line in - off; do
-    rm -f "$home/config/supervision-host" "$home/host-env"
-    [ "$line" = - ] || printf '%s\n' "$line" > "$home/config/supervision-host"
+    rm -f "$home/config/supervision-host" "$home/config/supervision-host-off" "$home/host-env"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
     run_host_checkpoint "$home" boundary --seconds 1
     [ ! -e "$home/host-env" ] || fail "a Codex home whose config/supervision-host is ${line/-/absent} ran the supervision host"
   done
