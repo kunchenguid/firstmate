@@ -1663,7 +1663,7 @@ test_gerrit_no_mistakes_requires_summary_capable_gerrit_axi() {
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
-  # A gerrit-axi from before 0.4.0 refuses `message` as an unknown command.
+  # A gerrit-axi from before 0.3.0 refuses `message` as an unknown command.
   # shellcheck disable=SC2016 # The fake's \$1 expands when it runs, not here.
   printf '#!/bin/sh\n[ "$1" = message ] && exit 2\nexit 0\n' > "$fakebin/gerrit-axi"
   chmod +x "$fakebin/gerrit-axi"
@@ -1676,7 +1676,7 @@ EOF
   # shellcheck disable=SC2016 # Backticks are literal refusal text.
   assert_contains "$out" 'posts its pipeline summary with `gerrit-axi message`, which the installed gerrit-axi does not support' \
     "the refusal did not name the missing gerrit-axi capability"
-  assert_contains "$out" "gerrit-axi 0.4.0 or later" "the refusal did not name the release that fixes it"
+  assert_contains "$out" "gerrit-axi 0.3.0 or later" "the refusal did not name the release that fixes it"
   assert_absent "$home/state/forge-capable-s1.meta" "the refused spawn still recorded a task"
 
   FM_HOME="$home" "$BRIEF" forge-capable-s2 proj --mode direct-PR --forge gerrit >/dev/null \

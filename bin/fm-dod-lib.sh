@@ -636,7 +636,7 @@ fm_dod_gerrit_summary_posted() {  # <url> <patch_set> <posted> <note>
 
 # 0 unless a no-mistakes ship to a Gerrit project would reach its publish step
 # with a gerrit-axi that cannot post the pipeline summary. \`gerrit-axi message
-# --help\` exits 0 only from 0.4.0, the release that added \`message\`; earlier
+# --help\` exits 0 only from 0.3.0, the release that added \`message\`; earlier
 # releases refuse the unknown command with a usage exit. It is local and needs
 # no server, so bin/fm-spawn.sh and bin/fm-promote.sh ask it before the worker
 # starts rather than letting the worker discover it after publishing. 1 when
@@ -645,11 +645,11 @@ fm_gerrit_summary_capable() {  # <mode> <forge> <caller>
   local mode=$1 forge=$2 caller=$3
   [ "$forge" = gerrit ] && [ "$mode" = no-mistakes ] || return 0
   if ! command -v gerrit-axi >/dev/null 2>&1; then
-    echo "error: $caller: a no-mistakes ship to a Gerrit project publishes and posts its pipeline summary with gerrit-axi, which is not on PATH; install gerrit-axi 0.4.0 or later" >&2
+    echo "error: $caller: a no-mistakes ship to a Gerrit project publishes and posts its pipeline summary with gerrit-axi, which is not on PATH; install gerrit-axi 0.3.0 or later" >&2
     return 1
   fi
   if ! gerrit-axi message --help >/dev/null 2>&1; then
-    echo "error: $caller: a no-mistakes ship to a Gerrit project posts its pipeline summary with \`gerrit-axi message\`, which the installed gerrit-axi does not support; install gerrit-axi 0.4.0 or later" >&2
+    echo "error: $caller: a no-mistakes ship to a Gerrit project posts its pipeline summary with \`gerrit-axi message\`, which the installed gerrit-axi does not support; install gerrit-axi 0.3.0 or later" >&2
     return 1
   fi
   return 0
