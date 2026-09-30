@@ -618,4 +618,75 @@ OUT=$(host_control relaunch ios claude pool-model-a medium --expect-generation h
 expect_code 6 "$RC" "missing host generation binding: $OUT"
 pass "host lifecycle fencing refuses mismatched and missing incarnation bindings before effects"
 
+reset_meta
+seed_pool
+FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+  "$SEATS" reserve ios --generation retired --kind secondmate --harness pi --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+  "$SEATS" release ios --generation retired --reason prelaunch >/dev/null
+' || fail "could not record the terminal remote holder"
+printf 'fleet_seat_generation=retired\nremote_spawn_gen=retired\n' >> "$HOME_DIR/state/ios.meta"
+cp "$HOME_DIR/config/fleet-seats" "$TMP/optout-policy"
+rm "$HOME_DIR/config/fleet-seats"
+OUT=$(run_relaunch ios claude default medium); RC=$?
+expect_code 0 "$RC" "remote terminal-holder opt-out readmission: $OUT"
+GEN=$(sed -n 's/^fleet_seat_generation=//p' "$HOME_DIR/state/ios.meta")
+[ -n "$GEN" ] && [ "$GEN" != retired ] || fail "remote opt-out kept the terminal parent binding"
+assert_equals "$GEN" "$(sed -n 's/^remote_spawn_gen=//p' "$HOME_DIR/state/ios.meta")" "remote parent and host generations diverged"
+assert_equals confirmed "$(ios_lifecycle "$GEN")" "remote opt-out successor did not confirm"
+assert_equals released "$(ios_lifecycle retired)" "remote readmission revived its predecessor"
+assert_equals true "$(seats show ios | jq --arg g "$GEN" 'any(.incarnations[]; .generation == $g and .model == null)')" "remote default-backed holder retained a resolved model"
+cp "$TMP/optout-policy" "$HOME_DIR/config/fleet-seats"
+OUT=$(FM_HOME="$HOME_DIR" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '"$SEATS" reserve other --generation contender --harness pi --model pool-model-a --holder-pid "$$"' 2>&1); RC=$?
+expect_code 4 "$RC" "restored policy hid the remote opt-out successor: $OUT"
+OUT=$(run_relaunch ios claude pool-model-a medium); RC=$?
+expect_code 0 "$RC" "ordinary remote relaunch after restoring policy: $OUT"
+assert_equals released "$(ios_lifecycle "$GEN")" "the next remote handoff stranded its opt-out predecessor"
+pass "remote terminal-holder readmission publishes its new binding and stays counted when policy returns"
+
+for VERB in launch relaunch; do
+  bash -c '. "$1/bin/fm-secondmate-liveness-lib.sh" && fm_supervisor_lifecycle_acquire "$2" ios 0 && : > "$3" && exec sleep 600' \
+    _ "$ROOT" "$HOST_HOME/state/parent-route" "$TMP/unpooled-$VERB-episode" &
+  HOST_BLOCKER=$!
+  for _ in $(seq 1 50); do [ -e "$TMP/unpooled-$VERB-episode" ] && break; sleep 0.1; done
+  HOST_ARGS=("$VERB" ios notaharness pool-model-a medium)
+  [ "$VERB" != launch ] || HOST_ARGS+=(herdr)
+  ( host_control "${HOST_ARGS[@]}" > "$TMP/unpooled-$VERB.out"; echo "$?" > "$TMP/unpooled-$VERB.rc" ) &
+  HOST_CALLER=$!
+  sleep 0.5
+  if ! kill -0 "$HOST_CALLER" 2>/dev/null; then
+    kill "$HOST_BLOCKER"; wait "$HOST_BLOCKER" 2>/dev/null
+    fail "unpooled $VERB bypassed the host lifecycle episode: $(cat "$TMP/unpooled-$VERB.out")"
+  fi
+  assert_no_grep 'unverified remote secondmate harness' "$TMP/unpooled-$VERB.out" "unpooled $VERB ran outside the episode"
+  kill "$HOST_BLOCKER"
+  wait "$HOST_BLOCKER" 2>/dev/null
+  wait "$HOST_CALLER" || fail "unpooled host fixture failed"
+  assert_equals 1 "$(cat "$TMP/unpooled-$VERB.rc")" "the admitted host call skipped its ordinary preflight"
+  assert_grep 'unverified remote secondmate harness' "$TMP/unpooled-$VERB.out" "unpooled $VERB did not proceed after episode release"
+done
+
+for VERB in launch relaunch disposition; do
+  env ROOT="$ROOT" HOST_HOME="$HOST_HOME" VERB="$VERB" bash -c '
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_supervisor_lifecycle_acquire "$HOST_HOME/state/parent-route" ios 0 || exit 1
+    lock=$(fm_supervisor_lifecycle_lock_path "$HOST_HOME/state/parent-route" ios)
+    carrier=$FM_SUPERVISOR_LIFECYCLE_CARRIER
+    if [ "$VERB" = disposition ]; then
+      out=$(FM_HOME="$HOST_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" disposition ios --operation tombstone) || exit 1
+      printf "%s\n" "$out" | sed -n "s/^seat_disposition=//p" | jq -e ".disposition == \"dead-after-start\"" >/dev/null || exit 1
+    else
+      args=("$VERB" ios notaharness pool-model-a medium)
+      [ "$VERB" != launch ] || args+=(herdr)
+      out=$(FM_HOME="$HOST_HOME" "$ROOT/bin/fm-remote-secondmate-control.sh" "${args[@]}" 2>&1)
+      [ "$?" = 1 ] || exit 1
+      case "$out" in *"unverified remote secondmate harness"*) ;; *) echo "$out"; exit 1 ;; esac
+    fi
+    [ -d "$lock" ] && [ "$FM_SUPERVISOR_LIFECYCLE_CARRIER" = "$carrier" ] || exit 1
+    [ "$(cat "$lock/pid")" = "$$" ] || exit 1
+    fm_supervisor_lifecycle_release "$HOST_HOME/state/parent-route" ios
+    [ ! -e "$lock" ]
+  ' || fail "host $VERB did not adopt and preserve its verified owner's episode"
+done
+pass "unpooled host launch, relaunch, and disposition serialize and adopt without releasing their owner's episode"
+
 echo "ALL TESTS PASSED"
