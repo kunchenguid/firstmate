@@ -66,6 +66,7 @@ To answer an item, reply from exactly `johnpoyser@gmail.com` and make the first 
 Only inline `text/plain` content is parsed; attachments and embedded forwarded messages are excluded, and recognized quoted-history markers end answer extraction.
 The poller reads a message body only when its single `From` address is the owner and the topmost `Authentication-Results` field is the Gmail receiver's result (`mx.google.com`) showing DKIM or DMARC pass aligned with `gmail.com`; lower sender-supplied copies are ignored.
 Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
+While away, the poller searches for the owner's `From` first and fails the poll for retry when that search fails; each ignored message is examined once per away posture and stays unseen, so it cannot block later replies and is reported by attended polling after return.
 
 
 

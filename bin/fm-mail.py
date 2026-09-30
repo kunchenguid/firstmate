@@ -21,6 +21,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 import email
 import smtplib
 from contextlib import contextmanager
@@ -263,8 +264,8 @@ def clean(s):
     a fake uid line for the bash layer; strip surrounding whitespace too."""
     return re.sub(r'[\t\r\n]+', ' ', s or '').strip()
 
-def connect_mailbox():
-    m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX, timeout=MAIL_TIMEOUT)
+def connect_mailbox(timeout=MAIL_TIMEOUT):
+    m = imaplib.IMAP4_SSL(IMH, IMP, ssl_context=CTX, timeout=timeout)
     m.login(USER, PW)
     return m
 
@@ -505,6 +506,37 @@ def save_turn(path, turn):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(str(turn % 2) + '\n')
 
+def poll_budget():
+    """Seconds of IMAP work one poll may spend. Invalid or non-positive values become 6."""
+    try:
+        value = float(os.environ.get('FM_MAIL_POLL_BUDGET') or '6')
+    except ValueError:
+        value = 6.0
+    return value if value > 0 else 6.0
+
+def load_away_scan(path, identity):
+    """Return uids already examined and ignored under this away posture and
+    mailbox generation; any other identity starts an empty scan."""
+    if not path:
+        return set()
+    try:
+        lines = open(path, encoding='utf-8').read().splitlines()
+    except OSError:
+        return set()
+    if not lines or lines[0] != identity:
+        return set()
+    return {line for line in lines[1:] if line}
+
+def save_away_scan(path, identity, uids):
+    if not path:
+        return
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(identity + '\n')
+        for uid in sorted(uids, key=lambda u: (len(u), u)):
+            f.write(uid + '\n')
+    os.replace(tmp, path)
+
 def cmd_poll_list():
     # Bound the expensive header fetches: only uids not already recorded in the
     # cursor are considered as new, then previously unfetchable retry-set uids
@@ -519,9 +551,11 @@ def cmd_poll_list():
     retry, retry_order = load_retry(os.environ.get('FM_MAIL_RETRY', ''))
     retry_pos_path = os.environ.get('FM_MAIL_RETRY_POS', '')
     retry_pos = load_retry_pos(retry_pos_path, len(retry_order))
+    budget = poll_budget()
+    deadline = time.monotonic() + budget
     m = None
     try:
-        m = connect_mailbox()
+        m = connect_mailbox(min(MAIL_TIMEOUT, budget))
         m.select('INBOX')
         ur = m.untagged_responses.get('UIDVALIDITY')
         uidv = clean(ur[-1].decode()) if ur else ''
@@ -552,20 +586,28 @@ def cmd_poll_list():
 
         # While away, ask IMAP to identify messages whose From header names the
         # configured owner and scan those first; fetched headers still undergo
-        # strict Gmail-authentication checks below. Unsupported search falls
-        # back to ordinary ordering without weakening authentication.
+        # strict Gmail-authentication checks below. A failed owner search
+        # fails the poll so it is retried. Messages already examined and
+        # ignored under this away posture are skipped, so a spoofed or
+        # outsider backlog is fetched at most once and cannot block later
+        # mail; they stay out of the cursor for attended polling after return.
         owner_priority = set()
-        if afk_email_active:
-            try:
-                owner_type, owner_data = m.uid(
-                    'search', None, 'UNSEEN', 'FROM', f'"{OWNER_EMAIL}"')
-                if owner_type == 'OK' and owner_data:
-                    owner_priority = {
-                        item.decode() if isinstance(item, bytes) else str(item)
-                        for item in (owner_data[0] or b'').split()
-                    }
-            except Exception:
-                owner_priority = set()
+        away_scan_path = os.environ.get('FM_MAIL_AWAY_SCAN', '')
+        away_scan_identity = ''
+        away_scanned = set()
+        if afk_email_active and not invalid_posture:
+            owner_type, owner_data = m.uid(
+                'search', None, 'UNSEEN', 'FROM', f'"{OWNER_EMAIL}"')
+            if owner_type != 'OK':
+                raise RuntimeError('away owner sender search failed')
+            owner_priority = {
+                item.decode() if isinstance(item, bytes) else str(item)
+                for item in ((owner_data or [b''])[0] or b'').split()
+            }
+            away_scan_identity = 'away-scan\t%s\t%s' % (
+                uidv, afk_record_field('entered_epoch') or '')
+            away_scanned = load_away_scan(away_scan_path, away_scan_identity)
+            new_uids = [u for u in new_uids if u not in away_scanned]
         retry_header_reserve = min(len(retry_candidates), 5) if afk_email_active else 0
         if afk_email_active:
             retry_candidates = retry_candidates[:retry_header_reserve]
@@ -641,6 +683,12 @@ def cmd_poll_list():
 
             if header_fetches >= 20:
                 break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock = getattr(m, 'sock', None)
+            if sock is not None:
+                sock.settimeout(min(MAIL_TIMEOUT, remaining))
             header_fetches += 1
             # A raised or empty header FETCH is treated as a failure for THIS uid only,
             # so one bad message can never abort the bounded scan: a new uid is
@@ -688,7 +736,7 @@ def cmd_poll_list():
                             subj = clean(
                                 f'[away-mode reply not processed: message body exceeds 256 KiB] {subj}')
 
-                    except AfkBodyFetchError:
+                    except (AfkBodyFetchError, socket.timeout, TimeoutError):
                         raise
                     except Exception as error:
                         raise AfkBodyFetchError('configured sender body fetch failed') from error
@@ -698,7 +746,8 @@ def cmd_poll_list():
                 out.append((uid, idate, fr, subj, 'degraded'))
                 new_emitted += 1
                 continue
-
+            except (socket.timeout, TimeoutError):
+                break
             except Exception:
                 if afk_email_active:
                     out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
@@ -844,6 +893,11 @@ def cmd_poll_list():
         # skip an unspent turn.
         if next_turn is not None:
             save_turn(turn_path, next_turn)
+        if afk_email_active and not invalid_posture:
+            newly_ignored = {row[0] for row in out if row[4] == 'ignored'}
+            if newly_ignored:
+                save_away_scan(away_scan_path, away_scan_identity,
+                               away_scanned | newly_ignored)
         return 0
     except Exception as e:
         # stderr, not stdout: the bash poll's command substitution captures

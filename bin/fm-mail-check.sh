@@ -207,7 +207,7 @@ action_check() {
   if [ ! -x "$MAIL_BIN" ]; then
     line="fm-mail.sh is missing next to this check ($MAIL_BIN)"
   else
-    out=$(fm_run_timed "$BUDGET_SECS" "$MAIL_BIN" poll 2>&1) || rc=$?
+    out=$(FM_MAIL_POLL_BUDGET=$((BUDGET_SECS / 2)) fm_run_timed "$BUDGET_SECS" "$MAIL_BIN" poll 2>&1) || rc=$?
     if [ "${rc:-0}" -eq 124 ]; then
       line="poll did not finish within the ${BUDGET_SECS}s budget"
     elif [ "${rc:-0}" -ne 0 ]; then

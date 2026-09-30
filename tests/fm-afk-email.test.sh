@@ -681,7 +681,7 @@ class FakeMailbox:
         raise AssertionError(f"invalid posture fetched mail: {fetch_spec}")
 
 mailbox = FakeMailbox()
-mail.connect_mailbox = lambda: mailbox
+mail.connect_mailbox = lambda *args: mailbox
 posture = state / ".afk-contract"
 valid_record = posture.read_bytes()
 
@@ -731,9 +731,10 @@ class FallbackMailbox:
     def select(self, *_): pass
     def logout(self): pass
 
-    def uid(self, command, uid, fetch_spec):
+    def uid(self, command, *args):
         if command == "search":
             return "OK", [b"3"]
+        uid, fetch_spec = args
         self.fetches.append((uid.decode(), fetch_spec))
         assert fetch_spec == "(BODY.PEEK[HEADER])", fetch_spec
         header = (
@@ -743,7 +744,7 @@ class FallbackMailbox:
         return "OK", [(b"1 RFC822.SIZE 100", header)]
 
 fallback_mailbox = FallbackMailbox()
-mail.connect_mailbox = lambda: fallback_mailbox
+mail.connect_mailbox = lambda *args: fallback_mailbox
 output = StringIO()
 with redirect_stdout(output):
     assert mail.cmd_poll_list() == 0
@@ -1005,7 +1006,7 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
   token2=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '2p')
   [ -n "$token" ] && [ -n "$token2" ] || fail "sent update omitted a reply token"
-  python3 - "$ROOT" "$home" "$token" "$token2" <<'PY'
+  python3 - "$ROOT" "$home" "$token" "$token2" <<'PY' || fail "mail polling did not authenticate owner replies"
 
 import importlib.util
 import os
@@ -1097,10 +1098,10 @@ class FakeMailbox:
     def select(self, *_): pass
     def logout(self): pass
 
-    def uid(self, command, uid, fetch_spec):
+    def uid(self, command, *args):
         if command == "search":
             return "OK", [self.search_ids]
-
+        uid, fetch_spec = args
         key = uid.decode()
         if "RFC822.SIZE" in fetch_spec:
             size = mail.MAX_AFK_BODY_BYTES + 1 if key == "3" else len(bodies[key])
@@ -1117,7 +1118,7 @@ class FakeMailbox:
         raise AssertionError(f"unexpected fetch spec: {fetch_spec}")
 
 mailbox = FakeMailbox()
-mail.connect_mailbox = lambda: mailbox
+mail.connect_mailbox = lambda *args: mailbox
 initial_output = StringIO()
 initial_error = StringIO()
 with redirect_stdout(initial_output), redirect_stderr(initial_error):
