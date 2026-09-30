@@ -295,6 +295,32 @@ test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text() {
   pass "board text links URLs and existing reports in new tabs, a missing report stays text, and markup stays text"
 }
 
+test_a_report_preview_keeps_balanced_parentheses_in_link_targets() {
+  local home report out page
+  home=$(make_home preview-parens)
+  report="$home/data/scout-3/report.md"
+  mkdir -p "${report%/*}"
+  cat > "$report" <<'MD'
+See [Foo](https://en.wikipedia.org/wiki/Foo_(bar)) and https://en.wikipedia.org/wiki/Baz_(qux).
+(Also https://example.com/plain.)
+MD
+  render_board "$home" "$(jq -n --arg report "$report" '[
+    {"id":"t3","repo":"sample","name":"scout-3","state":"working","kind":"scout","doing":("report " + $report)}
+  ]')" '[]' > /dev/null
+  page=$(find "$home/.lavish/bearings-board-reports" -name '*.html' | head -1)
+  [ -n "$page" ] || fail "the build wrote no report preview page"
+  out=$(node "$ROOT/tests/assets/report-preview-harness.mjs" "$page") \
+    || fail "the report preview page could not be rendered"
+  printf '%s' "$out" | jq -e '
+    .blocks[0].text == "See Foo and https://en.wikipedia.org/wiki/Baz_(qux). (Also https://example.com/plain.)"
+    and ([.blocks[0].children[] | {text, href}] == [
+      {text: "Foo", href: "https://en.wikipedia.org/wiki/Foo_(bar)"},
+      {text: "https://en.wikipedia.org/wiki/Baz_(qux)", href: "https://en.wikipedia.org/wiki/Baz_(qux)"},
+      {text: "https://example.com/plain", href: "https://example.com/plain"}])
+  ' >/dev/null || fail "a report preview cut a link target at a balanced parenthesis: $out"
+  pass "a report preview keeps balanced parentheses in markdown and bare link targets and drops trailing punctuation"
+}
+
 test_decision_option_labels_link_their_urls() {
   local home out
   home=$(make_home option-links)
@@ -372,4 +398,5 @@ test_omitted_warnings_never_count_as_more_queued
 test_an_omitted_kind_keeps_the_existing_queued_rendering
 test_board_text_links_urls_and_previewed_reports_but_keeps_markup_as_text
 test_decision_option_labels_link_their_urls
+test_a_report_preview_keeps_balanced_parentheses_in_link_targets
 test_a_report_preview_renders_the_markdown_and_keeps_markup_as_text
