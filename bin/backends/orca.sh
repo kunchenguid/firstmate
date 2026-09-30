@@ -10,7 +10,7 @@
 # dead-shell-vs-agent-composer rule). Owned by bin/fm-composer-lib.sh, reused by
 # every backend so the decision cannot drift.
 # shellcheck source=bin/fm-composer-lib.sh
-. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
+. "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../fm-composer-lib.sh"
 
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }

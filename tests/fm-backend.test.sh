@@ -502,22 +502,37 @@ test_backend_validate_refuses_unknown() {
 }
 
 test_backend_source_shell_portable() {
-  local out status stub probe
-  # zsh does not word-split unquoted expansions; sourcing fm-backend.sh from
-  # an interactive zsh session must still recognize known backend names.
-  # The claim is name matching and the sibling precheck only: the adapters
-  # find their own siblings through BASH_SOURCE, so zsh is not a full load.
-  if command -v zsh >/dev/null 2>&1; then
-    zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr" >/dev/null 2>&1 \
-      || fail "zsh: fm_backend_source herdr should accept the known backend name and find its sibling libraries"
-    out=$(zsh -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
-      && fail "zsh: fm_backend_source bogus should fail"
+  local shell backend funcs out stub probe
+  # zsh neither word-splits unquoted expansions nor sets BASH_SOURCE; sourcing
+  # fm-backend.sh from an interactive zsh session must still load every
+  # adapter and the sibling libs it sources, without a single sourcing error.
+  for shell in zsh bash; do
+    if ! command -v "$shell" >/dev/null 2>&1; then
+      pass "$shell: shell-portable backend sourcing skipped ($shell not found)"
+      continue
+    fi
+    for backend in tmux herdr zellij orca cmux; do
+      case "$backend" in
+        tmux) funcs="fm_backend_tmux_capture fm_tmux_strip_ghost fm_composer_strip_ghost fm_cursor_canonical_path fm_harness_path_name fm_agent_process_classify_name fm_gemini_path_is_gemini" ;;
+        herdr) funcs="fm_backend_herdr_capture fm_composer_strip_ghost fm_transition_policy fm_agent_process_classify_name fm_harness_path_name fm_cursor_canonical_path fm_gemini_path_is_gemini" ;;
+        zellij) funcs="fm_backend_zellij_capture fm_backend_hometag fm_composer_strip_ghost" ;;
+        orca) funcs="fm_backend_orca_capture fm_composer_strip_ghost" ;;
+        cmux) funcs="fm_backend_cmux_capture fm_backend_hometag fm_composer_strip_ghost" ;;
+      esac
+      out=$("$shell" -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source $backend && typeset -f $funcs >/dev/null" 2>&1) \
+        || fail "$shell: fm_backend_source $backend should load the adapter and its sibling libs"$'\n'"$out"
+      [ -z "$out" ] || fail "$shell: fm_backend_source $backend printed sourcing errors"$'\n'"$out"
+    done
+    out=$("$shell" -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
+      && fail "$shell: fm_backend_source bogus should fail"
     assert_contains "$out" "unknown backend 'bogus'" \
-      "zsh: fm_backend_source did not reject bogus with the expected error"
-    pass "zsh: fm_backend_source recognizes known backends and rejects unknown ones"
+      "$shell: fm_backend_source did not reject bogus with the expected error"
+    pass "$shell: fm_backend_source loads every adapter with its sibling libs and rejects unknown backends"
+  done
 
-    # zsh ties the lowercase `path` array to PATH; a backend loaded while
-    # fm_backend_source clobbers PATH cannot resolve external commands.
+  # zsh ties the lowercase `path` array to PATH; a backend loaded while
+  # fm_backend_source clobbers PATH cannot resolve external commands.
+  if command -v zsh >/dev/null 2>&1; then
     stub="$TMP_ROOT/zsh-source-path"
     probe="$stub/probe"
     mkdir -p "$stub/backends"
@@ -528,17 +543,7 @@ test_backend_source_shell_portable() {
     [ -s "$probe" ] \
       || fail "zsh: fm_backend_source clobbered PATH while loading a backend adapter"
     pass "zsh: fm_backend_source keeps PATH intact while loading a backend adapter"
-  else
-    pass "zsh: shell-portable backend matching skipped (zsh not found)"
   fi
-
-  bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source herdr && declare -F fm_backend_herdr_capture >/dev/null" 2>/dev/null \
-    || fail "bash: fm_backend_source herdr should load the adapter when sourced"
-  out=$(bash -c "cd '$ROOT' && source bin/fm-backend.sh && fm_backend_source bogus" 2>&1) \
-    && fail "bash: fm_backend_source bogus should fail"
-  assert_contains "$out" "unknown backend 'bogus'" \
-    "bash: fm_backend_source did not reject bogus with the expected error"
-  pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
 test_backend_source_requires_adapter_file() {
