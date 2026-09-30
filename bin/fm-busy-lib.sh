@@ -120,7 +120,8 @@
 # app-server turn lifecycle with capability negotiation, and sanctions its
 # stable lifecycle hooks as the intermediate. Neither is usable on the
 # installed binary, so Codex classifies unknown codex-unverified rather than
-# falling back to idle, and fm-spawn installs no Codex busy wiring.
+# falling back to idle, and fm-spawn installs no Codex busy wiring. Herdr
+# native busy remains positive evidence of work, as for the other adapters.
 # docs/verification/supervision.md owns the evidence for both probes.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
@@ -180,7 +181,8 @@ fm_busy_codex_hooks_verified() {
 
 # fm_busy_codex_semantic_source: 0 when ANY verified Codex semantic source
 # exists. fm-spawn arms and wires Codex only behind this gate, and the
-# classifier reports unknown codex-unverified until it opens.
+# classifier reports unknown codex-unverified until it opens, except for
+# positive Herdr native busy evidence.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
@@ -1029,6 +1031,13 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       ;;
     codex*)
       if ! fm_busy_codex_semantic_source; then
+        # Herdr positively observes generation, including Codex tool waits.
+        # Its idle status is not a turn-end proof and must remain unknown.
+        if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1 \
+          && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" = busy ]; then
+          printf 'busy herdr-native'
+          return 0
+        fi
         printf 'unknown codex-unverified'
         return 0
       fi

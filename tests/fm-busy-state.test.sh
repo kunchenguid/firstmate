@@ -510,6 +510,33 @@ test_dead_endpoint_overrides() {
   pass "endpoint death is the only process-level override and yields dead, never busy"
 }
 
+test_codex_herdr_native_busy_during_tool_wait() {
+  local state screen out
+  state=$(new_state_dir codex-herdr-native)
+  # Captured on Codex 0.159.2 / Herdr 0.9.1 during a real sleep 90.
+  screen='◦ Waiting for background terminal (1m 16s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close
+  └ sleep 90
+› Ask Codex to do anything
+  GPT-6.1-Sol medium · /worktree · Run bounded lab sleep
+  ← for agents · ? for shortcuts'
+  out=$(
+    fm_backend_busy_state() { printf busy; }
+    fm_busy_classify herdr lab:w1:p1 codex t1 "$state" "$screen"
+  )
+  [ "$out" = 'busy herdr-native' ] || fail "a live Codex tool wait with native busy must report busy, got '$out'"
+  out=$(
+    fm_backend_busy_state() { printf idle; }
+    fm_busy_classify herdr lab:w1:p1 codex t1 "$state" "$screen"
+  )
+  [ "$out" = 'unknown codex-unverified' ] || fail "native idle must not prove Codex turn end, got '$out'"
+  out=$(
+    fm_backend_busy_state() { printf busy; }
+    fm_busy_classify tmux lab codex t1 "$state" "$screen"
+  )
+  [ "$out" = 'unknown codex-unverified' ] || fail "Codex must not borrow another backend's native state, got '$out'"
+  pass 'Codex uses positive Herdr busy evidence during a tool wait and never infers idle from its screen'
+}
+
 test_herdr_native_busy_only() {
   local state out
   state=$(new_state_dir herdr-native)
@@ -622,6 +649,7 @@ test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
+test_codex_herdr_native_busy_during_tool_wait
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown

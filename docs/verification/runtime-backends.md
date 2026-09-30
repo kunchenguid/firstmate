@@ -2365,3 +2365,37 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Codex registration recovery and native busy
+
+Verified on 2026-09-30 with codex-cli 0.159.2 and Herdr 0.9.1.
+Refresh the token-free liveness, shell-only exit, and replacement check with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-herdr-codex-state-live-e2e.test.sh
+```
+
+The guard deliberately imposes Herdr's valid `unknown` registration through `pane report-agent` to separate semantic availability from process liveness; it does not claim Codex naturally emits that state.
+Before the fix, the live Codex process and the shell-only pane after killing its native binary both read `unreadable` with that registration.
+After the fix, the same real process shapes read `alive` and `dead`, and a replacement Codex in the preserved pane reads `alive`.
+Codex's `unknown` and `stale` registrations require a verified harness process or positive shell-only proof; an unidentified foreground process or failed process read stays unreadable.
+The portable cases are in `tests/fm-backend-herdr.test.sh`, including isolation from other harnesses and refusal to reclaim a stale-registration pane as a husk.
+
+Positive Herdr native busy evidence now reaches the Codex semantic classifier instead of being hidden by the unverified complete-lifecycle gate.
+Native idle still cannot prove a turn ended, and rendered Codex output remains excluded as a worker-state source.
+`tests/fm-busy-state.test.sh` pins this using a screen captured during a real 90-second tool wait.
+The token-spending refresh command also checks that Codex survives that wait:
+
+```sh
+FM_HERDR_CODEX_TURN_LIVE=1 bash bin/fm-test-run.sh tests/fm-herdr-codex-state-live-e2e.test.sh
+```
+
+Exact live-guard output:
+
+```text
+ok - Codex codex-cli 0.159.2 / Herdr 0.9.1 survived sleep 90 with native busy evidence
+ok - Codex codex-cli 0.159.2 / Herdr 0.9.1: unknown registration reads alive, shell-only exit reads dead, replacement reads alive
+```
+
+The spontaneous mid-command exit reported by a worker was not reproduced by this bounded wait.
+The guard isolates its session through `bin/fm-herdr-lab.sh`, including the default-session fleet-state tripwire at teardown.

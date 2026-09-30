@@ -2262,7 +2262,7 @@ EOF
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
 #   stale-agent - `agent get` reports a registered agent_status (working, idle,
-#                 done, or blocked) but fm_backend_herdr_pane_process_state
+#                 done, blocked, or Codex unknown/stale) but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
 #                 has exited and Herdr kept its registration (issue #4115;
 #                 Herdr does not release a Pi registration on TUI shutdown when
@@ -2275,7 +2275,9 @@ EOF
 #   live        - `agent get` succeeds with a registered agent_status and the
 #                 process-level view is `agent` or `other`: a harness process
 #                 is running, or something that is not a bare shell is, so the
-#                 registration keeps its authority. An idle or blocked agent
+#                 registration keeps its authority. Codex unknown/stale
+#                 requires `agent`; `other` stays unknown without semantic
+#                 authority. An idle or blocked agent
 #                 is still a genuine, still-registered agent, not a restored
 #                 husk, so it is never a close-and-replace candidate.
 #   unknown     - anything else: an unparseable/unexpected response from
@@ -2288,7 +2290,7 @@ EOF
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence status semantic_missing=0
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2306,10 +2308,21 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   case "$status" in
     working|idle|done|blocked) ;;
+    unknown|stale)
+      # Codex's registration can lose semantic state without losing process
+      # identity. Prove liveness (or a shell-only exit) below independently of
+      # that state; neither value is evidence that a turn is idle or busy.
+      [ "$(printf '%s' "$out" | jq -r '.result.agent.agent // empty' 2>/dev/null)" = codex ] \
+        || { printf 'unknown'; return 0; }
+      semantic_missing=1
+      ;;
     *) printf 'unknown'; return 0 ;;
   esac
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
-    agent|other) printf 'live' ;;
+    agent) printf 'live' ;;
+    other)
+      if [ "$semantic_missing" = 1 ]; then printf 'unknown'; else printf 'live'; fi
+      ;;
     shell) printf 'stale-agent' ;;
     *) printf 'unknown' ;;
   esac
