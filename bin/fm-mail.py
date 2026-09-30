@@ -992,12 +992,12 @@ def cmd_poll_list():
             exhausted = sorted(
                 (u for u, v in pending.items() if v[0] >= AWAY_READ_ATTEMPTS), key=int)
             for u in exhausted:
-                if not pending[u][1] or recipient is None:
+                if not pending[u][1]:
                     del pending[u]
             if high != away_high or pending != away_pending:
                 save_away_scan(away_scan_path, away_scan_identity, high, pending)
             alerted = [
-                u for u in exhausted if u in pending
+                u for u in exhausted if u in pending and recipient is not None
                 and send_unreadable_message_alert(
                     recipient, deadline + 0.9 * budget - time.monotonic())
             ]

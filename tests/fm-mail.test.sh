@@ -690,7 +690,7 @@ slow = {}
 search_delay = 0
 body_failures = {}
 header_failures = {}
-if scenario == 'header-fail':
+if scenario in ('header-fail', 'header-outage'):
     uids = ['1', '2']
     authentic = {'2'}
     header_failures = {'1': 99}
@@ -830,6 +830,17 @@ elif scenario == 'config-outage':
     print(f'outage rows={status(rows)} handoffs={handoffs}')
     rc, rows, second, _, _ = poll(True)
     print(f'restored fetched={",".join(second)} handoffs={handoffs}')
+elif scenario == 'header-outage':
+    fetched_total = []
+    for recipient in (None, None, None, None, owner, owner):
+        rc, rows, fetched, _, _ = poll(True, recipient)
+        assert rc == 0, rc
+        fetched_total += fetched
+        if recipient is None:
+            print(f'outage alerts={len(alerts)}')
+    print(f'header_fetches={fetched_total.count("1")} alerts={len(alerts)} to={alerts[0][0] if alerts else ""}')
+    print('alert_says_check_gmail=%s' % (
+        len(alerts) == 1 and 'check gmail' in alerts[0][2].lower()))
 elif scenario == 'header-fail':
     fetched_total = []
     for _ in range(4):
@@ -937,6 +948,11 @@ test_away_owner_read_failures_retry_then_alert() {
     "the one alert tells the captain to check Gmail"
   assert_contains "$out" 'alert_content_safe=True' \
     "the alert contains no sender, subject, or message body"
+  out=$(run_away_poll_harness header-outage)
+  assert_not_contains "$out" 'outage alerts=1' "no alert is attempted while the destination is missing"
+  assert_contains "$out" 'header_fetches=3 alerts=1 to=johnpoyser@gmail.com' \
+    "an exhausted header read is kept through a destination outage and alerted once after restore"
+  assert_contains "$out" 'alert_says_check_gmail=True' "the retained alert tells the captain to check Gmail"
   out=$(run_away_poll_harness permanent)
   assert_contains "$out" "handoffs=['2'] owner_fetches=3 spoof_fetches=1" \
     "a permanently unreadable owner reply is tried three times while later mail is processed"
