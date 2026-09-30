@@ -293,6 +293,37 @@ test_checkpoint_never_steals_a_live_session_lock_owner() {
   pass "checkpoint: a live session-lock owner is never reclaimed by the checkpoint"
 }
 
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
+test_checkpoint_never_reclaims_a_live_unknown_session_lock_owner() {
+  local home fakebin unrelated i status
+  home=$(make_home reclaim-live-unknown-owner)
+  : > "$home/config/supervision-host"
+  printf 'task=lab\n' > "$home/state/lab-task.meta"
+  fakebin="$TMP_ROOT/reclaim-live-unknown-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  sleep 20 &
+  unrelated=$!
+  i=0
+  while [ "$i" -lt 50 ] && ! kill -0 "$unrelated" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$unrelated" 2>/dev/null || fail "fixture: the unrelated process did not start"
+  printf '%s\n' "$unrelated" > "$home/state/.lock"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$fakebin/codex" -c '
+    "$0" --seconds 3
+  ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  expect_code 1 "$status" "a live non-harness owner must stand the host down"
+  [ "$(cat "$home/state/.lock" 2>/dev/null)" = "$unrelated" ] \
+    || fail "the checkpoint reclaimed an unknown live session-lock owner"
+  assert_contains "$(cat "$home/out.txt")" "supervision-host stood down" "the stand-down must still say why"
+  kill -TERM "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "checkpoint: a live non-harness session-lock owner is never reclaimed"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
@@ -303,4 +334,5 @@ test_host_checkpoint_needs_the_file_and_honors_off
 test_real_host_checkpoint_ends_quietly_at_its_bound
 test_checkpoint_reclaims_a_dead_session_lock_owner
 test_checkpoint_never_steals_a_live_session_lock_owner
+test_checkpoint_never_reclaims_a_live_unknown_session_lock_owner
 test_checkpoint_leaves_an_owned_or_absent_lock_alone

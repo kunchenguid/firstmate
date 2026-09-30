@@ -130,11 +130,9 @@ positive_or() {  # <value> <default>
 # the lock by hand. A live owner this session does not own, and a missing or
 # malformed lock, stay exactly as uncertain as before and are never touched.
 reclaim_dead_session_lock_owner() {
-  local lock_pid
   fm_session_lock_owned_by_self "$STATE" && return 0
-  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$lock_pid" in ''|*[!0-9]*) return 0 ;; esac
-  fm_harness_pid_alive "$lock_pid" && return 0
+  fm_session_lock_inspect "$STATE"
+  [ "$FM_LOCK_INSPECT_STATE" = stale ] || return 0
   "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || true
 }
 
