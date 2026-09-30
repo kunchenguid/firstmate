@@ -127,7 +127,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - No keyed status decision opened after the last `complete`.
 
 An inventory entry absent from the active home's backlog is still durable when a local secondmate home registered in `data/secondmates.md` holds that exact task id for the captain or records its captain answer, because a call handed to a secondmate stays in that authoritative home.
-`complete` applies the same check and names the secondmate home beside each such entry in its completion line.
+`complete` applies the same check and names the registered secondmate beside each such entry in its completion line.
 A remote route has no local backlog to read and is never consulted, so an entry held nowhere readable still refuses.
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
@@ -528,7 +528,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
-- A call held or answered in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog.
+- A call held in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog, and once answered there it still passes `verify`.
   An unregistered home, a remote route, an entry held nowhere, and a secondmate task closed without a recorded answer still fail `verify`.
 
 ### Answers, stamps, and deferral
