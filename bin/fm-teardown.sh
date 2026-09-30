@@ -138,9 +138,9 @@
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
 # an absent claim proceeds and would return a slot that may be another task's. An
-# absent claim - a slot taken before claims existed, or already returned - keeps
-# exactly the record-scan protection it had before, because refusing it would
-# strand every task in flight across that change on no evidence at all.
+# absent claim - a slot taken before claims existed, or already returned - does
+# not itself refuse cleanup; record exclusivity and repository/pool identity
+# must still pass before any slot cleanup.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -2336,29 +2336,10 @@ require_exclusive_task_worktree_slot() {
   fm_treehouse_require_exclusive_record "$META" "$ID" "$STATE" "$slot"
 }
 
-# Positive slot ownership, read from the claim the task that took the slot wrote
-# into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
-#
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
-# task that actually took the slot, and it is written under the same project lock
-# that allocates it - so a claim naming another task is proof the slot was
-# reassigned after this record was written.
-#
-# A claim naming another task does not refuse: it means the slot is no longer
-# this task's, so the record's own cleanup proceeds and every slot step is
-# skipped (see the script header for why refusing would strand the record and
-# why skipping discards nothing). Returns TEARDOWN_SLOT_REASSIGNED_RC for that
-# state so each caller gates its slot steps on one determination; the claimant
-# stays in FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME.
-#
-# An absent claim proceeds as the slot's owner: a slot taken before claims
-# existed, or already returned to the pool, carries none, and refusing those
-# would strand every task in flight across the change for no evidence at all.
-# Those keep exactly the record-scan protection they had before.
+# The script header owns cleanup decisions for absent, reassigned, and unsafe
+# claims; bin/fm-wake-lib.sh owns claim identity and states. Reassignment returns
+# TEARDOWN_SLOT_REASSIGNED_RC, with the claimant in FM_TREEHOUSE_SLOT_OWNER_ID
+# and FM_TREEHOUSE_SLOT_OWNER_HOME, so callers consistently skip slot cleanup.
 TEARDOWN_SLOT_REASSIGNED_RC=3
 require_owned_worktree_slot_record() {  # <task-id> <worktree> [home]
   local record_id=$1 worktree=$2 marker
@@ -3552,8 +3533,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # to pool. Firstmate checks the recorded project's pool against the explicit
+  # slot path before return; see bin/fm-wake-lib.sh's return preflight.
+  # teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then

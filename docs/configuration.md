@@ -1254,6 +1254,7 @@ Every session-provider-only backend (`tmux`, `herdr`, `zellij`, `cmux`) uses `tr
 Treehouse must support structured pool status (`status --json`, available in 2.1.0 and newer) for worker allocation, pooled secondmate-home seeding, and guarded slot returns.
 [`bin/fm-install-treehouse.sh`](../bin/fm-install-treehouse.sh) installs the verified Treehouse version required by the slot-identity guards in [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) and [`bin/fm-teardown.sh`](../bin/fm-teardown.sh).
 For independent clones in isolated homes, follow the pool-isolation and guarded ownership-recovery guidance in [`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s header before dispatch.
+[`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns allocation refusals and the limits on allocating while pool slots retain task ownership.
 
 Backend tool availability uses the adapter's own executable resolver, so bootstrap and spawn agree on supported non-`PATH` locations such as cmux's bundled CLI.
 An unknown resolved backend emits `BACKEND_INVALID` and blocks dispatch instead of silently dropping its dependency delta or falling back to tmux.

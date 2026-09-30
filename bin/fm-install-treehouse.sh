@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # fm-install-treehouse.sh - install CI's pinned, verified Treehouse build.
 #
-# Used only by the required real-Herdr CI lane for E2E scripts that genuinely
-# need treehouse (spawn worktree acquisition). Same pin/checksum discipline as
+# Used by the required real-Herdr CI lane and operators needing the verified
+# Treehouse build for slot-identity guards. Same pin/checksum discipline as
 # fm-install-herdr.sh: official release URL, exact asset, SHA-256, bounded
 # download, post-install version check. Never a floating package-manager latest.
 #
