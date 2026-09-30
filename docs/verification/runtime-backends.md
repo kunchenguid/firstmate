@@ -753,6 +753,38 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 `tests/fm-control-relaunch.test.sh` uses a Herdr fixture; `tests/fm-retired-backends.test.sh` proves retired endpoint refusals without terminal input or record loss.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
+### Presentation-independent agent lifecycle
+
+Measured 2026-09-30 on Linux with Herdr client/server 0.8.0, protocol 20, TraeX 0.207.1, Codex 0.158.0 and Pi 0.87.1.
+The token-free live guard uses an explicitly authorized named lab helper for every Herdr operation and restores the default-session tripwire through that helper's teardown.
+Run it with the helper path and task label assigned to the verification lab:
+
+```sh
+FM_HERDR_LAB_HELPER="$HERDR_LAB_HELPER" FM_HERDR_LAB_TASK="$HERDR_LAB_TASK" \
+  bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh
+```
+
+Observed output from real installed TUIs, without `report-agent` overrides:
+
+```text
+live harness=traex version=traecli 0.207.1(internal edition) native_status=unknown process=agent structural=live
+PASS vendor-emitted unknown presentation coexists with verified live traecli 0.207.1(internal edition)
+PASS traecli 0.207.1(internal edition) supported exit then exact endpoint cleanup preserves report
+live harness=codex version=codex-cli 0.158.0 native_status=idle process=agent structural=live
+PASS codex-cli 0.158.0 supported exit then exact endpoint cleanup preserves report
+live harness=pi version=0.87.1 native_status=idle process=agent structural=live
+LIMITATION Pi 0.87.1: structural liveness verified; supported exit safely refused unproved composer
+```
+
+TraeX's loading composer initially reported idle; its loaded footer reported unknown while the independently attributed process remained alive.
+The guard waits for that loading phase before observing the real vendor state and checks that native busy remains unknown when structural liveness is proven.
+TraeX and Codex exited through `fm-control.sh`, retained their panes until endpoint teardown, and preserved reports.
+On this installed Pi configuration, the existing composer owner treated the `$0.000` cost footer as a shell row; the guard proves liveness and the unchanged refusal to send an exit command, not successful Pi exit or cleanup.
+No new Pi composer compatibility claim is made by this measurement.
+The same guard verifies live sibling and focused-resource preservation, dirty/shared directory retention, conflicting ownership and generation refusals, and interrupted cleanup bookkeeping.
+`tests/fm-backend-herdr.test.sh` supplies portable real-process regressions for unrecognized presentation states, a harness descendant behind a foreground tool, stale registrations, and missing or foreign registration identity.
+`tests/fm-busy-state.test.sh` retains managed-input refusal for conflicting terminal, cwd, generation and replacement-process evidence.
+
 ### Stale agent registration
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).
@@ -782,7 +814,7 @@ The registration is still present after the wait, and Herdr's own `pane report-a
 Two vendor facts the fix rests on, both read from the outputs above and from `fm_backend_herdr_pane_process_state`'s `pane process-info` parse:
 
 - Pi's process presents with kernel name `node` and argv0 `pi` (its foreground group also carries Pi's child `node` helpers with argv0 such as `npm view ... version`), so a running Pi is attributed by argv[0] through the structural process probe; a symlink named `claude` to `sleep` presents as name `sleep`, argv0 `claude`.
-- Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; that transient reads `unknown` in the pane classifier as it always did, and only a lifecycle status is subject to the process-level proof.
+- Herdr creates the record with its own placeholder `agent_status` of `unknown` the moment it notices Pi, before Pi's extension reports `idle`; the structural classifier now consults independent process evidence for that registration too, as verified under [presentation-independent agent lifecycle](#presentation-independent-agent-lifecycle).
 
 Subcommand presence below the 0.9.0 measurement, checked 2026-09-10 on macOS aarch64 against the pinned upstream release clients fetched from `https://github.com/ogulcancelik/herdr/releases/download/v<version>/herdr-macos-aarch64`:
 
@@ -799,7 +831,7 @@ The command run against each client was `<client> pane --help`, which is client-
 process-info  Show pane process information
 ```
 
-This proves subcommand presence in the client only, not the server response shape, which is measured only on 0.9.0 above.
+This proves subcommand presence in the client only, not the server response shape, which is measured on 0.8.0 and 0.9.0 above.
 
 The live guard that refreshes this record runs by default wherever Herdr and Pi are installed, spends no model token, and fails naming both versions:
 
@@ -817,7 +849,7 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 ```
 
 `tests/fm-control-herdr-smoke.test.sh` proves the same shape through the control plane with no harness launched (the two `stale` lines under "Agent lifecycle control" above): a registration over a real agent-named process reads `alive`, stopping that process makes the pane read `stale-agent` and recover as `dead` while `agent get` still reports the record, `exit` then reports `already-stopped`, and `--relaunch` reuses the same endpoint with the local copy intact.
-`tests/fm-backend-herdr.test.sh` pins the logic portably with canned `process-info` bodies over real processes, driving the signals apart: the identical shell-only foreground reads `stale-agent` for a childless shell and `live` when an agent-named process is still a descendant of that shell, a `working`, `done`, or `blocked` record over a shell-only pane reads the same as `idle`, an unreadable process view reads `unknown` and refuses husk closing, a transient prompt helper beside the shell settles into `stale-agent` on the next shell-only sample while a foreground that never settles within the bound still reads `live`, and `busy_state` verifies a `working` record before reporting busy, returning `unknown` when its process evidence is unreadable.
+`tests/fm-backend-herdr.test.sh` pins the logic portably with canned `process-info` bodies over real processes, driving the signals apart: the identical shell-only foreground reads `stale-agent` for a childless shell and `live` when an agent-named process is still a descendant of that shell, a `working`, `done`, or `blocked` record over a shell-only pane reads the same as `idle`, an unreadable process view reads `unknown` and refuses husk closing, a transient prompt helper beside the shell settles into `stale-agent` on the next shell-only sample while a foreground that never settles within the bound remains `unknown`, and `busy_state` verifies a `working` record before reporting busy, returning `unknown` when its process evidence is unreadable.
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 

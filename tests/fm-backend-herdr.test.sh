@@ -198,7 +198,7 @@ case "$cmd $sub" in
     pane=${3:-}
     status=$(jq_state -r --arg p "$pane" '.agent_status[$p] // empty')
     if [ -n "$status" ]; then
-      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$status"
+      printf '{"result":{"agent":{"pane_id":"%s","agent":"pi","agent_status":"%s"}}}\n' "$pane" "$status"
     else
       printf '{"error":{"code":"agent_not_found","message":"agent target %s not found"}}\n' "$pane"
     fi
@@ -405,7 +405,7 @@ stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|->
     # +1: pane get -> the pane structurally exists
     printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/$((n + 1)).out"
     # +2: agent get -> a registered agent with the given status
-    printf '{"result":{"agent":{"agent":"pi","agent_status":"%s"}}}\n' "$2" > "$resp/$((n + 2)).out"
+    printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"%s"}}}\n' "$2" > "$resp/$((n + 2)).out"
     # +3: pane process-info -> the pane's actual process view
     [ "$3" = - ] || printf '%s\n' "$3" > "$resp/$((n + 3)).out"
     [ -z "${4:-}" ] || printf '%s\n' "$4" > "$resp/$((n + 3)).exit"
@@ -439,7 +439,7 @@ test_stale_registration_ignores_status_and_reads_the_process() {
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   "$sleep_bin" 300 &
   shell_pid=$!
-  for status in working 'done' blocked; do
+  for status in working 'done' blocked unknown future-state; do
     out=$(stale_registration_case "shell-only-$status" "$status" "$(shell_only_process_info "$shell_pid")")
     [ "$out" = "stale-agent dead refused" ] \
       || { kill "$shell_pid" 2>/dev/null; fail "a lingering '$status' record over a shell-only pane must still read stale-agent/dead, got '$out'"; }
@@ -459,15 +459,67 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
-test_registered_agent_with_a_non_shell_foreground_process_stays_alive() {
-  local out
-  # A registered agent running a foreground tool in its own process group is
-  # not a shell-only pane, so the registration keeps its authority.
-  out=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 stale_registration_case live-tool working \
-    '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4250,"foreground_processes":[{"pid":4250,"name":"git","argv0":"git","argv":["git","status"],"cmdline":"git status"}]}}}')
-  [ "$out" = "live alive refused" ] \
-    || fail "a registered agent with a non-shell foreground process must stay live/alive, got '$out'"
-  pass "herdr stale registration: only a shell-only pane demotes a registration"
+test_registration_requires_exact_structural_identity() {
+  local variant dir resp log fb body out
+  for variant in exact wrong-pane missing-pane missing-agent empty-agent non-object; do
+    dir="$TMP_ROOT/registration-$variant"; mkdir -p "$dir/responses"
+    resp="$dir/responses"; log="$dir/log"; : > "$log"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/1.out"
+    body='{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"unknown"}}}'
+    case "$variant" in
+      wrong-pane) body=$(printf '%s' "$body" | jq '.result.agent.pane_id="w2:p2"') ;;
+      missing-pane) body=$(printf '%s' "$body" | jq 'del(.result.agent.pane_id)') ;;
+      missing-agent) body=$(printf '%s' "$body" | jq 'del(.result.agent.agent)') ;;
+      empty-agent) body=$(printf '%s' "$body" | jq '.result.agent.agent=""') ;;
+      non-object) body='{"result":{"agent":[]}}' ;;
+    esac
+    printf '%s\n' "$body" > "$resp/2.out"
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"pi","argv":["pi"]}]}}}' > "$resp/3.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_pane_agent_state fmtest w1:p2' "$ROOT")
+    if [ "$variant" = exact ]; then
+      [ "$out" = live ] || fail "exact registration control did not read live: $out"
+    else
+      [ "$out" = unknown ] || fail "$variant registration borrowed a process identity: $out"
+      assert_not_contains "$(cat "$log")" process-info 'invalid registration must refuse before reading a different process'
+    fi
+  done
+  pass 'missing, malformed and foreign registration identities refuse before process attribution'
+}
+
+test_unknown_presentation_uses_real_process_identity() {
+  local lab pid name argv0 body out status
+  lab="$TMP_ROOT/unknown-process"; mkdir -p "$lab"
+  ln -s "$(command -v sleep)" "$lab/pi"
+  "$lab/pi" 300 &
+  pid=$!
+  name=$(LC_ALL=C ps -p "$pid" -o comm=)
+  argv0=$(LC_ALL=C ps -p "$pid" -o args= | awk '{print $1}')
+  body=$(jq -nc --argjson pid "$pid" --arg name "$name" --arg argv0 "$argv0" \
+    '{result:{type:"pane_process_info",process_info:{pane_id:"w1:p2",shell_pid:$pid,foreground_process_group_id:$pid,foreground_processes:[{pid:$pid,name:$name,argv:[$argv0]}]}}}')
+  for status in unknown future-presentation ''; do
+    kill -0 "$pid" || fail 'real process witness disappeared'
+    out=$(stale_registration_case "live-unrecognized-$status" "$status" "$body")
+    [ "$out" = "live alive refused" ] || { kill "$pid"; fail "real harness with '$status' presentation was not alive: $out"; }
+  done
+  kill "$pid"
+  pass 'unknown, future and empty presentation states cannot negate a real harness process or authorize husk closing'
+}
+
+test_registered_agent_with_a_non_shell_foreground_process_is_unknown() {
+  local out shell_pid body
+  # A real childless process makes the absence of a harness descendant
+  # independent of whichever unrelated process owns a hardcoded fixture PID.
+  sleep 300 &
+  shell_pid=$!
+  body=$(jq -nc --argjson pid "$shell_pid" \
+    '{result:{type:"pane_process_info",process_info:{pane_id:"w1:p2",shell_pid:$pid,foreground_process_group_id:4250,foreground_processes:[{pid:4250,name:"git",argv:["git","status"]}]}}}')
+  out=$(FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 stale_registration_case live-tool working "$body")
+  kill "$shell_pid"
+  [ "$out" = "unknown unreadable refused" ] \
+    || fail "a non-harness foreground process cannot prove the registered agent alive, got '$out'"
+  pass "herdr registration: an unrelated foreground tool remains unknown and cannot authorize control"
 }
 
 # settle_registration_case: one pane classification over a scripted sequence
@@ -478,7 +530,7 @@ settle_registration_case() {  # <dir-suffix> <polls> <process-info-body>...
   shift 2
   mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
   n=3
   for body in "$@"; do
     printf '%s\n' "$body" > "$resp/$n.out"
@@ -510,7 +562,7 @@ test_transient_prompt_helper_settles_into_stale_agent() {
   pass "herdr stale registration: a transient prompt helper settles into stale-agent instead of reading live"
 }
 
-test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
+test_exhausted_settle_window_keeps_a_non_shell_foreground_unknown() {
   local sleep_bin shell_pid out
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   "$sleep_bin" 300 &
@@ -519,9 +571,9 @@ test_exhausted_settle_window_keeps_a_non_shell_foreground_live() {
     "$(prompt_helper_process_info "$shell_pid")" "$(prompt_helper_process_info "$shell_pid")" \
     "$(shell_only_process_info "$shell_pid")")
   kill "$shell_pid" 2>/dev/null || true
-  [ "$out" = "live 2" ] \
-    || fail "a foreground that never settles within the bound must stay live after exactly the bounded sample count, got '$out'"
-  pass "herdr stale registration: an exhausted settle window still reads a non-shell foreground as live"
+  [ "$out" = "unknown 2" ] \
+    || fail "a foreground that never settles within the bound must stay unknown after exactly the bounded sample count, got '$out'"
+  pass "herdr stale registration: an exhausted settle window preserves an unclassified foreground as unknown"
 }
 
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive() {
@@ -537,10 +589,13 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   shell_pid=$!
   sleep 0.3
   out=$(stale_registration_case descendant idle "$(shell_only_process_info "$shell_pid")")
+  local tool_out
+  tool_out=$(stale_registration_case descendant-tool unknown "$(prompt_helper_process_info "$shell_pid")")
   pkill -P "$shell_pid" 2>/dev/null || true
   kill "$shell_pid" 2>/dev/null || true
   [ "$out" = "live alive refused" ] \
     || fail "a registered agent with a live agent-named descendant must stay live/alive, got '$out'"
+  [ "$tool_out" = "live alive refused" ] || fail "foreground tool hid the independently verified agent descendant: $tool_out"
   # The divergence itself: the identical canned foreground view reads
   # stale-agent for a childless shell, so the descendant walk is what carried
   # this verdict.
@@ -628,7 +683,7 @@ test_busy_state_never_reports_a_shell_only_pane_busy() {
   shell_pid=$!
   dir="$TMP_ROOT/busy-stale"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
   # 1: agent get -> a lingering working record; 2: process-info -> shell only
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
   shell_only_process_info "$shell_pid" > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -640,7 +695,7 @@ test_busy_state_never_reports_a_shell_only_pane_busy() {
 
   # The control: the same working record with a live Pi foreground reads busy.
   dir="$TMP_ROOT/busy-live"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi"],"cmdline":"pi"}]}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -649,7 +704,7 @@ test_busy_state_never_reports_a_shell_only_pane_busy() {
 
   # The same registration cannot prove work when the process read fails.
   dir="$TMP_ROOT/busy-unreadable"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"working"}}}\n' > "$resp/1.out"
   printf '1\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -658,7 +713,7 @@ test_busy_state_never_reports_a_shell_only_pane_busy() {
 
   # An idle record needs no process read: idle is never trusted as busy anyway.
   dir="$TMP_ROOT/busy-idle"; mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
-  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"idle"}}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_busy_state fmtest:w1:p2' "$ROOT")
@@ -1108,7 +1163,7 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   # 3: pane get -> the pane structurally exists
   printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/3.out"
   # 4: agent get -> a genuinely registered, live agent (idle, not just working)
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p2","agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
   # 5: pane process-info -> a live Pi process backs that registration (#4115)
   printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -1131,7 +1186,7 @@ test_create_task_refuses_when_any_duplicate_label_is_live() {
   printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"}}\n' > "$resp/4.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"},{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/5.out"
   printf '{"result":{"pane":{"pane_id":"w1:p3"}}}\n' > "$resp/6.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p3","agent":"pi","agent_status":"idle"}}}\n' > "$resp/7.out"
   # 8: pane process-info -> a live Pi process backs that registration (#4115)
   printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
@@ -3450,7 +3505,7 @@ test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
   printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate/task-p3 · p:%s"}]}}\n' "$token" > "$resp/1.out"
   printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/2.out"
   printf '{"result":{"pane":{"pane_id":"w1:p1"}}}\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"pane_id":"w1:p1","agent":"pi","agent_status":"idle"}}}\n' > "$resp/4.out"
   # 5: process-info -> a live harness backs the registration (issue #4115)
   printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p1","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}\n' > "$resp/5.out"
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
@@ -5041,9 +5096,11 @@ test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_registered_agent_with_a_live_foreground_process_stays_alive
-test_registered_agent_with_a_non_shell_foreground_process_stays_alive
+test_registration_requires_exact_structural_identity
+test_unknown_presentation_uses_real_process_identity
+test_registered_agent_with_a_non_shell_foreground_process_is_unknown
 test_transient_prompt_helper_settles_into_stale_agent
-test_exhausted_settle_window_keeps_a_non_shell_foreground_live
+test_exhausted_settle_window_keeps_a_non_shell_foreground_unknown
 test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_alive
 test_agent_descendant_under_a_spaced_install_path_stays_alive
 test_registered_agent_with_an_unreadable_process_view_is_unknown

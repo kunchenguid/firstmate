@@ -25,6 +25,7 @@ lab_cleanup() {
 trap lab_cleanup EXIT
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 call() { "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" "$@"; }
+call status --json | jq -c '{client_version:.client.version,server_version:.server.version,protocol:.server.protocol}'
 cat > "$LAB_DIR/herdr-wrapper" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -88,6 +89,110 @@ EOF
   chmod 600 "$LAB_DIR/accepted.json"
   "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$LAB_DIR/accepted.json" >/dev/null
 }
+# Real installed harnesses, without model prompts or synthetic report-agent state.
+# Public control and teardown must distinguish process existence from screen
+# recognition. Keep a dirty local file and the report as preservation witnesses.
+mkdir -p "$LAB_DIR/codex-home"
+cat > "$LAB_DIR/codex-home/config.toml" <<EOF
+model = "lifecycle-test"
+model_provider = "lifecycle-test"
+
+[features]
+hooks = false
+
+[model_providers.lifecycle-test]
+name = "Lifecycle test"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+requires_openai_auth = false
+
+[projects."$ROOT"]
+trust_level = "trusted"
+EOF
+checked=0
+for harness in traex codex pi; do
+  if ! command -v "$harness" >/dev/null 2>&1; then
+    printf 'skip: %s not installed for live lifecycle proof\n' "$harness"
+    continue
+  fi
+  checked=$((checked + 1))
+  version=$("$harness" --version 2>&1 | head -1)
+  call tab create --workspace "$anchor" --label "fm-live-$harness" --cwd "$ROOT" --no-focus > "$LAB_DIR/live-$harness.json"
+  setup_task "live-$harness" "$LAB_DIR/live-$harness.json" "s-live-$harness" "$ROOT"
+  sed -i "s/^harness=codex$/harness=$harness/" "$FM_HOME/state/live-$harness.meta"
+  pane=$(jq -r '.result.pane.pane_id // .result.root_pane.pane_id' "$LAB_DIR/live-$harness.json")
+  case "$harness" in
+    traex) launch='traex -y' ;;
+    codex)
+      printf -v launch 'CODEX_HOME=%q codex --dangerously-bypass-approvals-and-sandbox' \
+        "$LAB_DIR/codex-home"
+      ;;
+    pi) launch='pi --no-approve' ;;
+  esac
+  call pane run "$pane" "$launch" >/dev/null
+  ready=0
+  dismissed=0
+  trusted=0
+  sleep 8 # Let the real loading composer give way to the installed footer.
+  for ((attempt=0; attempt<80; attempt++)); do
+    if [ "$(fm_backend_herdr_pane_process_state "$HERDR_LAB_SESSION" "$pane")" = agent ] &&
+       { [ "$harness" = pi ] || [ "$(fm_backend_herdr_composer_state "$HERDR_LAB_SESSION:$pane")" = empty ]; } &&
+       { [ "$harness" != traex ] || [ "$(call agent get "$pane" | jq -r '.result.agent.agent_status')" = unknown ]; }; then
+      ready=1
+      break
+    fi
+    if [ "$harness" = codex ]; then
+      screen=$(call pane read "$pane" --source recent --lines 200)
+      if [ "$trusted" = 0 ] &&
+         { [[ "$screen" == *'Trust this folder?'* ]] || [[ "$screen" == *'Do you trust the contents of this directory?'* ]]; }; then
+        call pane send-keys "$pane" Enter >/dev/null
+        trusted=1
+      elif [ "$dismissed" = 0 ] && [[ "$screen" == *'Update now'* && "$screen" == *'esc skip'* ]]; then
+        call pane send-keys "$pane" Escape >/dev/null
+        dismissed=1
+      fi
+    fi
+    sleep 0.2
+  done
+  call agent get "$pane" > "$LAB_DIR/$harness-agent.json"
+  call pane process-info --pane "$pane" > "$LAB_DIR/$harness-process.json"
+  call pane read "$pane" --source recent --lines 200 > "$LAB_DIR/$harness-screen.txt"
+  [ "$ready" = 1 ] || { cat "$LAB_DIR/$harness-screen.txt"; fail "$version did not reach the required real process/composer/presentation state"; }
+  status=$(jq -r '.result.agent.agent_status' "$LAB_DIR/$harness-agent.json")
+  printf 'live harness=%s version=%s native_status=%s process=%s structural=%s\n' "$harness" "$version" "$status" \
+    "$(fm_backend_herdr_pane_process_state "$HERDR_LAB_SESSION" "$pane")" \
+    "$(fm_backend_herdr_pane_agent_state "$HERDR_LAB_SESSION" "$pane")"
+  [ "$(fm_backend_herdr_agent_state "$HERDR_LAB_SESSION:$pane")" = alive ] || fail "$version is not structurally alive"
+  if [ "$status" = unknown ]; then
+    [ "$(fm_backend_herdr_busy_state "$HERDR_LAB_SESSION:$pane")" = unknown ] || fail 'structural live must not invent semantic idle'
+    call agent explain "$pane" --json > "$LAB_DIR/$harness-explain.json"
+    printf 'PASS vendor-emitted unknown presentation coexists with verified live %s\n' "$version"
+  fi
+  report_hash=$(shasum -a 256 "$FM_HOME/data/live-$harness/report.md")
+  # The structural guard must not weaken independent composer protection.
+  # Some installed Pi configurations draw a cost/footer that the existing
+  # composer owner cannot disambiguate from a shell. Record the real limit,
+  # prove supported exit refuses without effects, and retain the live pane.
+  if [ "$harness" = pi ] && [ "$(fm_backend_herdr_composer_state "$HERDR_LAB_SESSION:$pane")" != empty ]; then
+    if output=$("$ROOT/bin/fm-control.sh" "live-$harness" exit 2>&1); then
+      fail "$version exited through an unproved composer"
+    fi
+    [[ "$output" == *'not proven empty'* ]] || fail "unexpected $version refusal: $output"
+    [ "$(fm_backend_herdr_agent_state "$HERDR_LAB_SESSION:$pane")" = alive ] || fail 'refused exit changed Pi liveness'
+    [ "$report_hash" = "$(shasum -a 256 "$FM_HOME/data/live-$harness/report.md")" ] || fail 'refused exit changed report'
+    printf 'LIMITATION Pi %s: structural liveness verified; supported exit safely refused unproved composer\n' "$version"
+    continue
+  fi
+  FM_CONTROL_EXIT_WAIT=20 "$ROOT/bin/fm-control.sh" "live-$harness" exit
+  call pane get "$pane" >/dev/null
+  [ "$(fm_backend_herdr_agent_state "$HERDR_LAB_SESSION:$pane")" = dead ] || fail "$version did not exit"
+  "$ROOT/bin/fm-teardown.sh" "live-$harness" --endpoint-only --expect-spawn-gen "s-live-$harness"
+  [ "$(fm_backend_herdr_pane_presence_state "$HERDR_LAB_SESSION" "$pane")" = dead ] || fail "$version endpoint was not removed"
+  [ "$report_hash" = "$(shasum -a 256 "$FM_HOME/data/live-$harness/report.md")" ] || fail 'report changed during cleanup'
+  printf 'PASS %s supported exit then exact endpoint cleanup preserves report\n' "$version"
+done
+[ "$checked" -gt 0 ] || fail 'no installed harness exercised'
+
 call workspace create --label mixed --cwd "$ROOT" --no-focus > "$LAB_DIR/mixed.json"
 mixed=$(jq -r '.result.workspace.workspace_id' "$LAB_DIR/mixed.json")
 sibling=$(jq -r '.result.root_pane.pane_id' "$LAB_DIR/mixed.json")

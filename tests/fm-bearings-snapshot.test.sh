@@ -34,8 +34,8 @@ case "$1 ${2:-}" in
   'agent get')
     case "$3" in
       *missing*) echo '{"error":{"code":"agent_not_found"}}'; exit 1 ;;
-      *idle*) echo '{"result":{"agent":{"agent_status":"idle"}}}' ;;
-      *) echo '{"result":{"agent":{"agent_status":"working"}}}' ;;
+      *idle*) jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
+      *) jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"working"}}}' ;;
     esac ;;
   'pane process-info')
     case "${4:-}" in

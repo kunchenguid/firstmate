@@ -2168,7 +2168,8 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #                shell sits under the pane's top shell.
 #   other      - the foreground group holds something that is neither: a tool
 #                the agent is running in its own process group, a pager, a
-#                stranger's process. Not a shell-only pane. An idle shell
+#                stranger's process, with no verified harness descendant.
+#                Not a shell-only pane. An idle shell
 #                transiently hosts prompt helpers such as starship in its
 #                foreground group (the same shape the idle-shell proof settles
 #                on), so this verdict alone is resampled for the same bounded
@@ -2239,12 +2240,10 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
     i=$((i + 1))
   done
 
-  # Nothing in the foreground is a harness. A foreground that is not purely
-  # shells is already `other`, whatever else the pane holds. Before calling a
-  # shells-only foreground a shell-only PANE, look for a harness that is still a
-  # descendant of the pane shell outside the foreground group; only its
-  # absence, read from the real process table, is proof of an agent-free pane.
-  [ "$others" -eq 0 ] || { printf 'other'; return 0; }
+  # Nothing in the foreground is a harness. A tool may own the foreground
+  # group while its parent agent remains under the pane shell. Check those
+  # descendants before returning other, just as for a shells-only foreground;
+  # a stale registration over an unrelated tool is not proof of a live agent.
   ps_bin=${FM_HERDR_PS_BIN:-ps}
   command -v "$ps_bin" >/dev/null 2>&1 || { printf 'unreadable'; return 0; }
   rows=$(LC_ALL=C "$ps_bin" -axo pid=,ppid=,comm= 2>/dev/null) || { printf 'unreadable'; return 0; }
@@ -2281,6 +2280,7 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
     }
   }')
 EOF
+  [ "$others" -eq 0 ] || { printf 'other'; return 0; }
   printf 'shell'
 }
 
@@ -2306,8 +2306,8 @@ EOF
 #                 stability across a server restart"), and what a future
 #                 `resume_agents_on_restore = false` restore would produce too
 #                 (a plain shell, never an agent).
-#   stale-agent - `agent get` reports a registered agent_status (working, idle,
-#                 done, or blocked) but fm_backend_herdr_pane_process_state
+#   stale-agent - `agent get` identifies a named agent on the exact pane,
+#                 but fm_backend_herdr_pane_process_state
 #                 proves the pane is shell-only: the registered agent's process
 #                 has exited and Herdr kept its registration (issue #4115;
 #                 Herdr does not release a Pi registration on TUI shutdown when
@@ -2317,23 +2317,22 @@ EOF
 #                 running agent. No registered status outranks the process
 #                 view, because a killed mid-turn agent leaves `working`
 #                 behind just as a quit one leaves `idle`.
-#   live        - `agent get` succeeds with a registered agent_status and the
-#                 process-level view is `agent` or `other`: a harness process
-#                 is running, or something that is not a bare shell is, so the
-#                 registration keeps its authority. An idle or blocked agent
-#                 is still a genuine, still-registered agent, not a restored
-#                 husk, so it is never a close-and-replace candidate.
+#   live        - `agent get` identifies a named agent on the exact pane and
+#                 the independent process-level view is `agent`. Presentation
+#                 status (including unknown, absent, or a future value) cannot
+#                 negate that proof and does not establish busy or idle.
+#                 A live agent is never a close-and-replace candidate.
 #   unknown     - anything else: an unparseable/unexpected response from
 #                 either call, a `pane get` success whose own echoed pane_id
 #                 does not round-trip (guards against misreading a herdr
 #                 response shape change as "the pane exists"), or a registered
-#                 agent whose process-level view is unreadable - the
+#                 agent whose process-level view is other or unreadable - the
 #                 registration alone is no longer trusted, and its absence is
 #                 not claimed either. The caller must fail safe toward refusal
 #                 here, never toward closing - this is the conservative
 #                 backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 out code presence status
+  local session=$1 pane_id=$2 out code presence
   presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane_id")
   if [ "$presence" != present ]; then
     case "$presence" in
@@ -2348,13 +2347,16 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
     [ "$code" = "agent_not_found" ] && printf 'no-agent' || printf 'unknown'
     return 0
   fi
-  status=$(printf '%s' "$out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
-  case "$status" in
-    working|idle|done|blocked) ;;
-    *) printf 'unknown'; return 0 ;;
-  esac
+  # Registration is structural identity, not a screen-state enum. A vendor
+  # manifest may not recognize the installed TUI while the exact registered
+  # harness still exists. Require the echoed pane and a named registration;
+  # semantic busy/idle remains the separate busy-state reader's responsibility.
+  printf '%s' "$out" | jq -e --arg pane "$pane_id" '
+    .result.agent | type == "object" and .pane_id == $pane
+    and (.agent | type == "string" and length > 0)
+  ' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
   case "$(fm_backend_herdr_pane_process_state "$session" "$pane_id")" in
-    agent|other) printf 'live' ;;
+    agent) printf 'live' ;;
     shell) printf 'stale-agent' ;;
     *) printf 'unknown' ;;
   esac

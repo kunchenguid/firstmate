@@ -70,7 +70,7 @@ case "$1 ${2:-}" in
     if [ "${FM_FAKE_HERDR_AGENT:-}" = zsh ]; then
       echo '{"error":{"code":"agent_not_found"}}'
     elif [ -n "${FM_FAKE_HERDR_AGENT:-}" ]; then
-      echo '{"result":{"agent":{"agent_status":"idle"}}}'
+      jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}'
     else echo '{}'; fi ;;
   'pane process-info')
     jq -n --arg p "$4" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:"pi"}]}}}' ;;

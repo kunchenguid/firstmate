@@ -30,7 +30,7 @@ make_fakebin() {
 case "$1 ${2:-}" in
   'status --json') echo '{"server":{"running":true}}' ;;
   'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
-  'agent get') echo '{"result":{"agent":{"agent_status":"working"}}}' ;;
+  'agent get') jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"working"}}}' ;;
   'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}' ;;
   'pane read') printf 'working\n> \n' ;;
   *) echo '{}' ;;

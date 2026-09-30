@@ -309,7 +309,7 @@ family_for_basename() {
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
-    fm-backend-herdr-agent-exit-shell-e2e.test.sh|fm-teardown-lifecycle-herdr-e2e.test.sh|\
+    fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
     fm-periodic-stow-herdr-live-e2e.test.sh|\
     fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|\
@@ -331,7 +331,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
-    fm-herdr-pi-stale-registration-live-e2e.test.sh|\
+    fm-herdr-pi-stale-registration-live-e2e.test.sh|fm-teardown-lifecycle-herdr-e2e.test.sh|\
     fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|fm-pi-branch-status-live.test.sh|\
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|\
@@ -697,6 +697,7 @@ tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
+tests/fm-teardown-lifecycle-herdr-e2e.test.sh 98268
 tests/fm-teardown.test.sh 97603
 tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151

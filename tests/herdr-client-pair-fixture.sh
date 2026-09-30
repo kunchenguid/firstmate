@@ -33,14 +33,14 @@ SH
   cat >> "$dir/current/herdr" <<'SH'
   "pane get")
     if [ "${3:-}" = wCY:p2 ]; then
-      printf '{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_status":"idle","pane_id":"wCY:p2","tab_id":"wCY:t2","workspace_id":"wCY"},"type":"pane_info"}}\n'
+      printf '{"id":"cli:pane:get","result":{"pane":{"agent":"codex","agent_status":"idle","pane_id":"wCY:p2","tab_id":"wCY:t2","workspace_id":"wCY"},"type":"pane_info"}}\n'
     else
       printf '{"id":"cli:pane:get","error":{"code":"pane_not_found","message":"no such pane"}}\n' >&2; exit 1
     fi ;;
   "agent get")
-    printf '{"id":"cli:agent:get","result":{"agent":{"agent":"claude","agent_status":"idle","pane_id":"wCY:p2"},"type":"agent_info"}}\n' ;;
+    printf '{"id":"cli:agent:get","result":{"agent":{"agent":"codex","agent_status":"idle","pane_id":"wCY:p2"},"type":"agent_info"}}\n' ;;
   "pane process-info")
-    printf '{"id":"cli:pane:process_info","result":{"process_info":{"pane_id":"wCY:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"claude","argv0":"claude","argv":["claude"],"cmdline":"claude"}]},"type":"pane_process_info"}}\n' ;;
+    printf '{"id":"cli:pane:process_info","result":{"process_info":{"pane_id":"wCY:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]},"type":"pane_process_info"}}\n' ;;
   *) : ;;
 esac
 exit 0
