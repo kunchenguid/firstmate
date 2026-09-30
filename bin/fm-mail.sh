@@ -196,7 +196,6 @@ run_py() {
   FM_MAIL_AWAY_SCAN="$AWAY_SCAN" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
   FM_AFK_EMAIL_TO="${FM_AFK_EMAIL_TO:-}" \
-  FM_AFK_POSTURE="$( [ -f "$STATE_DIR/.afk-contract" ] && printf 1 || printf 0 )" \
     "$PY" "$PY_BIN" "$@"
 }
 

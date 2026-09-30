@@ -695,7 +695,7 @@ if scenario in ('header-fail', 'header-outage'):
     authentic = {'2'}
     header_failures = {'1': 99}
     os.environ['FM_MAIL_POLL_BUDGET'] = '1'
-elif scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage', 'posture-repair'):
+elif scenario in ('transient', 'permanent', 'handoff-timeout', 'handoff-fails', 'config-outage', 'posture-repair', 'body-timeout'):
     uids = ['1', '2', '3']
     authentic = {'1', '2'}
     body_failures = {'1': 1 if scenario == 'transient' else (99 if scenario == 'permanent' else 0)}
@@ -758,6 +758,8 @@ class FakeConn:
             header = f'From: {owner}\r\n{extra}Subject: mail {number}\r\n\r\n'.encode()
             return ('OK', [(f'RFC822.SIZE {len(body)}'.encode(), header)])
         self.body_fetches.append(number)
+        if scenario == 'body-timeout' and number == '1':
+            raise TimeoutError('body read timed out')
         if body_failures.get(number, 0) > 0:
             body_failures[number] -= 1
             return ('NO', [])
@@ -832,6 +834,14 @@ if scenario in ('transient', 'handoff-timeout'):
     rc, rows, second, _, _ = poll(True)
     print(f'second rc={rc} fetched={",".join(second)} handoffs={handoffs} alerts={len(alerts)}')
     print('handoff_timeouts_bounded=%s' % all(0 < t <= 2 for t in handoff_timeouts))
+elif scenario == 'body-timeout':
+    body_attempts = []
+    for _ in range(4):
+        before = len(FakeConn.body_fetches)
+        rc, rows, fetched, _, _ = poll(True)
+        assert rc == 0, rc
+        body_attempts += FakeConn.body_fetches[before:]
+    print(f'owner_body_attempts={body_attempts.count("1")} handoffs={sorted(set(handoffs))} alerts={len(alerts)}')
 elif scenario == 'posture-repair':
     rc, rows, first, _, _ = poll(True, invalid=True)
     print(f'invalid rc={rc} rows={status(rows)} fetched={len(first)} handoffs={handoffs}')
@@ -979,6 +989,9 @@ test_away_owner_read_failures_retry_then_alert() {
   assert_contains "$out" "second rc=0 fetched=1,2 handoffs=['1', '2']" \
     "a timed-out handoff retains the reply for the next poll"
   assert_contains "$out" 'handoff_timeouts_bounded=True' "the reply handoff is bounded by the poll budget"
+  out=$(run_away_poll_harness body-timeout)
+  assert_contains "$out" "owner_body_attempts=3 handoffs=['2'] alerts=1" \
+    "a repeatedly timing-out owner body counts as a failed read, alerts once, and cannot block later replies"
   out=$(run_away_poll_harness posture-repair)
   assert_contains "$out" "invalid rc=0 rows=1:deferred,2:deferred,3:deferred fetched=0 handoffs=[]" \
     "a malformed away record defers owner replies without reading them"

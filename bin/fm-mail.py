@@ -748,6 +748,7 @@ def cmd_poll_list():
                     sock.settimeout(min(MAIL_TIMEOUT, remaining))
                 header_fetches += 1
                 header_loaded = False
+                body_started = False
                 # A raised or empty header FETCH is treated as a failure for THIS uid only,
                 # so one bad message can never abort the bounded scan: a new uid is
                 # surfaced degraded, a retry uid is left for a later scan step, and
@@ -772,7 +773,7 @@ def cmd_poll_list():
                         or not gmail_authentication_pass(mi)
                     )
                     if afk_enabled and not ignored and from_is_configured(fr, recipient):
-
+                        body_started = True
                         try:
                             message_size = fetched_size(msg)
                             if message_size is None:
@@ -808,7 +809,7 @@ def cmd_poll_list():
                     new_emitted += 1
                     continue
                 except (socket.timeout, TimeoutError):
-                    if away_mode and not header_loaded:
+                    if away_mode and (body_started or not header_loaded):
                         away_held.add(u)
                         away_owner_failed.add(u)
                     break
