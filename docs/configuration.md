@@ -196,11 +196,6 @@ The turn stays open until main acknowledges the sequence through its `fm_branch_
 While away, the entry is saved, but processing waits until the away-posture record is archived.
 Pi away-email delivery is documented in [Away email on Pi](afk-email.md).
 
-
-
-
-
-
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
@@ -1402,20 +1397,9 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP message.
 
-
-
-
 **Polling and delivery guarantees**
 Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 Pi away-mode sender filtering and authenticated-body rules are documented in [Away email on Pi](afk-email.md).
-
-
-
-
-
-
-
-
 
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
@@ -1441,17 +1425,6 @@ FM_SMTP_HOST=   # SMTP server hostname
 Pi's optional `/afk` email destination is separate from general mail transport; [Away email on Pi](afk-email.md) owns its fixed destination, Gmail receiving-mailbox requirement, and setup gate.
 
 `FM_IMAP_PORT` (default 993; integer 1..65535), `FM_SMTP_PORT` (default 465; integer 1..65535), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
-
-
-
-
-
-
-
-
-
-
-
 
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
 `FM_MAIL_POLL_BUDGET` (default 6 seconds; the mail check sets half its own budget) is one wall-clock bound on a poll's IMAP work from connect through every fetch, and caps each socket timeout; a poll that reaches it hands off what it already fetched and leaves the remaining candidates for the next poll.
@@ -2350,9 +2323,6 @@ FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
 FM_AFK_EMAIL_TO=  # Pi /afk email destination; see docs/afk-email.md
-
-
-
 
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development

@@ -18,14 +18,6 @@ A record carrying quiet mode (`bin/fm-afk-contract.sh mode`) is not this posture
 Typing `/afk` is itself the go: the captain may not look at the screen again, so entry never waits for a further human response, and no read-back gates it or asks for a go.
 Hold-for-return remains the fallback when Pi has the exact owner destination but lacks valid mail transport settings. Pi refuses `/afk` before recording or announcing anything when `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`; the [away-email setup guide](../../../docs/afk-email.md) owns setup and limits. Other primary harnesses keep their existing away path and do not claim email delivery.
 
-
-
-
-
-
-
-
-
 ## Entering: `/afk [words]`
 
 1. **Write the record first, in this same turn.**
@@ -53,12 +45,7 @@ Hold-for-return remains the fallback when Pi has the exact owner destination but
    Both daemon paths require the record `enter` wrote and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 3. **Announce, then read back after entry.**
-   Relay the recorded reach line exactly in spirit, following [Away email on Pi](../../../docs/afk-email.md) for configured email reach or hold-for-return when transport is unavailable. Your instructions are recorded and the away session will carry them out where it can, anything it is unsure of, or that needs you, is emailed to the fixed owner destination when configured and otherwise waits for your return, and destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
-
-
-
-
-
+   Relay the recorded reach line exactly in spirit, following [Away email on Pi](../../../docs/afk-email.md) for configured email reach or hold-for-return when transport is unavailable. On Pi, captain-facing outcomes are emailed to the fixed owner destination when email reach is active and otherwise wait for your return; other primary harnesses retain their existing away path. Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
 
    Then give your own plain-sentence restatement of the words in `AGENTS.md` section 9 language - what you read them as asking for, sentence by sentence, never a numbered field list - beside the expected return, the spend cap, and the one-sentence reach announcement.
    Say plainly which sentence, if any, you could not act on while away (a red merge, a discard, anything on the never-set, local-only landing); it waits for their return.
@@ -69,14 +56,6 @@ Hold-for-return remains the fallback when Pi has the exact owner destination but
 ## While away
 
 - Follow [Away email on Pi](../../../docs/afk-email.md) for the delivery, authentication, reply, and safety contract of Pi's optional email reach.
-
-
-
-
-
-
-
-
 
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).

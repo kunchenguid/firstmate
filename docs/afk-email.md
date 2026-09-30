@@ -2,25 +2,12 @@
 
 Away email lets a Pi supervision branch send captain-facing outcomes to John Poyser's Gmail inbox and accept a reply for one specific outcome.
 
-
-
-
-
-
 It is an optional extension of the existing mail plane and does not change what actions the away session is authorized to take.
 Other primary harnesses retain their existing away behavior and do not claim this delivery path.
 
 ## Setup
 
 Use a dedicated sending mailbox if practical, and create an app password for it rather than using your normal account password.
-
-
-
-
-
-
-
-
 
 Add the following values to this Firstmate home's gitignored `.env`:
 
@@ -37,8 +24,6 @@ Use the Gmail receiving mailbox for IMAP; other IMAP hosts keep Pi away mode on 
 `FM_AFK_EMAIL_TO` must be exactly `johnpoyser@gmail.com`; this fixed destination is also the only permitted reply identity.
 Away email requires the receiving IMAP mailbox to be Gmail at `imap.gmail.com`, so the topmost `Authentication-Results` field can be trusted as Gmail's receiver-generated result.
 
-
-
 The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
 Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
 
@@ -52,11 +37,6 @@ Then enter `/afk` on Pi and confirm its read-back says email reach is active.
 Pi refuses `/afk` before writing or announcing an active posture if `FM_AFK_EMAIL_TO` is absent or differs from `johnpoyser@gmail.com`.
 With the exact destination but incomplete or invalid mail transport settings, away mode retains the hold-for-return behavior instead.
 
-
-
-
-
-
 No credential needs to be shared with Firstmate.
 
 ## Replies and limits
@@ -69,41 +49,14 @@ Other senders and messages without that authenticated result are silently ignore
 While away, the poller walks unseen mail in ascending UID order from a persistent away-scan cursor; ignored mail is examined at most once per away posture, stays unread, and cannot block later replies, so attended polling reports it after return. Failed reads of authenticated owner replies remain retryable.
 A failed read of a message, an owner reply that arrives while mail configuration is missing, or a reply handoff that fails or runs past the poll budget, is retried on later polls without blocking the scan; after three failed reads of an authenticated owner reply the poller stops retrying it and sends one alert, without message content, saying one reply could not be read.
 
-
-
-
 If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid. The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
 Each code is accepted only for its own sent item, once, and for seven days after sending. Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit. Replies over 8,000 characters are rejected with a notice in the durable mail wake.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 A matching reply enters Firstmate's existing captain inbox as words for that outcome.
 An authenticated owner message with a missing, invalid, expired, or already-used code follows the ordinary mail wake path and is never treated as verified instructions.
 The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.
 
 Away updates are batched, with a minimum interval of one message per minute. If another batch is ready sooner, it remains queued until the interval expires.
-
-
-
-
-
-
 
 Email transport settings and received-mail polling are owned by the [Mail plane](configuration.md#mail-plane-env).
 The durable away-posture reach selection and its hold-for-return fallback are owned by `bin/fm-afk-contract.sh` and the [`/afk` skill](../.agents/skills/afk/SKILL.md).
