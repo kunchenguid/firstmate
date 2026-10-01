@@ -6045,6 +6045,7 @@ test_compact_progress_drives_branch_same_worker_continuation() {
   home="$TMP_ROOT/compact-branch-home"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/state/procevent-claims" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
 const { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
@@ -6133,6 +6134,9 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     fields.next_step,
     "Tell the existing viewer worker to continue the same no-mistakes run after its intermediate review",
     "Arm the PR check for https://github.com/acme/viewer/pull/7",
+    "Arm the future decision recheck for the existing task",
+    "Send the approved handoff to the existing other worker",
+    "Recheck the unchanged task after the healthy wait",
   ][promptCount - 1];
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
@@ -6149,18 +6153,33 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   if (!deniedUpdate.isError || !deniedUpdate.content[0].text.includes("permits read only")) {
     throw new Error(`branch gained progress-write authority: ${JSON.stringify(deniedUpdate)}`);
   }
-  scopedRefusal = await bash.execute("cross-scope", { command: `${realRoot}/bin/fm-send.sh other 'Unrelated steer.'` });
-  if (!scopedRefusal.isError || !scopedRefusal.content[0].text.includes("outside this exact branch admission")) {
-    throw new Error(`compact admission escaped its canonical task: ${JSON.stringify(scopedRefusal)}`);
+  if (promptCount === 1) {
+    scopedRefusal = await bash.execute("cross-scope", { command: `${realRoot}/bin/fm-send.sh other 'Unrelated steer.'` });
+    if (!scopedRefusal.isError || !scopedRefusal.content[0].text.includes("outside this exact branch admission")) {
+      throw new Error(`compact admission escaped its canonical task: ${JSON.stringify(scopedRefusal)}`);
+    }
   }
   const command = promptCount === 3
     ? `${realRoot}/bin/fm-pr-check.sh viewer https://github.com/acme/viewer/pull/7`
-    : `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
-  const sent = await bash.execute("continue", { command });
-  if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
+    : promptCount === 4
+      ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
+      : promptCount === 5
+        ? `${realRoot}/bin/fm-task-handoff.sh send viewer other --id viewer-to-other-r1 'Continue the already-approved dependent step.'`
+        : promptCount === 6 ? "" :
+        `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
+  if (command) {
+    const sent = await bash.execute("continue", { command });
+    if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
+  } else {
+    appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
+    appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
+  }
   reportResult = await report.execute("report", { task: "viewer", verdict: "routine", silent: true,
-    summary: promptCount === 3 ? "The PR check was armed for the ready implementation." :
-      "The existing worker received the authorized no-mistakes continuation." });
+    summary: promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
+      ? "The future decision recheck was armed while captain approval remains pending."
+      : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
+      : promptCount === 6 ? "The task remains unchanged after its healthy wait."
+      : "The existing worker received the authorized no-mistakes continuation." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
 
@@ -6268,23 +6287,113 @@ if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) 
   throw new Error("metadata-only PR-check continuation was retained only in the branch session");
 }
 
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const futureRecheck = { ...prCheck,
+  current_state: "The implementation is ready and captain approval is explicitly pending",
+  remaining_gap: "Captain approval remains pending and the future decision recheck is not armed",
+  next_step: "Arm the future decision recheck for the existing task",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(futureRecheck)]);
+if (result.status !== 0) throw new Error(`MAIN future-recheck progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 4 &&
+  routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length === 1 &&
+  sentToMain.length === beforeMain + 4,
+  "future-recheck continuation");
+for (const path of [
+  `${home}/state/when/when-viewer.spec`,
+  `${home}/state/when/when-viewer.trust`,
+  `${home}/state/procevent/when-viewer.source`,
+]) {
+  if (!readFileSync(path, "utf8").trim()) throw new Error(`future-recheck owner did not publish ${path}`);
+}
+if (!sentToMain.at(-1)?.message?.content?.includes("future decision recheck was armed while captain approval remains pending")) {
+  throw new Error(`future-recheck owner state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+}
+const waitingApproval = run("fm-task-state.sh", ["progress", "viewer"]);
+const waitingApprovalRecord = JSON.parse(waitingApproval.stdout);
+if (waitingApproval.status !== 0 || waitingApprovalRecord.task_state !== "in_flight" ||
+    waitingApprovalRecord.current_state !== futureRecheck.current_state || waitingApprovalRecord.next_step !== futureRecheck.next_step) {
+  throw new Error(`future captain-approval wait did not remain open: ${waitingApproval.stderr || waitingApproval.stdout}`);
+}
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (promptCount !== 4 || sentToMain.length !== beforeMain + 4 ||
+    routed.some((item) => /fm-(?:control|pr-merge|merge-local)\.sh/.test(item.command))) {
+  throw new Error("future captain-approval wait repeated coordination or performed unauthorized lifecycle work");
+}
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const handoff = { ...futureRecheck,
+  current_state: "The task is ready to continue through its approved dependency",
+  remaining_gap: "The approved dependent worker instruction has not been delivered",
+  next_step: "Send the approved handoff to the existing other worker",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(handoff)]);
+if (result.status !== 0) throw new Error(`MAIN handoff progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 5 &&
+  routed.filter((item) => item.command.includes("fm-task-handoff.sh send viewer other")).length === 1 &&
+  sentToMain.length === beforeMain + 5,
+  "arbitrary-id handoff continuation");
+if (!readFileSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`, "utf8").includes("Continue the already-approved dependent step") ||
+    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=delivered")) {
+  throw new Error("arbitrary-id handoff owner did not publish its durable receipt");
+}
+if (!sentToMain.at(-1)?.message?.content?.includes("approved cross-task handoff reached the existing worker")) {
+  throw new Error(`arbitrary-id handoff state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+}
+
+writeFileSync(`${home}/state/viewer.child.meta`, "spawn_gen=child-g1\nkind=ship\n");
+writeFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task started\n");
+mkdirSync(`${home}/data/viewer/artifacts`, { recursive: true });
+writeFileSync(`${home}/data/viewer/artifacts/build.log`, "initial artifact bytes\n");
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const quiet = { ...handoff,
+  current_state: "The task is healthy and unchanged",
+  remaining_gap: "The next scheduled readback is not due",
+  next_step: "Recheck the unchanged task after the healthy wait",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(quiet)]);
+if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 6 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "dotted sibling isolation");
+if (sentToMain.length !== beforeMain + 5) throw new Error("an unrelated dotted task interrupted MAIN");
+if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
+  throw new Error("unchanged continuation was not retained quietly in the branch");
+}
+
 // Only MAIN performs final semantic acceptance after the fixture's requested
 // outcome is satisfied. Empty gap/next step removes the task from monitoring.
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
-const accepted = { ...intermediate, current_state: "All requested checks passed and MAIN reviewed the artifact",
+const accepted = { ...quiet, current_state: "All requested checks passed and MAIN reviewed the artifact",
   remaining_gap: "", next_step: "" };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(accepted)]);
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 3 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
-    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 || sentToMain.length !== beforeMain + 3) {
+if (promptCount !== 6 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
+    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
+    routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
+    routed.filter((item) => item.command.includes("fm-task-handoff.sh send viewer other")).length !== 1 ||
+    sentToMain.length !== beforeMain + 5) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation delivered inbox and metadata-only resume changes to MAIN, kept unchanged execution quiet, and stopped only after MAIN acceptance");
+console.log("compact continuation delivered exact owner changes to MAIN, isolated dotted task identities, kept unchanged execution quiet, and stopped only after MAIN acceptance");
 process.exit(0);
 EOF
   status=$?

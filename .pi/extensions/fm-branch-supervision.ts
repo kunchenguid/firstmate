@@ -64,6 +64,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstat as lstatAsync } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -689,6 +690,7 @@ export default function (pi: ExtensionAPI) {
   let branchChain: Promise<void> = Promise.resolve();
   let continuationToolsRemaining: number | null = null;
   let recordContinuationReceipt: (() => void) | null = null;
+  let compactContinuationUsedBash = false;
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
   let branchProgressBindings: Record<string, string> = {};
   let branchProgressSnapshots: Record<string, string> = {};
@@ -703,33 +705,47 @@ export default function (pi: ExtensionAPI) {
     const { revision: _revision, coordination: _coordination, ...taskState } = record || {};
     return JSON.stringify(taskState);
   }
-  function compactResumeSnapshot(task: string): string {
+  async function compactResumeSnapshot(task: string): Promise<string> {
     try {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) throw new Error("invalid task id");
-      const entries: Array<[string, "directory" | "file", string?]> = [];
-      const visit = (path: string, label: string) => {
-        const stat = lstatSync(path);
-        if (stat.isSymbolicLink()) throw new Error("invalid task state");
-        if (stat.isFile()) {
-          entries.push([label, "file", createHash("sha256").update(readFileSync(path)).digest("hex")]);
-          return;
+      const data = process.env.FM_DATA_OVERRIDE || join(fmHome, "data");
+      const directSuffixes = [
+        "meta", "status", "turn-ended", "progress", "busy-state", "busy-gen", "busy-session",
+        "check.sh", "check-trust", "pr-poll", "pr-poll-registration", "pr-poll-retirement",
+        "pr-poll-merge-notified", "merge-authority", "cleanup.json", "backlog-close",
+        "control-relaunch", "control-relaunch.meta-prior", "control-relaunch.brief-prior",
+        "control-relaunch.note", "reconcile-nudged", "herdr-presentation", "pi-ext.ts", "inbox",
+      ];
+      const paths = [
+        ...directSuffixes.map((suffix) => join(state, `${task}.${suffix}`)),
+        join(state, `${task}.inbox`, "handled"),
+        join(state, `.${task}.open-decisions-cursor`),
+        join(state, `.${task}.branch-outcome-index`),
+        join(state, `.short-operation-${task}.json`),
+        join(state, "remote-tasks", task, "state.json"),
+        join(state, "cloud-tasks", task, "state.json"),
+        join(state, "when", `when-${task}.spec`),
+        join(state, "when", `when-${task}.trust`),
+        join(state, "when", `when-${task}.fired`),
+        join(state, "procevent", `when-${task}.source`),
+        join(state, "procevent", `ida-${task}.source`),
+        join(state, "procevent", `aime-${task}.source`),
+        join(data, task, "brief.md"),
+        join(data, task, "lifecycle.json"),
+        join(data, task, "report.md"),
+      ];
+      const entries = await Promise.all(paths.map(async (path) => {
+        const label = relative(fmHome, path);
+        try {
+          const stat = await lstatAsync(path, { bigint: true });
+          if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory())) throw new Error("invalid task state");
+          return [label, stat.isDirectory() ? "directory" : "file", String(stat.dev), String(stat.ino),
+            String(stat.size), String(stat.mtimeNs), String(stat.ctimeNs)];
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [label, "absent"];
+          throw error;
         }
-        if (!stat.isDirectory()) throw new Error("invalid task state");
-        entries.push([label, "directory"]);
-        for (const name of readdirSync(path).sort()) visit(join(path, name), join(label, name));
-      };
-      for (const name of readdirSync(state).sort()) {
-        if (name === task || name.startsWith(`${task}.`) || name.startsWith(`.${task}.`)) {
-          visit(join(state, name), join("state", name));
-        }
-      }
-      for (const [root, label] of [
-        [join(state, "remote-tasks", task), join("state", "remote-tasks", task)],
-        [join(state, "cloud-tasks", task), join("state", "cloud-tasks", task)],
-        [join(process.env.FM_DATA_OVERRIDE || join(fmHome, "data"), task), join("data", task)],
-      ]) {
-        if (existsSync(root)) visit(root, label);
-      }
+      }));
       return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
     } catch {
       return "";
@@ -1505,7 +1521,7 @@ export default function (pi: ExtensionAPI) {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
             const before = branchProgressSnapshots[task];
-            unchangedContinuation = Boolean(before) && compactResumeSnapshot(task) === before;
+            unchangedContinuation = !compactContinuationUsedBash && Boolean(before) && await compactResumeSnapshot(task) === before;
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1880,6 +1896,11 @@ ${context.command}
         };
       },
     });
+    const executeBash = bashTool.execute.bind(bashTool);
+    bashTool.execute = async (...args) => {
+      if (Object.keys(branchProgressBindings).length > 0) compactContinuationUsedBash = true;
+      return executeBash(...args);
+    };
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
@@ -2115,7 +2136,7 @@ ${context.command}
               const progress = JSON.parse(compact.stdout);
               if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step) {
                 branchProgressBindings[task] = progress.record_token;
-                branchProgressSnapshots[task] = compactResumeSnapshot(task);
+                branchProgressSnapshots[task] = await compactResumeSnapshot(task);
               }
             } catch { /* Malformed compact progress grants no branch capability. */ }
           }
@@ -2248,8 +2269,9 @@ ${context.command}
       const entryOffset = sessionManager.getEntries().length;
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchTaskBindings = {};
+      compactContinuationUsedBash = false;
       branchProgressBindings = { [offer.task]: progress.record_token };
-      branchProgressSnapshots = { [offer.task]: compactResumeSnapshot(offer.task) };
+      branchProgressSnapshots = { [offer.task]: await compactResumeSnapshot(offer.task) };
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
       trace("prompt", "started");
@@ -2275,6 +2297,7 @@ ${context.command}
         branchTaskBindings = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
+        compactContinuationUsedBash = false;
         wakeTaskScope = null;
       }
       const error = settledPromptProviderError(sessionManager, entryOffset);
