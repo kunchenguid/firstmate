@@ -459,18 +459,18 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
-      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      // A successor may itself close with a wake before its predecessor finishes
+      // delivery. Queue that close instead of dropping its wake and continuity.
+      const restoration = Promise.resolve(restorationInFlight).catch(() => {}).then(async () => {
+        const result = await restoreAfterActionableClose(paths, sessionID, client, predecessor);
+        const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
+        await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+      });
       restorationInFlight = restoration;
-      void restoration.then(async (result) => {
-        try {
-          const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
-        } finally {
-          if (restorationInFlight === restoration) restorationInFlight = null;
-        }
+      void restoration.then(() => {
+        if (restorationInFlight === restoration) restorationInFlight = null;
       }).catch((error) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
         surfaceFailure(

@@ -6,8 +6,6 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
 
@@ -15,6 +13,22 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
+
+# Native command discovery costs no tokens and must not depend on live credentials.
+test_native_command_discovery() (
+  fm_live_gate default-on FM_OPENCODE_NATIVE_DISCOVERY opencode jq
+  native_config=$(cd "$ROOT" && opencode debug config --pure) \
+    || fail "OpenCode $(opencode --version) could not load native command configuration"
+  for native_command in ahoy bearings stow afk quiet updatefirstmate; do
+    printf '%s\n' "$native_config" | jq -e --arg name "$native_command" \
+      '.command[$name] | (.description | length > 0) and (.template | contains("$ARGUMENTS"))' >/dev/null \
+      || fail "OpenCode $(opencode --version) did not discover /$native_command"
+  done
+  pass "OpenCode $(opencode --version) discovers six native Firstmate commands"
+)
+test_native_command_discovery || exit 1
+
+fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
 
 TMUX=$(command -v tmux)
 SOCKET="fm-opencode-live-e2e-$$"

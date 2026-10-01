@@ -10,6 +10,91 @@ WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-recovery-loop)
 export NODE_NO_WARNINGS=1
 
+test_opencode_consecutive_wakes_keep_successor() {
+  local repo out status
+  repo="$TMP_ROOT/opencode-consecutive"
+  mkdir -p "$repo/bin" "$repo/state" "$repo/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$repo/state/crew.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_HOME/state/arm-count" ] || read -r count < "$FM_HOME/state/arm-count"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_HOME/state/arm-count"
+printf 'watcher: started pid=%s\n' "$$"
+if [ "$count" -le 2 ]; then
+  sleep 0.1
+  printf 'check: consecutive-%s\n' "$count"
+else
+  printf '%s\n' "$$" > "$FM_HOME/state/successor-pid"
+  exec sleep 60
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" \
+    FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$repo/state" \
+    node --input-type=module 2>&1 <<'JS'
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const prompts = [];
+const client = { session: { promptAsync: async ({ body }) => {
+  // Hold predecessor delivery open while the successor fires independently.
+  await new Promise(resolve => setTimeout(resolve, 400));
+  prompts.push(body.parts[0].text);
+} } };
+const mod = await import(pathToFileURL(process.env.PLUGIN));
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: home, worktree: home });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "fixture" } } });
+const deadline = Date.now() + 10000;
+while (Date.now() < deadline && prompts.length < 2) {
+  await new Promise(resolve => setTimeout(resolve, 50));
+}
+let pid;
+try {
+  if (existsSync(`${home}/state/successor-pid`)) {
+    pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
+    process.kill(pid, 0);
+  }
+  if (!pid) throw new Error("no live third arm after consecutive wakes");
+  if (prompts.length !== 2 || !prompts[0].includes("consecutive-1") || !prompts[1].includes("consecutive-2")) {
+    throw new Error(`wakes lost or reordered: ${JSON.stringify(prompts)}`);
+  }
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 3) {
+    throw new Error("unexpected extra successor");
+  }
+  // Replay a terminal-service HUP of the arm, without killing the plugin host.
+  const predecessor = pid;
+  process.kill(predecessor, "SIGHUP");
+  const retryDeadline = Date.now() + 5000;
+  while (Date.now() < retryDeadline) {
+    pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
+    if (pid !== predecessor) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  if (pid === predecessor) throw new Error("HUP did not start a replacement arm");
+  process.kill(pid, 0);
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 4 || prompts.length !== 2) {
+    throw new Error("HUP retry duplicated delivery or successor launches");
+  }
+  console.log("two overlapping wakes delivered in order; third arm alive");
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
+} finally {
+  if (pid) process.kill(pid, "SIGTERM");
+  process.exit(process.exitCode ?? 0);
+}
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must retain overlapping actionable closes: $out"
+  pass "OpenCode delivers consecutive wakes and keeps one live successor, including after HUP"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p \
@@ -223,4 +308,5 @@ test_handling_successor_does_not_go_blind() {
 }
 
 test_handling_successor_does_not_go_blind
+test_opencode_consecutive_wakes_keep_successor
 test_unacknowledged_recovery_is_announced_once_per_generation

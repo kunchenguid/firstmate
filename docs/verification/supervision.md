@@ -6,6 +6,31 @@ This record supports current session-start, turn-end, watcher-continuity, superv
 Operator behavior and active limits remain in the linked current guides.
 Task-specific chronology, temporary paths, run identifiers, and delivery transcripts remain in private reports or PR evidence.
 
+## OpenCode consecutive wakes and native commands
+
+Verified on 2026-10-01 on Linux with OpenCode 1.18.34 and Node 24.21.0:
+
+```sh
+bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh tests/fm-turnend-guard.test.sh tests/fm-opencode-primary-live-e2e.test.sh
+```
+
+Relevant output:
+
+```text
+ok - OpenCode delivers consecutive wakes and keeps one live successor, including after HUP
+ok - .opencode primary plugin: guard path is anchored to worktree, not directory
+ok - OpenCode 1.18.34 discovers six native Firstmate commands
+skip: live: opt-in; set FM_OPENCODE_LIVE_E2E=1 to run
+```
+
+The continuity regression drives the real plugin with executable arm fixtures and delays predecessor prompt delivery while the successor emits another actionable close.
+It asserts both wakes arrive in order and exactly one third arm remains alive.
+It then sends that arm SIGHUP and verifies exactly one replacement remains alive without duplicate wake delivery.
+Reinstating the dropped-close condition makes the same fixture fail with `no live third arm after consecutive wakes`.
+The guard regression returns `failed` from its coordinator and verifies the fallback still delivers its diagnostic.
+Native command discovery runs the installed `opencode debug config --pure` without model tokens and checks all six command templates.
+This does not claim a fresh credentialed TUI monitoring pass; the prompt-submitting portion remains opt-in through the same live test.
+
 ## Native session-start delivery
 
 The cross-harness transport pass ran on 2026-07-17 with Codex 0.144.4, Grok 0.2.103, OpenCode 1.17.18, Pi 0.80.10, and the tracked Claude hook wiring.

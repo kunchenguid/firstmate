@@ -1035,6 +1035,8 @@ const hooks = await mod.FmPrimaryTurnendGuard({
   directory: process.env.DIRECTORY,
   worktree: process.env.WORKTREE,
 });
+// An exhausted arm is not supervision. The guard must still report it.
+globalThis.__firstmateOpenCodeWatchArm = { ensureArmed: async () => "failed" };
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);

@@ -321,6 +321,20 @@ The OpenCode nudge runs only on `session.created`.
 The watcher-arm and turn-end plugins run later, on `session.idle`.
 The guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
+#### Launch and command discovery
+
+Launch `opencode` interactively from the Firstmate home, with `FM_HOME` pointing to that home and the required tools on the inherited `PATH`.
+Do not use `--pure` for the primary: it disables the external plugins that deliver startup and supervision.
+The tracked `.opencode/commands/` wrappers expose `/ahoy`, `/bearings`, `/stow`, `/afk`, `/quiet`, and `/updatefirstmate` in native command discovery and load their owning skills.
+Skill discovery alone is not a substitute for native command registration.
+Before launching, `opencode debug config` should list those commands and the Firstmate primary plugins; `opencode debug skill` verifies the separate skill surface.
+
+After changing command definitions, configuration, or plugins, exit the old OpenCode process and start a new TUI process: the running process keeps its loaded configuration.
+Keep all existing task files and unlanded changes when restarting the primary.
+Use `/bearings` in the new session to reconcile durable work before continuing it; `/ahoy` is a recap of the visible session, not a reconstruction of a previous session's transcript.
+An interactive `--continue` resumes the most recent session for the current directory, while plain `opencode` starts a new session.
+[`supervision-protocols/opencode.md`](supervision-protocols/opencode.md) owns the ongoing monitoring and manual-probe limits.
+
 ### Grok
 
 Grok is a nudge-tier harness.
