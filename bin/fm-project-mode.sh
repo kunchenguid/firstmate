@@ -63,8 +63,9 @@
 #   intake, and the captain's confirmation is what this record holds.
 #   A forge describes what a mode publishes, so it composes with no-mistakes and
 #   direct-PR and is REFUSED on local-only, which publishes nothing: that mode
-#   lands by fast-forwarding local main, which on a review-server project
-#   advances it with content the server has never seen
+#   lands by fast-forwarding the task's selected integration branch, or the
+#   local default when no integration branch was selected, which on a
+#   review-server project advances local content the server has never seen
 #   (docs/gerrit-forge-integration.md section 3).
 #
 # A registered `forge=gerrit` project reports yolo=off with an explicit stderr
