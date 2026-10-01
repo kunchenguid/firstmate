@@ -318,6 +318,8 @@ else
 fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
+PI_HOME_ACCOUNT=false
+fm_quota_pi_home_matches "${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$SCRIPT_DIR/..}}/config}" && PI_HOME_ACCOUNT=true
 
 # provider_for_harness <harness> [<model>]
 # The harness -> primary provider family table is owned by
@@ -334,9 +336,9 @@ provider_for_harness() {
 # on a schema 6 snapshot.
 effective_for_provider_model() {
   local provider=$1 model=${2:-default} lane=${3:-}
-  printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" --arg lane "$lane" "$FM_QUOTA_ROW_JQ"'
+  printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" --arg lane "$lane" --argjson pi_home "$PI_HOME_ACCOUNT" "$FM_QUOTA_ROW_JQ"'
     ($model | sub("^model:"; "")) as $model_token |
-    quota_row(.; $provider; $lane) as $p |
+    quota_row(.; $provider; $lane; $pi_home) as $p |
     if ($p // null) == null then {status: "unknown"}
     else ($p.quotaSemantics.effectiveAvailability // []) |
     map(select(.scope as $scope |
