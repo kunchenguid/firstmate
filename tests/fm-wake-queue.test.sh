@@ -15,6 +15,7 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
 GUARD="$ROOT/bin/fm-guard.sh"
+WEB_INBOX="$ROOT/bin/fm-web-inbox.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-tests)
 
@@ -52,6 +53,83 @@ test_concurrent_append_and_drain() {
     || fail "concurrent records could not be acknowledged"
   [ ! -s "$state/.wake-queue" ] || fail "acknowledged concurrent records remained queued"
   pass "concurrent append plus drain preserves durable records through acknowledgement"
+}
+
+test_browser_inbox_wakes_without_stealing_acknowledgement() {
+  local dir state fakebin out rows
+  dir=$(make_case browser-inbox)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf '%s\n' '{"id":"browser-1","ts":"2026-01-01T00:00:00Z","channel":"typed","text":"Please summarize this note"}' > "$state/.inbox"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  wait_for_exit "$!" 40 || fail "watcher did not wake for a browser inbox message"
+  grep -F 'check: local browser inbox has unread messages' "$out" >/dev/null \
+    || fail "watcher did not surface the browser inbox wake"
+  rows=$(awk 'NF { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "one unread mailbox must enqueue exactly one wake, got $rows"
+  grep "$(printf '\tcheck\tweb-inbox\t')" "$state/.wake-queue" >/dev/null \
+    || fail "browser inbox wake was not queued under its stable key"
+  [ ! -e "$state/.inbox.seen" ] || fail "watcher must not acknowledge the browser message"
+  pass "browser inbox wakes firstmate while its cursor remains owned by the primary"
+}
+
+test_browser_inbox_ordered_protocol() {
+  local dir state home pending drain first_offset second_offset seen remaining
+  dir=$(make_case browser-protocol)
+  state="$dir/state"
+  home="$dir"
+  python3 - "$state/.inbox" <<'PY'
+import json, sys
+rows = [
+    {"id":"typed-1", "ts":"2026-01-01T00:00:00Z", "channel":"typed", "text":"Summarize the release notes"},
+    {"id":"click-2", "ts":"2026-01-01T00:01:00Z", "channel":"click", "text":"Approve the reviewed change", "ref":{"task":"task-1", "sha":"a" * 40}},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    for row in rows:
+        stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+    stream.write('{"id":"partial"}')
+PY
+  pending=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" pending || pending=$?
+  [ "$pending" -eq 0 ] || fail "complete browser messages should be pending"
+  drain=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" drain) || fail "drain should read pending browser messages"
+  printf '%s\n' "$drain" | grep -q '"id":"typed-1"' || fail "first message was not returned"
+  printf '%s\n' "$drain" | grep -q '"id":"click-2"' || fail "second message was not returned"
+  ! printf '%s\n' "$drain" | grep -q 'partial' || fail "an unterminated line must not be returned"
+  first_offset=$(printf '%s\n' "$drain" | sed -n '1s/.*"offset":\([0-9]*\).*/\1/p')
+  second_offset=$(printf '%s\n' "$drain" | sed -n '2s/.*"offset":\([0-9]*\).*/\1/p')
+  [ -n "$first_offset" ] && [ -n "$second_offset" ] || fail "drain offsets are missing"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack click-2 "$second_offset" >/dev/null 2>&1; then fail "out-of-order acknowledgement must fail"; fi
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack typed-1 "$second_offset" >/dev/null 2>&1; then fail "mismatched offset must fail"; fi
+  printf 'The release fixes startup.' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" reply typed-1 answer - \
+    || fail "reply should append to outbox"
+  printf 'The release fixes startup.' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" reply typed-1 answer - \
+    || fail "identical retry should be idempotent"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" reply typed-1 fyi 'different reply' >/dev/null 2>&1; then fail "a second different reply must fail"; fi
+  python3 - "$state/.outbox" <<'PY'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+assert len(rows) == 1
+assert rows[0]["in_reply_to"] == "typed-1"
+assert rows[0]["kind"] == "answer"
+assert rows[0]["text"] == "The release fixes startup."
+PY
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack typed-1 "$first_offset" || fail "first row should acknowledge"
+  seen=$(cat "$state/.inbox.seen")
+  [ "$seen" = "$first_offset" ] || fail "acknowledgement cursor should equal the first line end"
+  remaining=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" drain)
+  printf '%s\n' "$remaining" | grep -q '"id":"click-2"' || fail "second row should remain pending"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack click-2 "$second_offset" || fail "second row should acknowledge"
+  pending=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" pending || pending=$?
+  [ "$pending" -eq 1 ] || fail "partial trailing line must not keep the mailbox pending"
+  rm "$state/.inbox.seen"
+  ln -s "$dir/missing" "$state/.inbox.seen"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" drain >/dev/null 2>&1; then fail "symlink cursor must be refused"; fi
+  pass "browser mailbox reads complete rows, orders acknowledgements, and writes correlated replies"
 }
 
 test_signal_catchup_without_running_watcher() {
@@ -3393,6 +3471,8 @@ test_folded_worker_resolved_is_not_owned_lag
 test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
+test_browser_inbox_wakes_without_stealing_acknowledgement
+test_browser_inbox_ordered_protocol
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor
 test_not_working_stale_enqueue_before_suppressor

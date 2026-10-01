@@ -163,9 +163,15 @@ def main(argv: list[str]) -> int:
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
         return 0
-    if len(argv) != 4 or not rows:
+    if len(argv) < 4 or not rows:
         fail("reply requires a pending message id, kind and text")
-    message_id, kind, text = argv[1:]
+    message_id, kind = argv[1:3]
+    if argv[3] == "-":
+        if len(argv) != 4:
+            fail("reply with stdin accepts no additional arguments")
+        text = sys.stdin.read()
+    else:
+        text = " ".join(argv[3:])
     if not valid_message(rows[0][2]) or rows[0][2].get("id") != message_id:
         fail("reply must name the first pending valid message")
     if kind not in ("answer", "proposal", "ready", "decision", "blocked", "fyi") or not text.strip():

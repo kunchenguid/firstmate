@@ -575,6 +575,14 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/web-inbox.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": ".agents/skills/web-inbox/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }
