@@ -131,8 +131,10 @@
 # claim alone cannot settle: a home seeded before bin/fm-home-seed.sh published
 # its own claim still carries the claim of whichever task used the slot before,
 # and completed scouts' stale records still name it. So a slot showing a
-# durable Treehouse lease or a secondmate identity marker or parent binding is
-# never returned, reset, or reaped by an ordinary task: while the claim
+# durable Treehouse lease, or a secondmate identity marker or parent binding
+# while its pool state cannot answer, is never returned, reset, or reaped by an
+# ordinary task; a slot its pool state records unleased is an ordinary slot
+# whatever markers a retired secondmate left in it. While the claim
 # would still make this task its owner, teardown refuses, even with --force,
 # and names bin/fm-home-seed.sh claim-slot when the home's ownership is
 # otherwise proved. Once the claim names the persistent owner that
@@ -2440,7 +2442,8 @@ require_exclusive_task_worktree_slot() {
 }
 
 # Persistent secondmate homes (see the script header). A pool slot showing a
-# durable lease or a secondmate marker is a home no ordinary task may return,
+# durable lease, or a secondmate marker while its pool state cannot answer
+# (fm_treehouse_slot_persistent_evidence), is a home no ordinary task may return,
 # reset, or reap, so a claim that would still make this task its owner (its own
 # or none) refuses, even with --force. Only a positive
 # fm_treehouse_secondmate_slot_proof whose persistent owner the claim already

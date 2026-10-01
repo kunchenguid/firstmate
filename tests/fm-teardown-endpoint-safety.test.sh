@@ -1671,7 +1671,6 @@ test_persistent_home_reconciliation_refuses_unproved_ownership() {
     > "$dir/pool/treehouse-state.json"
   before=$(persistent_home_fingerprint "$dir")
   assert_claim_slot_refused "$dir" "$before" "no durable lease" "lease"
-  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "identity marker without a durable lease"
 
   dir=$(make_persistent_case unproved-pool-state old-scout-a old-scout-a)
   printf 'not json\n' > "$dir/pool/treehouse-state.json"
@@ -1856,6 +1855,63 @@ test_persistent_home_claim_reconciliation_is_idempotent_and_recoverable() {
   pass "fm-home-seed claim-slot: a repeated reconciliation is a no-op and an interrupted one converges without losing prior-claim evidence"
 }
 
+# A retired secondmate's slot goes back to the pool unleased, but Treehouse
+# keeps gitignored files across a return, so its identity marker and parent
+# binding stay in the slot. The next ordinary task the pool hands it to must
+# still tear down and return it; the same markers keep refusing while the pool
+# records a durable lease or cannot answer.
+make_retired_home_slot_case() {  # <name> <task-id>
+  local dir slot home id=$2
+  dir=$(make_case "$1")
+  mark_case_as_treehouse_pool "$dir"
+  slot=$(cd "$dir/pool/1/project" && pwd -P)
+  home=$(cd "$dir/home" && pwd -P)
+  printf '%s\n' "$PERSISTENT_MATE" > "$slot/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$slot/.fm-secondmate-parent"
+  fm_git_init_commit "$slot/projects/harbor" >/dev/null
+  write_persistent_scout "$dir" "$id"
+  claim_pool_slot "$dir" "$id" "$home"
+  printf '%s\n' "$dir"
+}
+
+test_retired_secondmate_markers_do_not_hold_a_reused_slot() {
+  local dir mode before
+
+  for mode in unforced --force; do
+    dir=$(make_retired_home_slot_case "retired-home-reused$mode" next-crew)
+    : > "$dir/runtime.log"
+    if [ "$mode" = --force ]; then
+      run_persistent_teardown "$dir" next-crew --force \
+        || fail "forced teardown of a crewmate in a retired secondmate's slot refused: $(cat "$dir/stderr")"
+    else
+      run_persistent_teardown "$dir" next-crew \
+        || fail "teardown of a crewmate in a retired secondmate's slot refused: $(cat "$dir/stderr")"
+    fi
+    assert_absent "$dir/home/state/next-crew.meta" "$mode reused retired slot: the task record was left"
+    assert_absent "$dir/pool/1/.fm-slot-owner" "$mode reused retired slot: the spent claim was left"
+    grep -Fq "treehouse <return>" "$dir/runtime.log" \
+      || fail "$mode reused retired slot: the pool slot was not returned: $(cat "$dir/runtime.log")"
+  done
+
+  dir=$(make_retired_home_slot_case retired-home-still-leased next-crew)
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$(cd "$dir/pool/1/project" && pwd -P)" "$PERSISTENT_MATE" > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" next-crew "$before" "markers on a still-leased slot" --force
+  assert_contains "$(cat "$dir/stderr")" "persistent secondmate home" \
+    "markers on a still-leased slot: the refusal should name the persistent home"
+
+  dir=$(make_retired_home_slot_case retired-home-unreadable-pool next-crew)
+  printf 'not json\n' > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" next-crew "$before" "markers with an unreadable pool state" --force
+  assert_contains "$(cat "$dir/stderr")" "persistent secondmate home" \
+    "markers with an unreadable pool state: the refusal should name the persistent home"
+
+  pass "fm-teardown: a retired secondmate's leftover markers do not hold a reused unleased slot, while a leased or unreadable pool still refuses"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1883,6 +1939,7 @@ test_reconciled_seeded_home_lets_completed_dead_scouts_finish
 test_persistent_home_reconciliation_refuses_unproved_ownership
 test_persistent_home_cleanup_keeps_completion_and_endpoint_gates
 test_persistent_home_claim_reconciliation_is_idempotent_and_recoverable
+test_retired_secondmate_markers_do_not_hold_a_reused_slot
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot

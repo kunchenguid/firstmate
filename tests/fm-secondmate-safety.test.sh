@@ -2225,7 +2225,19 @@ EOF
   grep -F 'treehouse return' "$log" >/dev/null && fail "forced secondmate teardown returned a persistent-home slot"
   grep -F 'persistent secondmate home' "$err" >/dev/null \
     || fail "forced secondmate teardown did not explain the persistent-home refusal: $(cat "$err")"
-  pass "forced secondmate teardown refuses a child slot that is another secondmate's persistent home"
+
+  # Once that secondmate retires, the pool records the slot unleased while its
+  # gitignored marker stays behind; the child's slot is then ordinary again.
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-persistent-slot-pool/treehouse-state.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-persistent-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "forced secondmate teardown refused a child slot holding only a retired secondmate's marker: $(cat "$err")"
+  grep -F "treehouse return --force $childwt" "$log" >/dev/null \
+    || fail "forced secondmate teardown did not return the child's reused slot: $(cat "$log")"
+  [ ! -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown left the child record"
+  pass "forced secondmate teardown refuses a child slot that is another secondmate's persistent home, and returns it once that home is retired"
 }
 
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {

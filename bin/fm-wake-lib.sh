@@ -1627,11 +1627,18 @@ fm_treehouse_slot_lease_holder() {  # <slot>
 }
 
 # True when a pool slot shows a persistent secondmate home that no ordinary task
-# may ever return: a durable Treehouse lease is held on it, or it carries a
-# secondmate identity marker or parent binding whatever its lease reads.
+# may ever return: a durable Treehouse lease is held on it, or its pool state
+# cannot answer and it carries a secondmate identity marker or parent binding.
+# A slot its pool state records unleased is an ordinary returned slot: Treehouse
+# keeps gitignored files across a return, so a retired secondmate's markers
+# outlive the home they named and prove nothing about the task now using it.
 fm_treehouse_slot_persistent_evidence() {  # <slot>
-  local slot=$1
-  fm_treehouse_slot_lease_holder "$slot" >/dev/null && return 0
+  local slot=$1 rc=0
+  fm_treehouse_slot_lease_holder "$slot" >/dev/null || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+  esac
   [ -e "$slot/.fm-secondmate-home" ] || [ -L "$slot/.fm-secondmate-home" ] \
     || [ -e "$slot/.fm-secondmate-parent" ] || [ -L "$slot/.fm-secondmate-parent" ]
 }
