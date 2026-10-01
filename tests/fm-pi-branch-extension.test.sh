@@ -6049,7 +6049,7 @@ test_compact_progress_drives_branch_same_worker_continuation() {
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
 const { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
-const { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, writeFileSync } = await import("node:fs");
+const { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
 
 mkdirSync(`${home}/state`, { recursive: true });
@@ -6065,6 +6065,14 @@ case "$1 $2" in
 esac
 `);
 chmodSync(`${home}/fakebin/herdr`, 0o755);
+mkdirSync(`${home}/handoff-fail-bin`, { recursive: true });
+writeFileSync(`${home}/handoff-fail-bin/mv`, `#!/bin/sh
+if [ "\$2" = "${home}/state/task-handoffs/status/viewer-to-other-r1.state" ] && grep -q '^state=delivered$' "\$1"; then
+  exit 1
+fi
+exec /bin/mv "\$@"
+`);
+chmodSync(`${home}/handoff-fail-bin/mv`, 0o755);
 process.env.PATH = `${home}/fakebin:${process.env.PATH}`;
 const run = (script, args, actor = "main", extra = {}) => spawnSync(`${realRoot}/bin/${script}`, args, {
   encoding: "utf8",
@@ -6164,7 +6172,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     : promptCount === 4
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
       : promptCount === 5
-        ? `${realRoot}/bin/fm-task-handoff.sh send viewer other --id viewer-to-other-r1 'Continue the already-approved dependent step.'; exit 9`
+        ? `PATH=${home}/handoff-fail-bin:"$PATH" ${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r1`
         : promptCount === 6 ? "" :
         `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
@@ -6345,14 +6353,23 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(handoff)]);
 if (result.status !== 0) throw new Error(`MAIN handoff progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+writeFileSync(`${home}/state/.lease-other`, `branch\t${process.ppid}\t${Math.floor(Date.now() / 1000)}\n`);
+const preparedHandoff = run("fm-task-handoff.sh", ["send", "viewer", "other", "--id", "viewer-to-other-r1",
+  "Continue the already-approved dependent step."]);
+if (preparedHandoff.status !== 6 ||
+    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=retryable-refusal")) {
+  throw new Error(`handoff fixture did not retain a retryable record: ${preparedHandoff.stderr}`);
+}
+rmSync(`${home}/state/.lease-other`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 5 &&
-  routed.filter((item) => item.command.includes("fm-task-handoff.sh send viewer other")).length === 1 &&
+  routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length === 1 &&
   sentToMain.length === beforeMain + 5,
   "arbitrary-id handoff continuation");
 if (!readFileSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`, "utf8").includes("Continue the already-approved dependent step") ||
-    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=delivered")) {
-  throw new Error("arbitrary-id handoff owner did not publish its durable receipt");
+    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=retryable-refusal") ||
+    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
+  throw new Error("partially completed handoff did not retain its durable inbox receipt");
 }
 if (!sentToMain.at(-1)?.message?.content?.includes("approved cross-task handoff reached the existing worker")) {
   throw new Error(`arbitrary-id handoff state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
@@ -6362,6 +6379,11 @@ writeFileSync(`${home}/state/viewer.child.meta`, "spawn_gen=child-g1\nkind=ship\
 writeFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task started\n");
 mkdirSync(`${home}/data/viewer/artifacts`, { recursive: true });
 writeFileSync(`${home}/data/viewer/artifacts/build.log`, "initial artifact bytes\n");
+for (let index = 0; index < 257; index += 1) {
+  const id = `historical-${String(index).padStart(3, "0")}`;
+  writeFileSync(`${home}/state/task-handoffs/records/${id}.msg`,
+    `schema=fm-task-handoff.v1\nid=${id}\nfrom=archive-source\ntarget=archive-target\n--\nhistorical handoff\n`);
+}
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const quiet = { ...handoff,
@@ -6399,12 +6421,12 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 if (promptCount !== 6 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
-    routed.filter((item) => item.command.includes("fm-task-handoff.sh send viewer other")).length !== 1 ||
+    routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length !== 1 ||
     sentToMain.length !== beforeMain + 5) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation delivered exact owner changes to MAIN, kept read-only and unchanged failures quiet, isolated task identities, and stopped only after MAIN acceptance");
+console.log("compact continuation delivered partial handoff effects to MAIN and kept oversized unchanged owner state quiet");
 process.exit(0);
 EOF
   status=$?

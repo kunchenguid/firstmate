@@ -736,6 +736,7 @@ export default function (pi: ExtensionAPI) {
         join(data, task, "report.md"),
       ];
       let handoffNames: string[] = [];
+      let handoffOverflow = false;
       let handoffDirectory: Dir | undefined;
       try {
         handoffDirectory = await opendirAsync(handoffRecords);
@@ -747,13 +748,20 @@ export default function (pi: ExtensionAPI) {
           for (let count = 0; ; count += 1) {
             const entry = await handoffDirectory.read();
             if (!entry) break;
-            if (count >= 256) throw new Error("too many task handoffs");
+            if (count >= 256) {
+              handoffOverflow = true;
+              break;
+            }
             if (entry.name.endsWith(".msg")) handoffNames.push(entry.name);
           }
         } finally {
           await handoffDirectory.close();
         }
         handoffNames.sort();
+      }
+      if (handoffOverflow) {
+        handoffNames = [];
+        paths.push(handoffRecords, handoffStatus);
       }
       for (const name of handoffNames) {
         const id = name.slice(0, -4);
@@ -775,10 +783,14 @@ export default function (pi: ExtensionAPI) {
           const separator = line.indexOf("=");
           if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
         }
+        const source = header.get("from") || "";
+        const target = header.get("target") || "";
         if (header.get("schema") !== "fm-task-handoff.v1" || header.get("id") !== id ||
-            !header.has("from") || !header.has("target")) throw new Error("invalid task handoff record");
-        if (header.get("from") === task || header.get("target") === task) {
-          paths.push(record, join(handoffStatus, `${id}.state`));
+            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(source) ||
+            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(target)) throw new Error("invalid task handoff record");
+        if (source === task || target === task) {
+          paths.push(record, join(handoffStatus, `${id}.state`),
+            join(state, `${target}.inbox`), join(state, `${target}.inbox`, "handled"));
         }
       }
       const entries = await Promise.all(paths.map(async (path) => {
