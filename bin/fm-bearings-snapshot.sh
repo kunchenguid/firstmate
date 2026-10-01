@@ -522,10 +522,14 @@ elif [ -n "$PROJECTS_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
       _sha=$(fm_run_timed 5 git -C "$_clone" rev-parse --short HEAD 2>/dev/null) || _sha=""
       _branch="(detached ${_sha:-unknown})"
     fi
-    if fm_run_timed 10 git -C "$_clone" status --porcelain 2>/dev/null | grep -q '[^[:space:]]'; then
-      _clean=false
+    if _status_out=$(fm_run_timed 10 git -C "$_clone" status --porcelain 2>/dev/null); then
+      if printf '%s' "$_status_out" | grep -q '[^[:space:]]'; then
+        _clean=false
+      else
+        _clean=true
+      fi
     else
-      _clean=true
+      _clean=null
     fi
     printf '%s\t%s\t%s\n' "$_proj" "$_branch" "$_clean" >> "$live_branches"
   done
