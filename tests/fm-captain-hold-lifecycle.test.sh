@@ -4358,12 +4358,6 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit $?
-fi
-
-
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
 test_hold_reason_round_trips_awkward_characters
