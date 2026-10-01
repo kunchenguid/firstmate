@@ -660,11 +660,12 @@ start_successor() {  # <predecessor-arm-pid>
 }
 
 # Record the successor for the next host to take over, then drop it from this
-# host's cleanup without stopping it. A successor that cannot be recorded stays
-# tracked, so the cleanup stops it and main's next turn end arms a fresh cycle;
-# that returns 1. The shell signals background jobs when it exits, and this
-# arm's handler would then stop the watcher, so disown it first. The capture
-# file stays tracked so the EXIT trap unlinks it; the arm already holds that
+# host's cleanup without stopping it. A successor whose record does not read
+# back as a regular file holding exactly its pid and identity stays tracked,
+# so the cleanup stops it and main's next turn end arms a fresh cycle; that
+# returns 1. The shell signals background jobs when it exits, and this arm's
+# handler would then stop the watcher, so disown it first. The capture file
+# stays tracked so the EXIT trap unlinks it; the arm already holds that
 # descriptor and keeps waiting on the watcher.
 detach_successor() {
   local identity tmp=
@@ -672,8 +673,10 @@ detach_successor() {
   identity=$(identity_of "$SUCCESSOR_PID")
   if [ -z "$identity" ] || ! tmp=$(mktemp "$LEFT_RECORD.tmp.XXXXXX" 2>/dev/null) \
     || ! printf '%s\t%s\n' "$SUCCESSOR_PID" "$identity" > "$tmp" 2>/dev/null \
-    || ! mv -f "$tmp" "$LEFT_RECORD" 2>/dev/null; then
-    [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+    || ! mv -f "$tmp" "$LEFT_RECORD" 2>/dev/null \
+    || [ -L "$LEFT_RECORD" ] || [ ! -f "$LEFT_RECORD" ] \
+    || [ "$(cat "$LEFT_RECORD" 2>/dev/null)" != "$SUCCESSOR_PID"$'\t'"$identity" ]; then
+    [ -z "$tmp" ] || rm -f "$tmp" "$LEFT_RECORD/${tmp##*/}" 2>/dev/null || true
     log_line "pass-through	successor-unrecorded	$(printf '%s\n' "$REASON" | head -n 1)"
     return 1
   fi

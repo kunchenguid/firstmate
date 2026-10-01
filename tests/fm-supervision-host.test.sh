@@ -1457,14 +1457,13 @@ test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park() {
 no_home_arms() { [ -z "$(home_arms "$1")" ]; }
 
 # A successor the host cannot record for the next park's take-over (here the
-# record path is an unwritable directory) must not be left running: the host
-# stops it on exit, the close still reaches main unchanged, and main's next
-# turn end owns a fresh cycle with no orphan beside it.
+# record path is a directory the record would land inside) must not be left
+# running: the host stops it on exit, the close still reaches main unchanged,
+# and main's next turn end owns a fresh cycle with no orphan beside it.
 test_unrecorded_successor_is_stopped_rather_than_left_for_main() {
   local home
   home=$(make_primary_home hook-successor-unrecorded)
   mkdir "$home/state/.supervision-host-left"
-  chmod 555 "$home/state/.supervision-host-left"
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "unrecorded successor: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
@@ -1475,8 +1474,8 @@ test_unrecorded_successor_is_stopped_rather_than_left_for_main() {
   assert_rewoke_main "$home" "unrecorded successor (pass-through)"
   assert_re '^signal: .*demo.status' "$home/hook.err" "unrecorded successor: the close must carry the watcher's reason line"
   wait_until 100 no_home_arms "$home" || fail "unrecorded successor: an arm outlived the host:"$'\n'"$(home_arms "$home")"
-  chmod 755 "$home/state/.supervision-host-left"
-  rmdir "$home/state/.supervision-host-left"
+  rmdir "$home/state/.supervision-host-left" \
+    || fail "unrecorded successor: the record left inside the directory was not removed: $(ls -A "$home/state/.supervision-host-left")"
   main_drain "$home" >/dev/null
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
   [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
