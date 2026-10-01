@@ -967,18 +967,56 @@ JS
   pass "Pi retains a bounded digest prefix and loudly marks oversized preflight delivery"
 }
 
-test_run_resume_delegates_to_the_nudge() {
-  local root="$TMP_ROOT/run-resume" out status=0
+# A live verified harness outside this test's ancestry, holding a home lock the
+# way another attended session would.
+start_foreign_harness() {  # <dir>; prints the harness pid
+  local dir=$1
+  mkdir -p "$dir"
+  ln -sf /bin/bash "$dir/codex"
+  "$dir/codex" -c 'sleep 60' >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+# A herdr-restored or otherwise unattended resume has no person to act on a
+# nudge. With no live lock owner, the restored session takes the helm itself.
+test_run_resume_without_a_live_owner_takes_the_helm() {
+  local root out status source
+  for source in resume reload fork; do
+    root="$TMP_ROOT/run-$source-unowned"
+    make_run_primary "$root"
+    status=0
+    out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
+    expect_code 0 "$status" "run wrapper $source with no lock"
+    assert_contains "$out" "$FULL_BANNER$root" "$source with no lock did not take the helm"
+    assert_not_contains "$out" "FIRSTMATE_OP" "$source with no lock also emitted the nudge"
+    assert_present "$root/state/.lock" "$source with no lock did not acquire the fleet lock"
+  done
+  root="$TMP_ROOT/run-resume-stale"
   make_run_primary "$root"
+  printf '%s\n' 2147483646 > "$root/state/.lock"
+  status=0
   out=$(run_hook "$root" --source resume </dev/null) || status=$?
-  expect_code 0 "$status" "run wrapper resume"
-  [ "$out" = "$NUDGE_LINE" ] || fail "resume did not delegate to the exact nudge line, got: $out"
-  assert_absent "$root/state/.lock" "resume acquired the fleet lock instead of delegating"
-  pass "run wrapper: resume delegates to the nudge instead of re-running the digest"
+  expect_code 0 "$status" "run wrapper resume with a stale lock"
+  assert_contains "$out" "$FULL_BANNER$root" "resume over a dead lock owner did not take the helm"
+  [ "$(cat "$root/state/.lock")" != 2147483646 ] || fail "resume over a dead lock owner left the stale lock"
+  pass "run wrapper: resume, reload and fork with no live lock owner take the helm"
+}
+
+test_run_resume_with_a_live_foreign_owner_nudges() {
+  local root="$TMP_ROOT/run-resume-foreign" out status=0 holder
+  make_run_primary "$root"
+  holder=$(start_foreign_harness "$TMP_ROOT/foreign-harness")
+  printf '%s\n' "$holder" > "$root/state/.lock"
+  out=$(run_hook "$root" --source resume </dev/null) || status=$?
+  kill "$holder" 2>/dev/null || true
+  expect_code 0 "$status" "run wrapper resume under a live foreign owner"
+  [ "$out" = "$NUDGE_LINE" ] || fail "resume under a live foreign owner did not delegate to the nudge, got: $out"
+  [ "$(cat "$root/state/.lock")" = "$holder" ] || fail "resume took a lock another live session holds"
+  pass "run wrapper: resume while another live session holds the lock delegates to the nudge"
 }
 
 test_run_reads_source_from_the_hook_payload() {
-  local root="$TMP_ROOT/run-payload" out status=0
+  local root="$TMP_ROOT/run-payload" out status=0 holder
   make_run_primary "$root"
   run_hook "$root" --source startup </dev/null >/dev/null
   out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
@@ -986,12 +1024,15 @@ test_run_reads_source_from_the_hook_payload() {
   expect_code 0 "$status" "run wrapper payload compact"
   assert_contains "$out" "$REEMIT_BANNER$root" "a compact hook payload was not routed to a re-emit"
 
-  # A fresh root, because the compact case above legitimately took the lock and
-  # an owned lock is exactly when the nudge is supposed to stay silent.
+  # A fresh root under a live foreign owner, because an owned lock keeps the
+  # nudge silent and a free one now takes the helm.
   root="$TMP_ROOT/run-payload-resume"
   make_run_primary "$root"
+  holder=$(start_foreign_harness "$TMP_ROOT/foreign-harness-payload")
+  printf '%s\n' "$holder" > "$root/state/.lock"
   status=0
   out=$(printf '{"source":"resume","cwd":"/nowhere"}' | run_hook "$root") || status=$?
+  kill "$holder" 2>/dev/null || true
   expect_code 0 "$status" "run wrapper payload resume"
   assert_contains "$out" "FIRSTMATE_OP" "a resume hook payload did not delegate to the nudge"
   assert_not_contains "$out" "SESSION START" "a resume hook payload still ran the digest"
@@ -1109,7 +1150,8 @@ test_run_rebuild_forwards_source_to_drifted_instruction_refresh
 test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
-test_run_resume_delegates_to_the_nudge
+test_run_resume_without_a_live_owner_takes_the_helm
+test_run_resume_with_a_live_foreign_owner_nudges
 test_run_reads_source_from_the_hook_payload
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent

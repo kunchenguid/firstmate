@@ -69,15 +69,16 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
 | `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
-| `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
+| `resume`, `reload`, `fork` | Full digest when the lock is free or stale; otherwise delegate to the nudge wrapper | A new process that resumed an old session with no live lock owner is usually an unattended restore (a Herdr server restart or a reboot relaunching each pane on its saved session), where no one is present to act on a nudge and no watcher can create a turn until the lock is taken. When the lock is still ours, re-running is redundant and the nudge stays silent; when another live session holds it, the nudge asks for a manual start. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
 ### Change from the previous nudge matcher
 
 This routing deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
+Compaction is covered where a tracked adapter delivers that source because a compacted session has lost exactly the digest it needs. Resume keeps its restored digest and runs a new one only when it must also take the helm, because no live session holds the lock.
 
-- Compaction is covered where a tracked adapter delivers that source, because a compacted session has lost exactly the digest it needs.
-- Resume is excluded from the run because it restores that digest instead of losing it.
+On Pi, `.pi/extensions/fm-primary-pi-watch.ts` arms the watcher as soon as this session owns the lock, polling for a bounded window (`FM_PI_ARM_LOCK_POLL_MS`, `FM_PI_ARM_LOCK_WAIT_MS`) after `session_start`, so a restored primary resumes supervision with no model turn; it never takes the lock itself.
+After a background Claude helper-chain recycle breaks that ancestry, the wrapper may emit a redundant nudge even though the shared same-session verdict still owns the lock; the requested session start remains idempotent.
 
 ### Lock and completion interlock
 
@@ -398,7 +399,7 @@ It proves a fresh primary whose state directory cannot be created reports that o
 It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
 
 - Completion-gated `--reemit` selection.
-- Resume delegation.
+- Resume taking the helm over a free or stale lock and delegating under a live owner.
 - Pi CLI continuation classification.
 - An unrecognized source falling through to the full digest.
 - Bounded loud delivery of an oversized Pi digest.

@@ -117,6 +117,7 @@ type SessionGeneration = {
   // still delivering the wake it was started for; its bounded retry runs once
   // that delivery settles instead of being skipped by the single-flight guard.
   deferredClose: { message: string; predecessorArmPid: string } | null;
+  lockWaitTimer: ReturnType<typeof setInterval> | null;
 };
 
 function refreshWatchToolShell(
@@ -155,6 +156,11 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// After session_start, how often and for how long to look for this session
+// taking the lock. A restored session takes it from a background session-start
+// run that finishes after session_start, and nothing else would arm it.
+const lockPollMs = positiveInteger("FM_PI_ARM_LOCK_POLL_MS", 1000);
+const lockWaitMs = positiveInteger("FM_PI_ARM_LOCK_WAIT_MS", 900_000);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -525,6 +531,7 @@ function createGeneration(): SessionGeneration {
     cleanupFailure: "",
     unconsumedWakes: new Map(),
     deferredClose: null,
+    lockWaitTimer: null,
   };
 }
 
@@ -538,6 +545,8 @@ function generationIsLive(generation: SessionGeneration): boolean {
 
 function relinquishGeneration(generation: SessionGeneration): void {
   generation.stopping = true;
+  if (generation.lockWaitTimer) clearInterval(generation.lockWaitTimer);
+  generation.lockWaitTimer = null;
   if (generation.retryTimer) clearTimeout(generation.retryTimer);
   if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
   generation.retryTimer = null;
@@ -1207,10 +1216,32 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(event.message.content));
   });
 
+  // Arms once this session owns the lock. Polls only until then, within a
+  // bound, and never takes the lock itself: session start owns acquisition.
+  function armWhenLockOwned(owner: SessionGeneration): void {
+    if (owner.lockWaitTimer) return;
+    const deadline = Date.now() + lockWaitMs;
+    owner.lockWaitTimer = setInterval(() => {
+      if (!generationIsLive(owner) || Date.now() > deadline) {
+        if (owner.lockWaitTimer) clearInterval(owner.lockWaitTimer);
+        owner.lockWaitTimer = null;
+        return;
+      }
+      if (lockOwnership() !== "owned") return;
+      if (owner.lockWaitTimer) clearInterval(owner.lockWaitTimer);
+      owner.lockWaitTimer = null;
+      activateOwnedWatch(owner);
+    }, lockPollMs);
+    owner.lockWaitTimer.unref?.();
+  }
+
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
-    if (lockOwnership() !== "owned") return;
+    if (lockOwnership() !== "owned") {
+      armWhenLockOwned(generation);
+      return;
+    }
     activateOwnedWatch(generation);
   });
   pi.on?.("session_shutdown", async (event) => {

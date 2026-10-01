@@ -28,11 +28,13 @@
 #   clear, compact          `--reemit` digest only when this lock owner recorded
 #                           a completed full startup; otherwise a full digest,
 #                           so a startup killed mid-sweep is finished first
-#   resume, reload, fork    delegate to the nudge wrapper. Prior context is
-#                           restored on these, so re-running is redundant when
-#                           this process still holds the lock (the nudge stays
-#                           silent) and a plain instruction is enough when a new
-#                           process resumed an old session (the nudge fires).
+#   resume, reload, fork    full digest when no live session holds the lock
+#                           (free or stale): an unattended restore, such as a
+#                           herdr server restart, must take the helm without
+#                           waiting for a person to prompt. Otherwise delegate
+#                           to the nudge wrapper, which stays silent when this
+#                           process still holds the lock and asks for a manual
+#                           start when another live session holds it.
 #
 # Every ordinary transport path exits 0, exactly like the nudge wrapper: a
 # Claude SessionStart exit 2 blocks session initialization, so a failed session
@@ -137,8 +139,26 @@ if [ -z "$SOURCE" ] && [ ! -t 0 ]; then
   ')
 fi
 
+# A restored session with no live lock owner has nobody to act on a nudge: a
+# herdr server restart, a reboot, or any other unattended relaunch resumes the
+# primary's last session file and then waits for a prompt that may never come,
+# with no watcher armed to create one. Taking the helm here is the startup
+# behavior. A lock another live session holds, or one that cannot be
+# classified, keeps the nudge, which stays silent when this process owns it.
+resume_has_no_live_owner() {
+  fm_session_lock_inspect "$STATE"
+  case "$FM_LOCK_INSPECT_STATE" in
+    free|stale) return 0 ;;
+  esac
+  return 1
+}
+
 case "$SOURCE" in
   resume|reload|fork)
+    if resume_has_no_live_owner; then
+      "$SCRIPT_DIR/fm-session-start.sh" --source "$SOURCE" || true
+      exit 0
+    fi
     exec "$SCRIPT_DIR/fm-sessionstart-nudge.sh"
     ;;
   clear|compact)

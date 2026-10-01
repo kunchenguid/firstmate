@@ -214,6 +214,66 @@ EOF
   pass "Pi custom tool exposes repair-only metadata and returns automatic-continuation guidance"
 }
 
+# An unattended restore runs session start in the background after session_start
+# fires, so the lock is not yet this session's when the extension activates. The
+# extension must arm as soon as it is, with no model turn; it must not arm while
+# another live session holds the lock.
+test_pi_arms_when_session_start_takes_the_lock_later() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-late-lock-root"
+  home="$TMP_ROOT/pi-late-lock-home"
+  log="$TMP_ROOT/pi-late-lock.log"
+  stop="$TMP_ROOT/pi-late-lock.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+    FM_PI_ARM_LOCK_POLL_MS=20 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const handlers = {};
+const pi = {
+  on(name, handler) { (handlers[name] ??= []).push(handler); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const lock = `${process.env.FM_HOME}/state/.lock`;
+const other = spawn("sleep", ["30"], { stdio: "ignore" });
+writeFileSync(lock, `${other.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+for (const handler of handlers.session_start) await handler({ reason: "startup" }, {});
+await sleep(200);
+if (existsSync(process.env.FM_ARM_LOG)) throw new Error("armed while another live session held the lock");
+other.kill();
+writeFileSync(lock, `${process.pid}\n`);
+for (let i = 0; i < 200 && !existsSync(process.env.FM_ARM_LOG); i += 1) await sleep(10);
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("did not arm after session start took the lock");
+await sleep(200);
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 1) throw new Error(`late lock spawned ${rows.length} arm children`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+for (const handler of handlers.session_shutdown ?? []) await handler({ reason: "quit" }, {});
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must arm once when session start takes the lock after session_start"
+  [ -z "$out" ] || fail "Pi late-lock test printed output: $out"
+  pass "Pi extension arms once the restored session takes the lock, and never under another live owner"
+}
+
 test_pi_redundant_tool_call_is_owned_noop() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-redundant-tool-root"
@@ -5183,6 +5243,7 @@ EOF
 
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
+test_pi_arms_when_session_start_takes_the_lock_later
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
