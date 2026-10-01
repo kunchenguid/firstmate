@@ -1,0 +1,160 @@
+{
+  "$schema": "https://unpkg.com/opencode-swarm@7.187.3/opencode-swarm.schema.json",
+  "agents": {
+    "explorer": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "coder": {
+      "model": "opencode/minimax-m2.5-free",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "reviewer": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "test_engineer": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "sme": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "researcher": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_sounding_board": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_drift_verifier": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_hallucination_verifier": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_oversight": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_architecture_supervisor": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "critic_finding_validator": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "docs": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "docs_design": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "designer": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "curator_init": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "curator_phase": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "curator_postmortem": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "curator_consolidation": {
+      "model": "opencode/gpt-5-nano",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "skill_improver": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    },
+    "spec_writer": {
+      "model": "opencode/big-pickle",
+      "fallback_models": [
+        "opencode/gpt-5-nano",
+        "opencode/big-pickle"
+      ]
+    }
+  },
+  "max_iterations": 5
+}

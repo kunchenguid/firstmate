@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "extractorStamp": "c053829b0c030d16304d144884d55340a331e97419fd4f65986ab64c9da8f9df",
+  "exclusionStamp": "cceddb84f07166eb48fa3314cdb4ef68e65c367692eed22b40d7163525bc2198",
+  "files": {
+    ".claude/mods/firstmate-calm/hooks/register.ts": {
+      "size": 20027,
+      "mtimeMs": 1790811495695.877
+    },
+    ".claude/mods/firstmate-calm/lib/fm-branch-notes.ts": {
+      "size": 8349,
+      "mtimeMs": 1790811495695.877
+    },
+    ".claude/mods/firstmate-calm/lib/fm-calm-presentation.ts": {
+      "size": 6749,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/lib/fm-calm-preservation.ts": {
+      "size": 613,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/lib/fm-calm-ship-raster.ts": {
+      "size": 6133,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts": {
+      "size": 11899,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/lib/fm-operational-input.ts": {
+      "size": 6199,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/tests/branch-notes.test.ts": {
+      "size": 7763,
+      "mtimeMs": 1790811495696.0967
+    },
+    ".claude/mods/firstmate-calm/tests/calm.test.ts": {
+      "size": 22786,
+      "mtimeMs": 1790811495696.475
+    },
+    ".claude/mods/firstmate-calm/tests/support.ts": {
+      "size": 12690,
+      "mtimeMs": 1790811495696.475
+    },
+    ".claude/mods/firstmate-calm/tests/working-ship.test.ts": {
+      "size": 10432,
+      "mtimeMs": 1790811495696.475
+    },
+    ".omp/extensions/fm-primary-omp-watch.ts": {
+      "size": 48578,
+      "mtimeMs": 1790811495697.4915
+    },
+    ".omp/extensions/fm-primary-turnend-guard.ts": {
+      "size": 22835,
+      "mtimeMs": 1790811495697.798
+    },
+    ".opencode/plugins/fm-primary-cd-check.js": {
+      "size": 2356,
+      "mtimeMs": 1790811495697.996
+    },
+    ".opencode/plugins/fm-primary-pretool-check.js": {
+      "size": 2346,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".opencode/plugins/fm-primary-sessionstart-nudge.js": {
+      "size": 1826,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".opencode/plugins/fm-primary-turnend-guard.js": {
+      "size": 2901,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".opencode/plugins/fm-primary-watch-arm.js": {
+      "size": 21661,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".opencode/plugins/lib/fm-operational-input.js": {
+      "size": 1470,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".opencode/plugins/package.json": {
+      "size": 42,
+      "mtimeMs": 1790811495698.0505
+    },
+    ".pi/extensions/fm-branch-supervision.ts": {
+      "size": 115905,
+      "mtimeMs": 1790811495698.3545
+    },
+    ".pi/extensions/fm-calm.ts": {
+      "size": 21375,
+      "mtimeMs": 1790811495699.0393
+    },
+    ".pi/extensions/fm-primary-pi-watch.ts": {
+      "size": 48455,
+      "mtimeMs": 1790811495699.0393
+    },
+    ".pi/extensions/fm-primary-turnend-guard.ts": {
+      "size": 21261,
+      "mtimeMs": 1790811495699.0393
+    },
+    ".pi/extensions/lib/fm-async-exec.ts": {
+      "size": 3766,
+      "mtimeMs": 1790811495699.0393
+    },
+    ".pi/extensions/lib/fm-branch-dispatch.ts": {
+      "size": 34267,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-branch-model-picker.ts": {
+      "size": 3082,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-calm-assistant-layout.ts": {
+      "size": 4509,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-calm-operational-user-layout.ts": {
+      "size": 4937,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-calm-pending-operational-layout.ts": {
+      "size": 13971,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-calm-visibility.ts": {
+      "size": 3224,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-calm-working-ship.ts": {
+      "size": 4832,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-native-contract.ts": {
+      "size": 1575,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-operational-input.ts": {
+      "size": 4924,
+      "mtimeMs": 1790811495699.579
+    },
+    ".pi/extensions/lib/fm-sessionstart-supervisor.mjs": {
+      "size": 1020,
+      "mtimeMs": 1790811495699.579
+    },
+    "bin/backends/herdr-eventwait.py": {
+      "size": 5536,
+      "mtimeMs": 1790811495709.984
+    },
+    "bin/backends/herdr-workspace-move.py": {
+      "size": 3420,
+      "mtimeMs": 1790811495709.984
+    },
+    "bin/fm_voice_frame.py": {
+      "size": 6200,
+      "mtimeMs": 1790811495745.0144
+    },
+    "bin/fm_voice_records.py": {
+      "size": 24886,
+      "mtimeMs": 1790811495745.0144
+    },
+    "bin/fm-arm-command-policy.mjs": {
+      "size": 38677,
+      "mtimeMs": 1790811495712.0146
+    },
+    "bin/fm-branch-dispatch.mjs": {
+      "size": 5605,
+      "mtimeMs": 1790811495714.0146
+    },
+    "bin/fm-cd-command-policy.mjs": {
+      "size": 6057,
+      "mtimeMs": 1790811495716.0146
+    },
+    "bin/fm-extension-launch-barrier.mjs": {
+      "size": 4883,
+      "mtimeMs": 1790811495720.0146
+    },
+    "bin/fm-extension.mjs": {
+      "size": 128454,
+      "mtimeMs": 1790811495721.0146
+    },
+    "bin/fm-herdr-lab-viewer.py": {
+      "size": 6743,
+      "mtimeMs": 1790811495722.0146
+    },
+    "bin/fm-jev-mem-guard.py": {
+      "size": 9488,
+      "mtimeMs": 1790811495724.0144
+    },
+    "bin/fm-mail.py": {
+      "size": 20334,
+      "mtimeMs": 1790811495725.0144
+    },
+    "bin/fm-voice-client.py": {
+      "size": 67302,
+      "mtimeMs": 1790811495741.0144
+    },
+    "bin/fm-voice-relay.py": {
+      "size": 58730,
+      "mtimeMs": 1790811495741.0144
+    },
+    "docs/examples/process-event-extension/file-signal.mjs": {
+      "size": 3314,
+      "mtimeMs": 1790811495749.902
+    },
+    "tests/assets/board-render-harness.mjs": {
+      "size": 4585,
+      "mtimeMs": 1790811495757.5408
+    },
+    "tests/fm-backend-herdr-eventwait.test.py": {
+      "size": 3023,
+      "mtimeMs": 1790811495760.0144
+    },
+    "tests/fm-turnend-foreign-owner-repro.py": {
+      "size": 12494,
+      "mtimeMs": 1790811495806.0142
+    }
+  }
+}

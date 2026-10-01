@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codebase Review Swarm"
+  short_description: "Evidence-gated full-repo audit with Phase 0 inventory, non-diluting selected-track depth, coverage closure, reviewer/critic validation, and .swarm artifacts."
+  default_prompt: "Use $codebase-review-swarm to run a quote-grounded codebase review. Begin at repository root with Phase 0 inventory."
+policy:
+  allow_implicit_invocation: false
