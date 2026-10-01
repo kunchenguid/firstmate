@@ -28,6 +28,8 @@ Binding to every interface can expose private conversations, tool output, and th
 
 Open `http://SERVER:17847/`, enter the token in the page, and choose the task dashboard, a journal, or a task report.
 The dashboard separates processing, waiting or blocked, completed, and archived or cancelled tasks.
+`Processing` counts tasks marked active, in flight, or working only when no hold condition applies.
+`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or need lifecycle reconciliation, so they are excluded from `Processing` even if another current record still says working.
 Each task opens its canonical Markdown report when present, otherwise its canonical brief, and labels which document type is shown.
 Tasks with a canonical report also provide an explicit Open task report action that switches to the report view without changing the canonical task identity.
 The page sends the token only in the `Authorization` header for protected APIs.
@@ -38,7 +40,9 @@ If browser storage is unavailable, login still works for the current page and th
 Rejected or expired saved credentials are removed instead of being retried.
 The page starts from a clearly labelled recent tail for a large journal, can reload from byte zero, supports text and role/type filters, and polls for complete appended lines without a page reload.
 Task status and selected task documents refresh automatically while dashboard refresh is enabled.
-Repeated task overview reads within a short bounded freshness window reuse the last successful snapshot and show the cache age while preserving the authoritative snapshot and visible errors.
+Before the first task snapshot succeeds, counts show dashes instead of authoritative zeros, and the task lists distinguish loading and failure from a genuinely empty category.
+Background task refresh keeps the last loaded counts and selection visible, while session selection and journal event reads remain available during task loading.
+Repeated task overview reads within a short bounded freshness window reuse the last successful snapshot and show the cache age, while refresh failures remain visible without replacing the last successful task data.
 All reader-facing timestamps are rendered in the fixed Asia/Shanghai time zone and labelled UTC+8; stored timestamps remain unchanged.
 Standalone task reports are labelled by task and refresh automatically while follow mode is enabled.
 Rendered reports and task briefs support headings, paragraphs, lists, blockquotes, tables, fenced code, and safe web or email links, with the complete plain source available below them.
