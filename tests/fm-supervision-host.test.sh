@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Behavior tests for the supervision host (bin/fm-supervision-host.sh,
 # docs/supervision-host.md): its report surface (bin/fm-branch-report.sh), its
-# dispatch entry (bin/fm-branch-dispatch.mjs), and the host loop itself.
+# dispatch entry (bin/fm-branch-dispatch.mjs), engine result accounting for
+# standalone objects and verbose event arrays, and the host loop itself.
 #
 # The loop cases run the real host, arm, watcher, wake grant, drain, outcome
 # store, and lease scripts in a fixture home. The host runs as a child of a fake
@@ -2621,7 +2622,57 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+test_engine_result_objects_and_verbose_arrays() {
+  local fixture="$TMP_ROOT/engine-result.json" actual variant
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$ROOT/bin/fm-supervision-engine-lib.sh"
+  node -e '
+    const fs = require("node:fs");
+    const result = {type: "result", subtype: "success", is_error: false,
+      total_cost_usd: 1.25, num_turns: 3, usage: {input_tokens: 11,
+        cache_read_input_tokens: 22, cache_creation_input_tokens: 33, output_tokens: 44}};
+    fs.writeFileSync(process.argv[1], JSON.stringify(result));
+  ' "$fixture"
+  actual=$(fm_supervision_engine_result claude "$fixture" 0.5) || fail "plain result could not be read"
+  [ "$actual" = 'error=0 cost=0.75 conversation_cost=1.25 input=11 cache_read=22 cache_write=33 output=44 turns=3' ] \
+    || fail "plain result accounting: $actual"
+  for variant in success missing subtype is-error incomplete trailing; do
+    node -e '
+      const fs = require("node:fs");
+      const success = {type: "result", subtype: "success", is_error: false,
+        total_cost_usd: 1.25, num_turns: 3, usage: {input_tokens: 11,
+          cache_read_input_tokens: 22, cache_creation_input_tokens: 33, output_tokens: 44}};
+      const final = JSON.parse(JSON.stringify(success));
+      const variant = process.argv[2];
+      const events = [null, {type: "system"}, success];
+      if (variant === "missing") events.pop();
+      if (variant === "subtype") final.subtype = "error_during_execution";
+      if (variant === "is-error") final.is_error = true;
+      if (variant === "incomplete") delete final.usage.output_tokens;
+      if (["subtype", "is-error", "incomplete"].includes(variant)) events.push(final);
+      if (variant === "trailing") events.push({type: "system"}, null);
+      fs.writeFileSync(process.argv[1], JSON.stringify(events));
+    ' "$fixture" "$variant"
+    actual=$(fm_supervision_engine_result claude "$fixture" 0.5) || fail "$variant array could not be read"
+    case "$variant" in
+      success|trailing)
+        [ "$actual" = 'error=0 cost=0.75 conversation_cost=1.25 input=11 cache_read=22 cache_write=33 output=44 turns=3' ] \
+          || fail "$variant array accounting: $actual"
+        ;;
+      missing)
+        [ "$actual" = 'error=1 cost=0 conversation_cost=0 input=0 cache_read=0 cache_write=0 output=0 turns=0' ] \
+          || fail "missing result accounting: $actual"
+        ;;
+      *)
+        case "$actual" in error=1\ *) ;; *) fail "$variant array accepted an earlier success: $actual" ;; esac
+        ;;
+    esac
+  done
+  pass "engine: plain objects and the last verbose result preserve accounting and completeness checks"
+}
+
 test_park_exit_probe_uses_half_second_child_sleeps
+test_engine_result_objects_and_verbose_arrays
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail
