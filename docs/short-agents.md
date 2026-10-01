@@ -158,6 +158,9 @@ For an attempted cleanup with an unmanaged Treehouse path refusal, or a separate
 The unmanaged-path recovery requires the pane to be already absent and settles only the remaining bookkeeping, while the current-judgment path may close the exact still-present owned endpoint once before finishing that bookkeeping.
 Both preserve the failed result and every surviving copy; other uncertain effects remain reserved.
 A changed candidate, identity, or grant stops new writes.
+The archived/pruned current-judgment variant is bookkeeping-only for the narrower case where the configured Done archive and archived lifecycle still prove business authority, but the original task metadata, cleanup receipt and pending-close marker are all absent.
+It requires the exact immutable operation binding and reservation, unchanged failed files, dead runner and children, a structured absent endpoint read, and the current surviving copy/Git identity.
+It writes a distinct preservation and operation receipt, releases only the matching reservation, leaves the original attempt uncertain, and never calls teardown, recreates historical records, or changes backlog/history/copy content.
 The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.
 

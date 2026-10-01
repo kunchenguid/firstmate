@@ -169,3 +169,5 @@ console.log(`PASS ${mode}: pre-preservation cleanup observation, exact original 
 console.log(`PASS ${mode}: alias return, exact pending preservation, unchanged failure/content, identity/live-child/lease/project-owner refusals, idempotent settlement and lifecycle completion`);
 const {currentCleanupCases}=await import('./short-cleanup-current.mjs');
 await currentCleanupCases({root,tmp,live,setup,run,snap,write,read,cmd,git,shellQuote,processIdentity,basePath});
+const {archivedCleanupCases}=await import('./short-cleanup-archived.mjs');
+await archivedCleanupCases({root,tmp,live,setup,run,snap,write,read,cmd,git,shellQuote,processIdentity,basePath});

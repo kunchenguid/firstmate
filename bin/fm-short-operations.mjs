@@ -29,6 +29,11 @@
 // new transaction. No historical no-effect conclusion is drawn. A distinct
 // retention receipt binds this judgment and unchanged failure; originals stay
 // immutable. Pending current close with a present endpoint refuses replay.
+// fm-cleanup-archived-judgment.v1 instead binds a configured Done-history row,
+// archived lifecycle authority, absent historical task/cleanup/close records,
+// a structured absent endpoint read and the surviving operation-bound copy/Git
+// identity. It writes only a distinct preservation and operation receipt before
+// releasing the exact reservation; it never calls teardown or recreates records.
 import * as fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
@@ -234,14 +239,16 @@ export function operationReceipts(dir) {
     const receipt=read(path.join(dir,x)), step=request.input.operations?.steps[receipt.index];
     if(!step || x!==`operation-${receipt.index}.receipt.json` || receipt.id!==request.id || receipt.nonce!==request.nonce || !['completed','refused'].includes(receipt.state) || receipt.action!==commandFor(step).action) fail('malformed operation receipt');
     if(receipt.settlement!==undefined) {
-      if(!((receipt.settlement==='dead-owner-codebase-readback'&&receipt.action==='merge')||(['dead-owner-cleanup-readback','main-current-cleanup-readback'].includes(receipt.settlement)&&receipt.action==='cleanup'))) fail('malformed operation settlement');
+      if(!((receipt.settlement==='dead-owner-codebase-readback'&&receipt.action==='merge')||(['dead-owner-cleanup-readback','main-current-cleanup-readback','main-archived-cleanup-readback'].includes(receipt.settlement)&&receipt.action==='cleanup'))) fail('malformed operation settlement');
       recordedProcessIdentity(receipt.effectExecutor,`settled ${receipt.action} executor`);
-      if(receipt.settlement==='main-current-cleanup-readback') {
+      if(['main-current-cleanup-readback','main-archived-cleanup-readback'].includes(receipt.settlement)) {
         const proofFile=path.join(dir,`operation-${receipt.index}.preservation.json`),proof=JSON.parse(regularBytes(proofFile));
-        if(receipt.originalAttempt!=='uncertain'||receipt.retentionRef!==proofFile||receipt.retentionSha256!==hashBytes(regularBytes(proofFile))||proof.schema!=='fm-cleanup-current-retention.v1'||proof.id!==request.id||proof.nonce!==request.nonce||proof.index!==receipt.index||proof.originalAttempt!=='uncertain') fail('current cleanup receipt retention changed');
+        const schema=receipt.settlement==='main-current-cleanup-readback'?'fm-cleanup-current-retention.v1':'fm-cleanup-archived-retention.v1';
+        if(receipt.originalAttempt!=='uncertain'||receipt.retentionRef!==proofFile||receipt.retentionSha256!==hashBytes(regularBytes(proofFile))||proof.schema!==schema||proof.id!==request.id||proof.nonce!==request.nonce||proof.index!==receipt.index||proof.originalAttempt!=='uncertain') fail('current cleanup receipt retention changed');
         const names=['request.json','result.json',`operation-${receipt.index}.intent.json`,`operation-${receipt.index}.effect.json`,`operation-${receipt.index}.output.json`];
         if(Object.keys(proof.hashes??{}).length!==names.length||names.some(name=>proof.hashes[name]!==hashBytes(regularBytes(path.join(dir,name))))) fail('current cleanup original evidence changed');
         if(proof.judgment_sha256!==hashBytes(regularBytes(proof.judgment_ref))) fail('current cleanup judgment changed');
+        if(receipt.settlement==='main-archived-cleanup-readback'&&(proof.archiveDisposition!=='archive_done'||receipt.evidence?.archiveDisposition!=='archive_done')) fail('archived cleanup authority changed');
       }
     }
     if(receipt.state==='completed') {
@@ -491,6 +498,103 @@ function currentAssessmentMatches(v) {
     v.q.evidence.every(e=>a.evidence.some(item=>equal(item,e)))&&
     a.evidence.every(e=>v.q.evidence.some(item=>equal(item,e))||e.ref===v.record.cleanup_ref);
 }
+
+function pathEntryExists(file) {
+  try {fs.lstatSync(file);return true;} catch(error) {if(error.code==='ENOENT') return false;throw error;}
+}
+function currentDirectoryIdentity(value) {
+  canonical(value);
+  const stat=fs.statSync(value);
+  if(!stat.isDirectory()) fail('archived cleanup copy/project identity is missing');
+  let common;
+  try {common=fs.realpathSync(git(value,'rev-parse','--path-format=absolute','--git-common-dir'));}
+  catch {fail('archived cleanup Git owner unreadable');}
+  const commonStat=fs.statSync(common);
+  if(!commonStat.isDirectory()) fail('archived cleanup Git owner unreadable');
+  return {path:value,device:stat.dev,inode:stat.ino,git:{path:common,device:commonStat.dev,inode:commonStat.ino}};
+}
+function archivedCopyBinding(v) {
+  const binding={home:v.home,task:v.step.task,spawn_gen:v.binding.spawn_gen,
+    copy:currentDirectoryIdentity(fs.realpathSync(v.binding.worktree)),
+    project:currentDirectoryIdentity(fs.realpathSync(v.binding.project))};
+  if(binding.copy.path!==v.binding.worktree||binding.project.path!==v.binding.project) fail('archived cleanup operation directory identity changed');
+  return binding;
+}
+function archivedDisposition(home,task) {
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),data=path.join(home,'data');
+  let value;
+  try {
+    value=execFileSync('bash',['-c','. "$1"; snapshot=$(fm_task_disposition_snapshot "$2") || exit 1; fm_task_disposition_for "$snapshot" "$3"',
+      'archived-cleanup',path.join(root,'bin/fm-task-disposition-lib.sh'),data,task],
+    {encoding:'utf8',cwd:home,env:cleanupOwnerEnvironment(home),stdio:['ignore','pipe','pipe']}).trim();
+  } catch {fail('archived cleanup configured history authority is unavailable');}
+  if(value!=='archive_done') fail('archived cleanup configured history authority changed');
+  return value;
+}
+function archivedEndpointAbsent(v) {
+  const target=`${v.binding.herdr_session}:${v.binding.herdr_pane_id}`;
+  if(!v.binding.herdr_session||!v.binding.herdr_pane_id||v.binding.window!==target||!v.binding.herdr_workspace_id||!v.binding.herdr_tab_id) fail('archived cleanup endpoint identity changed');
+  const claims=fs.readdirSync(path.join(v.home,'state')).filter(name=>name.endsWith('.meta'));
+  if(claims.length>1000) fail('archived cleanup endpoint claim scan is unbounded');
+  for(const name of claims) {
+    const file=path.join(v.home,'state',name),stat=fs.lstatSync(file);
+    if(!stat.isFile()||stat.isSymbolicLink()) fail('archived cleanup endpoint claim is unsafe');
+    const other=metadata(v.home,name.slice(0,-5),true);
+    if(other.herdr_session===v.binding.herdr_session&&other.herdr_pane_id===v.binding.herdr_pane_id) fail('archived cleanup endpoint is claimed by another task');
+  }
+  const root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  try {
+    execFileSync('bash',['-c','. "$1"; fm_backend_source herdr; fm_backend_herdr_endpoint_confirmed_gone "$2"',
+      'archived-cleanup',path.join(root,'bin/fm-backend.sh'),target],
+    {encoding:'utf8',cwd:root,env:cleanupOwnerEnvironment(v.home),stdio:['ignore','pipe','pipe'],timeout:30000});
+  } catch {fail('archived cleanup endpoint is present or absence is unproved');}
+}
+function archivedCleanupContext(home,id,index,file) {
+  const v=cleanupRecoveryContext(home,id,index,{current:true});
+  canonical(file);
+  if(!file.startsWith(path.join(home,'data')+path.sep)) fail('archived cleanup judgment must be in this home data');
+  const bytes=regularBytes(file),q=JSON.parse(bytes),task=v.step.task,proofFile=path.join(v.dir,`operation-${index}.preservation.json`);
+  fields(q,['schema','home','id','index','nonce','task','spawn_gen','goal_revision','brief_sha256','lifecycle_sha256','hashes','copy_binding','judgment','evidence']);
+  if(q.schema!=='fm-cleanup-archived-judgment.v1'||q.home!==home||q.id!==id||q.index!==index||q.nonce!==v.request.nonce||q.task!==task||q.spawn_gen!==v.binding.spawn_gen||!equal(q.hashes,v.hashes)) fail('archived cleanup judgment identity/original evidence changed');
+  fields(q.judgment,['disposition','outcome','remaining_gap','authority_ref','evidence']);
+  if(q.judgment.disposition!=='archived'||q.judgment.remaining_gap!==''||typeof q.judgment.outcome!=='string'||!q.judgment.outcome.trim()||!Array.isArray(q.judgment.evidence)) fail('archived cleanup needs explicit current MAIN bookkeeping judgment');
+  const record=lifecycleCurrent(home,task,'read'),lifecycleFile=path.join(home,'data',task,'lifecycle.json');
+  if(record.disposition!=='archived'||record.execution_generation!==q.spawn_gen||record.goal_revision!==q.goal_revision||record.brief_sha256!==q.brief_sha256||hashBytes(regularBytes(lifecycleFile))!==q.lifecycle_sha256) fail('archived cleanup lifecycle authority changed');
+  if(q.judgment.authority_ref===record.assessment?.authority_ref) fail('archived cleanup requires separate current MAIN authority');
+  const refs=q.judgment.evidence,required=[`data/${task}/brief.md`,`data/${task}/report.md`,'data/done-archive.md',record.assessment?.authority_ref,q.judgment.authority_ref];
+  if(required.some(ref=>typeof ref!=='string'||!refs.includes(ref))||new Set(refs).size!==refs.length||!Array.isArray(q.evidence)||q.evidence.length!==refs.length||new Set(q.evidence.map(item=>item.ref)).size!==refs.length) fail('archived cleanup lacks unique current/history authority');
+  for(const ref of refs) {
+    const evidence=q.evidence.find(item=>item.ref===ref),target=path.resolve(home,ref);
+    if(!evidence||!target.startsWith(home+path.sep)||hashBytes(regularBytes(canonical(target)))!==evidence.sha256) fail(`archived cleanup evidence changed: ${ref}`);
+  }
+  if(hashBytes(regularBytes(path.join(home,'data',task,'brief.md')))!==q.brief_sha256) fail('archived cleanup brief changed');
+  for(const suffix of ['.meta','.cleanup.json','.backlog-close']) if(pathEntryExists(path.join(home,'state',task+suffix))) fail('archived cleanup requires absent task, cleanup and pending-close records');
+  archivedDisposition(home,task);
+  const copyBinding=archivedCopyBinding(v);
+  if(!equal(copyBinding,q.copy_binding)) fail('archived cleanup directory/Git ownership changed');
+  archivedEndpointAbsent(v);
+  const proof=pathEntryExists(proofFile)?JSON.parse(regularBytes(proofFile)):null;
+  if(proof&&(proof.schema!=='fm-cleanup-archived-retention.v1'||proof.home!==home||proof.id!==id||proof.index!==index||proof.nonce!==q.nonce||proof.task!==task||proof.spawn_gen!==q.spawn_gen||proof.goal_revision!==q.goal_revision||proof.judgment_ref!==file||proof.judgment_sha256!==hashBytes(bytes)||proof.lifecycle_sha256!==q.lifecycle_sha256||proof.archiveDisposition!=='archive_done'||proof.originalAttempt!=='uncertain'||!equal(proof.hashes,v.hashes)||!equal(proof.copy_binding,copyBinding))) fail('archived cleanup retention proof changed');
+  return {...v,q,proof,proofFile,judgmentFile:file,judgmentSha:hashBytes(bytes),copyBinding,record};
+}
+function settleArchivedCleanupLocked(home,id,index,judgmentFile) {
+  let v=archivedCleanupContext(home,id,index,judgmentFile);
+  cleanupRecoveryLocks(v);
+  if(!v.proof) {
+    const proof={schema:'fm-cleanup-archived-retention.v1',home,id,index,nonce:v.q.nonce,task:v.step.task,spawn_gen:v.binding.spawn_gen,goal_revision:v.q.goal_revision,hashes:v.hashes,judgment_ref:judgmentFile,judgment_sha256:v.judgmentSha,lifecycle_sha256:v.q.lifecycle_sha256,archiveDisposition:'archive_done',copy_binding:v.copyBinding,originalAttempt:'uncertain'};
+    if(!publish(v.proofFile,proof)) fail('archived cleanup retention proof collided');
+    v=archivedCleanupContext(home,id,index,judgmentFile);
+  }
+  const evidence={taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:'retained-unverified',bookkeepingComplete:true,archiveDisposition:'archive_done'};
+  if(!exists(v.receiptFile)&&!publish(v.receiptFile,{id,nonce:v.q.nonce,index,action:'cleanup',state:'completed',at:Date.now(),executor:processIdentity(process.pid),settlement:'main-archived-cleanup-readback',effectExecutor:v.started.identity,evidence,originalAttempt:'uncertain',retentionRef:v.proofFile,retentionSha256:hashBytes(regularBytes(v.proofFile))})) fail('archived cleanup receipt collided');
+  const receipt=operationReceipts(v.dir).find(item=>item.index===index);
+  if(receipt?.settlement!=='main-archived-cleanup-readback'||receipt.originalAttempt!=='uncertain'||receipt.retentionRef!==v.proofFile||receipt.retentionSha256!==hashBytes(regularBytes(v.proofFile))||!equal(receipt.evidence,evidence)) fail('archived cleanup receipt conflicts with preserved history');
+  if(exists(v.marker.file)) {
+    if(!equal(read(v.marker.file),v.expected)) fail('archived cleanup reservation changed');
+    fs.unlinkSync(v.marker.file);
+  }
+  return {id,index,state:'completed',action:'cleanup',settlement:receipt.settlement,evidence:receipt.evidence,originalAttempt:'uncertain',result:read(path.join(v.dir,'result.json')).state};
+}
 function prepareCurrentCleanup(task,generation) {
   const v=verifyCleanupRecoveryOwner(task,generation);
   if(!process.env.FM_SHORT_CLEANUP_JUDGMENT) fail('missing current cleanup judgment');
@@ -548,7 +652,11 @@ function preserveCleanupEvidence(task,generation) {
 }
 
 function settleRetainedCleanupLocked(home,id,index,judgmentFile) {
-  if(judgmentFile) return settleCurrentCleanupLocked(home,id,index,judgmentFile);
+  if(judgmentFile) {
+    const schema=JSON.parse(regularBytes(judgmentFile)).schema;
+    if(schema==='fm-cleanup-archived-judgment.v1') return settleArchivedCleanupLocked(home,id,index,judgmentFile);
+    return settleCurrentCleanupLocked(home,id,index,judgmentFile);
+  }
   const v=cleanupRecoveryContext(home,id,index),root=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   cleanupRecoveryLocks(v);
   if(!exists(v.receiptFile)) {
