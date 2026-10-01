@@ -64,11 +64,12 @@
 # answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
 #
 # Two further projections come from live state only, never from prose or prior
-# reports. servers[] rows {project,port,pid,uptime,dir} cover TCP listeners and
-# UDP endpoints whose process cwd sits under a fleet project path (a fleet clone
-# or a live task worktree), listeners on a launchd preview port, and every
-# com.firstmate.preview-* launchd service from FM_BEARINGS_PREVIEW_DIR (default
-# ~/Library/LaunchAgents). project_branches[] rows {project,branch,clean} cover
+# reports. servers[] rows {project,proto,port,pid,uptime,dir} cover TCP listeners
+# and UDP endpoints whose process cwd sits under a fleet project path (a fleet clone
+# or a live task worktree), plus every RUNNING com.firstmate.preview-* launchd
+# service from FM_BEARINGS_PREVIEW_DIR (default ~/Library/LaunchAgents, proto TCP).
+# A preview plist whose service is not running is not a server and is left out,
+# as is a listener on a preview port whose process belongs to no fleet project. project_branches[] rows {project,branch,clean} cover
 # every git-backed fleet clone plus registered projects with no clone (branch
 # "-", clean null). Both are additive fm-bearings.v1 fields bounded by
 # FM_BEARINGS_SERVERS and FM_BEARINGS_BRANCHES with omitted[] disclosure; any
@@ -399,12 +400,34 @@ parse_lsof_listeners() {  # <proto>
 }
 live_listeners=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-listeners.XXXXXX") \
   || { echo "fm-bearings-snapshot: cannot create a temporary listeners file" >&2; exit 1; }
+# The whole live-state collection below shares FM_BEARINGS_COLLECT_TIMEOUT:
+# every bounded call takes the remaining budget, and loops stop with an
+# omitted[] disclosure once the budget is gone, so the snapshot cannot exceed
+# the panel's subprocess timeout on a busy fleet.
+_collect_start=$SECONDS
+collect_remaining() {
+  _collect_remain=$((FM_BEARINGS_COLLECT_TIMEOUT - (SECONDS - _collect_start)))
+  [ "$_collect_remain" -lt 0 ] && _collect_remain=0
+  printf '%s' "$_collect_remain"
+}
 : > "$live_listeners"
 if command -v lsof >/dev/null 2>&1; then
-  fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" lsof -nP -iTCP -sTCP:LISTEN -F pcn 2>/dev/null \
-    | parse_lsof_listeners TCP >> "$live_listeners" || true
-  fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" lsof -nP -iUDP -F pcn 2>/dev/null \
-    | parse_lsof_listeners UDP >> "$live_listeners" || true
+  _lsof_failed=0
+  if [ "$(collect_remaining)" -gt 0 ] \
+    && _tcp_out=$(fm_run_timed "$(collect_remaining)" lsof -nP -iTCP -sTCP:LISTEN -F pcn 2>/dev/null); then
+    printf '%s\n' "$_tcp_out" | parse_lsof_listeners TCP >>"$live_listeners"
+  else
+    _lsof_failed=1
+  fi
+  if [ "$(collect_remaining)" -gt 0 ] \
+    && _udp_out=$(fm_run_timed "$(collect_remaining)" lsof -nP -iUDP -F pcn 2>/dev/null); then
+    printf '%s\n' "$_udp_out" | parse_lsof_listeners UDP >>"$live_listeners"
+  else
+    _lsof_failed=1
+  fi
+  if [ "$_lsof_failed" -ne 0 ]; then
+    SERVERS_NOTE="listener table incomplete (lsof failed or exceeded the collection deadline; some servers omitted)"
+  fi
   _dedup=$(sort -u "$live_listeners" 2>/dev/null) || _dedup=""
   printf '%s\n' "$_dedup" | sed '/^[[:space:]]*$/d' > "$live_listeners"
 else
@@ -419,9 +442,17 @@ _uptimes=""
 if [ -s "$live_listeners" ]; then
   _pid_list=$(awk -F'\t' '{print $3}' "$live_listeners" | sort -u | head -n 64 | tr '\n' ',' | sed 's/,$//')
   if [ -n "$_pid_list" ]; then
-    _uptimes=$(fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" ps -o pid=,etime= -p "$_pid_list" 2>/dev/null) || _uptimes=""
+    if [ "$(collect_remaining)" -gt 0 ]; then
+      _uptimes=$(fm_run_timed "$(collect_remaining)" ps -o pid=,etime= -p "$_pid_list" 2>/dev/null) || _uptimes=""
+    fi
     for _pid in $(printf '%s' "$_pid_list" | tr ',' ' '); do
-      _cwd=$(fm_run_timed 5 lsof -a -p "$_pid" -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | head -n 1) || _cwd=""
+      if [ "$(collect_remaining)" -le 0 ]; then
+        [ -n "$SERVERS_NOTE" ] || SERVERS_NOTE="server detail truncated (collection deadline exceeded; some servers omitted)"
+        break
+      fi
+      _probe_cap=$(collect_remaining)
+      [ "$_probe_cap" -gt 5 ] && _probe_cap=5
+      _cwd=$(fm_run_timed "$_probe_cap" lsof -a -p "$_pid" -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | head -n 1) || _cwd=""
       _up=$(printf '%s\n' "$_uptimes" | awk -v pid="$_pid" '$1 == pid { $1 = ""; sub(/^ +/, ""); gsub(/ /, ""); print; exit }')
       [ -n "$_up" ] || _up="-"
       printf '%s\t%s\t%s\n' "$_pid" "${_cwd:-}" "$_up" >> "$live_pids"
@@ -435,8 +466,8 @@ live_previews=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-previews.XXXXXX") \
 : > "$live_previews"
 if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; then
   _launch_list=""
-  if command -v launchctl >/dev/null 2>&1; then
-    _launch_list=$(fm_run_timed "$FM_BEARINGS_COLLECT_TIMEOUT" launchctl list 2>/dev/null) || _launch_list=""
+  if command -v launchctl >/dev/null 2>&1 && [ "$(collect_remaining)" -gt 0 ]; then
+    _launch_list=$(fm_run_timed "$(collect_remaining)" launchctl list 2>/dev/null) || _launch_list=""
   fi
   for _plist in "$FM_BEARINGS_PREVIEW_DIR"/com.firstmate.preview-*.plist; do
     [ -f "$_plist" ] || continue
@@ -449,8 +480,10 @@ if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; t
     _sup="-"
     if [ -n "$_spid" ]; then
       _sup=$(printf '%s\n' "$_uptimes" 2>/dev/null | awk -v pid="$_spid" '$1 == pid { $1 = ""; sub(/^ +/, ""); gsub(/ /, ""); print; exit }')
-      if [ -z "$_sup" ] && command -v ps >/dev/null 2>&1; then
-        _sup=$(fm_run_timed 5 ps -o etime= -p "$_spid" 2>/dev/null | tr -d ' ') || _sup=""
+      if [ -z "$_sup" ] && command -v ps >/dev/null 2>&1 && [ "$(collect_remaining)" -gt 0 ]; then
+        _ps_cap=$(collect_remaining)
+        [ "$_ps_cap" -gt 5 ] && _ps_cap=5
+        _sup=$(fm_run_timed "$_ps_cap" ps -o etime= -p "$_spid" 2>/dev/null | tr -d ' ') || _sup=""
       fi
       [ -n "$_sup" ] || _sup="-"
     fi
@@ -458,9 +491,12 @@ if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; t
   done
 fi
 
-# Assemble servers[]: matched listeners, listeners on preview ports, then every
-# preview service whose port is not already covered. jq owns the matching so
-# the shell never compares paths itself.
+# Assemble servers[]: listeners whose process cwd sits under a fleet project
+# (proto TCP/UDP), then every RUNNING preview service whose port is not already
+# covered. A stopped preview (no live launchd PID) is not a server and is left
+# out; a listener on a preview port with no fleet-project cwd is left out too,
+# so an unrelated squatter can neither pose as fleet work nor suppress the real
+# preview row. jq owns the matching so the shell never compares paths itself.
 if [ -s "$live_listeners" ] || [ -s "$live_previews" ]; then
   SERVERS_ALL_JSON=$(jq -Rs --slurpfile cands "$live_cands" '
       split("\n") | map(select(. != "") | split("\t")
@@ -480,22 +516,22 @@ if [ -s "$live_listeners" ] || [ -s "$live_previews" ]; then
       ($cands[0] // []) as $cands
       | ($pids[0] // {}) as $pids
       | ($previews[0] // []) as $previews
-      | ($previews | map(select(.port != "-" and .port != "") | .port)) as $preview_ports
       | ([ .[]
           | (.pid | tostring) as $pid
           | ($pids[$pid] // {cwd:"", uptime:"-"}) as $info
           | (match_project($cands; $info.cwd)) as $proj
-          | (.port) as $lport
-          | select($proj != null or ($preview_ports | index($lport) != null))
-          | {project:($proj // ($info.cwd | split("/") | last | select(. != "") // "-" )),
+          | select($proj != null)
+          | {project:$proj, proto:.proto,
              port:(.port | tonumber), pid:(.pid | tonumber? // null),
              uptime:$info.uptime, dir:$info.cwd} ]
         | sort_by([.project, .port]) | unique) as $rows
       | ($rows | map(.port | tostring)) as $seen_ports
       | ($rows + [ $previews[]
+          | select(.pid != "" and .pid != null)
           | select((.port | tostring) as $p | ($seen_ports | index($p) == null))
           | (match_project($cands; .dir)) as $proj
           | {project:($proj // (.label | sub("^com\\.firstmate\\.preview-"; ""))),
+             proto:"TCP",
              port:(.port | tonumber? // null), pid:(.pid | tonumber? // null),
              uptime:.uptime, dir:.dir} ]
         | map(select(.port != null))
@@ -516,13 +552,21 @@ elif [ -n "$PROJECTS_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
     [ -d "$_clone" ] || continue
     _clone=${_clone%/}
     _proj=${_clone##*/}
-    fm_run_timed 5 git -C "$_clone" rev-parse --git-dir >/dev/null 2>&1 || continue
-    _branch=$(fm_run_timed 5 git -C "$_clone" branch --show-current 2>/dev/null) || _branch=""
+    if [ "$(collect_remaining)" -le 0 ]; then
+      [ -n "$BRANCHES_NOTE" ] || BRANCHES_NOTE="branch collection truncated (collection deadline exceeded; some branches omitted)"
+      break
+    fi
+    _git_cap=$(collect_remaining)
+    [ "$_git_cap" -gt 5 ] && _git_cap=5
+    fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --git-dir >/dev/null 2>&1 || continue
+    _branch=$(fm_run_timed "$_git_cap" git -C "$_clone" branch --show-current 2>/dev/null) || _branch=""
     if [ -z "$_branch" ]; then
-      _sha=$(fm_run_timed 5 git -C "$_clone" rev-parse --short HEAD 2>/dev/null) || _sha=""
+      _sha=$(fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --short HEAD 2>/dev/null) || _sha=""
       _branch="(detached ${_sha:-unknown})"
     fi
-    if _status_out=$(fm_run_timed 10 git -C "$_clone" status --porcelain 2>/dev/null); then
+    _status_cap=$(collect_remaining)
+    [ "$_status_cap" -gt 10 ] && _status_cap=10
+    if [ "$_status_cap" -gt 0 ] && _status_out=$(fm_run_timed "$_status_cap" git -C "$_clone" status --porcelain 2>/dev/null); then
       if printf '%s' "$_status_out" | grep -q '[^[:space:]]'; then
         _clean=false
       else

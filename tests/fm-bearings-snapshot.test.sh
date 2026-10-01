@@ -3025,9 +3025,9 @@ test_servers_and_branches_project_live_state() {
   json=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e --arg home "$home" '
     (.servers | length) == 3
-      and (.servers | any(.project == "alpha" and .port == 3101 and .pid == 111
+      and (.servers | any(.project == "alpha" and .proto == "TCP" and .port == 3101 and .pid == 111
         and .uptime == "01:02:03" and .dir == ($home + "/projects/alpha")))
-      and (.servers | any(.project == "beta" and .port == 5349 and .pid == 222))
+      and (.servers | any(.project == "beta" and .proto == "UDP" and .port == 5349 and .pid == 222))
       and (.servers | any(.project == "gamma" and .port == 3200 and .pid == 444
         and .dir == "/opt/gamma"))
       and ([.servers[] | select(.port == 3101)] | length) == 1
@@ -3039,9 +3039,9 @@ test_servers_and_branches_project_live_state() {
         and .clean == true))
   ' >/dev/null || fail "live servers or clone branches were not projected: $json"
   toon=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin")
-  assert_contains "$toon" 'servers[3]{project,port,pid,uptime,dir}:' "TOON must carry the servers table"
+  assert_contains "$toon" 'servers[3]{project,proto,port,pid,uptime,dir}:' "TOON must carry the servers table"
   assert_contains "$toon" 'project_branches[2]{project,branch,clean}:' "TOON must carry the branches table"
-  assert_contains "$toon" 'alpha,3101,111' "TOON servers must match the JSON projection"
+  assert_contains "$toon" 'alpha,TCP,3101,111' "TOON servers must match the JSON projection"
   pass "live listeners, preview services, and clone branches are projected with TOON parity"
 }
 
@@ -3067,7 +3067,7 @@ test_server_and_branch_bounds_are_disclosed() {
   pass "server and branch bounds truncate with omitted disclosure"
 }
 
-test_servers_degrade_to_preview_only_without_listeners() {
+test_servers_disclose_listener_failure_without_aborting() {
   local home fakebin json previews
   home=$(make_home live-degraded)
   mkdir -p "$home/projects/alpha"
@@ -3083,13 +3083,11 @@ SH
   write_preview_fixtures "$previews" "$home/projects/alpha"
   json=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
-    (.servers | length) == 2
-      and (.servers | any(.project == "alpha" and .port == 3101 and .pid == null))
-      and (.servers | any(.project == "gamma" and .port == 3200 and .pid == null
-        and .uptime == "-"))
+    (.servers | length) == 0
+      and (.omitted | any(.surface | contains("listener table incomplete")))
       and (.project_branches | length) == 1
-  ' >/dev/null || fail "listener failure did not degrade to preview-only servers: $json"
-  pass "a failed listener table degrades to preview services without aborting"
+  ' >/dev/null || fail "listener failure did not degrade to a disclosed empty servers table: $json"
+  pass "a failed listener table discloses the omission without aborting"
 }
 
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot() {
@@ -3533,7 +3531,7 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
 
 test_servers_and_branches_project_live_state
 test_server_and_branch_bounds_are_disclosed
-test_servers_degrade_to_preview_only_without_listeners
+test_servers_disclose_listener_failure_without_aborting
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
