@@ -448,7 +448,7 @@
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
-#   When config/graphify-worktree is present and the source clone has graphify-out/, a fresh or relaunch task worktree receives an absolute symlink to it before launch; an existing entry is preserved and link failures warn without blocking the spawn.
+#   When config/graphify-worktree is present and the source clone has graphify-out/, a fresh or relaunch task worktree receives an absolute symlink to it before launch, recorded as graphify_link=1 in state/<id>.meta so teardown removes only that link; an existing entry is preserved and link failures warn without blocking the spawn.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -4911,7 +4911,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx graphify_link", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4963,6 +4963,10 @@ preserve_relaunch_meta() {
   if [ "$KIND" = secondmate ]; then
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
+  fi
+  if [ "$SPAWN_GRAPHIFY_LINK_CREATED" = 1 ] ||
+    { [ "$RELAUNCH" -eq 1 ] && [ "$(fm_meta_get "$RELAUNCH_META" graphify_link)" = 1 ]; }; then
+    echo "graphify_link=1"
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     preserve_relaunch_meta

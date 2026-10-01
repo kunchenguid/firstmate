@@ -251,6 +251,8 @@ test_graphify_out_links_only_when_worktree_flag_is_present() {
   expect_code 0 "$status" "spawn should succeed with graphify-out present but config/graphify-worktree absent"$'\n'"$out"
   [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
     || fail "spawn created a graphify-out entry without the opt-in flag"
+  assert_no_grep '^graphify_link=' "$HOME_DIR/state/$id.meta" \
+    "spawn recorded graph link ownership without creating a link"
 
   id='pool-graphify-on-r1'
   rec=$(make_originless_case graphify-on "$id")
@@ -267,6 +269,8 @@ test_graphify_out_links_only_when_worktree_flag_is_present() {
   linked_graph=$(readlink "$POOL_DIR/graphify-out")
   [ "$linked_graph" = "$source_graph" ] || fail "graphify-out link was not absolute: $linked_graph"
   [ -f "$POOL_DIR/graphify-out/graph.json" ] || fail "task worktree graphify-out link does not reach the source graph"
+  [ "$(grep -c '^graphify_link=1$' "$HOME_DIR/state/$id.meta")" = 1 ] \
+    || fail "spawn did not record exactly one graphify_link=1 ownership marker"
   pass "spawn links graphify-out into task worktrees only when config/graphify-worktree is present"
 }
 

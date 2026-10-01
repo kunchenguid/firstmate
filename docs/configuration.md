@@ -574,7 +574,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 The optional local, gitignored `config/graphify-worktree` presence flag enables default-off graphify sharing for ship and scout task worktrees.
 With the flag absent, spawns do not link `graphify-out/` into task worktrees and generated briefs do not mention graphify.
 With the flag present, `bin/fm-spawn.sh` links the source clone's `graphify-out/` into each ship or scout worktree when that source directory exists, and `bin/fm-brief.sh` tells those workers to try `graphify query` for codebase questions before grep or bulk reads.
-The source graph remains in the project clone, existing task worktree entries are preserved, link failures warn without blocking spawn, and `bin/fm-teardown.sh` removes only a worktree `graphify-out` symlink guarded by `-L`.
+The source graph remains in the project clone, existing task worktree entries are preserved, link failures warn without blocking spawn, and `bin/fm-teardown.sh` removes only a `graphify-out` symlink that spawn created and recorded as `graphify_link=1` in the task record; any other `graphify-out` entry is left to the ordinary unlanded-work refusal.
 Secondmate charters and homes are unchanged by this flag.
 
 ## Fleet activity ledger (config/fleet-ledger)

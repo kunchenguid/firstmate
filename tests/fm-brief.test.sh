@@ -237,6 +237,9 @@ test_graphify_worktree_flag_controls_ship_and_scout_guidance() {
     || fail "scout graphify-off scaffold failed"
   assert_no_grep "graphify query" "$home/data/graphify-off-scout/brief.md" \
     "scout brief should not mention graphify when config/graphify-worktree is absent"
+  grep -A1 -F 'at a detached HEAD on a clean default branch.' "$home/data/graphify-off-scout/brief.md" \
+    | grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' \
+    || fail "scout brief gained an extra line when config/graphify-worktree is absent"
 
   : > "$home/config/graphify-worktree"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-on-ship sample --mode direct-PR >/dev/null 2>&1 \

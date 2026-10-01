@@ -13,8 +13,9 @@
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
 # A task worktree's graphify-out symlink is removed before branch or worktree
-# cleanup only when it points at that task's source clone graph, while the source
-# clone's graph directory and unrelated worktree entries are never targeted.
+# cleanup only when the task record carries spawn's graphify_link=1 marker and the
+# link still points at that task's source clone graph; any other entry is left to
+# the unlanded-work checks.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -2600,9 +2601,10 @@ safe_rm_rf_child_worktree() {
   rm -rf -- "$target"
 }
 
-remove_graphify_worktree_link() { # <project> <worktree>
-  local project=$1 worktree=$2 link project_real expected_target actual_target
+remove_graphify_worktree_link() { # <meta> <project> <worktree>
+  local meta=$1 project=$2 worktree=$3 link project_real expected_target actual_target
   [ -n "$project" ] && [ -n "$worktree" ] || return 0
+  [ "$(meta_value "$meta" graphify_link)" = 1 ] || return 0
   link="$worktree/graphify-out"
   [ -L "$link" ] || return 0
   project_real=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 0
@@ -3274,7 +3276,7 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        remove_graphify_worktree_link "$child_proj" "$child_wt" || return 1
+        remove_graphify_worktree_link "$child_meta" "$child_proj" "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
@@ -3294,7 +3296,7 @@ cleanup_firstmate_home_children() {
         require_owned_worktree_slot_record "$child_id" "$child_wt" || return 1
       else
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        remove_graphify_worktree_link "$child_proj" "$child_wt" || return 1
+        remove_graphify_worktree_link "$child_meta" "$child_proj" "$child_wt" || return 1
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
@@ -3463,11 +3465,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-# Remove the task's disposable graph link before git safety inspection too: the
-# link is ours, while any real graphify-out directory remains subject to the
-# ordinary unlanded-work checks.
+# Remove the spawn-recorded graph link before git safety inspection; any other
+# graphify-out entry remains subject to the ordinary unlanded-work checks.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  remove_graphify_worktree_link "$PROJ" "$WT" || exit 1
+  remove_graphify_worktree_link "$META" "$PROJ" "$WT" || exit 1
 fi
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
