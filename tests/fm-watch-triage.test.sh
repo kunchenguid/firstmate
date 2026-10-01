@@ -2502,6 +2502,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   # confirm it re-surfaces as a paused recheck - never a wedge.
   back=$(( $(date +%s) - 500 ))
   set_mtime "$back" "$state/.paused-resurfaced-$key"
+  set_mtime "$back" "$state/.paused-since-$key"
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
@@ -2877,6 +2878,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
       set_mtime "$(( $(date +%s) - 2000 ))" "$statusf"
       sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
       set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+      set_mtime "$(( $(date +%s) - 2000 ))" "$state/.paused-since-$key"
       printf 'parked, elapsed 4s' > "$capture_file"
       : > "$out"
       parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$command" \
@@ -4286,6 +4288,7 @@ test_secondmate_declared_wait_first_sight_is_absorbed() {
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the quiet secondmate cycle"
 
     set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+    set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-since-$key"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-mate_status"
     FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" FM_FAKE_CREW_STATE="$crew_state" \
       watch_bg "$state" "$fakebin" "$out" env FM_PAUSE_RESURFACE_SECS=240
