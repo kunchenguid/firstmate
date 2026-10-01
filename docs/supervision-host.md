@@ -110,6 +110,7 @@ So a close reaches main off Pi exactly when it would on Pi: a check trigger, a d
 On that main-only pass-through the host starts the successor watcher cycle and leaves it running, then prints the close unchanged.
 It leaves the watcher's recovery marker reading downtime, confirming no handling handoff, because the re-arm owner delivers a close to main only while that marker reads downtime.
 The session's next park takes that cycle over instead of attaching to it (`bin/fm-watch-arm.sh --take-over`), so one arm, the host's own, owns the watcher again rather than the successor outliving main's turn beside an attached arm.
+A successor the host cannot record for that take-over is stopped when the host exits instead, so main's next turn end arms a fresh cycle.
 It also passes the close through unchanged, with no added line, when any of these holds (`fm_supervision_host_attended_ready` in `bin/fm-supervision-engine-lib.sh` owns the list):
 
 - The home names no usable engine.
