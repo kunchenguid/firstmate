@@ -111,8 +111,8 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status or a new leftover-state cleanup finding, unless
-#                          afk is active
+#                          status or, with FM_HEARTBEAT_HYGIENE=1, a new
+#                          leftover-state cleanup finding, unless afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2268,8 +2268,8 @@ heartbeat_scan_finds_actionable() {
 # then records the captured set with mark_hygiene_surfaced. It runs only when
 # STATE is this FM_HOME's own state directory, because the audit correlates this
 # home's task records with this home's clones; it is bounded by
-# FM_HEARTBEAT_HYGIENE_TIMEOUT (default 15 seconds), and FM_HEARTBEAT_HYGIENE=0
-# disables it. An audit failure or overrun wakes nothing and leaves the
+# FM_HEARTBEAT_HYGIENE_TIMEOUT (default 15 seconds), and it is off unless
+# FM_HEARTBEAT_HYGIENE=1 opts in. An audit failure or overrun wakes nothing and leaves the
 # surfaced set untouched; FM_HYGIENE_SCANNED=1 marks a scan whose JSON parsed.
 FM_HYGIENE_CAPTURED_KEYS=''
 FM_HYGIENE_SCANNED=0
@@ -2277,7 +2277,7 @@ hygiene_scan_finds_new() {
   local home_state state_real json keys new
   FM_HYGIENE_CAPTURED_KEYS=''
   FM_HYGIENE_SCANNED=0
-  [ "${FM_HEARTBEAT_HYGIENE:-1}" != 0 ] || return 1
+  [ "${FM_HEARTBEAT_HYGIENE:-0}" = 1 ] || return 1
   home_state=$(CDPATH='' cd -- "$FM_HOME/state" 2>/dev/null && pwd -P) || return 1
   state_real=$(CDPATH='' cd -- "$STATE" 2>/dev/null && pwd -P) || return 1
   [ "$home_state" = "$state_real" ] || return 1

@@ -6207,8 +6207,25 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
   pass "heartbeat backstop fail-safe surfaces a captain-relevant status the per-wake path missed"
 }
 
+wait_heartbeat_absorbed() {  # <state> <pid> <out> <label>: the heartbeat absorbs without a wake; reaps pid
+  local state=$1 pid=$2 out=$3 label=$4 i=0
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a cleanup finding woke the heartbeat ($label): $(cat "$out")"
+  fi
+  while [ "$i" -lt 200 ]; do
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -s "$out" ] || fail "a cleanup finding printed a wake reason ($label): $(cat "$out")"
+  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] \
+    || fail "the heartbeat did not absorb a cleanup finding ($label)"
+  reap "$pid"
+}
+
 test_heartbeat_wakes_once_for_new_cleanup_findings() {
-  local dir state fakebin out pid i audit_env
+  local dir state fakebin out pid audit_env
   dir=$(make_case heartbeat-hygiene); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   # The home's own clone holds an unpushed fm/* branch no task record owns.
@@ -6220,8 +6237,16 @@ test_heartbeat_wakes_once_for_new_cleanup_findings() {
   git -C "$dir/projects/alpha" add lost.txt
   git -C "$dir/projects/alpha" -c user.name=t -c user.email=t@example.invalid commit -qm lost
   git -C "$dir/projects/alpha" checkout -q main
+  # Without the opt-in, the heartbeat neither runs the audit nor wakes for it.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 env -u FM_HEARTBEAT_HYGIENE "$WATCH" > "$out" &
+  pid=$!
+  wait_heartbeat_absorbed "$state" "$pid" "$out" "audit not opted in"
+  [ ! -e "$state/.hygiene-surfaced" ] || fail "the heartbeat ran the cleanup audit without FM_HEARTBEAT_HYGIENE=1"
+  rm -f "$state/.heartbeat-streak"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_HYGIENE=1 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a new cleanup finding did not wake the heartbeat"; }
   grep -Fx "heartbeat" "$out" >/dev/null || fail "the cleanup backstop did not exit with a heartbeat wake"
@@ -6236,27 +6261,15 @@ test_heartbeat_wakes_once_for_new_cleanup_findings() {
     rm -f "$state/.heartbeat-streak"
     : > "$out"
     PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-      FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 env "$audit_env" "$WATCH" > "$out" &
+      FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 FM_HEARTBEAT_HYGIENE=1 \
+      env "$audit_env" "$WATCH" > "$out" &
     pid=$!
-    if ! wait_poll_cycle "$state" "$pid"; then
-      reap "$pid"; fail "an already surfaced cleanup finding woke the heartbeat again ($audit_env): $(cat "$out")"
-    fi
-    i=0
-    while [ "$i" -lt 200 ]; do
-      [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 0.1
-      i=$((i + 1))
-    done
-    [ ! -s "$out" ] || fail "a standing cleanup finding printed a wake reason ($audit_env): $(cat "$out")"
-    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] \
-      || fail "the heartbeat did not absorb a standing cleanup finding ($audit_env)"
-    reap "$pid"
+    wait_heartbeat_absorbed "$state" "$pid" "$out" "$audit_env"
     grep -F "fm/lost" "$state/.hygiene-surfaced" >/dev/null \
       || fail "the surfaced cleanup set was lost after a heartbeat ($audit_env), so it would wake again"
   done
   git -C "$dir/projects/alpha" rev-parse --verify -q fm/lost >/dev/null || fail "the heartbeat audit changed the branch"
-  pass "the heartbeat wakes once for new leftover-state cleanup findings and absorbs standing ones"
+  pass "the opted-in heartbeat wakes once for new leftover-state cleanup findings and absorbs standing ones; it is off by default"
 }
 
 # --- beacon stays fresh while absorbing -------------------------------------

@@ -204,12 +204,12 @@ owns_branch_name() {  # <common-dir> <id>
   return 1
 }
 
-# Slot claims and shared copies. Loading the slot helpers creates the state
-# directory, so they load only once it already exists; a home without one has
-# no task records and no claims.
+# Slot claims and shared copies. Loading the slot helpers runs mkdir -p on
+# their STATE, so they load against this script's own directory; a home without
+# a state directory is still inspected and still has none afterwards.
 load_slot_lib() {
   command -v fm_treehouse_slot_owner_state >/dev/null 2>&1 && return 0
-  [ -d "$STATE" ] || return 1
+  local STATE=$SCRIPT_DIR FM_STATE_OVERRIDE=$SCRIPT_DIR
   # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"  # fm_treehouse_pool_slot, fm_treehouse_slot_owner_*

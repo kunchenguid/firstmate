@@ -219,13 +219,15 @@ commit_file "$REPO" unlanded.txt unlanded "unlanded work"
 git -C "$REPO" checkout -q main
 commit_file "$REPO" later.txt later "later main work"
 git -C "$REPO" push -q origin main
-# A claimed pool copy makes the audit inspect slot claims in a home with no state.
+# A dirty claimed pool copy makes the audit inspect slot claims in a home with no state.
 git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/readonly-pool/1/alpha"
 printf 'task=gone\nhome=%s\n' "$HOME_RO" > "$TMP_ROOT/readonly-pool/1/.fm-slot-owner"
+printf 'edit\n' >> "$TMP_ROOT/readonly-pool/1/alpha/README.md"
 rmdir "$HOME_RO/state"
 before=$(objects_snapshot "$REPO")
 json=$(audit "$HOME_RO" --json)
-assert_equals "unlanded-branch:fm/unlanded" "$(classes "$json")" "the unlanded branch is still reported"
+assert_equals "dirty-orphan-copy:alpha,unlanded-branch:fm/unlanded" "$(classes "$json")" \
+  "a home with no state directory still reports its dirty pool copy and unlanded branch"
 assert_equals "$before" "$(objects_snapshot "$REPO")" "the audit writes no objects into an audited repository"
 [ ! -e "$HOME_RO/state" ] || fail "the audit created the home's state directory"
 pass "the audit changes no repository or home state"
