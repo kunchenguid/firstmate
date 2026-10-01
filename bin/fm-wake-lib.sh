@@ -1334,6 +1334,33 @@ fm_meta_lock_path() {
   printf '%s/.meta-%s.lock\n' "$dir" "$id"
 }
 
+# fm_meta_insert_before_pr <meta> <lines> [drop-key...]: print <meta> without
+# any drop-key line, with <lines> placed just before its first pr= line, or at
+# the end when it has none. A key written after pr= makes
+# fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh) refuse the record, which
+# unauthenticates an already-armed PR poll, so every writer that adds a key to
+# a task record that may carry pr= goes through this.
+fm_meta_insert_before_pr() {
+  local meta=$1 lines=$2
+  shift 2
+  FM_META_INSERT=$lines FM_META_DROP="$*" awk '
+    BEGIN {
+      n = split(ENVIRON["FM_META_DROP"], d, " ")
+      for (i = 1; i <= n; i++) drop[d[i]] = 1
+      ins = ENVIRON["FM_META_INSERT"]
+    }
+    function emit() {
+      if (!done && ins != "") print ins
+      done = 1
+    }
+    { k = $0; sub(/=.*/, "", k) }
+    k in drop { next }
+    /^pr=/ { emit() }
+    { print }
+    END { emit() }
+  ' "$meta"
+}
+
 # fm_task_set_lock_path: the per-home lock guarding WHICH tasks exist in a home,
 # as opposed to fm_meta_lock_path, which guards one task's record.
 #

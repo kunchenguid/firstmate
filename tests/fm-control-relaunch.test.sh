@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -488,6 +490,44 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# arm_pr_poll <case-dir> <id>: register a merge poll the way fm-pr-check.sh
+# does, with the pr= identity block last in the record.
+arm_pr_poll() {
+  local state="$1/home/state" id=$2
+  {
+    printf '%s\n' "pr=https://github.com/example/repo/pull/7"
+    printf '%s\n' "pr_head=f965bd680f44eeed2969d97ea885f3aaac2229d1"
+  } >> "$state/$id.meta"
+  fm_pr_poll_prepare "$state" "$id" github https://github.com/example/repo/pull/7 \
+    github.com example/repo 7 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "could not prepare the PR poll fixture"
+  fm_pr_poll_publish_prepared || fail "could not publish the PR poll fixture"
+  fm_pr_poll_artifacts_valid "$state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the PR poll fixture did not validate before the relaunch"
+}
+
+test_relaunch_keeps_an_armed_pr_poll_valid() {  # <trace on|off>
+  local trace=$1 id dir out rc
+  id=rlpr$trace
+  dir=$(new_case "armed-pr-$trace" "$id")
+  add_ship_task "$dir" "$id" claude
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+  arm_pr_poll "$dir" "$id"
+
+  out=$(run_control "$dir" "$id" relaunch --note "continuing after review"); rc=$?
+  expect_code 0 "$rc" "relaunch with an armed PR poll should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" "$id" control_relaunch_tx)" ] \
+    || fail "the relaunch transaction must still be recorded"
+  if [ "$trace" = on ]; then
+    fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+      || fail "the replacement's trace carrier must be recorded"
+  fi
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "relaunch (trace $trace) broke the armed PR poll:"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  pass "fm-control relaunch: an armed PR poll still validates after relaunch (trace $trace)"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2391,6 +2431,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_pr_poll_valid off
+test_relaunch_keeps_an_armed_pr_poll_valid on
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

@@ -313,13 +313,13 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
-{
-  echo "kind=ship"
-  echo "mode=$MODE"
-  echo "yolo=$YOLO"
-  echo "branch=$BRANCH"
-} >> "$TMP"
+if ! fm_meta_insert_before_pr "$META" "$(printf 'kind=ship\nmode=%s\nyolo=%s\nbranch=%s' "$MODE" "$YOLO" "$BRANCH")" \
+  kind mode yolo branch > "$TMP"; then
+  rm -f -- "$TMP"
+  TMP=
+  echo "error: task record for $ID could not be prepared" >&2
+  exit 1
+fi
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=
