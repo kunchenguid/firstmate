@@ -1,0 +1,1 @@
+{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_status":"done","focused":false,"pane_id":"w1:p2","revision":2,"scroll":{"max_offset_from_bottom":4962,"offset_from_bottom":1595,"viewport_rows":39},"tab_id":"w1:t2","workspace_id":"w1"},"type":"pane_info"}}

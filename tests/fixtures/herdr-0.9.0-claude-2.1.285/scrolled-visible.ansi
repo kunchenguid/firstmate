@@ -1,0 +1,39 @@
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55m: Firstmate instruction waiting: list '/srv/firstmate/state/example-task-xxxxxxxxxxxxxxxxxx.inbox'/*.msg and, in numer[0m
+[0m[38;2;255;255;255m[48;2;55;55;55mic order, read and act on each, then mv each [0m[48;2;55;55;55m       [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55mhandled file to '/srv/firstmate/state/example-task-xxxxxxxxxxxxxxxxxx.inbox'/handled/.[0m[48;2;55;55;55m                                [0m
+[0m[48;2;55;55;55m                                                    [0m
+
+[0m[38;2;255;255;255m⏺[0m xxxxxxx 00 xx xxxxxxx. xxxxxxx 000 xxx xxxx xxxxxxx, xx x xx xxxxxxx xx xxx.
+
+  [0m[38;2;153;153;153mxxxx [0m[1m[38;2;153;153;153m0[0m[38;2;153;153;153m xxxx (xxxx+x xx xxxxxx)[0m
+
+[0m[38;2;255;255;255m⏺ [0mxxxxxxx 000: xxxxxxx 00 xxxxx x "xxx-0" xxxxxxxxx (x 0-xxxxxxx xxxxx xxxxx) xxxxxxx xxx xxxxxxx 00-xxxxxxx xxxx.
+
+[0m[38;2;78;186;101m⏺[0m [0m[1mxxxx[0m(xx /xxxxxxx/xxx/xxxxxx-000/-xxxxx-xx--xxxxxxxxx-xxxxxxxxxxx-xxxxx-x00000-0-xxxxxxxxxxx-xxxxx/000xxx00-000x-00x0-0
+0x0-000x00000x0x/xxxxxxxxxx/xxxx && xxx > xxx/x…)
+[0m[38;2;153;153;153m  ⎿  [0m                                    xxxx                                     xxxxx  xxxxx00_xxx  x0_xxxxx_xxxxx_xxx
+  x0_xxxxx_xxxxx_xxx  x0_xxxxx_xxx  x0_xxxxx_xx
+     xxx_xxx  x0_xxxxx_xxxxx_xxx  x0_xxxxx_xxx  x0_xxxxxxx
+                                     xx 00-00                            00:00 (xxxxxx)          0.0               00.00
+                0.00          00.0
+     [0m[2m… +00 xxxxx (xxxx+x xx xxxxxx)[0m
+[0m[38;2;153;153;153m  ⎿  xxxxx xxx xxx xxxxx xx /xxxxx/xx/.xxxxxxxxx/xxxxxxxxxxx-xxxxx-x00000/0/xxxxxxxxxxx-xxxxx[0m
+
+[0m[38;2;255;255;255m⏺[0m xxx 0/00'x 0-xxx xxxxx xxxx xx xxx 00.0xx xxxxxxxxxx, xxxx xxxxxxx xxx xxxxxxxx 00%. x xxxx xxx x xxxxx xxxxx xx x 00%
+ xxx, xxxxxxx xxxx xx xxx xxxxxx xxxxxx xx xxx
+  xxxxxxxx.
+
+[0m[38;2;78;186;101m⏺[0m [0m[1mxxxx[0m(xx /xxxxxxx/xxx/xxxxxx-000/-xxxxx-xx--xxxxxxxxx-xxxxxxxxxxx-xxxxx-x00000-0-xxxxxxxxxxx-xxxxx/000xxx00-000x-00x0-0
+0x0-000x00000x0x/xxxxxxxxxx/xxxx && xxx >> xxx/…)
+[0m[38;2;153;153;153m  ⎿  [0mx_xx00 000 00 000 xxx 00% xxxx +0.00% ['xxxx 00-00', 'xxxx 00-00'] xxx: ['00-00', '00-00', '00-00', '00-00'] xxx 0/
+00 xxxxxx: [00.00]
+     x_xxx00 000 00 000 xxx 00% xxxx +0.00% ['xxxx 00-00', 'xx 00-00', 'xxxx 00-00', 'xxxx 00-00'] xxx: ['00-00', '00-00
+', '00-00', '00-00'] xxx 0/00 xxxxxx: [00.00]
+[0m[38;2;153;153;153m  ⎿  xxxxx xxx xxx xxxxx xx /xxxxx/xx/.xxxxxxxxx/xxxxxxxxxxx-xxxxx-x00000/0/xxxxxxxxxxx-xxxxx[0m
+
+[0m[38;2;78;186;101m⏺ [0m[1mxxxx[0m(xx /xxxxxxx/xxx/xxxxxx-000/-xxxxx-xx--xxxxxxxxx-xxxxxxxxxxx-xxxxx-x00000-0-xxxxxxxxxxx-xxxxx/000xxx00-000x-00x0-0
+0x0-000x00000x0x/xxxxxxxxxx/xxxx && xxx > xxx/x…)
+[0m[38;2;153;153;153m  ⎿  [0m0
+     xxxxxxx
+     xxxx [xx=0000000000]: xxxxxxxx xxxxxxx 00 (xxx-0 xxxxxxxxx): xxx 0/00 xxx-0 xxxxx 0/00-0/00 xxx 0.00

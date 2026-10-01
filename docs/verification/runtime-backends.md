@@ -1119,6 +1119,7 @@ The CLI matrix was checked directly:
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
 | Styled viewport capture | `herdr pane read <pane> --source visible --format ansi` | Verified on 2026-09-26 against Herdr 0.9.0 with Claude Code 2.1.283: the flag pair exited 0 and returned the viewport with SGR attributes intact, which is the styled read behind `fm_backend_herdr_visible_capture_ansi` that ghost/placeholder stripping needs (see "Claude exit behind the slash-command popup" below). |
+| Scroll position | `herdr pane get <pane>` | Verified on 2026-09-30 against Herdr 0.9.0 with Claude Code 2.1.285: `.result.pane.scroll` reports `offset_from_bottom`, `max_offset_from_bottom`, and `viewport_rows`; `--source visible` follows that position, while `--source recent` stays anchored to the bottom with SGR attributes intact (see "Herdr viewport read on a scrolled-back pane" below). |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
@@ -1242,6 +1243,66 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ```text
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
 ```
+
+### Herdr viewport read on a scrolled-back pane
+
+Measured 2026-09-30 against Herdr 0.9.0 and Claude Code 2.1.285, with read-only commands on live panes whose view had been left scrolled back.
+
+`pane read --source visible` is the rendered screen, so it follows the pane's view.
+On an idle Claude pane with an empty composer and a view scrolled back 1595 rows, `pane get` reported the position and the two sources disagreed:
+
+```sh
+herdr pane get <pane> | jq -c .result.pane.scroll
+herdr pane read <pane> --source visible | sed -n 2p | cut -c1-40
+herdr pane read <pane> --source recent --lines 200 | tail -n 39 | sed -n '35p;37,39p' | sed 's/^ *//'
+```
+
+```text
+{"max_offset_from_bottom":4962,"offset_from_bottom":1595,"viewport_rows":39}
+❯ : Firstmate instruction waiting: list
+❯
+⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent                     ✔ Update installed · Restart to update
+new task? /clear to save 210k tokens
+/rc
+```
+
+The visible window's bottom-most prompt glyph was the transcript echo of a submitted message, which Claude Code draws as `❯` plus bright text, so the composer state read answered `pending` for an empty composer.
+That verdict skipped every steering doorbell and refused `bin/fm-control.sh exit` and `relaunch`.
+The view stays where it was left while the pane prints: on a working pane the offset grew from 199 to 243 during the measurement.
+The same read is wrong in the unsafe direction when the window shows an old empty composer while the live composer holds a draft, which the portable regression below holds.
+
+The fix reads the live screen instead: when `pane get` reports `offset_from_bottom` above 0, `fm_backend_herdr_visible_capture` and `fm_backend_herdr_visible_capture_ansi` read `--source recent` and keep the last `viewport_rows` rows.
+A pane at the bottom, and a Herdr that reports no scroll metrics, keep the `--source visible` read unchanged.
+Observed through the adapter on the two scrolled-back panes and two panes at the bottom:
+
+```sh
+bash -c '. bin/backends/herdr.sh; fm_backend_herdr_composer_state <session>:<pane>'
+```
+
+| Pane | `offset_from_bottom` | Before | After |
+| --- | --- | --- | --- |
+| idle Claude, empty composer | 1595 | `pending` | `empty` |
+| working Claude, empty composer | 199 | `pending` | `empty` |
+| idle Claude, empty composer | 0 | `empty` | `empty` |
+| finished Claude, empty composer | 0 | `empty` | `empty` |
+
+Why `recent` and not `detection`: both are anchored to the bottom, but `--source detection --format ansi` returned no escape sequences (0 of 39 rows against 37 for `--source visible --format ansi` on the same pane), and an unstyled read cannot tell ghost text from typed text.
+On four panes at the bottom, the last `viewport_rows` rows of `--source recent --lines 200 --format ansi` were the `--source visible --format ansi` capture preceded by one or two scrollback rows, because both sources drop trailing blank screen rows, and the composer verdict was identical on all four.
+
+Portable regressions, replaying captures recorded from the first pane above (`tests/fixtures/herdr-0.9.0-claude-2.1.285/README.md`); each fails against the view-following read:
+
+```sh
+tests/fm-backend-herdr.test.sh
+```
+
+```text
+ok - fm_backend_herdr_composer_state: a scrolled-back view's transcript echo cannot make an empty live composer read pending
+ok - fm_backend_herdr_composer_state: a scrolled-back view of an old empty composer cannot hide a typed draft
+ok - fm_backend_herdr_visible_capture: a scrolled-back pane is read as its live viewport, not its scrollback
+```
+
+No live guard drives this state yet.
+The Herdr CLI has no command that scrolls a pane's view; the socket API's `pane.scroll` request (`herdr api schema --json`) is the primitive a lab guard would need.
 
 ### Prune and respawn
 

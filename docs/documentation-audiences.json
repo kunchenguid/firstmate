@@ -545,6 +545,10 @@
       "audience": "public-product"
     },
     {
+      "path": "tests/fixtures/herdr-0.9.0-claude-2.1.285/README.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
     },

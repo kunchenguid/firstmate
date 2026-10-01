@@ -1,0 +1,80 @@
+     xxxx [xx=0000000000]: xxxxxxxx xxxxxxx 00 (xxx xxxxxxx 00 xxxxxx-xx, xxxx xxxx, $0; xxxx/xxxxx-xxxxxx-00x/xxxx
+     xxxx-0000-00-00.xx): 00.0 xxx xxx xxxxxxxx xxx 0/0 xx +0.00%; xxx xxxx xx xxxx xxxxxxx xxx
+[0m[38;2;153;153;153m  ⎿  xxxxx xxx xxx xxxxx xx /xxxxx/xx/.xxxxxxxxx/xxxxxxxxxxx-xxxxx-x00000/0/xxxxxxxxxxx-xxxxx[0m
+
+[0m[38;2;255;255;255m⏺[0m xxxxxxx 00 xx xxxxxxx xxxx [0m[38;2;177;185;249mxxxx/xxxxx-xxxxxx-00x/xxxxxxxx-0000-00-00.xx[0m, xxx xxx xxxx xxxx xx xx xxx xxxxxx xxxx. x
+  xxxxx xxxxxxx 000 xx [0m[38;2;177;185;249mxxxxxxx/[0m. xxx x xxxx xxx xxx xxxx xxxxxxxxxxx. xxx xxxx xxx xxxx, xxx xxx xxxx xxx $0.
+
+  [0m[1mxxxx xxxxxxx:[0m
+  0. [0m[1mxxx xxxx:[0m
+     - xxx xxx xxxxxxxx xxx xxx, xx xxxxx +00% xxxx. xxx xxxxx xxxxxxx xx xxxx xxxxxxx xxx 00-00%, xx xxxxx +0%.
+     - x xxxxxxxx xx xxxx xxx 0.0-0.0 xxxxxxxx xx xxxxxxx (xxxxx 0-0.0).
+     - xxx xxxxxxx xxxxx xxxxx 00 xx 000 xxxxxxxxx xx xxxxx xxx xxxxxxx. xxxx xx xxx xxx xxx xxxx xx xxx.
+     - xxxxxxxx xxx xxx (xxx xxxxx xxxxxx xxxxx xxx xxxxx xxxxxx 0, 0 xx 0 xxxxxxxx), xxx xxxxxxxx xxxxx 00-00%. xxx xxx
+       xxxxx xxxxxx xx xxx xxxx xx xxxx xxxxxx xxxxxx 00-00%.
+  0. [0m[1mxxxxx xxxx:[0m
+     - 00x, xxx xxxxxx 0 xxx xxx xxxx xxxx xxxx-xxxx xxxxxxxxxx xxx xxxx 0/00. xxx xxxxxxxxxx xxxx xxxxx xxxx 0/00.
+     - xxxx x "xxxx xxx" xxxx xxxxx 0/00. xx xxxx xxxxx 0/00: xxx xxx xxxx xx 0/00 xxx xxx xxxx xx 0/00.
+     - xxx 00% xxx 00 xxxxxxxxx xx xxx xxxxx xxxxx.
+  0. [0m[1mxxxxxxx:[0m
+     - xx xxxxxx xx xxxxxx xxxxxxx xxxxx x xxxxxxxx xxxxxxxxxxx.
+     - xxx x0, x xxxxxx xxxxx xxxxxx xxx xxxxx xxx: x0 xxx xxxx xxxxx xxxx xxx xxxxx xxx xxxx.
+  0. [0m[1mxxxxxxxxxxxx:[0m
+     - x xxxx xxxx xxxxxxx xxxxx xxxxxxx xxxx xx xxxxxx. xxx -00% xx -00% xx -00% xxxxxxx xxxxxxx xxxxxx xxxxxxx xxx
+       xxxxxx xxxx.
+     - xxxx xxxxxxxxx xxxxxx xxxxx xxx xxxx xxxx xxxxxx. xxx xxx xxxxxxxx xxxxxx-xxxxx xxxxxxx, xx xxxxx xxx xx xxx xxxx
+       xx xxxx.
+     - xxxxxxx xxx-xxxx xxxx xxx xxxxx xxxxxxxx xx xxxxxxxx, xxx xxxx xxxx xxxx xxxx xxxxxx xxxx xxxxxxx-xxxxxxxx
+       xxxxxx. xx xxxxx xxxx xxxxx 000 xxxxxxxx xxx x xxxxx xxx xxx xxxx xxxxxxx. x xxx xxx xxxxx xx.
+  0. [0m[1mxxx xxxxxxxxx:[0m
+     - xx x 00-xxx xxxxx xx xxx xxx xxx xxxxxx xxx, xxx xxxxxxxxxx xxxxx xxx xxxx xxxxxx. xx xxxx, xxx xxx xxx xxxx xxx
+       xx x xxxxxxxxx, xxx xxx xxxx xxxxx x xxxxxx xx 0/00-0/00.
+     - xx 0/00, xxx xxxx xx xxxxxxx xx xx'x xxxxxxxx, xxx 0 xx xxx 0 xx xxxxx xxxx xxxx. xxx "xxxxx xxxx" xxxxx xx xxxx
+       x xxxxx xxxx xxx, xxxxxxxx xx xxx xx xxxxx. xxxx xx xx xxxxxxx, xxx xx xxxx xxxxxxx xx.
+  0. [0m[1mxxxxxxxx xxxx: [0mxxx xxxx xxxxx xxxx (+00.0% xxxxxxx +00.0%). xxx xx xxxxx-x xxxxxxxx xxxx 0/00 xx 0/00 xxx xx, xx
+     xxx xxxx xx xxx xxx xxxxxx xx xxxxx x.
+  0. [0m[1mxxxx xxx xxx:[0m xx xxxxx xxxxx, xxxx xx xxxxx xxxx xxx xxxx xxxx. xxxxxxx xx xxxxx xxx xxx xxxxx xx x xxxxxxx xxxx.
+  
+  xxxxxxx 00 xxxx xxxx xxxx xxxxxxxxx xxx xxx xxxxxxx: xxx xxxxx xxx xxxxxx, xxx xxx xxxxxxxxx, xxx-xxxx, xxx xxx
+  xxxxxxx xx xxxx xxx xxx.
+
+[0m[38;2;153;153;153m✻[0m [0m[38;2;153;153;153mxxxxxxx xxx 00x 00x · xxxx 0:00 xx[0m
+
+[0m[38;2;80;80;80m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55m: Firstmate instruction waiting: list '/srv/firstmate/state/example-task-xxxxxxxxxxxxxxxxxx.inbox'/*.msg and, in [0m[48;2;55;55;55m     [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55mnumeric order, read and act on each, then mv each handled file to [0m[48;2;55;55;55m                                                    [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55m'/srv/firstmate/state/example-task-xxxxxxxxxxxxxxxxxx.inbox'/handled/.[0m[48;2;55;55;55m                                                [0m
+  
+[0m[38;2;78;186;101m⏺[0m [0m[1mxxxx[0m(xx /xxx/xxxxxxxxx/xxxxx/xxxxxxx-xxxx-xxxxxxxxxxxxxxxxxx.xxxxx && xx *.xxx 0>/xxx/xxxx | xxxx -x; xxx x xx $(xx
+      *.xxx 0>/xxx/xxxx | xxxx -x); xx xxxx "=== $x"; x…)
+[0m[38;2;153;153;153m  ⎿  [0m000.xxx
+     === 000.xxx
+     xxxxxx=xx-xxxx-xxxxx.x0
+     [0m[2m… +0 xxxxx (xxxx+x xx xxxxxx)[0m
+[0m[38;2;153;153;153m  ⎿  xxxxx xxx xxx xxxxx xx /xxxxx/xx/.xxxxxxxxx/xxxxxxxxxxx-xxxxx-x00000/0/xxxxxxxxxxx-xxxxx[0m
+
+[0m[38;2;78;186;101m⏺[0m [0m[1mxxxx[0m(xx /xxxxx/xx/xxx-xxxxx-xxxxxxxxx/xxxxx && xxxxxx '%x\x' "xxxxxx [xx=$(xxxx +%x)]: xxxxxxx xxx xxx xxxxxxx xx xxx
+      xxxx xxxxxxx 00 xxxxxxxxx - xxxxx-xxx xxxxxx (x…)
+[0m[38;2;153;153;153m  ⎿  [0mxxxxxx [xx=0000000000]: xxxxxxx xxx xxx xxxxxxx xx xxx xxxx xxxxxxx 00 xxxxxxxxx - xxxxx-xxx xxxxxx (xxxxxxx,
+     xxx xx xxxx; xxx xxx xxxxxxx xxx xxxxxx xxxx xx xxxxxxxxx xxxx), xxx xxx xxxxxxxxx (x xxxxxx xxxxx xx x xxxxx
+     xxxx xxx; xxx xx xxx xx xxxxx), xxxx xx x xxx-xxxx xxxxxx, xxx xxxxxxx xx xxxxx xxxx 0/00 xx xxx 0/00 xxxxxxxx
+     [0m[2m… +0 xxxxx (xxxx+x xx xxxxxx)[0m
+[0m[38;2;153;153;153m  ⎿  xxxxx xxx xxx xxxxx xx /xxxxx/xx/.xxxxxxxxx/xxxxxxxxxxx-xxxxx-x00000/0/xxxxxxxxxxx-xxxxx[0m
+
+[0m[38;2;255;255;255m⏺[0m x xxxxxxx xxxxxxx 000 xxx xxxxx xx xx [0m[38;2;177;185;249mxxxxxxx/[0m. x xxxxx x xxxxxx xxxx xx xxx xxxxxx xxxx. xx xxxx xxxx x xxxx xxx xxx
+  xxxxxxx'x xxxxxxx xx xxx xxxx xxxxxxx 00 xxxxxxxxx:
+
+  0. xxxxx-xxx xxxxxx: xx xxx xxxxx xxx xxxxxxx xxx, xxx xxx xx xxx xxxx?
+  0. xxx xxx xxxxxxxxx: x xxxxx xxxx xxx xxxxxx, xx x xxxxx xxxx xxx? xxx xx xxx xxxxx xxx xx xxx xx xxxxx?
+  0. xxxx, xx x xxxxxx xxx xxx xxx-xxxx xxxxxxx xx xxx xxxxx xxxxxxxx?
+  0. xxxx xx xxxx xxxx 0/00 xx xxx 0/00 xxxxxxxxxxx xxxx xx xxxxxxxxxxx?
+
+  xxxxx xxx xxxxxxx xxxxxx (xx-xxxx-xxxxxx-xxxxxx) xxxx, x xx xx xxxx. xxx xxxxx xx xxxxx.
+
+[0m[38;2;153;153;153m✻ xxxxxx xxx 0x · xxxx 0:00 xx[0m
+
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ 
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;255;107;128m⏵⏵ bypass permissions on[0m[38;2;153;153;153m (shift+tab to cycle) · ← 1 agent[0m                     [0m[38;2;78;186;101m✔ Update installed · Restart to update[0m
+                                                                                  [0m[38;2;153;153;153mnew task? [0m[38;2;177;185;249m/clear[0m[38;2;153;153;153m to save [0m[38;2;177;185;249m210k tokens[0m
+                                                                                                                   [0m[38;2;78;186;101m/rc[0m

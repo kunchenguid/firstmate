@@ -3133,25 +3133,63 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
-# fm_backend_herdr_visible_capture: the visible viewport only. `--source
-# visible` is herdr's viewport-bounded read, so it needs none of the --lines
-# workaround above - the bound is the pane itself, and asking for a line count
-# is what triggers the empty-read bug.
+# fm_backend_herdr_scrolled_back_rows: the pane's viewport height when its
+# view is scrolled back from the bottom of its scrollback, empty when it sits
+# at the bottom. Empty too when `pane get` fails or reports no scroll metrics,
+# so a herdr that cannot answer keeps the plain viewport read.
+fm_backend_herdr_scrolled_back_rows() {  # (parsed target) -> <viewport-rows>|empty
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.pane.scroll | select((.offset_from_bottom // 0) > 0) | .viewport_rows // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_live_screen: the LIVE screen - the viewport as it stands at
+# the bottom of the pane's scrollback, whatever the pane's view shows.
+# `--source visible` is herdr's viewport-bounded read, so it needs none of the
+# --lines workaround above - the bound is the pane itself, and asking for a
+# line count is what triggers the empty-read bug. It is also the RENDERED
+# screen, so it follows the view: a pane left scrolled back answers with a
+# window of old transcript instead of the live screen (verified live, herdr
+# 0.9.0; docs/verification/runtime-backends.md "Herdr viewport read on a
+# scrolled-back pane"). Every caller reads this to judge or prove the live
+# composer, where that window is wrong in both directions - a transcript echo
+# of a submitted message reads as pending typed text, and an old empty
+# composer hides a live one that holds a draft. So a scrolled-back pane is
+# read from the bottom-anchored `recent` source instead, trimmed to the
+# viewport height: the same rows `visible` returns at the bottom, plus at most
+# the few scrollback rows that stand in for trailing blank screen rows, which
+# both sources drop. The fetch keeps the small-N floor above.
+fm_backend_herdr_live_screen() {  # (parsed target) [pane-read-format-args...]
+  local rows fetch out
+  rows=$(fm_backend_herdr_scrolled_back_rows) || rows=
+  case "$rows" in
+    ''|*[!0-9]*|0)
+      fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible "$@" 2>/dev/null
+      return
+      ;;
+  esac
+  fetch=$rows
+  [ "$fetch" -ge 200 ] || fetch=200
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" "$@" 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$rows"
+}
+
+# fm_backend_herdr_visible_capture: the live viewport only, never scrollback
+# history above it (fm_backend_herdr_live_screen).
 fm_backend_herdr_visible_capture() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
+  fm_backend_herdr_live_screen
 }
 
 fm_backend_herdr_visible_capture_ansi() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible --format ansi 2>/dev/null
+  fm_backend_herdr_live_screen --format ansi
 }
 
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
-# ANSI viewport capture (`--source visible`, which needs no line count and so
-# no small-N workaround), the native `agent get` identity probe, and the
+# ANSI live-viewport capture (fm_backend_herdr_live_screen above), the native
+# `agent get` identity probe, and the
 # capability descriptor. Every shape - the bordered
 # box, the bare agent-glyph row, opencode's left-bar, and pi's
 # identity-gated separated pair (which this adapter pioneered) - now lives in
@@ -3189,8 +3227,8 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # composer as empty while it actually holds typed text. That blindness broke
 # fm-control exit (the typed /exit was judged unsent and cleared) and would
 # equally defeat this state read's pre-submit concat guard. The composer is
-# by definition inside the viewport, and `--source visible` needs none of the
-# small-N --lines workaround.
+# by definition inside the live viewport, which fm_backend_herdr_live_screen
+# reads even when the pane's view is scrolled back.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
