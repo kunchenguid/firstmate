@@ -159,6 +159,21 @@ test -f "${updated_pending%.pending}.presented" || fail 'updated goal lacked its
   || fail 'updated-goal acknowledgement changed its semantic obligation'
 pass 'old no-change receipt cannot cross a material goal update'
 
+dedupe_key_before=$(jq -r '.assessment.evidence_key' "$FM_HOME/data/unchanged/lifecycle.json")
+dedupe_revision_before=$(jq -r '.revision' "$FM_HOME/data/unchanged/lifecycle.json")
+dedupe_one=$(FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task unchanged --verdict routine \
+  --summary 'Repeated observation after owner bookkeeping.' --wake 'heartbeat: exact lifecycle revision')
+python3 "$LIB" owner-receipt unchanged --execution-generation ack-g1 --kind merge \
+  --facts '{"url":"https://example.test/owner/repo/pull/1","head":"abc123"}' >/dev/null
+test "$(jq -r '.assessment.evidence_key' "$FM_HOME/data/unchanged/lifecycle.json")" = "$dedupe_key_before" \
+  || fail 'owner bookkeeping unexpectedly changed the assessment evidence key'
+test "$(jq -r '.revision' "$FM_HOME/data/unchanged/lifecycle.json")" -gt "$dedupe_revision_before" \
+  || fail 'owner bookkeeping did not advance the lifecycle revision'
+dedupe_two=$(FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task unchanged --verdict routine \
+  --summary 'Repeated observation after owner bookkeeping.' --wake 'heartbeat: exact lifecycle revision')
+test "$dedupe_two" -gt "$dedupe_one" || fail 'new lifecycle revision reused an older branch outcome'
+pass 'lifecycle outcome reuse includes the exact current revision'
+
 export FM_HOME="$TMP_ROOT/home"
 
 # Repeating an outcome reuses its original delivery sequence, including while

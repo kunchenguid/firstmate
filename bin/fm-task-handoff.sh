@@ -395,7 +395,7 @@ _handoff_deliver_locked() {  # <id>
     handoff_retryable_locked "$id" "semantic stop or uncertain effect requires main reconciliation"
     return $?
   fi
-  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id") || write_rc=$?
+  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$(fm_meta_get "$meta" spawn_gen)") || write_rc=$?
   handoff_release_meta "$meta_lock"
   if [ "$write_rc" -eq 2 ]; then
     handoff_reject_locked "$id" "target inbox already contains handoff id '$id' with a different instruction"

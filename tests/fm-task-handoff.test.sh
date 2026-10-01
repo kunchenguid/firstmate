@@ -637,21 +637,28 @@ assert r['schema']=='fm-task-lifecycle.v2' and r['delegation']['policy_revision'
 binding={task:dict(goal_revision=r['goal_revision'],brief_sha256=r['brief_sha256'],execution_generation=r['execution_generation'],delegation_revision=r['delegation']['revision'])}
 subprocess.run([str(bin/'fm-wake-grant.sh'),'activate',str(os.getpid()),'1'],env=env,check=True,capture_output=True,text=True)
 call('observe',task,actor='branch',bindings=binding)
+assert call('inspect',task,actor='branch',bindings=binding)['execution_generation']=='g1'
+assert call('refresh',task,actor='branch',bindings=binding)['execution_generation']=='g1'
 call('continuation-policy','--expected-revision','1','--record',str(policy_file),actor='branch',ok=False)
 
 body=b'Collect the already-authorized validation evidence.\n'
 payload=directory/'payload';payload.write_bytes(body)
 handled_dir=home/'state'/f'{task}.inbox/handled';handled_dir.mkdir(parents=True)
-receipt=handled_dir/'001.msg';receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\n--\n'+body)
+legacy_receipt=handled_dir/'001.msg';legacy_receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\n--\n'+body)
+stale_receipt=handled_dir/'002.msg';stale_receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\nexecution_generation=g0\n--\n'+body)
+receipt=handled_dir/'003.msg';receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\nexecution_generation=g1\n--\n'+body)
 action=dict(id='routine.g1.a1',kind='steer',phase='prepared',expected_execution_generation='g1',attempts=0,attempt_limit=1,
             recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref=str(payload),payload_sha256=sha(payload),receipt_ref=None)
 patch=dict(delegation_revision=r['delegation']['revision'],next_action=action)
 patch_file=home/'data/patch.json';write_json(patch_file,patch)
 r=call('branch-patch',task,'--expected-revision',str(r['revision']),'--record',str(patch_file),actor='branch',bindings=binding)
 binding[task]['delegation_revision']=r['delegation']['revision']
+call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(legacy_receipt),actor='branch',bindings=binding,ok=False)
+call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(stale_receipt),actor='branch',bindings=binding,ok=False)
+assert call('lifecycle',task)['next_action']['phase']=='prepared'
 r=call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(receipt),actor='branch',bindings=binding)
 assert r['next_action']['phase']=='confirmed' and r['next_action']['attempts']==0
-assert r['next_action']['continuation']['inbox_id']=='001'
+assert r['next_action']['continuation']['inbox_id']=='003'
 
 # Revocation fences the previously materialized grant immediately. Re-enable
 # produces a new policy revision and a new exact task grant only after the
@@ -659,6 +666,7 @@ assert r['next_action']['continuation']['inbox_id']=='001'
 disabled=dict(policy,revision=1,enabled=False);write_json(policy_file,disabled)
 assert call('continuation-policy','--expected-revision','1','--record',str(policy_file))['revision']==2
 assert call('observe',task,actor='branch',bindings=binding)['delegated'] is False
+call('refresh',task,actor='branch',bindings=binding,ok=False)
 enabled=dict(policy,revision=2,enabled=True);write_json(policy_file,enabled)
 assert call('continuation-policy','--expected-revision','2','--record',str(policy_file))['revision']==3
 r=call('refresh',task);r=call('lifecycle',task)

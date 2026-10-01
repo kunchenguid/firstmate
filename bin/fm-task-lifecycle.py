@@ -1087,10 +1087,11 @@ class Task:
             key, separator, value = line.partition('=')
             require(separator and key not in fields, 'invalid handled inbox receipt')
             fields[key] = value
-        require(sep and set(fields) <= {'schema', 'at', 'delivery', 'handoff'} and
+        require(sep and set(fields) <= {'schema', 'at', 'delivery', 'handoff', 'execution_generation'} and
                 fields.get('schema') == 'fm-task-inbox.v1' and stamp(fields.get('at')) and
                 fields.get('delivery') in (None, 'fire-and-forget') and
-                (fields.get('handoff') is None or atom(fields['handoff'])),
+                (fields.get('handoff') is None or atom(fields['handoff'])) and
+                fields.get('execution_generation') == action['expected_execution_generation'],
                 'invalid handled inbox receipt')
         require(digest(body) == action['payload_sha256'], 'handled instruction body differs from prepared action')
         current = subprocess.run([str(Path(__file__).with_name('fm-task-state.sh')), self.id],
@@ -1274,6 +1275,9 @@ class Task:
         Reading does not enroll, fix stale identity, or consume any receipt.
         """
         record = self.read(current=False)
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            require(record is not None, 'task is not delegated')
+            self.delegated(record, 'inspect')
         evidence = [{'ref': ref, 'sha256': digest(self.reference(ref))} for ref in sorted(set(refs))]
         brief_sha, generation = digest(regular(self.directory / 'brief.md')), self.generation()
         snapshot = [record, brief_sha, generation, evidence]
@@ -1536,6 +1540,8 @@ class Task:
         record = self.read()
         if record is None:
             return self.summary(record)
+        if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            self.delegated(record, 'inspect')
         record = self.apply_routine_policy(record)
         action = record.get('next_action')
         if action and action['phase'] in ('attempted', 'uncertain'):

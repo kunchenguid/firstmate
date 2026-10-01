@@ -70,7 +70,13 @@ case "${1:-}" in
         fm_run_timed 2 python3 "$SCRIPT_DIR/fm-task-lifecycle.py" modes "$id" ;;
       lifecycle) fm_task_lifecycle read "$id" "$@" ;;
       observe) fm_task_lifecycle observe "$id" "$@" ;;
-      inspect) fm_task_lifecycle inspect "$id" "$@" ;;
+      inspect)
+        if [ "${FM_SUPERVISION_ACTOR:-main}" = branch ]; then
+          fm_task_lifecycle_mutate inspect "$id" "$@"
+        else
+          fm_task_lifecycle inspect "$id" "$@"
+        fi
+        ;;
       enroll|init) fm_task_lifecycle_mutate init "$id" "$@" ;;
       *) fm_task_lifecycle_mutate "$operation" "$id" "$@" ;;
     esac

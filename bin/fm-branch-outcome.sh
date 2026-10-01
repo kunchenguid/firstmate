@@ -14,8 +14,8 @@
 #     Lifecycle rows additionally carry evidenceKey, taskGeneration and
 #     lifecycleRevision.
 #     Append reuses the original sequence only for the exact task, generation,
-#     evidence key, wake, verdict, summary, and silent value; neither delivery
-#     nor processed cursors move on reuse. A caller without these options
+#     evidence key, lifecycle revision, wake, verdict, summary, and silent value;
+#     neither delivery nor processed cursors move on reuse. A caller without these options
 #     inherits the current lifecycle binding when one exists.
 #     The read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
@@ -484,6 +484,7 @@ case "$CMD" in
       LIFECYCLE_RECORD=$(fm_task_lifecycle read "$TASK") || exit 1
       CURRENT_KEY=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.assessment.evidence_key')
       CURRENT_GENERATION=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.execution_generation')
+      CURRENT_REVISION=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.revision')
       [ -z "$EVIDENCE_KEY" ] || [ "$EVIDENCE_KEY" = "$CURRENT_KEY" ] || exit 1
       [ -z "$TASK_GENERATION" ] || [ "$TASK_GENERATION" = "$CURRENT_GENERATION" ] || exit 1
       EVIDENCE_KEY=$CURRENT_KEY
@@ -509,9 +510,11 @@ case "$CMD" in
     fi
     if [ -n "$EVIDENCE_KEY" ] && [ -s "$STORE" ]; then
       EXISTING_SEQ=$(jq -rs --arg task "$TASK" --arg generation "$TASK_GENERATION" --arg key "$EVIDENCE_KEY" \
+        --argjson revision "$CURRENT_REVISION" \
         --arg wake "$WAKE" --arg verdict "$VERDICT" --arg summary "$SUMMARY" --argjson silent "$SILENT" \
         '[.[] | select(.task==$task and .taskGeneration==$generation and .evidenceKey==$key and
-          .wake==$wake and .verdict==$verdict and .summary==$summary and .silent==$silent)] | last | .seq // empty' "$STORE")
+          .lifecycleRevision==$revision and .wake==$wake and .verdict==$verdict and
+          .summary==$summary and .silent==$silent)] | last | .seq // empty' "$STORE")
       if [ -n "$EXISTING_SEQ" ]; then
         fm_lock_release "$LOCK"
         printf '%s\n' "$EXISTING_SEQ"
@@ -538,7 +541,6 @@ case "$CMD" in
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
     LIFECYCLE_FIELDS=''
     if [ -n "$EVIDENCE_KEY" ]; then
-      CURRENT_REVISION=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.revision')
       LIFECYCLE_FIELDS=",\"evidenceKey\":\"$EVIDENCE_KEY\",\"taskGeneration\":\"$TASK_GENERATION\",\"lifecycleRevision\":$CURRENT_REVISION"
     fi
     printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"%s}\n' \

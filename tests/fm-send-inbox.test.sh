@@ -323,6 +323,7 @@ p=h/'candidate.json';p.write_text(json.dumps(d));p.chmod(0o600)
 PY
   FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile t1 --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare action'
   run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "send goal: $(cat "$dir/error")"
+  grep -Fx 'execution_generation=s1' "$dir/home/state/t1.inbox/001.msg" >/dev/null || fail 'goal action receipt omitted its execution generation'
   mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
   run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "replay confirmed goal: $(cat "$dir/error")"
   [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'duplicate action enqueued'
