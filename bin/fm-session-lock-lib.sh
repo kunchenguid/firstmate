@@ -85,7 +85,10 @@ fm_harness_process_matches() {  # <comm> <args>
   # token. A full args line like `node /home/.../bin/pi` never matches ^pi$ as a
   # whole string; fm_harness_path_name on each token does (.../bin/pi -> pi).
   # Word-split only, inside a noglob subshell, so a literal wildcard token
-  # cannot pick up a harness-named path from the lock checker's cwd.
+  # cannot pick up a harness-named path from the lock checker's cwd. Only
+  # absolute paths, explicit ./ or ../ relatives, or an exact harness word
+  # count: a space inside a real path turns into a relative fragment such as
+  # pi/file.js after ps joins argv, and that fragment must not own the lock.
   case "$comm" in
     *node*|*python*)
       local _name
@@ -93,10 +96,22 @@ fm_harness_process_matches() {  # <comm> <args>
         set -f
         # shellcheck disable=SC2086 # intentional IFS split of the ps args blob
         for _tok in $args; do
-          if _n=$(fm_harness_path_name "$_tok"); then
-            printf '%s' "$_n"
-            exit 0
-          fi
+          case "$_tok" in
+            /*|./*|../*)
+              if _n=$(fm_harness_path_name "$_tok"); then
+                printf '%s' "$_n"
+                exit 0
+              fi
+              ;;
+            *)
+              # Bare harness word only (e.g. token pi). Relative fragments
+              # like pi/file.js share a path_name hit but are not a launch path.
+              if _n=$(fm_harness_path_name "$_tok") && [ "$_tok" = "$_n" ]; then
+                printf '%s' "$_n"
+                exit 0
+              fi
+              ;;
+          esac
         done
         exit 1
       ); then
