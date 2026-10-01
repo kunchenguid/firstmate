@@ -165,15 +165,17 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
 # <project-lock> is fm_treehouse_project_lock_path for the project being
 # admitted, and <project-dir> is that project's own directory, which matches
 # without recomputing its identity. The local homes come from
-# fm_local_firstmate_state_dirs <first-state>.
+# fm_local_firstmate_state_dirs <first-state>. <own-id> is the task being
+# admitted; its own record in <first-state> is the one this spawn replaces, so
+# it is not counted.
 # Sets FM_PROJECT_CAPACITY_OCCUPANTS to the count and
 # FM_PROJECT_CAPACITY_OCCUPANT_IDS to a comma-separated list of the holders,
 # each outside <first-state> qualified with its home. Returns 1 with
 # FM_PROJECT_CAPACITY_ERROR when the local homes cannot be enumerated, or when
 # a state directory or task record in them cannot be read, since skipping it
 # could undercount the holders.
-fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state>
-  local want=$1 own=$2 first=$3 state meta kind project lock id label i
+fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state> <own-id>
+  local want=$1 own=$2 first=$3 self=$4 state meta kind project lock id label i
   local -a cache_dirs cache_locks
   FM_PROJECT_CAPACITY_OCCUPANTS=0
   FM_PROJECT_CAPACITY_OCCUPANT_IDS=
@@ -191,6 +193,7 @@ fm_project_capacity_occupants() {  # <project-lock> <project-dir> <first-state>
     fi
     for meta in "$state"/*.meta; do
       [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      [ "$meta" != "$first/$self.meta" ] || continue
       [ -r "$meta" ] || {
         FM_PROJECT_CAPACITY_ERROR="task record $meta cannot be read"
         return 1

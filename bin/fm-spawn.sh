@@ -3038,7 +3038,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
 fi
 if [ -n "$SPAWN_PROJECT_CAPACITY" ]; then
-  if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE"; then
+  if ! fm_project_capacity_occupants "$SPAWN_TREEHOUSE_PROJECT_LOCK" "$PROJ_ABS" "$STATE" "$ID"; then
     echo "error: spawn refused: project $(basename "$PROJ_ABS") declares a capacity of $SPAWN_PROJECT_CAPACITY, but this machine's task records cannot all be read to count it ($FM_PROJECT_CAPACITY_ERROR)" >&2
     exit 1
   fi

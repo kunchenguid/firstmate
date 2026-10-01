@@ -312,6 +312,28 @@ test_symlinked_home_counts_each_worker_once() {
 
 # A place frees when a worker records its ready PR and when a task is cleaned
 # up; each release admits exactly one more worker.
+# A fresh spawn that restarts an existing task id replaces that task's own
+# record, so the record does not hold a place against it. Any other task on the
+# project still sees that record as a holder.
+test_restart_does_not_count_its_own_record() {
+  local case_dir home out rc=0
+  case_dir=$(make_case restart task-c task-d)
+  home="$case_dir/home"
+  declare_capacity "$home" "project 1"
+  fm_write_meta "$home/state/task-c.meta" \
+    "window=firstmate:fm-task-c" \
+    "project=$case_dir/project" \
+    "kind=ship"
+  out=$(spawn_ship "$case_dir" task-c) || rc=$?
+  assert_not_contains "$out" "deferred:" "a restart was deferred by its own record"
+  [ "$rc" -ne "$DEFER_EXIT" ] || fail "a restart exited with the deferral code: $out"
+  rc=0
+  out=$(spawn_ship "$case_dir" task-d "$case_dir/unused") || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "another task ignored the restarted task's place: $out"
+  assert_contains "$out" "1 already hold a place (task-c)" "another task did not count the restarted task"
+  pass "a restart of a task id does not count that task's own record"
+}
+
 test_release_frees_a_place() {
   local case_dir home out rc=0
   case_dir=$(make_case release task-c task-d)
@@ -609,6 +631,7 @@ test_spaced_project_name_is_declared
 test_hash_prefixed_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
+test_restart_does_not_count_its_own_record
 test_occupancy_counts_only_this_projects_workers
 test_capacity_is_shared_by_every_local_home
 test_unreadable_holders_refuse_admission
