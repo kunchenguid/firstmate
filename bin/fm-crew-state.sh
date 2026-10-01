@@ -1299,15 +1299,67 @@ if ! pane_readable "$BACKEND_TARGET"; then
     tmux:alive|herdr:alive)
       ;;
     tmux:missing|herdr:missing)
+  # A valid ship/scout terminal declaration outranks the death verdict: the
+  # harness is gone because the turn finished, not because state is unknown.
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
     tmux:dead|herdr:dead)
+  # A valid ship/scout terminal declaration outranks the death verdict: the
+  # harness is gone because the turn finished, not because state is unknown.
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
       emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)"
       ;;
     tmux:*|herdr:*)
+  # A valid ship/scout terminal declaration outranks the death verdict: the
+  # harness is gone because the turn finished, not because state is unknown.
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
       emit unknown none "backend unreachable ($TASK_BACKEND endpoint state: $AGENT_STATE)"
       ;;
     *)
+  # A valid ship/scout terminal declaration outranks the death verdict: the
+  # harness is gone because the turn finished, not because state is unknown.
+  case "$LOG_VERB" in
+    "done")
+      if [ "$KIND" = ship ]; then
+        emit_ship_status_done
+      fi
+      emit "done" status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+    failed)
+      emit failed status-log "$(status_line_note "$LOG_LINE")"
+      ;;
+  esac
       emit unknown none "backend target gone: $BACKEND_TARGET"
       ;;
   esac
@@ -1319,6 +1371,8 @@ fi
 # terminal declaration is the exception: once the harness is positively gone,
 # preserve a valid ship/scout outcome instead of losing it to the death verdict.
 if [ "$KIND" != secondmate ] && crew_agent_gone; then
+  # A valid ship/scout terminal declaration outranks the death verdict: the
+  # harness is gone because the turn finished, not because state is unknown.
   case "$LOG_VERB" in
     "done")
       if [ "$KIND" = ship ]; then
