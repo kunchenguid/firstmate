@@ -15,8 +15,12 @@ button:disabled { cursor: default; opacity: 0.45; }
 header { display: flex; align-items: end; justify-content: space-between; gap: 2rem; padding: 1.3rem 1.7rem; border-bottom: 1px solid #27405e; background: rgba(5, 13, 24, 0.82); backdrop-filter: blur(12px); }
 h1 { margin: 0; font-size: 1.45rem; letter-spacing: -0.025em; }
 .eyebrow { margin: 0 0 0.25rem; color: #64b8ff; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.16em; }
-.connection { display: flex; align-items: center; gap: 0.6rem; }
+.connection { display: flex; align-items: end; gap: 0.6rem; }
 .connection label { color: #9eb3cb; font-size: 0.8rem; }
+.token-entry { display: grid; grid-template-columns: auto minmax(12rem, 18rem); align-items: center; gap: 0.35rem 0.6rem; }
+.token-entry small { grid-column: 1 / -1; max-width: 30rem; color: #8fa7c1; line-height: 1.35; }
+.remember-token { display: flex; align-items: center; gap: 0.35rem; white-space: nowrap; }
+.secondary { background: #14253a; border-color: #36516f; }
 main { display: grid; grid-template-columns: minmax(16rem, 22rem) 1fr; min-height: calc(100vh - 5.2rem); }
 aside { padding: 1.1rem; border-right: 1px solid #27405e; background: rgba(7, 17, 31, 0.76); }
 aside > label { display: block; margin: 0.65rem 0 0.35rem; color: #9eb3cb; font-size: 0.78rem; font-weight: 700; }
@@ -71,6 +75,29 @@ pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45re
 .omitted-image { color: #a9bdd3; font-style: italic; }
 .report-source { margin-top: 1.6rem; padding-top: 0.9rem; border-top: 1px solid #304965; }
 .report-source pre { max-height: 45rem; white-space: pre; }
+.task-dashboard { display: grid; gap: 1.2rem; }
+.task-dashboard-heading, .task-detail-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.task-dashboard h2, .task-detail h2 { margin: 0; color: #f2f7fd; }
+.task-dashboard-heading > label { color: #a9bdd3; font-size: 0.85rem; }
+.task-counts { display: grid; grid-template-columns: repeat(4, minmax(8rem, 1fr)); gap: 0.75rem; }
+.task-count { padding: 0.9rem 1rem; border: 1px solid #2b4665; border-radius: 0.65rem; background: rgba(12, 25, 43, 0.9); }
+.task-count strong { display: block; margin-top: 0.2rem; font-size: 1.55rem; }
+.task-groups { display: grid; grid-template-columns: repeat(2, minmax(16rem, 1fr)); gap: 1rem; }
+.task-group { min-width: 0; padding: 1rem; border: 1px solid #263e5b; border-radius: 0.7rem; background: rgba(9, 21, 37, 0.82); }
+.task-group h3 { margin: 0 0 0.7rem; color: #f2f7fd; }
+.task-list { display: grid; gap: 0.55rem; }
+.task-card { width: 100%; padding: 0.8rem; text-align: left; background: #101f33; border-color: #2c4664; font-weight: 500; }
+.task-card.active { border-color: #70baff; box-shadow: 0 0 0 1px #70baff inset; }
+.task-card strong, .task-card small { display: block; overflow-wrap: anywhere; }
+.task-card small { margin-top: 0.28rem; color: #9bb0c7; }
+.task-card .task-state { display: inline-block; margin-bottom: 0.4rem; padding: 0.16rem 0.45rem; border-radius: 999px; background: #203c5c; color: #b9dcff; font-size: 0.72rem; }
+.task-card[data-category="processing"] { border-left: 4px solid #4aa8ff; }
+.task-card[data-category="held"] { border-left: 4px solid #e0a14c; }
+.task-card[data-category="completed"] { border-left: 4px solid #61d095; }
+.task-card[data-category="history"] { border-left: 4px solid #8292a6; }
+.task-detail { padding: 1.2rem 1.4rem; border: 1px solid #345577; border-radius: 0.7rem; background: rgba(12, 25, 43, 0.94); }
+.task-wait { padding: 0.55rem 0.7rem; border-radius: 0.45rem; background: #2b2514; color: #f4d88a; }
+.task-document { margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid #304965; }
 
 @media (max-width: 850px) {
   header, .toolbar { align-items: stretch; flex-direction: column; }
@@ -79,4 +106,7 @@ pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45re
   main { grid-template-columns: 1fr; }
   aside { border-right: 0; border-bottom: 1px solid #27405e; }
   .sessions { max-height: 15rem; }
+  .task-counts, .task-groups { grid-template-columns: 1fr; }
+  .token-entry { grid-template-columns: 1fr; }
+  .token-entry small { grid-column: auto; }
 }

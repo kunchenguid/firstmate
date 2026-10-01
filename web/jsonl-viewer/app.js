@@ -1,7 +1,9 @@
 const state = {
   token: "",
   sessions: [],
+  tasks: [],
   selected: null,
+  selectedTaskId: null,
   entries: [],
   cursor: "tail",
   identity: "",
@@ -11,12 +13,22 @@ const state = {
   loading: false,
   selectionGeneration: 0,
   requestGeneration: 0,
+  taskRequestGeneration: 0,
+  taskLoading: false,
+  taskSelectionGeneration: 0,
+  taskDocumentLoading: null,
+  taskDocumentContent: null,
   timer: null,
 };
 
+const TOKEN_STORAGE_KEY = "firstmate.jsonlViewer.accessToken.v1";
+
 const elements = {
   token: document.getElementById("token"),
+  rememberToken: document.getElementById("remember-token"),
+  tokenNote: document.getElementById("token-note"),
   connect: document.getElementById("connect"),
+  forget: document.getElementById("forget"),
   source: document.getElementById("source"),
   sessionSearch: document.getElementById("session-search"),
   sessions: document.getElementById("sessions"),
@@ -34,6 +46,21 @@ const elements = {
   events: document.getElementById("events"),
   report: document.getElementById("report"),
   reportRendered: document.getElementById("report-rendered"),
+  artifactViewer: document.getElementById("artifact-viewer"),
+  taskDashboard: document.getElementById("task-dashboard"),
+  taskStatus: document.getElementById("task-status"),
+  taskFollow: document.getElementById("task-follow"),
+  taskCounts: document.getElementById("task-counts"),
+  taskGroups: document.getElementById("task-groups"),
+  taskDetail: document.getElementById("task-detail"),
+  taskDetailState: document.getElementById("task-detail-state"),
+  taskDetailTitle: document.getElementById("task-detail-title"),
+  taskDetailMeta: document.getElementById("task-detail-meta"),
+  taskDetailWait: document.getElementById("task-detail-wait"),
+  taskDocumentEmpty: document.getElementById("task-document-empty"),
+  taskDocumentRendered: document.getElementById("task-document-rendered"),
+  taskDocumentSource: document.getElementById("task-document-source"),
+  closeTask: document.getElementById("close-task"),
 };
 
 function setStatus(message, error = false) {
@@ -44,8 +71,46 @@ function setStatus(message, error = false) {
 async function api(path) {
   const response = await fetch(path, { headers: { Authorization: `Bearer ${state.token}` }, cache: "no-store" });
   const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-  if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 401) invalidateCredential("Access token was rejected or expired. Enter a valid token to continue.");
+    const error = new Error(body.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return body;
+}
+
+function storedToken(operation, value) {
+  try {
+    if (operation === "get") return window.localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (operation === "set") window.localStorage.setItem(TOKEN_STORAGE_KEY, value);
+    if (operation === "remove") window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+    return null;
+  } catch {
+    elements.tokenNote.textContent = "Browser storage is unavailable. You can still connect, but the token will be kept only for this page.";
+    return null;
+  }
+}
+
+function invalidateCredential(message = "Enter an access token to begin.") {
+  state.token = "";
+  state.sessions = [];
+  state.tasks = [];
+  state.selected = null;
+  state.selectedTaskId = null;
+  state.selectionGeneration += 1;
+  state.taskSelectionGeneration += 1;
+  state.taskRequestGeneration += 1;
+  state.taskLoading = false;
+  state.taskDocumentLoading = null;
+  elements.token.value = "";
+  elements.rememberToken.checked = false;
+  elements.forget.disabled = true;
+  storedToken("remove");
+  renderSessions();
+  renderTaskDashboard();
+  setStatus(message, true);
+  elements.taskStatus.textContent = message;
 }
 
 function timestampOf(value) {
@@ -402,9 +467,181 @@ function selectDisplay(reportSelected) {
   elements.loadMore.disabled = reportSelected;
 }
 
+const taskGroups = [
+  ["processing", "Processing"],
+  ["held", "Waiting or blocked"],
+  ["completed", "Completed"],
+  ["history", "Archived or cancelled"],
+];
+
+function taskMatches(task, query) {
+  return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""}`.toLowerCase().includes(query);
+}
+
+function taskCard(task) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "task-card";
+  button.dataset.category = task.category;
+  if (state.selectedTaskId === task.id) button.classList.add("active");
+  const badge = document.createElement("span");
+  badge.className = "task-state";
+  badge.textContent = task.status;
+  const title = document.createElement("strong");
+  title.textContent = task.title;
+  const id = document.createElement("small");
+  id.textContent = task.id;
+  const metadata = document.createElement("small");
+  metadata.textContent = [task.project, task.kind, task.hasDocument ? "Document available" : "No document"].filter(Boolean).join(" · ");
+  button.append(badge, title, id, metadata);
+  button.addEventListener("click", () => selectTask(task.id));
+  return button;
+}
+
+function renderTaskDashboard() {
+  const query = elements.sessionSearch.value.toLowerCase();
+  const visible = state.tasks.filter(task => taskMatches(task, query));
+  elements.taskCounts.replaceChildren();
+  elements.taskGroups.replaceChildren();
+  for (const [category, label] of taskGroups) {
+    const count = state.tasks.filter(task => task.category === category).length;
+    const counter = document.createElement("div");
+    counter.className = "task-count";
+    const name = document.createElement("span");
+    name.textContent = label;
+    const value = document.createElement("strong");
+    value.textContent = String(count);
+    counter.append(name, value);
+    elements.taskCounts.append(counter);
+
+    const group = document.createElement("section");
+    group.className = "task-group";
+    group.dataset.category = category;
+    const heading = document.createElement("h3");
+    heading.textContent = label;
+    const list = document.createElement("div");
+    list.className = "task-list";
+    const matches = visible.filter(task => task.category === category);
+    for (const task of matches) list.append(taskCard(task));
+    if (!matches.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = query ? "No matching tasks." : "No tasks in this category.";
+      list.append(empty);
+    }
+    group.append(heading, list);
+    elements.taskGroups.append(group);
+  }
+  renderTaskDetail();
+}
+
+function renderTaskDetail() {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  elements.taskDetail.hidden = !task;
+  if (!task) return;
+  elements.taskDetailState.textContent = task.status;
+  elements.taskDetailTitle.textContent = task.title;
+  elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");
+  elements.taskDetailWait.hidden = !task.wait;
+  elements.taskDetailWait.textContent = task.wait || "";
+}
+
+function clearTaskDocument(message) {
+  state.taskDocumentContent = null;
+  elements.taskDocumentRendered.replaceChildren();
+  elements.taskDocumentSource.hidden = true;
+  elements.taskDocumentSource.querySelector("pre").textContent = "";
+  elements.taskDocumentEmpty.hidden = false;
+  elements.taskDocumentEmpty.textContent = message;
+}
+
+async function loadTaskDocument({ resetDisplay = false } = {}) {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  if (!task) return;
+  if (!task.hasDocument) {
+    clearTaskDocument("No Markdown report or document is available for this task.");
+    return;
+  }
+  const taskId = task.id;
+  const selectionGeneration = state.taskSelectionGeneration;
+  if (state.taskDocumentLoading?.taskId === taskId && state.taskDocumentLoading?.selectionGeneration === selectionGeneration) return;
+  const request = { taskId, selectionGeneration };
+  state.taskDocumentLoading = request;
+  if (resetDisplay) clearTaskDocument("Loading task document…");
+  try {
+    const body = await api(`/api/report?${new URLSearchParams({ id: taskId })}`);
+    if (selectionGeneration !== state.taskSelectionGeneration || state.selectedTaskId !== taskId || elements.source.value !== "tasks") return;
+    if (resetDisplay || body.content !== state.taskDocumentContent) {
+      renderMarkdown(elements.taskDocumentRendered, body.content);
+      elements.taskDocumentSource.querySelector("pre").textContent = body.content;
+      state.taskDocumentContent = body.content;
+    }
+    elements.taskDocumentEmpty.hidden = true;
+    elements.taskDocumentSource.hidden = false;
+  } catch (error) {
+    if (selectionGeneration !== state.taskSelectionGeneration || state.selectedTaskId !== taskId) return;
+    if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
+    else clearTaskDocument(error.message);
+  } finally {
+    if (state.taskDocumentLoading === request) state.taskDocumentLoading = null;
+  }
+}
+
+async function selectTask(id) {
+  state.taskSelectionGeneration += 1;
+  state.selectedTaskId = id;
+  renderSessions();
+  await loadTaskDocument({ resetDisplay: true });
+}
+
+async function loadTasks() {
+  if (!state.token || state.taskLoading) return;
+  const requestGeneration = ++state.taskRequestGeneration;
+  state.taskLoading = true;
+  try {
+    const body = await api("/api/tasks");
+    if (requestGeneration !== state.taskRequestGeneration) return;
+    state.tasks = body.tasks;
+    if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
+      state.selectedTaskId = null;
+      state.taskSelectionGeneration += 1;
+      clearTaskDocument("");
+    }
+    renderSessions();
+    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${new Date(body.generatedAt).toLocaleString()}${body.warning ? ` · ${body.warning}` : ""}`;
+  } catch (error) {
+    if (requestGeneration !== state.taskRequestGeneration) return;
+    if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
+    else elements.taskStatus.textContent = error.message;
+  } finally {
+    if (requestGeneration === state.taskRequestGeneration) state.taskLoading = false;
+  }
+}
+
+function showSelectedView() {
+  const dashboard = elements.source.value === "tasks";
+  elements.taskDashboard.hidden = !dashboard;
+  elements.artifactViewer.hidden = dashboard;
+  if (!dashboard) state.taskSelectionGeneration += 1;
+  renderSessions();
+}
+
 function renderSessions() {
   const source = elements.source.value;
   const query = elements.sessionSearch.value.toLowerCase();
+  if (source === "tasks") {
+    const matches = state.tasks.filter(task => taskMatches(task, query));
+    elements.sessions.replaceChildren();
+    for (const task of matches) elements.sessions.append(taskCard(task));
+    if (!matches.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No matching tasks.";
+      elements.sessions.append(empty);
+    }
+    renderTaskDashboard();
+    return;
+  }
   const matches = state.sessions.filter(session => (source === "all" || session.source === source) && `${session.id} ${session.modifiedAt}`.toLowerCase().includes(query));
   elements.sessions.replaceChildren();
   for (const session of matches) {
@@ -448,25 +685,45 @@ async function selectSession(session) {
   }
 }
 
-async function connect() {
+async function connect({ restored = false } = {}) {
   state.token = elements.token.value;
   if (!state.token) return setStatus("Enter an access token.", true);
   try {
     const body = await api("/api/sessions");
     state.sessions = [...body.sessions, ...body.reports].sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+    if (elements.rememberToken.checked) storedToken("set", state.token);
+    else storedToken("remove");
+    elements.forget.disabled = false;
     renderSessions();
     setStatus(`${body.sessions.length} journals and ${body.reports.length} reports available.`);
-    if (!state.selected && state.sessions.length) await selectSession(state.sessions[0]);
+    await loadTasks();
+    if (elements.source.value !== "tasks" && !state.selected && state.sessions.length) await selectSession(state.sessions[0]);
   } catch (error) {
-    state.sessions = [];
-    renderSessions();
-    setStatus(error.message, true);
+    if (error.status === 401) invalidateCredential(restored ? "Saved access token was rejected. Enter a valid token to continue." : "Access token was rejected.");
+    else {
+      state.sessions = [];
+      renderSessions();
+      setStatus(error.message, true);
+    }
   }
 }
 
-elements.connect.addEventListener("click", connect);
+function forgetToken() {
+  invalidateCredential("Access token forgotten. Enter a token to reconnect.");
+}
+
+elements.connect.addEventListener("click", () => connect());
+elements.forget.addEventListener("click", forgetToken);
+elements.rememberToken.addEventListener("change", () => {
+  if (!elements.rememberToken.checked) storedToken("remove");
+});
+elements.closeTask.addEventListener("click", () => {
+  state.selectedTaskId = null;
+  state.taskSelectionGeneration += 1;
+  renderTaskDashboard();
+});
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
-elements.source.addEventListener("change", renderSessions);
+elements.source.addEventListener("change", showSelectedView);
 elements.sessionSearch.addEventListener("input", renderSessions);
 elements.eventSearch.addEventListener("input", applyFilters);
 elements.roleFilter.addEventListener("change", applyFilters);
@@ -475,7 +732,22 @@ elements.loadMore.addEventListener("click", () => loadEvents());
 elements.fromStart.addEventListener("click", () => loadEvents({ resetDisplay: true, fromStart: true }));
 
 state.timer = window.setInterval(() => {
+  if (!state.token) return;
+  if (elements.source.value === "tasks") {
+    if (!elements.taskFollow.checked) return;
+    loadTasks();
+    if (state.selectedTaskId) loadTaskDocument();
+    return;
+  }
   if (!state.selected || !elements.follow.checked) return;
   if (state.selected.source === "report") loadReport();
   else if (state.eof || state.partialBytes > 0) loadEvents();
 }, 1000);
+
+showSelectedView();
+const savedToken = storedToken("get");
+if (savedToken) {
+  elements.token.value = savedToken;
+  elements.rememberToken.checked = true;
+  connect({ restored: true });
+}

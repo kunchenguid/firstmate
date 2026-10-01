@@ -35,6 +35,29 @@ REPORT_DIR="$HOME_FIXTURE/data/$REPORT_ID"
 TOKEN=browser-fixture-token-value
 SERVER_LOG="$TMP_ROOT/server.log"
 mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR"
+cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+cat > "$HOME_FIXTURE/data/backlog.md" <<MARKDOWN
+## In flight
+- [ ] $REPORT_ID - Dashboard processing task (repo: viewer) (kind: ship)
+- [ ] $FIRST_REPORT_ID - Delayed report task (repo: viewer) (kind: scout)
+
+## Queued
+- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)
+
+## Done
+- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)
+MARKDOWN
+cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
+## Archived 2026-09
+- [x] archived-task - Dashboard archived task (repo: viewer) (kind: ship)
+MARKDOWN
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"delayed first session"}]}}
 JSONL
@@ -130,14 +153,63 @@ await page.route("**/api/report?*", async route => {
   await route.continue();
 });
 let remoteAssetRequests = 0;
+let rejectedSessionRequests = 0;
 page.on("request", request => {
   if (request.url().startsWith("https://example.invalid/")) remoteAssetRequests += 1;
+  if (request.url().includes("/api/sessions") && request.headers().authorization === "Bearer invalid-saved-token") rejectedSessionRequests += 1;
 });
 let failed;
+let storagePage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await page.locator("#remember-token").check();
   await page.locator("#connect").click();
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
+  if (await page.locator('#task-groups .task-card[data-category="completed"]').count() !== 1) throw new Error("completed task category was not rendered");
+  if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 1) throw new Error("held task category was not rendered separately");
+  if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
+  await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.getByRole("button", { name: /Held without document/ }).first().click();
+  await page.getByText("No Markdown report or document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+
+  delayFirstReport = true;
+  await page.getByRole("button", { name: /Delayed report task/ }).first().click();
+  await firstReportRequestStarted;
+  await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  const staleTaskDocumentResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID);
+  releaseDelayedReport();
+  await (await staleTaskDocumentResponse).finished();
+  await page.waitForTimeout(100);
+  if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale task document replaced the current task selection");
+
+  const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
+  fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
+  await page.locator('.task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (await page.locator("#token").inputValue() !== process.env.VIEWER_TOKEN) throw new Error("opted-in token was not restored after reload");
+  await page.locator("#forget").click();
+  if (await page.locator("#token").inputValue()) throw new Error("forget did not clear the in-memory token");
+  if (await page.evaluate(() => localStorage.length)) throw new Error("forget did not clear the saved token");
+  await page.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await page.locator("#connect").click();
+  await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (await page.evaluate(() => localStorage.length)) throw new Error("token was persisted without explicit opt-in");
+  await page.evaluate(() => localStorage.setItem("firstmate.jsonlViewer.accessToken.v1", "invalid-saved-token"));
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("#task-status").filter({ hasText: "Saved access token was rejected" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.waitForTimeout(1200);
+  if (rejectedSessionRequests !== 1) throw new Error(`invalid saved token retried ${rejectedSessionRequests} times`);
+  if (await page.evaluate(() => localStorage.length) || await page.locator("#token").inputValue()) throw new Error("invalid saved token was not cleared");
+
+  await page.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await page.locator("#connect").click();
+  await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
   await page.locator(".event-card").waitFor({ state: "visible", timeout: 3000 });
   const literal = await page.locator(".event-content").textContent();
@@ -165,6 +237,7 @@ try {
   await page.locator("#event-search").fill("");
   if (await page.locator(".event-card:visible").count() !== 2) throw new Error("live append did not preserve both events");
   if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
+  await page.locator("#source").selectOption("report");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#journal-filters").isVisible() || await page.locator("#journal-actions").isVisible() || await page.locator("#events").isVisible()) throw new Error("journal-only controls remained visible in report mode");
@@ -182,21 +255,45 @@ try {
   const report = `${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`;
   fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
   await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
-  delayFirstReport = true;
+  let releaseArtifactReport = () => {};
+  let markArtifactReportStarted;
+  const artifactReportStarted = new Promise(resolve => { markArtifactReportStarted = resolve; });
+  const artifactReportRelease = new Promise(resolve => { releaseArtifactReport = resolve; });
+  await page.route("**/api/report?*", async route => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID) {
+      markArtifactReportStarted();
+      await artifactReportRelease;
+    }
+    await route.continue();
+  });
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_FIRST_REPORT_ID }).click();
-  await firstReportRequestStarted;
+  await artifactReportStarted;
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   const staleReportResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID);
-  releaseDelayedReport();
+  releaseArtifactReport();
   await (await staleReportResponse).finished();
   await page.waitForTimeout(100);
   if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale report response replaced the current report");
+
+  storagePage = await browser.contexts()[0].newPage();
+  await storagePage.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", { configurable: true, get() { throw new DOMException("denied", "SecurityError"); } });
+  });
+  await storagePage.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await storagePage.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await storagePage.locator("#remember-token").check();
+  await storagePage.locator("#connect").click();
+  await storagePage.getByText("Browser storage is unavailable", { exact: false }).waitFor({ state: "visible", timeout: 3000 });
+  await storagePage.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  await storagePage.close();
 } catch (error) {
   failed = error;
 } finally {
   releaseDelayed();
   releaseDelayedReport();
+  if (storagePage && !storagePage.isClosed()) await storagePage.close();
   await page.close();
 }
 if (failed) throw failed;

@@ -16,6 +16,7 @@
 // files are eligible.
 
 import { timingSafeEqual } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import http from "node:http";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -29,6 +30,7 @@ const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const TAIL_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
+const TASK_SNAPSHOT_TIMEOUT_MS = 15000;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -216,6 +218,167 @@ function listReports(root) {
     reports.push({ source: "report", id, label: id, bytes: info.size, modifiedAt: info.mtime.toISOString() });
   }
   return reports.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+}
+
+function taskCommandEnvironment(home) {
+  const environment = { ...process.env, FM_HOME: home };
+  delete environment.FM_JSONL_VIEWER_TOKEN;
+  delete environment.FM_JSONL_VIEWER_TOKEN_FILE;
+  return environment;
+}
+
+function taskDispositions(codeRoot, dataRoot, environment) {
+  const library = join(codeRoot, "bin", "fm-task-disposition-lib.sh");
+  const output = execFileSync("bash", ["-c", '. "$1"; fm_task_disposition_snapshot "$2"', "fm-jsonl-viewer", library, dataRoot], {
+    encoding: "utf8",
+    env: environment,
+    timeout: TASK_SNAPSHOT_TIMEOUT_MS,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const dispositions = new Map();
+  for (const line of output.split("\n")) {
+    if (!line) continue;
+    const [id, disposition] = line.split("\t");
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id) && /^(active|queued|done|archive_done|parked|ambiguous)$/.test(disposition)) {
+      dispositions.set(id, disposition);
+    }
+  }
+  return dispositions;
+}
+
+function lifecycleDispositions(codeRoot, dataRoot, environment) {
+  const values = new Map();
+  let ids = [];
+  try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
+  for (const id of ids) {
+    const directory = join(dataRoot, id);
+    const lifecycle = join(directory, "lifecycle.json");
+    try {
+      const directoryInfo = lstatSync(directory);
+      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || !inside(dataRoot, realpathSync(directory))) continue;
+      if (!regularNoSymlink(lifecycle)) continue;
+      const raw = execFileSync(join(codeRoot, "bin", "fm-task-state.sh"), ["lifecycle", id], {
+        encoding: "utf8",
+        env: environment,
+        timeout: 3000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      const disposition = JSON.parse(raw).disposition;
+      if (["open", "accepted", "archived"].includes(disposition)) values.set(id, disposition);
+    } catch {
+      values.set(id, "unknown");
+    }
+  }
+  return values;
+}
+
+function taskOverview(home, roots, codeRoot) {
+  const environment = taskCommandEnvironment(home);
+  const dataRoot = roots.reports || join(home, "data");
+  const raw = execFileSync(join(codeRoot, "bin", "fm-fleet-snapshot.sh"), ["--json"], {
+    encoding: "utf8",
+    env: environment,
+    timeout: TASK_SNAPSHOT_TIMEOUT_MS,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  const snapshot = JSON.parse(raw);
+  if (snapshot.schema !== "fm-fleet-snapshot.v1" || !Array.isArray(snapshot.tasks) || !Array.isArray(snapshot.backlog?.records)) {
+    throw new Error("unsupported task snapshot");
+  }
+  const dispositions = taskDispositions(codeRoot, dataRoot, environment);
+  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
+  const reports = new Map(listReports(roots.reports).map(report => [report.id, report]));
+  const items = new Map();
+  const ensure = id => {
+    if (!items.has(id)) items.set(id, { id, title: id });
+    return items.get(id);
+  };
+  for (const record of snapshot.backlog.records) {
+    if (!record?.structured || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(record.id || "")) continue;
+    Object.assign(ensure(record.id), {
+      title: record.title || record.id,
+      backlogState: record.state || null,
+      kind: record.kind || null,
+      project: record.repo || null,
+      holdKind: record.hold_kind || null,
+      blockedBy: Array.isArray(record.unresolved_blocker_ids) ? record.unresolved_blocker_ids : [],
+    });
+  }
+  for (const task of snapshot.tasks) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(task.id || "")) continue;
+    Object.assign(ensure(task.id), {
+      title: task.backlog?.title || task.id,
+      backlogState: task.backlog?.state || null,
+      kind: task.kind || task.backlog?.kind || null,
+      project: task.backlog?.repo || task.project || null,
+      currentState: task.current_state?.state || "unknown",
+      recordDisposition: task.record_disposition || dispositions.get(task.id) || "unknown",
+      lifecycleDisposition: task.lifecycle_disposition || lifecycles.get(task.id) || "legacy",
+      openDecisionCount: Array.isArray(task.hints?.open_decisions) ? task.hints.open_decisions.length : 0,
+      heldByDecision: Boolean(task.hints?.pending_decision || task.hints?.blocked_event),
+      blockedBy: Array.isArray(task.backlog?.unresolved_blocker_ids) ? task.backlog.unresolved_blocker_ids : [],
+      holdKind: task.backlog?.hold_kind || null,
+    });
+  }
+  for (const [id, disposition] of dispositions) ensure(id).recordDisposition ||= disposition;
+  for (const [id, disposition] of lifecycles) ensure(id).lifecycleDisposition ||= disposition;
+  for (const [id, report] of reports) {
+    const item = ensure(id);
+    item.hasDocument = true;
+    item.documentModifiedAt = report.modifiedAt;
+  }
+  const tasks = [...items.values()].map(item => {
+    const disposition = item.recordDisposition || "unknown";
+    const lifecycle = item.lifecycleDisposition || "legacy";
+    const terminalConflict = ["working", "blocked", "parked"].includes(item.currentState)
+      && (["done", "archive_done"].includes(disposition) || ["accepted", "archived"].includes(lifecycle));
+    const held = item.heldByDecision || item.openDecisionCount > 0 || item.currentState === "blocked" || item.currentState === "parked"
+      || item.holdKind === "parked" || (item.blockedBy || []).length > 0 || terminalConflict;
+    let category = "held";
+    let status = "Needs reconciliation";
+    if (terminalConflict) {
+      category = "held";
+      status = "Completion conflict";
+    } else if (lifecycle === "archived") {
+      category = "history";
+      status = "Cancelled";
+    } else if (disposition === "archive_done") {
+      category = "history";
+      status = "Archived";
+    } else if (!held && (lifecycle === "accepted" || disposition === "done")) {
+      category = "completed";
+      status = "Completed";
+    } else if (held) {
+      category = "held";
+      status = item.holdKind === "parked" ? "Parked" : item.currentState === "blocked" ? "Blocked" : "Waiting";
+    } else if (disposition === "active" || item.backlogState === "in_flight" || item.currentState === "working") {
+      category = "processing";
+      status = "Processing";
+    } else if (disposition === "queued" || item.backlogState === "queued") {
+      category = "held";
+      status = "Queued";
+    }
+    let wait = null;
+    if ((item.blockedBy || []).length) wait = `Blocked by ${item.blockedBy.join(", ")}`;
+    else if (item.openDecisionCount > 0) wait = `${item.openDecisionCount} open decision${item.openDecisionCount === 1 ? "" : "s"}`;
+    else if (category === "held") wait = status;
+    return {
+      id: item.id,
+      title: item.title || item.id,
+      category,
+      status,
+      kind: item.kind || null,
+      project: item.project || null,
+      wait,
+      hasDocument: Boolean(item.hasDocument),
+      documentModifiedAt: item.documentModifiedAt || null,
+    };
+  }).sort((left, right) => left.category.localeCompare(right.category) || left.title.localeCompare(right.title));
+  return {
+    generatedAt: snapshot.generated,
+    tasks,
+    warning: snapshot.main_inventory?.valid === false ? "Some current task records need reconciliation." : null,
+  };
 }
 
 function resolveSelection(roots, source, id) {
@@ -411,7 +574,8 @@ function serve() {
     supervisor: existingRoot(home, ["state", "branch-session"]),
     reports: existingRoot(home, ["data"]),
   };
-  const assetRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../web/jsonl-viewer");
+  const codeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const assetRoot = resolve(codeRoot, "web/jsonl-viewer");
   const assets = {
     "/": ["index.html", "text/html; charset=utf-8"],
     "/app.js": ["app.js", "text/javascript; charset=utf-8"],
@@ -436,6 +600,10 @@ function serve() {
       reports: listReports(roots.reports),
       roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
     });
+    if (url.pathname === "/api/tasks") {
+      try { return json(res, 200, taskOverview(home, roots, codeRoot)); }
+      catch { return json(res, 503, { error: "task overview is temporarily unavailable" }); }
+    }
     if (url.pathname === "/api/events") {
       const result = readEvents(roots, url.searchParams.get("source") || "", url.searchParams.get("id") || "", url.searchParams);
       return json(res, result.status, result.body);
