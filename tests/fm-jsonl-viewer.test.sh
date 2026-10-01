@@ -13,11 +13,12 @@ SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 SUPERVISOR_DIR="$HOME_FIXTURE/state/branch-session"
 REPORT_DIR="$HOME_FIXTURE/data/task-one"
+PREFIXED_REPORT_DIR="$HOME_FIXTURE/data/_task-two"
 TOKEN=viewer-test-token-value
 TOKEN_FILE="$TMP_ROOT/viewer.token"
 PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR"
+mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR"
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 
@@ -42,6 +43,7 @@ cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
 Visible report body.
 MARKDOWN
 printf 'not allowlisted\n' > "$REPORT_DIR/secret.md"
+printf '# Prefixed task report\n' > "$PREFIXED_REPORT_DIR/report.md"
 mkdir -p "$HOME_FIXTURE/data/escaped"
 printf 'outside report\n' > "$TMP_ROOT/outside.md"
 ln -s "$TMP_ROOT/outside.md" "$HOME_FIXTURE/data/escaped/report.md"
@@ -90,6 +92,7 @@ jq -e --arg id "$SHORT_ID" '.sessions | any(.source == "short" and .id == $id)' 
 jq -e '.sessions | any(.source == "supervisor" and .id == "session-one.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "supervisor session was not discovered"
 jq -e '.sessions | all(.id != "escaped.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlink escape was discovered"
 jq -e '.reports | any(.source == "report" and .id == "task-one" and .label == "task-one")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical task report was not discovered"
+jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "_task-two")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical report for a valid prefixed task id was not discovered"
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 status=$(curl -sS -o "$TMP_ROOT/traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=..%2Foutside.jsonl&cursor=0")
@@ -105,6 +108,8 @@ status=$(curl -sS -o "$TMP_ROOT/report-arbitrary.json" -w '%{http_code}' -H "Aut
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report.json"
 jq -e '.source == "report" and .id == "task-one" and (.content | contains("Visible report body.")) and .size > 0 and (.identity | length) > 0' "$TMP_ROOT/report.json" >/dev/null || fail "canonical task report was not read intact"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=_task-two" > "$TMP_ROOT/prefixed-report.json"
+jq -e '.source == "report" and .id == "_task-two" and (.content | contains("Prefixed task report"))' "$TMP_ROOT/prefixed-report.json" >/dev/null || fail "canonical report for a valid prefixed task id was not read intact"
 printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report-changed.json"
 jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/report-changed.json" >/dev/null || fail "changed task report was not refreshed"

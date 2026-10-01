@@ -157,6 +157,14 @@ function safeReportFile(root, candidate) {
   }
 }
 
+function taskIdPathSafe(id) {
+  return typeof id === "string"
+    && id.length > 0
+    && id.length <= 255
+    && !id.startsWith(".")
+    && /^[A-Za-z0-9._-]+$/.test(id);
+}
+
 function listSessions(roots) {
   const sessions = [];
   if (roots.short) {
@@ -193,7 +201,7 @@ function listSessions(roots) {
 function listReports(root) {
   if (!root) return [];
   let ids = [];
-  try { ids = readdirSync(root).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return []; }
+  try { ids = readdirSync(root).filter(taskIdPathSafe); } catch { return []; }
   const reports = [];
   for (const id of ids) {
     const directory = join(root, id);
@@ -240,7 +248,7 @@ function openVerified(file, root) {
 }
 
 function resolveReport(root, id) {
-  if (!root || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id)) return null;
+  if (!root || !taskIdPathSafe(id)) return null;
   const directory = join(root, id);
   try {
     const info = lstatSync(directory);
