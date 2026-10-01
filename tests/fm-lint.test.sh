@@ -585,6 +585,35 @@ SH
   pass "fm-lint.sh CI keeps source following without the local exclusion list"
 }
 
+test_ci_mode_invokes_shellcheck_once_per_root() {
+  local tmp fakebin log flag_log out invocation_count
+  local -a roots
+  tmp=$(fm_test_tmproot fm-lint-ci-per-root)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  # Four roots guarantee at least one of the two bounded shards gets more than
+  # one root (pigeonhole), so a reintroduced single-process-per-shard batch
+  # under --external-sources would collapse that shard's count below 1-per-root.
+  roots=(
+    bin/fm-install-shellcheck.sh
+    bin/fm-lint-workflows.sh
+    bin/fm-timeout-lib.sh
+    bin/fm-lock-lib.sh
+  )
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" "${roots[@]}" 2>&1) \
+    || fail "CI-mode per-root lint failed"$'\n'"$out"
+  [ "$(LC_ALL=C sort "$log")" = "$(printf '%s\n' "${roots[@]}" | LC_ALL=C sort)" ] \
+    || fail "CI-mode lint did not analyze every root"$'\n'"logged: $(cat "$log")"
+  invocation_count=$(grep -c '^external-sources=yes$' "$flag_log" || true)
+  [ "$invocation_count" -eq "${#roots[@]}" ] \
+    || fail "CI-mode (--external-sources) lint used $invocation_count ShellCheck calls for ${#roots[@]} roots, not one per root: this is the regression guard for the exit-143 OOM fix - a batched call here would reintroduce it"
+  pass "fm-lint.sh invokes ShellCheck once per root even with --external-sources, so the full-analysis lane cannot silently re-batch roots into one process"
+}
+
 test_main_branch_keeps_external_sources() {
   local tmp fakebin log flag_log out
   tmp=$(fm_test_tmproot fm-lint-main-follow)
@@ -1391,6 +1420,7 @@ test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
 test_changed_mode_drops_external_sources_and_excludes_cross_file_codes
 test_changed_mode_invokes_shellcheck_once_per_root
+test_ci_mode_invokes_shellcheck_once_per_root
 test_ci_keeps_external_sources_without_local_exclusions
 test_main_branch_keeps_external_sources
 test_merge_base_less_keeps_external_sources
