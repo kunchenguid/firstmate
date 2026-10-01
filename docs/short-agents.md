@@ -101,8 +101,11 @@ Full logs stay there rather than entering MAIN's context.
 Short-task state directories are retained for inspection; there is no automatic cleanup.
 
 Results enter the existing durable supervision outcome store.
-For a successful task, MAIN's processing request includes the complete returned result and any verified operation receipts directly, while retaining the result directory as durable evidence.
-The supervision extension accepts that direct body only when it exactly matches the bound successful ShortTask files; otherwise MAIN recovers it through `fm_branch_outcomes` before acknowledging with `fm_branch_processed`.
+For a successful task whose result body is at most 4096 Unicode characters, MAIN's processing request includes the complete returned result and any verified operation receipts directly, while retaining the result directory as durable evidence.
+The supervision extension accepts that inline body only when it exactly matches the bound successful ShortTask files.
+A larger result instead produces a concise notification of at most 1024 Unicode characters with its ShortTask identity, result path relative to `FM_HOME`, and verified-operation receipt count; the complete result remains unchanged and is available through `fm_short_task` with `action=result`.
+The larger result's processing request carries only that authenticated reference and requires one `fm_short_task` call with `action=result`; that authenticated read supplies both the complete result and the evidence needed before `fm_branch_processed` accepts acknowledgement.
+Reading the bounded reference again through `fm_branch_outcomes` does not substitute for loading the complete ShortTask result.
 Failed, cancelled, interrupted, and uncertain tasks retain their actual terminal state and use the ordinary durable outcome recovery path.
 MAIN does not poll normal operation progress or execute the chain's commands.
 Delivery is deduplicated, including a crash between storing the outcome and its notification receipt.

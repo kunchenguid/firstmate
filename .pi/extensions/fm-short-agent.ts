@@ -6,6 +6,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runCommandAsync } from './lib/fm-async-exec.ts';
 import { ShortAgents } from '../../bin/fm-short-agent.mjs';
+import { SHORT_RESULT_LOADED_EVENT } from '../../bin/fm-short-notification.mjs';
 
 export default function (pi: ExtensionAPI) {
   if (process.env.FM_SHORT_AGENT_ENABLED !== '1' || !process.env.FM_HOME) return;
@@ -95,10 +96,13 @@ export default function (pi: ExtensionAPI) {
   });
   pi.registerTool({
     name: 'fm_short_task', label: 'Inspect or cancel short task',
-    description: 'Read status/result or cancel a short-agent ID. Cancellation preserves the first terminal result. Detailed evidence stays local; ordinary notification acknowledgement uses fm_branch_processed.',
+    description: 'Read status/result or cancel a short-agent ID. Use result to retrieve the complete unchanged body when a completion notification carries only a durable reference. Cancellation preserves the first terminal result. Detailed evidence stays local; ordinary notification acknowledgement uses fm_branch_processed.',
     parameters: Type.Object({ id: Type.String(), action: Type.Union([Type.Literal('status'), Type.Literal('result'), Type.Literal('cancel')]) }),
     async execute(_id, args) {
       const result = args.action === 'cancel' ? (await get()).cancel(args.id) : await currentOwner('status', args.id);
+      if (args.action !== 'cancel' && result.state === 'completed') {
+        pi.events.emit(SHORT_RESULT_LOADED_EVENT, { id: args.id, summary: result.summary });
+      }
       void reconcile();
       return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
     },
