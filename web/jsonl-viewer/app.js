@@ -15,6 +15,7 @@ const state = {
   requestGeneration: 0,
   taskRequestGeneration: 0,
   taskLoading: false,
+  taskLoaded: false,
   taskSelectionGeneration: 0,
   taskDocumentLoading: null,
   taskDocumentContent: null,
@@ -122,6 +123,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskSelectionGeneration += 1;
   state.taskRequestGeneration += 1;
   state.taskLoading = false;
+  state.taskLoaded = false;
   state.taskDocumentLoading = null;
   elements.token.value = "";
   elements.rememberToken.checked = false;
@@ -531,7 +533,7 @@ function renderTaskDashboard() {
     const name = document.createElement("span");
     name.textContent = label;
     const value = document.createElement("strong");
-    value.textContent = String(count);
+    value.textContent = state.taskLoaded ? String(count) : "—";
     counter.append(name, value);
     elements.taskCounts.append(counter);
 
@@ -624,10 +626,13 @@ async function loadTasks() {
   if (!state.token || state.taskLoading) return;
   const requestGeneration = ++state.taskRequestGeneration;
   state.taskLoading = true;
+  elements.taskStatus.textContent = state.taskLoaded ? "Refreshing task status…" : "Loading task status…";
+  renderTaskDashboard();
   try {
     const body = await api("/api/tasks");
     if (requestGeneration !== state.taskRequestGeneration) return;
     state.tasks = body.tasks;
+    state.taskLoaded = true;
     if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
       state.selectedTaskId = null;
       state.taskSelectionGeneration += 1;
@@ -751,11 +756,10 @@ elements.closeTask.addEventListener("click", () => {
 });
 elements.openTaskReport.addEventListener("click", () => {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
-  const report = state.sessions.find(item => item.source === "report" && item.id === task?.id);
-  if (!report) return;
+  if (task?.documentType !== "report") return;
   elements.source.value = "report";
   showSelectedView();
-  selectSession(report);
+  selectSession({ source: "report", id: task.id, label: task.id });
 });
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
 elements.source.addEventListener("change", showSelectedView);

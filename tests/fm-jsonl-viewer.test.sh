@@ -62,6 +62,7 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" lifecycle cancelled-task \
   > "$TMP_ROOT/cancelled-lifecycle.json"
 chmod 600 "$TMP_ROOT/cancelled-lifecycle.json"
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" reconcile cancelled-task --expected-revision 1 --record "$TMP_ROOT/cancelled-lifecycle.json" >/dev/null
+rm "$HOME_FIXTURE/state/cancelled-task.meta"
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 

@@ -267,9 +267,10 @@ function taskDispositions(codeRoot, dataRoot, environment) {
   return dispositions;
 }
 
-function lifecycleDispositions(codeRoot, dataRoot, environment, candidateIds) {
+function lifecycleDispositions(codeRoot, dataRoot, environment) {
   const values = new Map();
-  const ids = [...candidateIds].filter(id => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id));
+  let ids = [];
+  try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
   for (const id of ids) {
     const directory = join(dataRoot, id);
     const lifecycle = join(directory, "lifecycle.json");
@@ -306,11 +307,7 @@ function taskOverview(home, roots, codeRoot) {
     throw new Error("unsupported task snapshot");
   }
   const dispositions = taskDispositions(codeRoot, dataRoot, environment);
-  const lifecycleIds = new Set([
-    ...snapshot.tasks.map(task => task?.id),
-    ...snapshot.backlog.records.map(record => record?.id),
-  ]);
-  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment, lifecycleIds);
+  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
   const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
   const items = new Map();
   const ensure = id => {
