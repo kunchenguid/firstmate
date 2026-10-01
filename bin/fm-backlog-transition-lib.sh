@@ -530,7 +530,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   shift 2
   for arg in "$@"; do
     if [ "$previous_arg" = --note ]; then
-      arg=$(fm_backlog_local_note_marker "$arg") || arg=$arg
+      if marked_arg=$(fm_backlog_local_note_marker "$arg"); then
+        arg=$marked_arg
+      fi
     fi
     if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
       done_args[${#done_args[@]}-1]=--note
@@ -571,7 +573,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
     if [ "$previous_arg" = --note ]; then
-      arg=$(fm_backlog_local_note_marker "$arg") || arg=$arg
+      if marked_arg=$(fm_backlog_local_note_marker "$arg"); then
+        arg=$marked_arg
+      fi
     fi
     case "$previous_arg" in
       --report)
