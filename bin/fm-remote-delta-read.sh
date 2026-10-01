@@ -10,6 +10,11 @@
 # the source. A shortened or changed prefix returns a structured continuity-break
 # result instead of silently rebasing the cursor.
 #
+# An unchanged snapshot is retried after FM_REMOTE_DELTA_POLL_SECONDS (default
+# 0.5 seconds). A complete line is visible on the next sample, and the window
+# deadline can overshoot by that interval plus snapshot and scheduling work.
+# The wait remains an ordinary child sleep; signal handling is unchanged.
+#
 # Exit 75 means the wait window closed with no complete line. SIGTERM exits the
 # same way after cleanup. The remote job worker preempts this read-only poll to
 # unblock any queued command other than another reply long-poll, then publishes
@@ -19,7 +24,7 @@ set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
 MAX_BYTES=${FM_REMOTE_DELTA_MAX_BYTES:-65536}
-POLL_SECONDS=${FM_REMOTE_DELTA_POLL_SECONDS:-0.2}
+POLL_SECONDS=${FM_REMOTE_DELTA_POLL_SECONDS:-0.5}
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

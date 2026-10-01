@@ -23,11 +23,12 @@
 # worker's orphan recovery.
 #
 # The serving loop does not busy-poll an idle queue. After a lane starts or is
-# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for 20 passes, so a home
+# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for four passes, so a home
 # whose lane just finished starts its next job promptly; otherwise it sleeps
-# one second between passes. That bound is how long newly staged or cancelled
-# work, a lane that died, an orphaned claim, or an expired queue deadline can
-# wait for the next pass, and it refreshes the readiness heartbeat about once
+# one second between passes. Work arriving after the four-pass burst may wait
+# for that quiet scan. Newly staged or cancelled work, a lane that died, an
+# orphaned claim, or an expired queue deadline can wait that interval plus
+# scan work and scheduling time. It refreshes the readiness heartbeat about once
 # per second, far inside the probe's 10-second freshness bound. The stale
 # sweep, whose state preparation also re-applies the queue directories' 0700
 # modes, runs at startup and then at most every 60 seconds, never more rarely
@@ -61,7 +62,7 @@ FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_ORP
 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS:-}" 20)
 FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
 FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
-WORKER_FAST_PASSES=20
+WORKER_FAST_PASSES=4
 WORKER_IDLE_WAIT_SECONDS=1
 WORKER_SWEEP_SECONDS=60
 
@@ -739,7 +740,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
       fi
       next_check=$((SECONDS + 1))
     fi
-    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
   done
   wait "$group_pid" 2>/dev/null
   rc=$?

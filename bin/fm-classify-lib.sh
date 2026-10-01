@@ -922,6 +922,25 @@ EOF
   printf '%s\n' "$current"
 }
 
+# The subset of status_open_decisions the task raised about its own work: a
+# reserved-namespace key is raised by a supervisor library about the task (a
+# pending-reply escalation), a `remote-reply-continuity-` key is the parent's
+# own blocker about a broken remote reply mirror
+# (bin/fm-procevent-remote-reply.sh), and a `captain-hold-` key relays a child
+# decision a secondmate escalated to the captain (bin/fm-captain-hold.sh) while
+# it keeps working, so the task is not waiting on any of them. Pending-reply
+# recovery and a fire-and-forget retry ring consult this set and leave a task
+# alone while it is non-empty.
+status_own_open_decisions() {  # <status-file>
+  local line prefix
+  status_open_decisions "$1" | while IFS= read -r line || [ -n "$line" ]; do
+    for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT} remote-reply-continuity- captain-hold-; do
+      case "$line" in "$prefix"*) continue 2 ;; esac
+    done
+    printf '%s\n' "$line"
+  done
+}
+
 # 0 when the fold above still holds at least one decision OPENED by
 # `needs-decision` - the status side's own record that a human was asked
 # something and has not answered. A `blocked` record is deliberately not this: a
@@ -1038,6 +1057,28 @@ EOF
   printf '%s' "$verb"
 }
 
+# The status file inside <state> that is this home's outbound parent channel
+# rather than a self-home task status log, printed; empty when there is none.
+# Only a remote mate home resolves one - its state/parent-replies.status is the
+# parent channel (bin/fm-parent-channel-lib.sh owns that resolution, sourced
+# lazily here because that library sources this one at its top level, so a
+# top-level source would be circular). A main home, a local mate - whose
+# channel lives in the parent home - or an unusable identity or binding keeps
+# every file, so ordinary task logs fold and wake exactly as before. The home
+# is the directory containing <state>, the <home>/state layout every caller of
+# these fleet-wide scans shares; a state dir outside such a home excludes
+# nothing. Callers compare the resolved path, never the file name, so a
+# parent-replies.status in any other home shape stays an ordinary task log.
+status_scan_parent_channel_exclude() {  # <state>
+  local state=$1 exclude
+  if ! command -v fm_parent_channel_outbound_status >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-parent-channel-lib.sh
+    . "$_FM_CLASSIFY_LIB_DIR/fm-parent-channel-lib.sh"
+  fi
+  exclude=$(fm_parent_channel_outbound_status "$(dirname "$state")" "$state") || return 0
+  printf '%s\n' "$exclude"
+}
+
 # Fleet-wide wrapper around status_open_decisions: scans every task's status
 # log under <state> and prefixes each still-open decision with its owning task
 # id, so a per-wake or per-session surface can print the consolidated open set
@@ -1046,9 +1087,11 @@ EOF
 # one "<task>\t<key>\t<verb>\t<note>" line per open decision, in glob (task id)
 # order; prints nothing when none are open.
 scan_open_decisions() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions "$f") || continue
     [ -n "$open" ] || continue
@@ -1339,9 +1382,11 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
 scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line
+  local state=$1 f task open line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     open=$(status_open_decisions_incremental "$f") || continue
     [ -n "$open" ] || continue
@@ -1356,9 +1401,11 @@ EOF
 }
 
 status_presentation_snapshot() {  # <state>
-  local state=$1 f task size ident
+  local state=$1 f task size ident exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
     size=$(_fm_status_file_size "$f") || return 1
@@ -1970,9 +2017,11 @@ status_line_is_unread_surface() {  # <status-line>
 # Prints nothing when none are unread. Directory scan rejects status symlinks
 # the same way scan_open_decisions does.
 scan_unread_surface_lines() {  # <state>
-  local state=$1 f task lines line
+  local state=$1 f task lines line exclude
+  exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     lines=$(status_new_lines_since_cursor "$f") || return 1
     [ -n "$lines" ] || continue

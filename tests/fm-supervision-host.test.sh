@@ -2037,6 +2037,32 @@ test_restarted_host_stops_what_a_killed_predecessor_left() {
   pass "host: a restarted host stops, by recorded identity, the cycle a killed predecessor left running"
 }
 
+test_park_exit_probe_uses_half_second_child_sleeps() {
+  local home host_pid
+  home=$(make_home park-cadence attended)
+  cat > "$home/fakebin/sleep" <<'SH'
+#!/bin/bash
+pid=''
+if [ -f "$FM_HOME/probe-host" ]; then
+  IFS= read -r pid < "$FM_HOME/probe-host" || true
+  if [ "$PPID" = "$pid" ]; then
+    printf '%s\n' "$1" >> "$FM_HOME/park-sleeps"
+  fi
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$home/fakebin/sleep"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "park-cadence: no watcher started"
+  host_pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
+  [ -n "$host_pid" ] || fail "park-cadence: no recorded host"
+  printf '%s\n' "$host_pid" > "$home/probe-host"
+  wait_until 100 test -s "$home/park-sleeps" || fail "park-cadence: no child sleep observed"
+  [ "$(sort -u "$home/park-sleeps")" = 0.5 ] || fail "park-cadence: exit probing did not use half-second sleeps"
+  stop_home_processes "$home"
+  pass "host: parked child-exit sampling uses ordinary half-second sleeps"
+}
+
 test_park_boundary_ends_the_park_before_the_hook_timeout() {
   local home token
   home=$(make_home boundary attended)
@@ -2595,6 +2621,7 @@ test_superseded_host_leaves_the_owner_untouched() {
   pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
 }
 
+test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail
