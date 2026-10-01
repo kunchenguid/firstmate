@@ -1081,13 +1081,22 @@ needs-decision [key=route]: choose route north or route south
 EOF
   run_captain "$home" hold "$lane" --reason "route choice pending" >/dev/null \
     || fail "could not hold the transfer lane"
-  run_captain "$home" complete "$lane" "$lane" >/dev/null \
+  # The origin task is the work the call was found in, not its own inventory
+  # entry. A separate captain task carries the call; the transfer and the
+  # lane's own hold mirror still both settle.
+  call=$lane-call
+  run_captain "$home" hold "$call" --title "Route choice for $lane" \
+    --reason "route choice pending" --repo sample --origin "$lane" >/dev/null \
+    || fail "could not hold a separate captain task for the transfer lane"
+  run_captain "$home" complete "$lane" "$call" >/dev/null \
     || fail "could not transfer the lane's decision to its captain-held task"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
-  [ "$(unstamp_line "$last")" = "captain-held [key=route]: tracked by $lane" ] \
+  [ "$(unstamp_line "$last")" = "captain-held [key=route]: tracked by $call" ] \
     || fail "complete did not leave its transfer as the lane's last line: $last"
   printf 'Take route north.\n' > "$home/transfer.txt"
+  run_captain "$home" answer "$call" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the transfer lane's captain call"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the transfer lane"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
