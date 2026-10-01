@@ -1068,5 +1068,22 @@ test_claude_agent_view_survives_one_lost_signal() {
   pass "fm_composer_claude_agent_view: a subagent view is still recognized when one signal is lost"
 }
 
+test_claude_agent_view_ignores_scrollback_placeholder() {
+  local stale f want screen
+  for stale in "$SELECTOR_CAPS"/subagent-*.txt; do
+    screen=$(cat "$stale")
+    for f in "$SELECTOR_CAPS"/*.txt; do
+      want=${f##*/}
+      want=${want%-*.txt}
+      agent_view_is "$want" "${f##*/} below stale ${stale##*/}" \
+        "$(printf '%s\n%s\n' "$screen" "$(cat "$f")")"
+    done
+    agent_view_is none "an empty composer without a list below stale ${stale##*/}" \
+      "$(printf '%s\n─────\n❯ \n─────\n\n  ? for shortcuts\n' "$screen")"
+  done
+  pass "fm_composer_claude_agent_view: stale subagent placeholders do not override the current composer"
+}
+
 test_claude_agent_view_reads_live_captures
 test_claude_agent_view_survives_one_lost_signal
+test_claude_agent_view_ignores_scrollback_placeholder

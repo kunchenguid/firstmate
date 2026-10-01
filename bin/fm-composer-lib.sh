@@ -1786,6 +1786,7 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
 # Captured on Claude Code 2.1.286 in tests/captures/claude-2.1.286-agent-selector.
 fm_composer_claude_agent_view() {  # <plain-screen>
   local screen=$1 row trimmed body marker rest name n top i cursor='' main_mark='' message_at=0
+  local composer_top=-1 composer_bottom=-1
   local -a rows=()
   while IFS= read -r row; do
     row=${row%$'\r'}
@@ -1817,11 +1818,26 @@ EOF
     [ -n "$name" ] || break
     top=$((top - 1))
   done
-  for ((i = 0; i < top; i++)); do
+  for ((i = top - 1; i >= 0; i--)); do
     trimmed=${rows[i]}
     fm_composer_normalize_trim_var trimmed
-    case "$trimmed" in '❯ Message @'?*) message_at=1 ;; esac
+    case "$trimmed" in
+      '──'*'─')
+        if [ "$composer_bottom" -ge 0 ]; then
+          composer_top=$i
+          break
+        fi
+        composer_bottom=$i
+        ;;
+    esac
   done
+  if [ "$composer_top" -ge 0 ]; then
+    for ((i = composer_top + 1; i < composer_bottom; i++)); do
+      trimmed=${rows[i]}
+      fm_composer_normalize_trim_var trimmed
+      case "$trimmed" in '❯ Message @'?*) message_at=1 ;; esac
+    done
+  fi
   trimmed=x
   if [ "$top" -gt 0 ]; then
     trimmed=${rows[top-1]}
