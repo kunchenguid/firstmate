@@ -1189,6 +1189,27 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 ok - live Herdr submit confirm: Claude Code (2.1.283 (Claude Code)) on herdr 0.9.0 proves and submits a typed /exit behind its command popup
 ```
 
+### Claude background-work exit confirmation
+
+Verified 2026-10-01 with Herdr 0.9.1 and Claude Code 2.1.286 in a named private lab.
+The control behavior and candidate-execution contract are owned by `bin/fm-control.sh` and `bin/fm-control-lib.sh`.
+The token-free live guard starts direct Bash background work, exercises both a newly submitted `/exit` and its already-open confirmation, and proves the agent gone on the same endpoint and worktree.
+It attaches only its owned lab viewer and leaves trust and permission decisions intact.
+Refresh with:
+
+```sh
+FM_HERDR_EXIT_CONFIRM_ONLY=1 bash bin/fm-test-run.sh tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+Observed:
+
+```text
+ok - live Claude exit confirmation: submitted /exit stops tasks and proves agent gone on the same endpoint and worktree (2.1.286 (Claude Code); herdr 0.9.1)
+ok - live Claude exit confirmation: existing /exit stops tasks and proves agent gone on the same endpoint and worktree (2.1.286 (Claude Code); herdr 0.9.1)
+```
+
+The portable executable regression is `tests/fm-control.test.sh`, including refusal of detach, stay, ambiguous dialogs and pending drafts without confirmation input.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

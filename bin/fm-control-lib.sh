@@ -429,3 +429,32 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     *) return 0 ;;
   esac
 }
+
+# Claude's supported background-work exit dialog (2.1.286). Match the current
+# modal, never an option mentioned in transcript prose. Only the stop option
+# already selected is supported; other selections or changed dialogs refuse.
+# Input is a plain full viewport. Output: stop|refuse|none.
+fm_control_exit_confirmation() {  # <harness> <viewport>
+  [ "${1-}" = claude ] || { printf 'none'; return 0; }
+  printf '%s\n' "${2-}" | awk '
+    { sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "") }
+    /Background work is running|Exit and stop tasks|Move to background and exit/ { seen = 1 }
+    $0 == "Background work is running" { title++; start = NR }
+    { row[NR] = $0 }
+    END {
+      if (!seen) { printf "none"; exit }
+      if (title != 1) { printf "refuse"; exit }
+      n = 0
+      for (i = start; i <= NR; i++) if (row[i] != "") lines[++n] = row[i]
+      if (n < 7 || lines[2] != "The following will stop when you exit:" ||
+          lines[n-3] != "❯ 1. Exit and stop tasks" ||
+          lines[n-2] != "2. Move to background and exit" ||
+          lines[n-1] != "3. Stay" ||
+          lines[n] != "Enter to confirm · Esc to cancel") { printf "refuse"; exit }
+      for (i = 3; i < n-3; i++)
+        if (lines[i] ~ /❯|Enter to confirm|Exit and stop tasks|Move to background and exit/) {
+          printf "refuse"; exit
+        }
+      printf "stop"
+    }'
+}

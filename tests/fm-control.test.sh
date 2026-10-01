@@ -129,7 +129,11 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
-        printf 'zsh' > "$D/command"
+        if [ -f "$D/open-exit-modal" ]; then
+          : > "$D/exit-modal-armed"
+        else
+          printf 'zsh' > "$D/command"
+        fi
       fi
       case "$payload" in
         *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command" ;;
@@ -137,6 +141,14 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       printf '%s %s\n' "$(perl -MTime::HiRes=time -e 'printf "%.3f", time')" "$payload" >> "$D/key-times"
+      if [ "$payload" = Enter ] && [ -f "$D/exit-modal-armed" ]; then
+        cp "$D/modal-screen" "$D/pane"
+        rm -f "$D/exit-modal-armed"
+        : > "$D/exit-modal"
+      elif [ "$payload" = Enter ] && [ -f "$D/exit-modal" ]; then
+        printf zsh > "$D/command"
+        rm -f "$D/exit-modal"
+      fi
       if [ "$payload" = Escape ] && [ -f "$D/devin" ]; then
         case "$(cat "$D/devin")" in
           running) printf armed > "$D/devin" ;;
@@ -1067,6 +1079,88 @@ $cases
 EOF
   pass "fm-control-lib: only a runtime's own recorded session has a relaunch resume form"
 }
+
+# Real Claude 2.1.286 plain viewport, independently captured in the lab.
+claude_exit_modal() {
+  cat <<'EOF'
+Background work is running
+The following will stop when you exit:
+shell · sleep 240
+❯ 1. Exit and stop tasks
+2. Move to background and exit
+3. Stay
+Enter to confirm · Esc to cancel
+EOF
+}
+
+test_existing_claude_exit_confirmation() {
+  local dir out rc
+  dir=$(new_case exit-confirmation)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  claude_exit_modal > "$dir/fake/pane"
+  : > "$dir/fake/exit-modal"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  [ "$rc" = 0 ] || fail "exact Claude stop confirmation should complete: $out"
+  [ ! -s "$dir/fake/literal" ] || fail "an existing confirmation must not receive typed commands"
+  [ "$(cat "$dir/fake/keys")" = Enter ] || fail "stop confirmation must receive exactly one Enter"
+  [ "$(cat "$dir/fake/command")" = zsh ] || fail "confirmation must prove agent stopped"
+  pass "existing exact Claude stop confirmation completes once without typing"
+}
+
+test_claude_exit_confirmation_refusals() {
+  local dir out rc variant
+  for variant in detach stay changed-footer duplicate extra-composer no-title; do
+    dir=$(new_case "exit-confirm-$variant")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    claude_exit_modal > "$dir/fake/pane"
+    case "$variant" in
+      detach) sed 's/❯ 1\./1./; s/^2\./❯ 2./' "$dir/fake/pane" > "$dir/fake/changed" ;;
+      stay) sed 's/❯ 1\./1./; s/^3\./❯ 3./' "$dir/fake/pane" > "$dir/fake/changed" ;;
+      changed-footer) sed 's/Enter to confirm/Enter to approve/' "$dir/fake/pane" > "$dir/fake/changed" ;;
+      duplicate) cat "$dir/fake/pane" "$dir/fake/pane" > "$dir/fake/changed" ;;
+      extra-composer) { cat "$dir/fake/pane"; printf '❯ unsent draft\n'; } > "$dir/fake/changed" ;;
+      no-title) sed '/^Background work is running/d' "$dir/fake/pane" > "$dir/fake/changed" ;;
+    esac
+    mv "$dir/fake/changed" "$dir/fake/pane"
+    out=$(run_control "$dir" t1 exit); rc=$?
+    [ "$rc" != 0 ] || fail "$variant dialog must refuse: $out"
+    [ ! -s "$dir/fake/keys" ] && [ ! -s "$dir/fake/literal" ] \
+      || fail "$variant dialog must receive no input"
+  done
+  pass "detach, stay, changed, duplicate and draft-contaminated exit dialogs refuse without input"
+}
+
+test_submitted_claude_exit_confirmation() {
+  local dir out rc selection
+  for selection in stop detach; do
+    dir=$(new_case "submitted-exit-$selection")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    : > "$dir/fake/open-exit-modal"
+    claude_exit_modal > "$dir/fake/modal-screen"
+    if [ "$selection" = detach ]; then
+      sed 's/❯ 1\./1./; s/^2\./❯ 2./' "$dir/fake/modal-screen" > "$dir/fake/changed"
+      mv "$dir/fake/changed" "$dir/fake/modal-screen"
+    fi
+    out=$(run_control "$dir" t1 exit); rc=$?
+    [ "$(cat "$dir/fake/literal")" = /exit ] || fail "new exit should type its command exactly once"
+    if [ "$selection" = stop ]; then
+      [ "$rc" = 0 ] || fail "new exact stop dialog should complete: $out"
+      [ "$(cat "$dir/fake/keys")" = $'Enter\nEnter' ] || fail "new stop dialog needs exactly submit and confirm"
+    else
+      [ "$rc" != 0 ] || fail "new detach selection must refuse: $out"
+      [ "$(cat "$dir/fake/keys")" = Enter ] || fail "new detach dialog must not receive a confirmation"
+      [ "$(cat "$dir/fake/command")" = claude ] || fail "refused detach must leave the agent alive"
+    fi
+  done
+  pass "submitted Claude exit confirms stop once and refuses detach without generic Enter retries"
+}
+
+test_existing_claude_exit_confirmation
+test_claude_exit_confirmation_refusals
+test_submitted_claude_exit_confirmation
 
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
