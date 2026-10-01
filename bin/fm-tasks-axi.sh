@@ -57,6 +57,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 usage() {
   awk '
@@ -137,4 +139,11 @@ else
 fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
+case "${1:-}" in
+  show|view|list)
+    set -o pipefail
+    tasks-axi ${ARGS[@]+"${ARGS[@]}"} | fm_hold_reason_decode_stream
+    exit $?
+    ;;
+esac
 exec tasks-axi ${ARGS[@]+"${ARGS[@]}"}

@@ -64,7 +64,8 @@ Repeat and edge cases:
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 - `--origin` records the origin the call was held for on its own `Captain hold origin:` body line, which `complete` and `verify` check.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
-  tasks-axi stores a reason on one parenthesised markdown line, so `hold` escapes `%`, parentheses, and line breaks as percent codes where it writes the reason, and the readers that show it decode them (`bin/fm-hold-reason-lib.sh` owns the encoding).
+  tasks-axi stores a reason on one parenthesised markdown line, so `hold` writes a version-marked base64 value and the readers that show it decode only that reason field (`bin/fm-hold-reason-lib.sh` owns the encoding).
+  Public `bin/fm-tasks-axi.sh show` and `list` reads preserve the reason through quoted strings, while unmarked legacy reasons and other fields pass through unchanged.
 
 ### Answering a call (`answer`)
 

@@ -4238,33 +4238,130 @@ test_complete_refuses_an_entry_held_for_another_origin() {
 # rest on one markdown line. The reason is encoded where it is written and
 # decoded wherever it is shown, so prose with every awkward character survives.
 test_hold_reason_round_trips_awkward_characters() {
-  local home id reason stored json shown start
+  local home id reason stored json shown start verb fields out raw rc raw_rc mode
+  local title legacy body quoted_reason quoted_title quoted_legacy expected_reason until_args=()
   home=$(make_home reason-round-trip)
-  id=sample-reason-call
-  reason=$'Pick route (north); say "yes" or \'no\' - 100% sure %28x%29\nSecond line'
-  run_captain "$home" hold "$id" --title "Choose the route" --reason "$reason" \
-    --repo sample >/dev/null \
-    || fail "hold refused a reason containing parentheses, a semicolon, quotes, and a newline"
-  stored=$(grep "^- \[ \] $id " "$home/data/backlog.md") \
-    || fail "the held row is not on one backlog line"
-  assert_contains "$stored" "(hold-kind: captain)" \
-    "parentheses in the reason broke the hold-kind tag"
-  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+  title='Investigate literal %28, "fm-hold-v1:bm9ydGg="'
+  legacy='Visit https://example.test/%28literal%29 and %0A; fm-hold-v1:bm9ydGg='
+  body=$'fm-hold-v1:bm9ydGg=\n  hold_reason: "%28"\n'
+  quoted_title=$(jq -cn --arg value "$title" '$value')
+  quoted_legacy=$(jq -cn --arg value "$legacy" '$value')
+  tasks_in "$home" add sample-legacy-call "$title" --kind captain --repo sample >/dev/null \
+    || fail "could not create the legacy call"
+  tasks_in "$home" hold sample-legacy-call --reason "$legacy" --kind captain >/dev/null \
+    || fail "could not hold the legacy call"
+  printf '%s' "$body" > "$home/legacy-body.txt"
+  tasks_in "$home" update sample-legacy-call --body-file "$home/legacy-body.txt" >/dev/null \
+    || fail "could not write the legacy body"
+
+  for id in sample-reason-call sample-dated-call; do
+    until_args=()
+    reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+    if [ "$id" = sample-dated-call ]; then
+      until_args=(--until 2099-01-01)
+      reason='fm-hold-v1:bm9ydGg='
+    fi
+    quoted_reason=$(jq -cn --arg value "$reason" '$value')
+    run_captain "$home" hold "$id" --title "$title" --reason "$reason" \
+      --repo sample ${until_args[@]+"${until_args[@]}"} >/dev/null \
+      || fail "hold refused the reason for $id"
+    stored=$(grep "^- \[ \] $id " "$home/data/backlog.md") \
+      || fail "the held row is not on one backlog line"
+    assert_contains "$stored" "(hold: fm-hold-v1:" "the persisted reason has no encoding marker"
+    assert_contains "$stored" "(hold-kind: captain)" "the reason broke the hold-kind tag"
+
+    for verb in show view; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" "$id") \
+        || fail "public $verb failed for $id"
+      shown=$(printf '%s\n' "$out" | sed -n 's/^  hold_reason: //p')
+      printf '%s\n' "$shown" | jq -e --arg reason "$reason" '. == $reason' >/dev/null \
+        || fail "public $verb changed the reason for $id"
+      assert_contains "$out" "  title: $quoted_title" "public $verb changed the title"
+    done
+    for fields in hold_reason,body body,hold_reason,hold_until; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" list --fields "$fields") \
+        || fail "public list failed with $fields"
+      assert_contains "$out" "$quoted_reason" "public list changed the reason with $fields"
+      assert_contains "$out" "$quoted_title" "public list changed the title with $fields"
+      raw=$(tasks_in "$home" list --fields "$fields" | grep '^  sample-legacy-call,')
+      shown=$(printf '%s\n' "$out" | grep '^  sample-legacy-call,')
+      assert_equals "$raw" "$shown" "public list changed legacy or unrelated fields"
+    done
+    json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
+    printf '%s' "$json" | jq -e --arg id "$id" --arg reason "$reason" --arg title "$title" \
+      '.backlog.records[] | select(.id == $id) | .hold_reason == $reason and .title == $title' >/dev/null \
+      || fail "fleet changed the reason or title for $id"
+    printf '%s' "$json" | jq -e --arg reason "$legacy" --arg title "$title" \
+      '.backlog.records[] | select(.id == "sample-legacy-call") |
+       .hold_reason == $reason and .title == $title and .body_lines[0] == "fm-hold-v1:bm9ydGg="' >/dev/null \
+      || fail "fleet changed legacy or unrelated fields"
+  done
+
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-legacy-call --full)
+  raw=$(tasks_in "$home" show sample-legacy-call --full)
+  assert_equals "$raw" "$out" "public show changed legacy or unrelated fields"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" list)
+  raw=$(tasks_in "$home" list)
+  assert_equals "$raw" "$out" "public list changed output with no reason column"
+  for verb in show list; do
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" --help)
+    raw=$(tasks_in "$home" "$verb" --help)
+    assert_equals "$raw" "$out" "public $verb changed help output"
+  done
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show nonexistent-call 2>&1)
+  rc=$?
+  raw=$(tasks_in "$home" show nonexistent-call 2>&1)
+  raw_rc=$?
+  [ "$raw_rc" -ne 0 ] || fail "the missing-task fixture unexpectedly exists"
+  expect_code "$raw_rc" "$rc" "public show missing task"
+  assert_equals "$raw" "$out" "public show changed a read error"
+
+  expected_reason=$'  Pick route (north); say "yes" or \'no\' - 100% sure %28x%29, café\t\\slash\r\nSecond line\n\n'
+  quoted_reason=$(jq -cn --arg value "$expected_reason" '$value')
+  for mode in tool manual fallback; do
+    case "$mode" in
+      manual) printf 'manual\n' > "$home/config/backlog-backend" ;;
+      fallback)
+        rm "$home/config/backlog-backend"
+        cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = list ]; then
+  printf 'read failed: literal %%28 and fm-hold-v1:bm9ydGg=\n' >&2
+  exit 1
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+        chmod +x "$home/fakebin/tasks-axi"
+        ;;
+    esac
+    start=$(PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_BOOTSTRAP_NETWORK=skip "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+    assert_contains "$start" "$quoted_reason" "startup $mode changed the encoded reason"
+    assert_contains "$start" 'Investigate literal %28' "startup $mode changed the title"
+    assert_contains "$start" "$legacy" "startup $mode changed the legacy reason"
+    assert_contains "$start" '"fm-hold-v1:bm9ydGg="' "startup $mode decoded a reason twice"
+    if [ "$mode" = fallback ]; then
+      assert_contains "$start" 'read failed: literal %28 and fm-hold-v1:bm9ydGg=' \
+        "startup changed unrelated error text"
+    fi
+  done
+  rm "$home/fakebin/tasks-axi"
+  out=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
-  shown=$(printf '%s' "$json" | jq -r --arg id "$id" \
-    '.backlog.records[] | select(.id == $id) | .hold_reason')
-  [ "$shown" = "$reason" ] \
-    || fail "the reason did not read back unchanged: $(printf '%s' "$shown" | od -c | head -3)"
-  start=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
-  assert_contains "$start" 'Pick route (north); say' \
-    "the session-start backlog listing did not decode the stored reason"
-  assert_not_contains "$start" 'Pick route %28north' \
-    "the session-start backlog listing shows the stored escapes"
-  pass "a hold reason with parentheses, a semicolon, quotes, and a newline reads back unchanged"
+    "$ROOT/bin/fm-afk-return.sh" check 2>&1 || true)
+  assert_contains "$out" "$quoted_reason" "return brief changed the encoded reason"
+  assert_contains "$out" "$quoted_title" "return brief changed the title"
+  assert_contains "$out" "$quoted_legacy" "return brief changed the legacy reason"
+  pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit $?
+fi
 
 
 test_origin_is_never_its_own_inventory_entry

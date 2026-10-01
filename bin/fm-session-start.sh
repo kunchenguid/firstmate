@@ -472,7 +472,7 @@ print_backlog_manual_compact() {
         }
       }
     }
-  ' "$path"
+  ' "$path" | fm_hold_reason_decode_stream markdown
 }
 
 # tasks-axi closes every listing with its own help block. This section composes
@@ -524,11 +524,11 @@ print_backlog_tasks_axi_compact() {
     printf 'compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to %s; task bodies omitted)\n' \
       "$QUEUED_LIMIT"
     printf '\nin flight:\n'
-    printf '%s\n' "$in_flight" | strip_axi_help
+    printf '%s\n' "$in_flight" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nheld (captain- or time-gated; an in-flight item that is also held appears in both groups):\n'
-    printf '%s\n' "$held" | strip_axi_help
+    printf '%s\n' "$held" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nblocked queued:\n'
-    printf '%s\n' "$blocked" | strip_axi_help
+    printf '%s\n' "$blocked" | fm_hold_reason_decode_stream | strip_axi_help
     printf '\nready queued (dispatchable now):\n'
     print_ready_queued_bounded "$ready"
     return 0
@@ -543,16 +543,13 @@ print_backlog_compact() {
   subsection "$label"
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
-      # Held rows carry the stored, escaped hold reason (bin/fm-hold-reason-lib.sh).
-      {
-        if fm_tasks_axi_backend_available "$CONFIG"; then
-          print_backlog_tasks_axi_compact "$path"
-        elif fm_backlog_backend_manual "$CONFIG"; then
-          print_backlog_manual_compact "$path" "manual backend"
-        else
-          print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
-        fi
-      } | fm_hold_reason_decode_stream
+      if fm_tasks_axi_backend_available "$CONFIG"; then
+        print_backlog_tasks_axi_compact "$path"
+      elif fm_backlog_backend_manual "$CONFIG"; then
+        print_backlog_manual_compact "$path" "manual backend"
+      else
+        print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
+      fi
       print_backlog_pointer
     else
       printf '(present, empty)\n'

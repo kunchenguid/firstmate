@@ -891,7 +891,7 @@ command_hold() {
   # tasks-axi stores the reason on one markdown line inside a parenthesised tag,
   # so parentheses and line breaks are encoded here (bin/fm-hold-reason-lib.sh)
   # and decoded by every reader, never refused.
-  stored_reason=$(fm_hold_reason_encode "$reason")
+  stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
   fi
