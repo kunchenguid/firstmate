@@ -4435,33 +4435,57 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
-test_paused_fresh_recheck_marker_does_not_mask_working() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
-  dir=$(make_case paused-fresh-recheck-marker); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-fresh-recheck"
+test_standing_pause_reads_crew_state_only_on_the_recheck_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid n reads
+  dir=$(make_case paused-crew-state-cadence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-read-cadence"
   printf 'idle awaiting external\n' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-fresh.meta"
-  printf 'paused: awaiting the upstream release\n' > "$state/pause-fresh.status"
-  sig=$(seen_sig "$state/pause-fresh.status"); printf '%s' "$sig" > "$state/.seen-pause-fresh_status"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-cadence.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/pause-cadence.status"
+  sig=$(seen_sig "$state/pause-cadence.status"); printf '%s' "$sig" > "$state/.seen-pause-cadence_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
-  date +%s > "$state/.paused-rechecked-$key"
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
 
+  # First stale sight reads crew state once and alerts the declaration once.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "provably working crew was hidden by a fresh pause recheck marker: $(cat "$out")"; }
-  [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "fresh pause recheck marker survived a provably working verdict"; }
-  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "provably working crew did not resume its wedge timer"; }
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a standing pause did not alert its first stale sight"; }
+  grep -F "stale: $window (paused" "$out" >/dev/null || fail "the pause first sight was not a paused stale alert: $(cat "$out")"
   reap "$pid"
-  unset FM_FAKE_CREW_STATE
-  pass "a fresh pause recheck marker cannot hide resumed provable work"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the pause first-sight wake"
+
+  # Inside FM_STALE_ESCALATE_SECS, idle polls of the standing pause never read crew state.
+  export FM_FAKE_CREW_STATE_LOG="$dir/crew-state.calls"
+  : > "$FM_FAKE_CREW_STATE_LOG"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  n=0
+  while [ "$n" -lt 4 ]; do
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a standing pause re-alarmed inside its cadence: $(cat "$out")"; }
+    n=$((n + 1))
+  done
+  reads=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
+  [ "$reads" -eq 0 ] || { reap "$pid"; fail "a standing pause read crew state $reads time(s) across $n idle polls inside FM_STALE_ESCALATE_SECS"; }
+
+  # Once the recheck marker ages past FM_STALE_ESCALATE_SECS, the next poll reads crew state again.
+  set_mtime "$(( $(date +%s) - 1000 ))" "$state/.paused-rechecked-$key"
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the pause recheck re-alarmed inside its resurface cadence: $(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the pause recheck re-alarmed inside its resurface cadence: $(cat "$out")"; }
+  reap "$pid"
+  reads=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
+  [ "$reads" -eq 1 ] || fail "an aged pause recheck marker spent $reads crew-state read(s), expected exactly one"
+  [ $(( $(date +%s) - $(file_mtime "$state/.paused-rechecked-$key") )) -lt 999 ] || fail "the pause recheck did not restart its cadence"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_LOG
+  pass "a standing pause reads crew state on first sight and the recheck cadence, never every idle poll"
 }
 
 test_redeclared_identical_pause_gets_a_new_first_sight() {
@@ -6893,7 +6917,7 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
-test_paused_fresh_recheck_marker_does_not_mask_working
+test_standing_pause_reads_crew_state_only_on_the_recheck_cadence
 test_redeclared_identical_pause_gets_a_new_first_sight
 test_pause_recheck_cadence_ignores_unrelated_status_updates
 test_paused_authoritative_working_preserves_wedge_timer

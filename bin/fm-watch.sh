@@ -1750,7 +1750,8 @@ clear_pause_tracking() {  # <window-key>
 # Reconcile a declared pause or captain-held status with authoritative crew state.
 # After fm-crew-state has fallen back to stopped or unknown, the declaration still
 # supplies the bounded cadence; only positive evidence that the crew is working
-# overrides it.
+# overrides it. Crew state is read on first sight of a standing pause and then at
+# most once per STALE_ESCALATE_SECS, never on every idle poll.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class
   key=$(window_key "$win")
@@ -1761,14 +1762,14 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    printf 'paused'
+    return
+  fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
-    return
-  fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    printf 'paused'
     return
   fi
   # Recover paused classification when authoritative crew state cannot name a
@@ -1817,16 +1818,8 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
-stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
-}
-
-# The same scope for a captain call, carrying the CALL's own lifecycle identity
-# beside the status signature. The status log is not enough on its own: a task
+# The re-surface throttle scope for a captain call, carrying the CALL's own
+# lifecycle identity beside the status-log signature. The status log is not enough on its own: a task
 # can be answered with `--release` and held again as a genuinely different call
 # without any status append, and binding the throttle to the signature alone let
 # the second call inherit the first one's silence and absorbed its first sight.
@@ -1906,7 +1899,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(declared_wait_identity "$STATE/$task.status" "$last")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
       if [ "$now" -lt "$until" ]; then
@@ -1921,7 +1914,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(declared_wait_identity "$STATE/$task.status" "$last")
     if captain_held_silenced "$last"; then
       throttled=0
     else
