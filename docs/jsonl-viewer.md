@@ -1,9 +1,9 @@
 # Task, report, and agent journal viewer
 
 `fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
-It reads only `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
+Task discovery and classification use the structured fleet snapshot, task lifecycle disposition, current backlog, and configured Done archive rather than the last status-log line.
+The only content artifacts it exposes are `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
 It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
-Task classification comes from the structured fleet snapshot, task lifecycle disposition, current backlog, and configured Done archive rather than the last status-log line.
 
 ## Start the viewer
 
@@ -38,7 +38,7 @@ Rejected or expired saved credentials are removed instead of being retried.
 The page starts from a clearly labelled recent tail for a large journal, can reload from byte zero, supports text and role/type filters, and polls for complete appended lines without a page reload.
 Task status and selected task documents refresh automatically while dashboard refresh is enabled.
 Standalone task reports are labelled by task and refresh automatically while follow mode is enabled.
-The rendered report view supports headings, paragraphs, lists, blockquotes, tables, fenced code, and safe web or email links, with the complete plain source available below it.
+Rendered reports and task briefs support headings, paragraphs, lists, blockquotes, tables, fenced code, and safe web or email links, with the complete plain source available below them.
 
 ## Reading boundaries
 
@@ -49,7 +49,7 @@ Rotation and detectable truncation add an explicit boundary while the browser re
 
 The viewer uses only local bundled HTML, JavaScript, and CSS.
 Log text is inserted with browser text nodes, so journal content is never executed as HTML.
-Report Markdown is converted into explicit browser nodes without accepting raw HTML, dangerous link schemes, or image loads.
+Report and task-brief Markdown is converted into explicit browser nodes without accepting raw HTML, dangerous link schemes, or image loads.
 Task documents larger than 8 MiB are refused rather than truncated.
 
 Run `bin/fm-test-run.sh tests/fm-jsonl-viewer.test.sh` for the portable authenticated task, report, and journal behavior suite.

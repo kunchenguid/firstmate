@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// fm-jsonl-viewer.mjs - token-protected, read-only browser viewer for the
-// current Firstmate home's ShortTask journals, supervision branch sessions,
-// canonical task reports, and canonical task briefs.
+// fm-jsonl-viewer.mjs - token-protected, read-only browser dashboard for the
+// current Firstmate home's tasks and canonical task documents, plus ShortTask
+// journals and supervision branch sessions.
 //
 // Usage:
 //   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file \
@@ -13,7 +13,7 @@
 // Static UI assets contain no private data; every discovery/read endpoint
 // requires Authorization: Bearer <token>. Only regular, non-symlink JSONL files
 // below state/short-agents and state/branch-session and canonical
-// data/<task>/{report.md,brief.md} files are eligible.
+// data/<task>/{report.md,brief.md} files are eligible as content artifacts.
 
 import { timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
