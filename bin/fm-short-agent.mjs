@@ -6,11 +6,12 @@
 // Without a current judgment, recovery requires the original unmanaged-path
 // refusal and confirmed pane absence, retains the surviving copy, and completes
 // only remaining record/backlog bookkeeping without replaying a close.
-// With a current judgment, MAIN separately accepts the current delivered state,
-// retains every copy, and may close the exact still-present owned endpoint once.
-// Both paths require owning primary ancestry, a dead executor and children, and
-// unchanged bound evidence and identities; neither rewrites the original result
-// or runs copy return, sync, later operations, or another uncertain close.
+// An accepted-current judgment retains every copy and may close the exact
+// still-present owned endpoint once. An archived/pruned judgment instead
+// requires the endpoint to be absent and settles bookkeeping without teardown.
+// All recovery paths require owning primary ancestry, a dead executor and
+// children, and unchanged bound evidence and identities; none rewrites the
+// original result or runs copy return, sync, or later operations.
 // Existing reconcile/reservation/lease/meta/project locks arbitrate.
 // The CLI --help and fm-short-operations.mjs own the exact recovery contracts.
 // Request: {key, goal, acceptance, provider?, model?, materials:[absolute file], operations?}.
