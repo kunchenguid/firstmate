@@ -54,10 +54,11 @@
 #     before the close is printed, so supervision continues when the session
 #     drops the handoff. It confirms no handling handoff, so the recovery
 #     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The host records that successor's arm, and the session's next
-#     park takes its cycle over (bin/fm-watch-arm.sh --take-over) instead of
-#     attaching to it, so the arm left behind for main's turn never outlives
-#     that turn as a second owner;
+#     main. The host records that successor's arm before relinquishing it
+#     (detach_successor owns the persistence check and failure path). The
+#     session's next park requests a take-over of its cycle rather than an
+#     ordinary attach; bin/fm-watch-arm.sh's --take-over header owns the
+#     conditions under which that restores a single owner and the fallback;
 #   - away (an away record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
@@ -136,8 +137,9 @@
 # releases the branch actor's leases; it releases them again after every
 # engine turn. It also reads the record of a successor a pass-through left for
 # main: while that arm still runs under its recorded identity, the first cycle
-# takes its cycle over rather than attaching to it, and the record stays until
-# that arm is gone, so a later host retries a take-over that left it running.
+# requests a take-over rather than an ordinary attach. Activation removes the
+# record only once that identity is no longer alive, so a later host retries a
+# take-over that left it running.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
