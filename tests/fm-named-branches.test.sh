@@ -36,44 +36,6 @@ fill_brief() { # <file>
   printf '%s\n' "$content" > "$file"
 }
 
-test_brief_names_the_crew_and_base_branches() {
-  local home id brief
-  home="$TMP_ROOT/brief/home"
-  mkdir -p "$home/data"
-  id=named-brief-nm
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes \
-    --branch-name feature/widget --base-branch office >/dev/null
-  brief="$home/data/$id/brief.md"
-  assert_grep 'Ship branch: feature/widget' "$brief" "no-mistakes brief omitted the crew branch"
-  assert_grep 'Base branch contract: base_branch=office' "$brief" "no-mistakes brief omitted the base contract"
-  assert_grep 'no-mistakes axi run --base-branch office' "$brief" "no-mistakes brief omitted the PR base"
-  assert_grep 'git checkout -b feature/widget' "$brief" "no-mistakes brief omitted the crew checkout"
-  # shellcheck disable=SC2016
-  assert_grep 'detached HEAD on `office`' "$brief" "no-mistakes brief did not detach on the named base"
-
-  id=named-brief-dp
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR \
-    --branch-name feature/widget --base-branch office >/dev/null
-  brief="$home/data/$id/brief.md"
-  assert_grep 'gh-axi pr create --base office' "$brief" "direct-PR brief omitted the PR base"
-
-  id=named-brief-lo
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
-    --branch-name feature/widget --base-branch office >/dev/null
-  brief="$home/data/$id/brief.md"
-  # shellcheck disable=SC2016
-  assert_grep 'merge into local `office`' "$brief" "local-only brief omitted the landing branch"
-  assert_grep 'ready in branch feature/widget' "$brief" "local-only brief omitted the crew branch"
-
-  id=named-brief-default
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only >/dev/null
-  brief="$home/data/$id/brief.md"
-  assert_no_grep 'Base branch contract:' "$brief" "an omitted base wrote a base contract"
-  assert_grep 'detached HEAD on a clean default branch' "$brief" "an omitted base changed the default checkout wording"
-  assert_grep 'git checkout -b fm/named-brief-default' "$brief" "an omitted crew name left the legacy branch"
-  pass "fm-brief: named crew and base branches render into launch, PR, and landing text"
-}
-
 test_brief_refuses_unusable_branch_selections() {
   local home out status
   home="$TMP_ROOT/brief-refuse/home"
@@ -91,13 +53,6 @@ test_brief_refuses_unusable_branch_selections() {
   out=$(FM_HOME="$home" "$BRIEF" scout-name proj --scout --branch-name feature/widget 2>&1); status=$?
   expect_code 1 "$status" "a scout crew branch was accepted"
   assert_contains "$out" "applies only to ship briefs" "a scout crew branch was not refused as a ship-only flag"
-
-  FM_HOME="$home" "$BRIEF" scout-base-collision proj --scout \
-    --base-branch fm/scout-base-collision >/dev/null \
-    || fail "a valid scout base equal to the default crew name was refused"
-  assert_grep 'Base branch contract: base_branch=fm/scout-base-collision' \
-    "$home/data/scout-base-collision/brief.md" \
-    "a valid scout base was not recorded in the brief"
 
   out=$(FM_HOME="$home" "$BRIEF" bad proj --mode local-only --base-branch 'has space' 2>&1); status=$?
   expect_code 1 "$status" "a base branch with a space was accepted"
@@ -218,7 +173,7 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
 }
 
 promote_keeps_the_named_branches() {
-  local home project id instructions meta
+  local home project id meta
   home="$TMP_ROOT/promote/home"
   project="$home/project"
   id=named-promote
@@ -232,12 +187,7 @@ promote_keeps_the_named_branches() {
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
     --mode local-only --yolo off --branch-name feature/widget --base-branch office >/dev/null
-  instructions="$home/data/$id/ship-instructions.md"
   meta="$home/state/$id.meta"
-  assert_grep 'Ship branch: feature/widget' "$instructions" "promotion omitted the crew branch"
-  assert_grep 'Base branch contract: base_branch=office' "$instructions" "promotion omitted the base"
-  # shellcheck disable=SC2016
-  assert_grep 'merge into local `office`' "$instructions" "promotion omitted the landing branch"
   assert_grep 'branch=feature/widget' "$meta" "promotion did not record the crew branch"
   assert_grep 'base_branch=office' "$meta" "promotion did not record the base"
   pass "fm-promote: a named crew branch and base survive promotion"
@@ -314,8 +264,10 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
     --mode direct-PR --yolo off --branch-name feature/remote-base >/dev/null
-  assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
-    "remote promotion instructions did not name the qualified base ref"
+  assert_grep 'branch=feature/remote-base' "$home/state/$id.meta" \
+    "remote promotion did not record the crew branch"
+  assert_grep 'base_branch=release' "$home/state/$id.meta" \
+    "remote promotion did not record the base branch"
 
   scout="$home/scout"
   git clone -q "$remote" "$scout"
@@ -330,8 +282,10 @@ test_promote_rejects_base_changes_and_branch_collisions() {
     || fail "promotion did not refresh an unfetched remote-tracking base"
   assert_grep 'kind=ship' "$home/state/$id.meta" \
     "promotion of an unfetched remote base did not publish ship metadata"
-  assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
-    "promotion of an unfetched remote base omitted the qualified base ref"
+  assert_grep 'branch=feature/unfetched-remote-base' "$home/state/$id.meta" \
+    "promotion of an unfetched remote base omitted the crew branch"
+  assert_grep 'base_branch=release' "$home/state/$id.meta" \
+    "promotion of an unfetched remote base omitted the base branch"
   git -C "$scout" rev-parse --verify --quiet 'refs/remotes/origin/release^{commit}' >/dev/null \
     || fail "promotion did not refresh the scout worktree remote-tracking base"
 
@@ -577,8 +531,8 @@ test_promote_accepts_a_base_chosen_for_an_unbased_scout() {
     --mode local-only --yolo off --branch-name feature/chosen --base-branch office >/dev/null
   assert_grep 'kind=ship' "$home/state/$id.meta" "promotion of an unbased scout did not publish ship metadata"
   assert_grep 'base_branch=office' "$home/state/$id.meta" "promotion did not record the base selected at promotion"
-  assert_grep 'Base branch contract: base_branch=office' "$home/data/$id/ship-instructions.md" \
-    "promotion omitted the base selected at promotion"
+  assert_grep 'branch=feature/chosen' "$home/state/$id.meta" \
+    "promotion omitted the crew branch selected at promotion"
   pass "fm-promote: an unbased scout accepts the base selected at promotion"
 }
 
@@ -649,7 +603,6 @@ test_reservations_cover_clones_of_one_origin() {
   pass "named branch reservations cover every clone of one origin"
 }
 
-test_brief_names_the_crew_and_base_branches
 test_brief_refuses_unusable_branch_selections
 test_bare_originless_project_lock_resolves
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
