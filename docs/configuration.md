@@ -1154,7 +1154,7 @@ That one diagnostic names the list line number at most and never prints the list
 
 **Missing or invalid rules**
 
-An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
+With valid configuration, an absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 
 **Checks performed after the answer**
 
@@ -1200,7 +1200,8 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 Every result above exits 0.
 
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, missing `jq`, or an invalid [Pi account pin](#worker-account-pin-configclaude-account-configpi-account) when any rule or default profile uses `pi` or `pi-signed`.
+  These errors stop resolution before any model or quota request and are never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**

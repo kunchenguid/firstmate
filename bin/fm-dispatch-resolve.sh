@@ -58,9 +58,9 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   Exit 2 only for a usage or configuration error, which is actionable,
+#   never selected around. docs/configuration.md "Outcomes and exit status"
+#   owns those error conditions.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
