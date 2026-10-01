@@ -4196,6 +4196,79 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
 }
 
+# A worker parked on a `needs-decision` it opened is waiting by declaration: the
+# open decision IS the wait, written in the status log rather than the backlog.
+# Before the fix only a `paused:` line or a backlog hold bounded the stale alarm,
+# so a worker idle on its own open question re-alarmed on every new pane hash,
+# and firstmate had to steer each one into a hand-written `paused:` line - the
+# 2026-10-01 retro case.
+# Pinned in both directions: while the decision stays open the first sight still
+# alarms, churn inside the re-surface window is absorbed, and the window's end
+# re-surfaces it once; after the `resolved` line for the same key lands, the same
+# pane goes back to alarming on every new hash. The keyed case with a later
+# `working:` line covers the inconclusive branch; the bare line covers the
+# captain-relevant one.
+test_open_needs_decision_bounds_stale_churn() {
+  local spec name line key dir state out capture throttle wakes round
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (open needs-decision stale bound)"; return 0; }
+  for spec in \
+    'open-decision|default|needs-decision: REST or GraphQL for the new endpoint?' \
+    'open-decision-then-working|api-shape|needs-decision [key=api-shape]: REST or GraphQL?'
+  do
+    name=${spec%%|*}; key=${spec#*|}; line=${key#*|}; key=${key%%|*}
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build an open-decision fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    throttle="$state/.paused-resurfaced-$(hold_key)"
+    if [ "$name" = open-decision-then-working ]; then
+      printf 'working: tidying docs while the decision is pending\n' >> "$state/held-merge.status"
+      printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    fi
+
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+      || fail "[$name] first sight of an open decision did not surface"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "[$name] first sight produced $wakes wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+
+    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+      || fail "[$name] watcher exited during pane churn on an open decision"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "[$name] pane churn re-alarmed an open decision $wakes time(s) inside the re-surface window"
+
+    [ -e "$throttle" ] || fail "[$name] the open decision recorded no re-surface cadence"
+    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+      || fail "[$name] open decision did not re-surface once its window elapsed"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the re-surface"
+
+    # The answer closes the wait: every new hash alarms again.
+    if [ "$key" = default ]; then
+      printf 'resolved: use REST\n' >> "$state/held-merge.status"
+    else
+      printf 'resolved [key=%s]: use REST\n' "$key" >> "$state/held-merge.status"
+    fi
+    printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, answered ${round}s" \
+        || fail "[$name] a resolved decision stopped alarming on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] resolved round $round produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge resolved round $round"
+      round=$((round + 1))
+    done
+  done
+  pass "an open needs-decision surfaces once, absorbs pane churn on the long cadence, and alarms normally once resolved"
+}
+
+
 
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -6654,6 +6727,7 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_open_needs_decision_bounds_stale_churn
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
