@@ -2574,6 +2574,7 @@ test_own_work_wait_keeps_first_alert_then_long_cadence() {
     # Both the unchanged declaration and its first alert must be older than
     # the 240s cadence for a forgotten wait to get its bounded recheck.
     set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-resurfaced-$key"
+    set_mtime "$(( $(date +%s) - 500 ))" "$state/.paused-since-$key"
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_TMUX_CURRENT_COMMAND=grok \
       FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting for own work' \
@@ -4207,6 +4208,10 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  # The first stale sight seeds the declaration anchor and is absorbed for a
+  # mate; age that anchor past the cadence so the next poll re-surfaces.
+  wait_poll_cycle "$state" "$pid" || fail "watcher did not re-surface a paused secondmate (first sight was not absorbed)"
+  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a paused secondmate"
   grep -F "stale: $window" "$out" >/dev/null || fail "paused secondmate did not emit a stale recheck"
   grep -F "awaiting external" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
@@ -4241,6 +4246,10 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  # The first stale sight seeds the declaration anchor and is absorbed for a
+  # mate; age that anchor past the cadence so the next poll re-surfaces.
+  wait_poll_cycle "$state" "$pid" || fail "watcher did not re-surface a captain-held secondmate (first sight was not absorbed)"
+  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
   grep -F "stale: $window" "$out" >/dev/null || fail "captain-held secondmate did not emit a stale recheck"
   grep -F "awaiting the captain" "$out" >/dev/null || fail "captain-held secondmate recheck did not name the captain as the blocker: $(cat "$out")"
@@ -4511,7 +4520,7 @@ test_pause_recheck_cadence_ignores_unrelated_status_updates() {
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=5 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first sight of a declared pause did not surface"; }
@@ -4519,11 +4528,16 @@ test_pause_recheck_cadence_ignores_unrelated_status_updates() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight pause wake"
 
+  # Age the declaration anchor and its first alert to 25s of the 30s cadence, so
+  # the recheck is due ~5s from now when measured from the declaration but ~30s
+  # from now (past the wait budget) if the fresh status append reset it.
+  set_mtime "$(( $(date +%s) - 25 ))" "$state/.paused-since-$key"
+  set_mtime "$(( $(date +%s) - 25 ))" "$state/.paused-resurfaced-$key"
   printf 'resolved [key=other]: unrelated phase completed\n' >> "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-pause-unrelated_status"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=5 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_poll_cycle "$state" "$pid"; then
@@ -5195,6 +5209,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
+  set_mtime "$back" "$state/.paused-since-$key"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
   printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -6514,6 +6529,7 @@ test_captain_held_never_rechecked_while_away_record_exists() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
   # Phase B: archiving the record (the return) restores the bounded recheck.
   archive_away_record "$state"
+  set_mtime "$back" "$state/.paused-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -6556,6 +6572,10 @@ test_captain_held_rechecked_under_a_quiet_record() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
+  # The first stale sight seeds the declaration anchor and is absorbed for a
+  # mate; age that anchor past the cadence so the next poll re-surfaces.
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a captain-held mate's first sight was not absorbed beside quiet mode's record"; }
+  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a captain-held item was not rechecked beside quiet mode's record"; }
   unset FM_FAKE_CREW_STATE
   grep -F "awaiting the captain" "$out" >/dev/null || fail "the recheck beside a quiet record did not name the captain: $(cat "$out")"
@@ -6709,6 +6729,10 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
   local dir state
   dir=$(paused_until_fixture until-wrong-year "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
   until_watch "$dir" 240
+  # The first stale sight seeds the declaration anchor; age it past the cadence.
+  wait_poll_cycle "$state" "$UNTIL_PID" \
+    || { reap "$UNTIL_PID"; fail "a wrong-year declared time was rechecked before its anchor aged: $(cat "$dir/watch.out")"; }
+  set_mtime "$(( $(date +%s) - 300 ))" "$state/.paused-since-test_fm-until"
   wait_for_exit "$UNTIL_PID" 100 \
     || { reap "$UNTIL_PID"; fail "a wrong-year declared time silenced the wait beyond the recheck cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null \
