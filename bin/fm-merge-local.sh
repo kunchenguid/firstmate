@@ -15,7 +15,9 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
-# Usage: fm-merge-local.sh <task-id>
+# --expect refuses a changed reviewed commit with exit 3. The resolved commit is
+# immutable throughout ancestor checks and the merge, even without this flag.
+# Usage: fm-merge-local.sh <task-id> [--expect <40-hex commit>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,11 +28,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
+if { [ "$#" -ne 1 ] && [ "$#" -ne 3 ]; } || ! fm_pr_task_id_valid "${1:-}"; then
   echo "error: invalid local merge request" >&2
   exit 2
 fi
 ID=$1
+EXPECT=
+if [ "$#" -eq 3 ]; then
+  if [ "$2" != --expect ] || ! printf '%s\n' "$3" | grep -Eq '^[0-9a-f]{40}$'; then
+    echo "error: --expect requires the full reviewed commit" >&2
+    exit 2
+  fi
+  EXPECT=$3
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -113,8 +123,14 @@ if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   exit 1
 fi
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
+# Resolve the branch once, so later branch movement cannot change what lands.
+TIP=$(git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}") || exit 1
+if [ -n "$EXPECT" ] && [ "$TIP" != "$EXPECT" ]; then
+  echo "REFUSED: work changed after review; nothing merged. Review it again." >&2
+  exit 3
+fi
+# Clean fast-forward only: DEFAULT must be an ancestor of this commit.
+if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$TIP"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
   exit 1
@@ -136,7 +152,7 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+git -C "$PROJ" merge --ff-only "$TIP" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"

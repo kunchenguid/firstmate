@@ -2656,6 +2656,37 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # The local browser bridge owns appending state/.inbox and never drains the
+  # orchestrator's wake queue. Surface complete mailbox lines through the same
+  # durable queue the primary already consumes; .inbox.seen remains the
+  # primary's acknowledgement and is advanced only after it handles a line.
+  web_inbox_pending=1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-web-inbox.sh" pending >/dev/null 2>&1 || web_inbox_pending=$?
+  if [ "$web_inbox_pending" -eq 0 ]; then
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    web_inbox_queued=$(fm_wake_queued_keys_locked check)
+    web_inbox_added=0
+    case " $web_inbox_queued " in
+      *" web-inbox "*) ;;
+      *)
+        fm_wake_append_locked check web-inbox \
+          'check: local browser inbox has unread messages' || {
+            fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+            exit 1
+          }
+        web_inbox_added=1
+        ;;
+    esac
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    if [ "$web_inbox_added" -eq 1 ]; then
+      wake 'check: local browser inbox has unread messages'
+    fi
+  elif [ "$web_inbox_pending" -gt 1 ]; then
+    echo "watcher: could not inspect the local browser inbox" >&2
+    exit 1
+  fi
+
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
