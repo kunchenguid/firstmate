@@ -2660,31 +2660,35 @@ while :; do
   # orchestrator's wake queue. Surface complete mailbox lines through the same
   # durable queue the primary already consumes; .inbox.seen remains the
   # primary's acknowledgement and is advanced only after it handles a line.
-  web_inbox_pending=0
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-web-inbox.sh" pending >/dev/null 2>&1 || web_inbox_pending=$?
+  web_inbox_pending=1
+  if [ -e "$STATE/.inbox" ] || [ -L "$STATE/.inbox" ]; then
+    web_inbox_pending=0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-web-inbox.sh" pending >/dev/null 2>&1 || web_inbox_pending=$?
+  fi
   if [ "$web_inbox_pending" -eq 0 ]; then
+    web_inbox_warned=0
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
-    web_inbox_queued=$(fm_wake_queued_keys_locked check)
     web_inbox_added=0
-    case " $web_inbox_queued " in
-      *" web-inbox "*) ;;
-      *)
-        fm_wake_append_locked check web-inbox \
-          'check: local browser inbox has unread messages' || {
-            fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-            exit 1
-          }
-        web_inbox_added=1
-        ;;
-    esac
+    if ! fm_wake_queued_keys_locked check | grep -Fxq web-inbox; then
+      fm_wake_append_locked check web-inbox \
+        'check: local browser inbox has unread messages' || {
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          exit 1
+        }
+      web_inbox_added=1
+    fi
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     if [ "$web_inbox_added" -eq 1 ]; then
       wake 'check: local browser inbox has unread messages'
     fi
   elif [ "$web_inbox_pending" -gt 1 ]; then
-    echo "watcher: could not inspect the local browser inbox" >&2
-    exit 1
+    if [ "${web_inbox_warned:-0}" -eq 0 ]; then
+      echo "watcher: warning: could not inspect the local browser inbox (exit $web_inbox_pending)" >&2
+      web_inbox_warned=1
+    fi
+  else
+    web_inbox_warned=0
   fi
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended

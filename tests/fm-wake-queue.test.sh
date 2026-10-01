@@ -76,8 +76,50 @@ test_browser_inbox_wakes_without_stealing_acknowledgement() {
   pass "browser inbox wakes firstmate while its cursor remains owned by the primary"
 }
 
+test_browser_inbox_wake_is_not_requeued_beside_other_check_wakes() {
+  local dir state fakebin out pid rows
+  dir=$(make_case browser-inbox-dedupe)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf '%s\n' '{"id":"browser-1","ts":"2026-01-01T00:00:00Z","channel":"typed","text":"Please summarize this note"}' > "$state/.inbox"
+  append_wake "$state" check inbox:note-1 'check: captain inbox note' || fail "could not queue a captain inbox wake"
+  append_wake "$state" check web-inbox 'check: local browser inbox has unread messages' || fail "could not queue a browser inbox wake"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  sleep 3
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rows=$(awk -F '\t' '$3 == "check" && $4 == "web-inbox" { count++ } END { print count + 0 }' "$state/.wake-queue")
+  [ "$rows" -eq 1 ] || fail "an already queued browser inbox wake must not be queued again, got $rows"
+  pass "browser inbox wake stays deduplicated beside other queued check wakes"
+}
+
+test_browser_inbox_failure_does_not_stop_the_watcher() {
+  local dir state fakebin out pid
+  dir=$(make_case browser-inbox-broken)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf '%s\n' '{"id":"browser-1","ts":"2026-01-01T00:00:00Z","channel":"typed","text":"hello"}' > "$state/.inbox"
+  printf '999999\n' > "$state/.inbox.seen"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  sleep 3
+  is_live_non_zombie "$pid" || { wait "$pid"; fail "an unreadable browser inbox must not stop the watcher"; }
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(grep -c 'could not inspect the local browser inbox' "$out")" -eq 1 ] \
+    || fail "an unreadable browser inbox should be reported once"
+  pass "an unreadable browser inbox is reported without stopping supervision"
+}
+
 test_browser_inbox_ordered_protocol() {
-  local dir state home pending drain first_offset second_offset seen remaining
+  local dir state home pending drain first_offset second_offset seen remaining status
   dir=$(make_case browser-protocol)
   state="$dir/state"
   home="$dir"
@@ -104,6 +146,9 @@ PY
   [ -n "$first_offset" ] && [ -n "$second_offset" ] || fail "drain offsets are missing"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack click-2 "$second_offset" >/dev/null 2>&1; then fail "out-of-order acknowledgement must fail"; fi
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack typed-1 "$second_offset" >/dev/null 2>&1; then fail "mismatched offset must fail"; fi
+  status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" ack typed-1 not-a-number >/dev/null 2>&1 || status=$?
+  [ "$status" -eq 2 ] || fail "a non-numeric ack offset must be a usage error, got $status"
   printf 'The release fixes startup.' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" reply typed-1 answer - \
     || fail "reply should append to outbox"
   printf 'The release fixes startup.' | FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" reply typed-1 answer - \
@@ -3475,6 +3520,8 @@ test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_browser_inbox_wakes_without_stealing_acknowledgement
+test_browser_inbox_wake_is_not_requeued_beside_other_check_wakes
+test_browser_inbox_failure_does_not_stop_the_watcher
 test_browser_inbox_ordered_protocol
 test_signal_catchup_without_running_watcher
 test_stale_enqueue_before_suppressor

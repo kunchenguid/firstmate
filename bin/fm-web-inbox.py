@@ -131,8 +131,7 @@ def main(argv: list[str]) -> int:
     if not argv or argv[0] not in ("pending", "drain", "ack", "reply"):
         fail("usage: fm-web-inbox.py pending|drain|ack <id> <offset>|reply <id> <kind> <text>")
     command = argv[0]
-    state, seen, rows = read_state()
-    rows = [row for row in rows if row[0] > seen]
+    state, _, rows = read_state()
     if command == "pending":
         return 0 if rows else 1
     if command == "drain":
@@ -145,7 +144,10 @@ def main(argv: list[str]) -> int:
     if command == "ack":
         if len(argv) != 3 or not rows:
             fail("ack requires the first pending message id and its byte offset")
-        offset = int(argv[2])
+        try:
+            offset = int(argv[2])
+        except ValueError:
+            fail("ack offset must be an integer")
         current_offset, _, item = rows[0]
         requested_id = (item or {}).get("id")
         malformed = not valid_message(item)
