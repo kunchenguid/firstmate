@@ -1569,6 +1569,18 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+declared_wait_identity() {  # <status-file> <declared-line>
+  local statusf=$1 line=$2 row position checksum
+  # The line position stays fixed across unrelated resolved events, but advances
+  # when an identical pause is declared again after its prior phase was resolved.
+  row=$(grep -nFx -- "$line" "$statusf" 2>/dev/null | tail -n 1) || row=
+  position=${row%%:*}
+  case "$position" in ''|*[!0-9]*) position=$(fm_wake_signal_sig "$statusf" || true) ;; esac
+  checksum=$(printf '%s' "$line" | cksum)
+  checksum=${checksum%% *}
+  printf 'declared:%s:%s' "$position" "$checksum"
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # captain-held transfer, alarm its first sight once (a secondmate's status signal
 # is its first surface, so its first sight is absorbed), and re-surface it once every
@@ -1585,18 +1597,6 @@ busy_turn_over_age() {  # <task>
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
-declared_wait_identity() {  # <status-file> <declared-line>
-  local statusf=$1 line=$2 row position checksum
-  # The line position stays fixed across unrelated resolved events, but advances
-  # when an identical pause is declared again after its prior phase was resolved.
-  row=$(grep -nFx -- "$line" "$statusf" 2>/dev/null | tail -n 1) || row=
-  position=${row%%:*}
-  case "$position" in ''|*[!0-9]*) position=$(fm_wake_signal_sig "$statusf" || true) ;; esac
-  checksum=$(printf '%s' "$line" | cksum)
-  checksum=${checksum%% *}
-  printf 'declared:%s:%s' "$position" "$checksum"
-}
-
 handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
   local win=$1 task=$2 h=$3 absorb_first=${4-} key statusf age detail reason declaration last until now min_age since_file
   key=$(window_key "$win")
