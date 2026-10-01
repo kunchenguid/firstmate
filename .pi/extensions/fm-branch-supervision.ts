@@ -157,7 +157,7 @@ const CODEX_COMPAT_SOURCE = `npm:${CODEX_COMPAT_PACKAGE}`;
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
 // the branch actor identity deterministically into every shell command.
-const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_branch_report"] as const;
+const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"] as const;
 
 // One shared prompt_cache_key per home for ALL branch sessions, derived only
 // from the home path so it survives restarts; main keeps its own session key.
@@ -693,6 +693,7 @@ export default function (pi: ExtensionAPI) {
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
   let branchProgressBindings: Record<string, string> = {};
   let branchProgressSnapshots: Record<string, string> = {};
+  let branchHandoffObservations: Record<string, Record<string, { target: string; change: "none" | "material" | "uncertain" }>> = {};
   let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
   let branchTaskAdmissionRevisions: Record<string, number> = {};
   let branchTaskAdmissionSnapshots: Record<string, string> = {};
@@ -708,8 +709,6 @@ export default function (pi: ExtensionAPI) {
     try {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) throw new Error("invalid task id");
       const data = process.env.FM_DATA_OVERRIDE || join(fmHome, "data");
-      const handoffRecords = join(state, "task-handoffs", "records");
-      const handoffStatus = join(state, "task-handoffs", "status");
       const directSuffixes = [
         "meta", "status", "turn-ended", "progress", "busy-state", "busy-gen", "busy-session",
         "check.sh", "check-trust", "pr-poll", "pr-poll-registration", "pr-poll-retirement",
@@ -735,147 +734,7 @@ export default function (pi: ExtensionAPI) {
         join(data, task, "lifecycle.json"),
         join(data, task, "report.md"),
       ];
-      const handoffEntries: string[][] = [];
-      const readHeader = async (path: string): Promise<Map<string, string> | null> => {
-        try {
-          const stat = await lstatAsync(path, { bigint: true });
-          if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid handoff receipt");
-          const handle = await openAsync(path, "r");
-          const buffer = Buffer.alloc(1024);
-          let bytesRead = 0;
-          try {
-            ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0));
-          } finally {
-            await handle.close();
-          }
-          const header = new Map<string, string>();
-          for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
-            if (line === "--") break;
-            const separator = line.indexOf("=");
-            if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
-          }
-          return header;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-          throw error;
-        }
-      };
-      const addHandoffReceipt = async (id: string, target: string, statusPath: string) => {
-        const inbox = join(state, `${target}.inbox`);
-        const handled = join(inbox, "handled");
-        const statusHeader = await readHeader(statusPath);
-        const recorded = statusHeader?.get("inbox_record") || "";
-        if (recorded) {
-          const name = basename(recorded);
-          const parent = dirname(resolve(recorded));
-          if (!/^[0-9]+\.msg$/.test(name) || (parent !== resolve(inbox) && parent !== resolve(handled))) {
-            throw new Error("invalid task handoff inbox receipt");
-          }
-          for (const path of [join(inbox, name), join(handled, name)]) {
-            const header = await readHeader(path);
-            if (header?.get("handoff") === id) {
-              paths.push(join(inbox, name), join(handled, name));
-              return;
-            }
-          }
-          handoffEntries.push(["task-handoff-receipt", task, id, "absent"]);
-          return;
-        }
-        let count = 0;
-        let receiptName = "";
-        for (const directory of [inbox, handled]) {
-          let handle: Dir | undefined;
-          try {
-            handle = await opendirAsync(directory);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-            throw error;
-          }
-          try {
-            for (;;) {
-              const entry = await handle.read();
-              if (!entry) break;
-              count += 1;
-              if (count > 256) {
-                handoffEntries.push(["task-handoff-receipt", task, id, "overflow"]);
-                return;
-              }
-              if (!entry.name.endsWith(".msg")) continue;
-              const header = await readHeader(join(directory, entry.name));
-              if (header?.get("handoff") === id) {
-                if (receiptName && receiptName !== entry.name) throw new Error("duplicate task handoff inbox receipt");
-                receiptName = entry.name;
-              }
-            }
-          } finally {
-            await handle.close();
-          }
-        }
-        if (receiptName) {
-          paths.push(join(inbox, receiptName), join(handled, receiptName));
-          return;
-        }
-        handoffEntries.push(["task-handoff-receipt", task, id, "absent"]);
-      };
-      let handoffNames: string[] = [];
-      let handoffOverflow = false;
-      let handoffDirectory: Dir | undefined;
-      try {
-        handoffDirectory = await opendirAsync(handoffRecords);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (handoffDirectory) {
-        try {
-          for (let count = 0; ; count += 1) {
-            const entry = await handoffDirectory.read();
-            if (!entry) break;
-            if (count >= 256) {
-              handoffOverflow = true;
-              break;
-            }
-            if (entry.name.endsWith(".msg")) handoffNames.push(entry.name);
-          }
-        } finally {
-          await handoffDirectory.close();
-        }
-        handoffNames.sort();
-      }
-      if (handoffOverflow) {
-        return "";
-      }
-      for (const name of handoffNames) {
-        const id = name.slice(0, -4);
-        if (!/^[A-Za-z0-9._-]{1,160}$/.test(id)) throw new Error("invalid task handoff id");
-        const record = join(handoffRecords, name);
-        const stat = await lstatAsync(record, { bigint: true });
-        if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid task handoff record");
-        const handle = await openAsync(record, "r");
-        const buffer = Buffer.alloc(1024);
-        let bytesRead = 0;
-        try {
-          ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0));
-        } finally {
-          await handle.close();
-        }
-        const header = new Map<string, string>();
-        for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
-          if (line === "--") break;
-          const separator = line.indexOf("=");
-          if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
-        }
-        const source = header.get("from") || "";
-        const target = header.get("target") || "";
-        if (header.get("schema") !== "fm-task-handoff.v1" || header.get("id") !== id ||
-            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(source) ||
-            !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(target)) throw new Error("invalid task handoff record");
-        if (source === task || target === task) {
-          const statusPath = join(handoffStatus, `${id}.state`);
-          paths.push(record, statusPath);
-          await addHandoffReceipt(id, target, statusPath);
-        }
-      }
-      const entries = [...handoffEntries, ...await Promise.all(paths.map(async (path) => {
+      const entries = await Promise.all(paths.map(async (path) => {
         const label = relative(fmHome, path);
         try {
           const stat = await lstatAsync(path, { bigint: true });
@@ -886,11 +745,101 @@ export default function (pi: ExtensionAPI) {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return [label, "absent"];
           throw error;
         }
-      }))];
+      }));
       return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
     } catch {
       return "";
     }
+  }
+
+  async function readHandoffHeader(path: string): Promise<Map<string, string> | null> {
+    try {
+      const stat = await lstatAsync(path, { bigint: true });
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid task handoff state");
+      const handle = await openAsync(path, "r");
+      const buffer = Buffer.alloc(4096);
+      let bytesRead = 0;
+      try {
+        ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0));
+      } finally {
+        await handle.close();
+      }
+      const header = new Map<string, string>();
+      for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+        if (line === "--") break;
+        const separator = line.indexOf("=");
+        if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
+      }
+      return header;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  }
+
+  async function exactHandoffState(id: string, target: string): Promise<{
+    fingerprint: string;
+    state: string;
+    receipt: "present" | "absent" | "unknown";
+  }> {
+    const recordPath = join(state, "task-handoffs", "records", `${id}.msg`);
+    const statusPath = join(state, "task-handoffs", "status", `${id}.state`);
+    const record = await readHandoffHeader(recordPath);
+    const status = await readHandoffHeader(statusPath);
+    const ownerState = status?.get("state") || (record ? "pending" : "absent");
+    let receipt: "present" | "absent" | "unknown" = "absent";
+    const inbox = join(state, `${target}.inbox`);
+    const handled = join(inbox, "handled");
+    const recorded = status?.get("inbox_record") || "";
+    if (recorded) {
+      const name = basename(recorded);
+      const parent = dirname(resolve(recorded));
+      if (!/^[0-9]+\.msg$/.test(name) || (parent !== resolve(inbox) && parent !== resolve(handled))) {
+        throw new Error("invalid task handoff inbox receipt");
+      }
+      for (const path of [join(inbox, name), join(handled, name)]) {
+        if ((await readHandoffHeader(path))?.get("handoff") === id) receipt = "present";
+      }
+    } else {
+      let count = 0;
+      for (const directory of [inbox, handled]) {
+        let handle: Dir | undefined;
+        try {
+          handle = await opendirAsync(directory);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw error;
+        }
+        try {
+          for (;;) {
+            const entry = await handle.read();
+            if (!entry) break;
+            if (!entry.name.endsWith(".msg")) continue;
+            count += 1;
+            if (count > 256) {
+              receipt = "unknown";
+              break;
+            }
+            if ((await readHandoffHeader(join(directory, entry.name)))?.get("handoff") === id) {
+              receipt = "present";
+              break;
+            }
+          }
+        } finally {
+          await handle.close();
+        }
+        if (receipt !== "absent") break;
+      }
+    }
+    return {
+      fingerprint: createHash("sha256").update(JSON.stringify({
+        record: record ? Object.fromEntries(record) : null,
+        status: status ? Object.fromEntries(status) : null,
+        receipt,
+      })).digest("hex"),
+      state: ownerState,
+      receipt,
+    };
   }
   // The admission is the branch's canonical, bounded lifecycle read. Keep the
   // semantic gap and current operation beside the already-projected
@@ -1662,7 +1611,9 @@ export default function (pi: ExtensionAPI) {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
             const before = branchProgressSnapshots[task];
-            unchangedContinuation = Boolean(before) && await compactResumeSnapshot(task) === before;
+            const handoffs = Object.values(branchHandoffObservations[task] || {});
+            unchangedContinuation = Boolean(before) && await compactResumeSnapshot(task) === before &&
+              handoffs.every((handoff) => handoff.change === "none");
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1891,6 +1842,129 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  function createTaskHandoffTool(toolGeneration: number): ToolDefinition {
+    const atom = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value);
+    const handoffEnv = () => ({
+      ...scriptEnv,
+      FM_SUPERVISION_ACTOR: "branch",
+      FM_BRANCH_GENERATION: String(toolGeneration),
+      FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
+      FM_BRANCH_PROGRESS_BINDINGS: JSON.stringify(branchProgressBindings),
+      FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : []),
+      FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
+      FM_LEASE_HOLDER_PID: ownedLockPid,
+    });
+    const run = async (args: string[]) => runCommandAsync(
+      "bash", [join(fmRoot, "bin/fm-task-handoff.sh"), ...args],
+      { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
+    );
+    return {
+      name: "fm_task_handoff",
+      label: "Task handoff",
+      description:
+        "Send one already-authorized cross-task instruction through the existing durable handoff owner. " +
+        "The source is always the exact task admitted to this branch turn. Supply the target, stable handoff id, exact instruction, and any prepared action id required by the source lifecycle. " +
+        "The owner retains authority, identity, collision, receipt, retry, and uncertain-effect checks. Reuse the same id for readback or supported recovery; never invent a new id after an uncertain result.",
+      parameters: Type.Object({
+        task: Type.String({ description: "The exact admitted source task" }),
+        target: Type.String({ description: "The authorized target task" }),
+        id: Type.String({ description: "Stable idempotency id for this exact handoff" }),
+        instruction: Type.String({ description: "The exact already-authorized instruction" }),
+        action_id: Type.Optional(Type.String({ description: "Prepared delegated action id when required by the source lifecycle" })),
+      }),
+      execute: async (_toolCallId, params) => {
+        const task = String((params as { task?: unknown }).task || "").trim();
+        const target = String((params as { target?: unknown }).target || "").trim();
+        const id = String((params as { id?: unknown }).id || "").trim();
+        const instruction = String((params as { instruction?: unknown }).instruction || "");
+        const actionId = String((params as { action_id?: unknown }).action_id || "").trim();
+        try {
+          if (!atom(task) || !atom(target) || !atom(id) || !instruction || task === target ||
+              !wakeTaskScope?.tasks.has(task) || (!branchTaskBindings[task] && !branchProgressBindings[task])) {
+            throw new Error("task handoff is outside this exact branch admission");
+          }
+          if (!(await actingAsOwner(toolGeneration))) {
+            throw new Error("supervision session was replaced or lost lock ownership");
+          }
+          const progressToken = branchProgressBindings[task];
+          if (progressToken) {
+            const current = await runCommandAsync(
+              "bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task],
+              { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
+            );
+            const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
+            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap ||
+                !progress.next_step || progress.task_state === "done") {
+              throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
+            }
+          } else {
+            const current = await runCommandAsync(
+              "bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task],
+              { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
+            );
+            const record = current.status === 0 ? JSON.parse(current.stdout) : null;
+            const binding = branchTaskBindings[task];
+            if (!record || record.disposition !== "open" || JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) ||
+                record.delegation?.revoked || Date.parse(record.delegation?.expires_at || "") <= Date.now()) {
+              throw new Error("task intent, execution, or delegation changed after branch admission");
+            }
+          }
+          const observations = branchHandoffObservations[task] ||= {};
+          const prior = observations[id];
+          if (prior && prior.target !== target) throw new Error("task handoff id was already attempted for another target in this turn");
+          const before = await exactHandoffState(id, target);
+          observations[id] = { target, change: prior?.change === "material" ? "material" : "uncertain" };
+          const args = ["send", task, target, "--id", id];
+          if (actionId) args.push("--action-id", actionId);
+          args.push(instruction);
+          const sent = await run(args);
+          const inspected = await run(["inspect", id]);
+          let after: Awaited<ReturnType<typeof exactHandoffState>> | null = null;
+          try {
+            after = await exactHandoffState(id, target);
+          } catch {
+            after = null;
+          }
+          let change: "none" | "material" | "uncertain";
+          if (after && (after.receipt === "present" && before.receipt !== "present" ||
+              after.state === "delivered" && before.state !== "delivered")) {
+            change = sent.status === 0 ? "material" : "uncertain";
+          } else if (sent.status === 0 && after) {
+            change = after.state === "delivered" && before.state === "delivered" ? "none" :
+              after.fingerprint === before.fingerprint ? "none" : "uncertain";
+          } else if (sent.status === 7 && after?.fingerprint === before.fingerprint) {
+            change = "none";
+          } else if (after && after.receipt === "absent" && (after.state === "absent" || inspected.status === 0)) {
+            change = "none";
+          } else {
+            change = "uncertain";
+          }
+          if (prior?.change === "material" || (prior?.change === "uncertain" && change === "none")) {
+            change = prior.change;
+          }
+          observations[id] = { target, change };
+          const result = {
+            source: task,
+            target,
+            id,
+            status: sent.status,
+            state: after?.state || "unknown",
+            receipt: after?.receipt || "unknown",
+            change,
+            detail: (sent.status === 0 ? sent.stdout : sent.stderr).trim(),
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            details: undefined,
+            ...(sent.status === 0 ? {} : { isError: true }),
+          };
+        } catch (error) {
+          return { content: [{ type: "text", text: String(error) }], details: undefined, isError: true };
+        }
+      },
+    };
+  }
+
   async function createBranch(
     branchGeneration: number,
     selectionRevision: number,
@@ -2046,6 +2120,7 @@ ${context.command}
       customTools: [
         bashTool as unknown as ToolDefinition,
         createTaskContinuationTool(branchGeneration),
+        createTaskHandoffTool(branchGeneration),
         createReportTool(branchGeneration),
       ],
       ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
@@ -2262,6 +2337,7 @@ ${context.command}
         branchTaskBindings = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
+        branchHandoffObservations = {};
         branchTaskObservations = {};
         branchTaskAdmissionRevisions = {};
         branchTaskAdmissionSnapshots = {};
@@ -2316,6 +2392,7 @@ ${context.command}
           branchTaskBindings = {};
           branchProgressBindings = {};
           branchProgressSnapshots = {};
+          branchHandoffObservations = {};
           branchTaskObservations = {};
           branchTaskAdmissionRevisions = {};
           branchTaskAdmissionSnapshots = {};
@@ -2407,6 +2484,7 @@ ${context.command}
       branchTaskBindings = {};
       branchProgressBindings = { [offer.task]: progress.record_token };
       branchProgressSnapshots = { [offer.task]: await compactResumeSnapshot(offer.task) };
+      branchHandoffObservations = {};
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
       trace("prompt", "started");
@@ -2415,6 +2493,7 @@ ${context.command}
           `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
           `Compare the goal and acceptance method with actual task artifacts and current executor state. Perform or route the next already-authorized routine step without asking MAIN to rewrite progress first. ` +
           `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
+          `For an already-authorized cross-task instruction, use fm_task_handoff with this admitted task as source, the exact target, a stable id, and the exact instruction; reuse that id for readback or recovery. ` +
           `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text. Route bounded ordinary gate continuations back to that same worker; do not run or respond to no-mistakes yourself. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
           `Request silent routine reporting only when the executor and resumable task state are unchanged. Material progress is delivered through the existing outcome channel so MAIN can update the original task record. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
@@ -2432,6 +2511,7 @@ ${context.command}
         branchTaskBindings = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
+        branchHandoffObservations = {};
         wakeTaskScope = null;
       }
       const error = settledPromptProviderError(sessionManager, entryOffset);

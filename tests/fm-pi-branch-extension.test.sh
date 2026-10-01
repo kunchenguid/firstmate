@@ -863,7 +863,7 @@ if (mainUserMessages.length !== 0) throw new Error("accepted wake leaked to main
 // generator-produced system prompt, no project resources, and the branch bash
 // carries the deterministic actor identity.
 const session = globalThis.__fmSessions[0];
-if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
+if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"])) {
   throw new Error(`unexpected tool order: ${JSON.stringify(session.options.tools)}`);
 }
 const loader = globalThis.__fmLoaders[0];
@@ -3065,7 +3065,7 @@ const globalSettings = {
 writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, JSON.stringify(globalSettings));
 // The same observed startup state must restore the guarded bash independent
 // of release strings, while a package retaining it needs no adaptation.
-if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
+if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"];
 
 registryModels.push(
   { provider: "anthropic", id: "main-model", api: "anthropic-messages" },
@@ -3109,7 +3109,7 @@ const lifecycle = globalThis.__fmLifecycle ?? [];
 if (lifecycle.indexOf("compat-session-start") < 0 || lifecycle.indexOf("compat-session-start") > lifecycle.indexOf("prompt")) {
   throw new Error(`the branch prompted before compatibility initialization: ${JSON.stringify(lifecycle)}`);
 }
-if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
+if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"])) {
   throw new Error(`compatibility startup escaped the branch tool allowlist: ${JSON.stringify(session.getActiveToolNames())}`);
 }
 if (JSON.stringify(globalThis.__fmPackageLookups) !== JSON.stringify([
@@ -3220,9 +3220,9 @@ if (mode.startsWith("wrong-")) {
     { metadata: { source: "npm:pi-openai-codex-compat", scope: "user", origin: "package",
       [mode.slice(6)]: "untrusted" } };
 }
-if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report", "exec_command"];
+if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report", "exec_command"];
 if (mode === "unrestorable-bash") {
-  globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
+  globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"];
   globalThis.__fmRefuseToolRestore = true;
 }
 if (mode === "resolve") globalThis.__fmCompatResolveError = "synthetic resolver failure";
@@ -6044,7 +6044,17 @@ test_compact_progress_drives_branch_same_worker_continuation() {
   repo="$TMP_ROOT/compact-branch-root"
   home="$TMP_ROOT/compact-branch-home"
   install_pi_branch_extension_fixture "$repo"
-  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  mkdir -p "$home/handoff-fail-bin"
+  cat > "$home/handoff-fail-bin/mv" <<EOF
+#!/bin/sh
+if [ "\$2" = "$home/state/task-handoffs/status/viewer-to-other-r1.state" ] && grep -q '^state=delivered\$' "\$1" && [ ! -e "$home/handoff-status-failed-once" ]; then
+  : > "$home/handoff-status-failed-once"
+  exit 1
+fi
+exec /bin/mv "\$@"
+EOF
+  chmod 755 "$home/handoff-fail-bin/mv"
+  PATH="$home/handoff-fail-bin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_PROCEVENT_CLAIM_ROOT="$home/state/procevent-claims" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
@@ -6065,14 +6075,6 @@ case "$1 $2" in
 esac
 `);
 chmodSync(`${home}/fakebin/herdr`, 0o755);
-mkdirSync(`${home}/handoff-fail-bin`, { recursive: true });
-writeFileSync(`${home}/handoff-fail-bin/mv`, `#!/bin/sh
-if [ "\$2" = "${home}/state/task-handoffs/status/viewer-to-other-r1.state" ] && grep -q '^state=delivered$' "\$1"; then
-  exit 1
-fi
-exec /bin/mv "\$@"
-`);
-chmodSync(`${home}/handoff-fail-bin/mv`, 0o755);
 process.env.PATH = `${home}/fakebin:${process.env.PATH}`;
 const run = (script, args, actor = "main", extra = {}) => spawnSync(`${realRoot}/bin/${script}`, args, {
   encoding: "utf8",
@@ -6086,6 +6088,7 @@ writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_
 mkdirSync(`${home}/data/viewer`, { recursive: true });
 writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive.\n");
 writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+writeFileSync(`${home}/state/archive-target.meta`, `window=fixture:w1:p3\nendpoint_task_id=archive-target\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t3\nherdr_pane_id=w1:p3\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 let progress = run("fm-task-state.sh", ["progress", "viewer"]);
 if (progress.status !== 0) throw new Error(progress.stderr);
 let record = JSON.parse(progress.stdout);
@@ -6145,13 +6148,16 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     "Arm the future decision recheck for the existing task",
     "Send the approved handoff to the existing other worker",
     "Recheck after unrelated target inbox activity",
+    "Confirm oversized unrelated handoff history did not change this task",
     "Deliver the approved handoff with oversized handoff history",
+    "Confirm settled and rejected handoffs do not create new progress",
   ][promptCount - 1];
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
     throw new Error(`compact admission was incomplete or rich: ${text}`);
   }
   const continuation = session.options.customTools.find((tool) => tool.name === "fm_task_continuation");
+  const handoff = session.options.customTools.find((tool) => tool.name === "fm_task_handoff");
   const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
   const bash = session.options.customTools.find((tool) => tool.name === "bash");
   readResult = await continuation.execute("read", { action: "read", task: "viewer" });
@@ -6172,11 +6178,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     ? `${realRoot}/bin/fm-pr-check.sh viewer https://github.com/acme/viewer/pull/7`
     : promptCount === 4
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
-      : promptCount === 5
-        ? `PATH=${home}/handoff-fail-bin:"$PATH" ${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r1`
-        : promptCount === 7
-          ? `${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r2`
-          : promptCount === 6 ? "" :
+      : promptCount >= 5 ? "" :
         `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
@@ -6190,9 +6192,57 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     }
     const failed = await bash.execute("unchanged-failure", { command: "/bin/false" });
     if (!failed.isError) throw new Error("unchanged failure fixture unexpectedly succeeded");
-    if (promptCount === 6) {
+    if (promptCount === 5) {
+      const params = { task: "viewer", target: "other", id: "viewer-to-other-r1",
+        instruction: "Continue the already-approved dependent step." };
+      const partial = await handoff.execute("partial-handoff", params);
+      const partialState = JSON.parse(partial.content[0].text);
+      if (!partial.isError || partialState.change !== "uncertain" || partialState.receipt !== "present") {
+        throw new Error(`partial handoff was not reported as uncertain: ${JSON.stringify(partial)}`);
+      }
+      const recovered = await handoff.execute("recover-handoff", params);
+      const recoveredState = JSON.parse(recovered.content[0].text);
+      if (recovered.isError || recoveredState.change !== "material" || recoveredState.state !== "delivered") {
+        throw new Error(`same-id handoff recovery failed: ${JSON.stringify(recovered)}`);
+      }
+    } else if (promptCount === 6) {
       const unrelated = run("fm-send.sh", ["other", "Unrelated sender message."]);
       if (unrelated.status !== 0) throw new Error(`unrelated target message failed: ${unrelated.stderr}`);
+    } else if (promptCount === 7) {
+      const unrelated = run("fm-task-handoff.sh", ["send", "archive-source", "archive-target", "--id", "archive-current",
+        "Advance an unrelated archived task."]);
+      if (unrelated.status !== 0) throw new Error(`unrelated handoff activity failed: ${unrelated.stderr}`);
+    } else if (promptCount === 8) {
+      const delivered = await handoff.execute("overflow-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
+        instruction: "Continue the second approved dependent step." });
+      const deliveredState = JSON.parse(delivered.content[0].text);
+      if (delivered.isError || deliveredState.change !== "material" || deliveredState.state !== "delivered") {
+        throw new Error(`typed overflow handoff failed: ${JSON.stringify(delivered)}`);
+      }
+    } else if (promptCount === 9) {
+      const replay = await handoff.execute("settled-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
+        instruction: "Continue the second approved dependent step." });
+      const replayState = JSON.parse(replay.content[0].text);
+      if (replay.isError || replayState.change !== "none" || replayState.state !== "delivered") {
+        throw new Error(`settled handoff was misclassified: ${JSON.stringify(replay)}`);
+      }
+      const collision = await handoff.execute("handoff-collision", { task: "viewer", target: "other", id: "viewer-to-other-r2",
+        instruction: "A different instruction must not reuse this id." });
+      const collisionState = JSON.parse(collision.content[0].text);
+      if (!collision.isError || collisionState.change !== "none" || collisionState.state !== "delivered") {
+        throw new Error(`payload collision changed the original handoff: ${JSON.stringify(collision)}`);
+      }
+      const rejected = await handoff.execute("rejected-handoff", { task: "viewer", target: "missing", id: "viewer-to-missing-r1",
+        instruction: "This target does not exist." });
+      const rejectedState = JSON.parse(rejected.content[0].text);
+      if (!rejected.isError || rejectedState.change !== "none" || rejectedState.state !== "rejected") {
+        throw new Error(`definitive no-effect handoff was misclassified: ${JSON.stringify(rejected)}`);
+      }
+      const spoofed = await handoff.execute("spoofed-source", { task: "other", target: "viewer", id: "spoofed-r1",
+        instruction: "Spoof the admitted source." });
+      if (!spoofed.isError || !spoofed.content[0].text.includes("outside this exact branch admission")) {
+        throw new Error(`typed handoff accepted a spoofed source: ${JSON.stringify(spoofed)}`);
+      }
     } else {
       appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
       appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
@@ -6203,7 +6253,9 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       ? "The future decision recheck was armed while captain approval remains pending."
       : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
-      : promptCount === 7 ? "The second approved handoff reached the existing worker despite oversized history."
+      : promptCount === 7 ? "Oversized unrelated handoff history left this task unchanged."
+      : promptCount === 8 ? "The second approved handoff reached the existing worker despite oversized history."
+      : promptCount === 9 ? "Settled and rejected handoffs created no new task progress."
       : "The existing worker received the authorized no-mistakes continuation." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
@@ -6371,14 +6423,12 @@ if (preparedHandoff.status !== 6 ||
 }
 rmSync(`${home}/state/.lease-other`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 5 &&
-  routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length === 1 &&
-  sentToMain.length === beforeMain + 5,
-  "arbitrary-id handoff continuation");
+await settle(() => promptCount === 5 && sentToMain.length === beforeMain + 5,
+  "typed handoff continuation");
 if (!readFileSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`, "utf8").includes("Continue the already-approved dependent step") ||
-    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=retryable-refusal") ||
+    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=delivered") ||
     readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
-  throw new Error("partially completed handoff did not retain its durable inbox receipt");
+  throw new Error("same-id handoff recovery did not retain one durable inbox receipt");
 }
 if (!sentToMain.at(-1)?.message?.content?.includes("approved cross-task handoff reached the existing worker")) {
   throw new Error(`arbitrary-id handoff state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
@@ -6417,15 +6467,27 @@ for (let index = 0; index < 257; index += 1) {
   writeFileSync(`${home}/state/task-handoffs/records/${id}.msg`,
     `schema=fm-task-handoff.v1\nid=${id}\nfrom=archive-source\ntarget=archive-target\n--\nhistorical handoff\n`);
 }
-writeFileSync(`${home}/state/.lease-other`, `branch\t${process.ppid}\t${Math.floor(Date.now() / 1000)}\n`);
-const overflowHandoff = run("fm-task-handoff.sh", ["send", "viewer", "other", "--id", "viewer-to-other-r2",
-  "Continue the second approved dependent step."]);
-if (overflowHandoff.status !== 6) throw new Error(`overflow handoff fixture was not retained: ${overflowHandoff.stderr}`);
-rmSync(`${home}/state/.lease-other`);
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
-const quiet = { ...unrelatedInbox,
-  current_state: "The second approved handoff is pending in oversized history",
+const overflowQuiet = { ...unrelatedInbox,
+  current_state: "The task is waiting with oversized unrelated handoff history",
+  remaining_gap: "No task-local resumable state has changed",
+  next_step: "Confirm oversized unrelated handoff history did not change this task",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(overflowQuiet)]);
+if (result.status !== 0) throw new Error(`MAIN overflow quiet progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 7 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "oversized unrelated handoff quiet continuation");
+if (sentToMain.length !== beforeMain + 5) throw new Error("oversized unrelated handoff activity interrupted MAIN");
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const quiet = { ...overflowQuiet,
+  current_state: "The second approved handoff is ready despite oversized history",
   remaining_gap: "The second dependent worker instruction has not been delivered",
   next_step: "Deliver the approved handoff with oversized handoff history",
 };
@@ -6435,7 +6497,7 @@ if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update fa
 record = JSON.parse(result.stdout);
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 7 && sentToMain.length === beforeMain + 6,
+await settle(() => promptCount === 8 && sentToMain.length === beforeMain + 6,
   "oversized handoff material delivery");
 if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`, "utf8").includes("state=delivered") ||
     !sentToMain.at(-1)?.message?.content?.includes("second approved handoff reached the existing worker")) {
@@ -6449,27 +6511,45 @@ if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".ms
   throw new Error("the earlier handoff effect was replayed after its failing shell result");
 }
 
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const noEffect = { ...quiet,
+  current_state: "The second handoff is delivered and exact readback is available",
+  remaining_gap: "No new handoff effect is authorized",
+  next_step: "Confirm settled and rejected handoffs do not create new progress",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(noEffect)]);
+if (result.status !== 0) throw new Error(`MAIN no-effect progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "settled and rejected handoff quiet continuation");
+if (sentToMain.length !== beforeMain + 6 ||
+    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
+  throw new Error("no-effect typed handoff created progress or duplicate delivery");
+}
+
 // Only MAIN performs final semantic acceptance after the fixture's requested
 // outcome is satisfied. Empty gap/next step removes the task from monitoring.
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
-const accepted = { ...quiet, current_state: "All requested checks passed and MAIN reviewed the artifact",
+const accepted = { ...noEffect, current_state: "All requested checks passed and MAIN reviewed the artifact",
   remaining_gap: "", next_step: "" };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(accepted)]);
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 7 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
+if (promptCount !== 9 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
-    routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length !== 1 ||
-    routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r2")).length !== 1 ||
     sentToMain.length !== beforeMain + 6) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation attributed exact receipts and surfaced material handoffs after bounded overflow");
+console.log("compact continuation used exact typed handoffs while oversized unrelated history stayed quiet");
 process.exit(0);
 EOF
   status=$?
