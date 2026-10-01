@@ -16,6 +16,7 @@ const state = {
   taskRequestGeneration: 0,
   taskLoading: false,
   taskLoaded: false,
+  taskLoadError: "",
   taskSelectionGeneration: 0,
   taskDocumentLoading: null,
   taskDocumentContent: null,
@@ -124,6 +125,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskRequestGeneration += 1;
   state.taskLoading = false;
   state.taskLoaded = false;
+  state.taskLoadError = "";
   state.taskDocumentLoading = null;
   elements.token.value = "";
   elements.rememberToken.checked = false;
@@ -500,6 +502,15 @@ function taskMatches(task, query) {
   return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""}`.toLowerCase().includes(query);
 }
 
+function taskEmptyMessage(query, loadedMessage) {
+  if (!state.taskLoaded) {
+    if (state.taskLoading) return "Loading task status…";
+    if (state.taskLoadError) return `Task loading failed: ${state.taskLoadError}`;
+    return "Connect to load task status.";
+  }
+  return query ? "No matching tasks." : loadedMessage;
+}
+
 function taskCard(task) {
   const button = document.createElement("button");
   button.type = "button";
@@ -549,7 +560,7 @@ function renderTaskDashboard() {
     if (!matches.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = query ? "No matching tasks." : "No tasks in this category.";
+      empty.textContent = taskEmptyMessage(query, "No tasks in this category.");
       list.append(empty);
     }
     group.append(heading, list);
@@ -626,8 +637,9 @@ async function loadTasks() {
   if (!state.token || state.taskLoading) return;
   const requestGeneration = ++state.taskRequestGeneration;
   state.taskLoading = true;
+  state.taskLoadError = "";
   elements.taskStatus.textContent = state.taskLoaded ? "Refreshing task status…" : "Loading task status…";
-  renderTaskDashboard();
+  renderSessions();
   try {
     const body = await api("/api/tasks");
     if (requestGeneration !== state.taskRequestGeneration) return;
@@ -644,9 +656,15 @@ async function loadTasks() {
   } catch (error) {
     if (requestGeneration !== state.taskRequestGeneration) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
-    else elements.taskStatus.textContent = error.message;
+    else {
+      state.taskLoadError = error.message;
+      elements.taskStatus.textContent = error.message;
+    }
   } finally {
-    if (requestGeneration === state.taskRequestGeneration) state.taskLoading = false;
+    if (requestGeneration === state.taskRequestGeneration) {
+      state.taskLoading = false;
+      if (state.taskLoadError) renderSessions();
+    }
   }
 }
 
@@ -668,7 +686,7 @@ function renderSessions() {
     if (!matches.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = "No matching tasks.";
+      empty.textContent = taskEmptyMessage(query, "No matching tasks.");
       elements.sessions.append(empty);
     }
     renderTaskDashboard();

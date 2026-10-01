@@ -130,6 +130,7 @@ const version = await fetch(`${process.env.CDP_URL}/json/version`).then(response
 const browser = await chromium.connectOverCDP(version.webSocketDebuggerUrl);
 const page = await browser.contexts()[0].newPage();
 let pendingTaskDelay = null;
+let failNextTaskRequest = false;
 function delayNextTaskRequest() {
   let markStarted;
   let release;
@@ -139,6 +140,11 @@ function delayNextTaskRequest() {
   return { started, release };
 }
 await page.route("**/api/tasks", async route => {
+  if (failNextTaskRequest) {
+    failNextTaskRequest = false;
+    await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "task overview is temporarily unavailable" }) });
+    return;
+  }
   const delay = pendingTaskDelay;
   if (delay) {
     pendingTaskDelay = null;
@@ -185,13 +191,21 @@ let failed;
 let storagePage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
-  const initialTaskDelay = delayNextTaskRequest();
+  await page.locator("#task-follow").uncheck();
+  failNextTaskRequest = true;
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
   await page.locator("#remember-token").check();
+  await page.locator("#connect").click();
+  await page.locator("#task-status").filter({ hasText: "task overview is temporarily unavailable" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!(await page.locator("#sessions .empty").textContent()).startsWith("Task loading failed:")) throw new Error("left task list presented a loading error as an empty result");
+  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 4 && nodes.every(node => node.textContent.startsWith("Task loading failed:")))) throw new Error("task groups presented a loading error as empty categories");
+  const initialTaskDelay = delayNextTaskRequest();
   await page.locator("#connect").click();
   await initialTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Loading task status…") throw new Error("initial task loading state was not explicit");
   if (await page.locator("#task-counts strong").evaluateAll(nodes => nodes.some(node => node.textContent === "0"))) throw new Error("unloaded task counts were presented as authoritative zeros");
+  if (await page.locator("#sessions .empty").textContent() !== "Loading task status…") throw new Error("left task list presented loading as an empty result");
+  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 4 && nodes.every(node => node.textContent === "Loading task status…"))) throw new Error("task groups presented loading as empty categories");
   await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
   await page.getByText("<img id=unsafe src=x onerror=alert(1)>", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
@@ -204,6 +218,7 @@ try {
   if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
   if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   const refreshTaskDelay = delayNextTaskRequest();
+  await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
   if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "2,2,1,1") throw new Error("background task refresh did not preserve loaded counts");
