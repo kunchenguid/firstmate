@@ -4431,6 +4431,109 @@ test_nonterminal_paused_rechecks_authoritative_state() {
   pass "a declared pause is periodically rechecked against authoritative active-run state"
 }
 
+test_paused_fresh_recheck_marker_does_not_mask_working() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case paused-fresh-recheck-marker); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-pause-fresh-recheck"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-fresh.meta"
+  printf 'paused: awaiting the upstream release\n' > "$state/pause-fresh.status"
+  sig=$(seen_sig "$state/pause-fresh.status"); printf '%s' "$sig" > "$state/.seen-pause-fresh_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  date +%s > "$state/.paused-rechecked-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "provably working crew was hidden by a fresh pause recheck marker: $(cat "$out")"; }
+  [ ! -e "$state/.paused-rechecked-$key" ] || { reap "$pid"; fail "fresh pause recheck marker survived a provably working verdict"; }
+  [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "provably working crew did not resume its wedge timer"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a fresh pause recheck marker cannot hide resumed provable work"
+}
+
+test_redeclared_identical_pause_gets_a_new_first_sight() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig old_declaration pid
+  dir=$(make_case identical-redeclared-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/redeclared.status"
+  window="test:fm-redeclared-pause"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/redeclared.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  old_declaration="declared:$(status_observed_signature "$statusf")"
+  printf '%s' "$old_declaration" > "$state/.paused-resurfaced-$(printf '%s' "$window" | tr ':/.' '___')"
+  printf 'resolved [key=other]: unrelated phase completed\npaused: awaiting the upstream release\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redeclared_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$state/.paused-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an identical re-declared pause did not alert on its first stale sight"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the re-declared pause first sight was not a stale alert: $(cat "$out")"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a resolved-then-identical re-declared pause gets its own first-sight alert"
+}
+
+test_pause_recheck_cadence_ignores_unrelated_status_updates() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
+  dir=$(make_case pause-recheck-unrelated-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/pause-unrelated.status"
+  window="test:fm-pause-unrelated-status"
+  printf 'idle awaiting external\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/pause-unrelated.meta"
+  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-pause-unrelated_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle awaiting external")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=5 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first sight of a declared pause did not surface"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the first declared-pause wake was not stale"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first-sight pause wake"
+
+  printf 'resolved [key=other]: unrelated phase completed\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-pause-unrelated_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=5 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an unrelated status update reset the pause throttle and caused an early wake: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "an unrelated status update caused an early repeat alert: $(cat "$out")"; }
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the pause did not re-surface at its bounded cadence after an unrelated status update"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the bounded recheck after an unrelated status update was not stale"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "unrelated status updates do not reset a declared pause's bounded recheck cadence"
+}
+
 test_paused_authoritative_working_preserves_wedge_timer() {
   local dir state fakebin out capture_file window key pane_hash sig pid since
   dir=$(make_case paused-working-preserves-wedge-timer); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6753,6 +6856,9 @@ test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
 test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash
 test_nonterminal_paused_rechecks_authoritative_state
+test_paused_fresh_recheck_marker_does_not_mask_working
+test_redeclared_identical_pause_gets_a_new_first_sight
+test_pause_recheck_cadence_ignores_unrelated_status_updates
 test_paused_authoritative_working_preserves_wedge_timer
 test_nonterminal_stale_repairs_missing_or_corrupt_timer
 test_wedge_escalation_deferred_while_worktree_is_written

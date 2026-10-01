@@ -1574,11 +1574,10 @@ busy_turn_over_age() {  # <task>
 # is its first surface, so its first sight is absorbed), and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. The bounded re-surface itself is the shared resurface_absorbed
-# above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
+# cheap: it NEVER re-reads crew state. The age is recorded once per declaration,
+# so unrelated status appends and a churny idle pane cannot restart the cadence.
+# The bounded re-surface itself is the shared resurface_absorbed above, throttled
+# by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
 # The recheck distinguishes the declared dependency from a captain decision:
@@ -1586,21 +1585,35 @@ busy_turn_over_age() {  # <task>
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
+declared_wait_identity() {  # <status-file> <declared-line>
+  local statusf=$1 line=$2 row position checksum
+  # The line position stays fixed across unrelated resolved events, but advances
+  # when an identical pause is declared again after its prior phase was resolved.
+  row=$(grep -nFx -- "$line" "$statusf" 2>/dev/null | tail -n 1) || row=
+  position=${row%%:*}
+  case "$position" in ''|*[!0-9]*) position=$(fm_wake_signal_sig "$statusf" || true) ;; esac
+  checksum=$(printf '%s' "$line" | cksum)
+  checksum=${checksum%% *}
+  printf 'declared:%s:%s' "$position" "$checksum"
+}
+
 handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
-  local win=$1 task=$2 h=$3 absorb_first=${4-} key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 absorb_first=${4-} key statusf age detail reason declaration last until now min_age since_file
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
-  age=$(( now - mtime ))
   last=$(status_declared_wait_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(declared_wait_identity "$statusf" "$last")
+  since_file="$STATE/.paused-since-$key"
+  if [ "$(cat "$since_file" 2>/dev/null || true)" != "$declaration" ]; then
+    printf '%s' "$declaration" > "$since_file"
+  fi
+  age=$(age_of "$since_file")
   if status_is_captain_held "$last"; then
     if away_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1706,7 +1719,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" "$STATE/.paused-since-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -1741,14 +1754,14 @@ pause_state_class() {  # <window> <task>
     crew_absorb_class "$task"
     return
   fi
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    printf 'paused'
-    return
-  fi
   class=$(crew_absorb_class "$task")
   if [ "$class" = working ]; then
     rm -f "$recheck_file"
     printf 'working'
+    return
+  fi
+  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
+    printf 'paused'
     return
   fi
   # Recover paused classification when authoritative crew state cannot name a
