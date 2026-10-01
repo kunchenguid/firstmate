@@ -30,12 +30,14 @@ GUARD="$ROOT/bin/fm-remote-herdr-guard.sh"
 
 # A fixture must be able to present a host with NO herdr, so the doctor never
 # sees the runner's own PATH. Only the two required tools are re-exposed, by
-# symlink, alongside the system directories the doctor's own helpers need.
+# symlink, alongside the system directories the doctor's own helpers need,
+# minus any managed tool or harness a host installed into them.
 TOOLS="$TMP_ROOT/tools"
 mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
-BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+BASE_PATH="$TOOLS:$(fm_test_base_path_sans /usr/bin:/bin:/usr/sbin:/sbin \
+  herdr tasks-axi treehouse claude codex opencode pi pi-signed grok kimi)"
 
 # Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
 # this test keeps open, with exactly the marker environment each birth needs.
