@@ -319,10 +319,12 @@ sync_project() {
     echo "$label: skipped: not a git repo"
     return 0
   fi
-  # Both sides are physical paths (git resolves --show-toplevel through symlinks),
-  # so a symlinked clone dir still compares equal to its own root.
-  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=""
-  if [ "$proj_top" != "$proj_abs" ]; then
+  # Ask git itself whether $PROJ is the work-tree root (an empty --show-cdup)
+  # rather than comparing spelled paths: a symlinked clone dir, or native Windows
+  # git printing D:/... or C:/.../Temp where the shell spells /d/... or /tmp, all
+  # still count as their own root.
+  proj_cdup=$(git -C "$PROJ" rev-parse --show-cdup 2>/dev/null) || proj_cdup="?"
+  if [ -n "$proj_cdup" ]; then
     echo "$label: skipped: not a clone root (git would act on $proj_top)"
     return 0
   fi

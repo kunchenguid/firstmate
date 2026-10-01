@@ -38,7 +38,8 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone (FM_TEST_KILL_RC=1
 # makes every pid dead). The suite itself may run inside a Claude session whose
 # CLAUDE_CODE_SESSION_ID and CLAUDE_PID would leak into the expression, so both
-# are scrubbed and only FM_TEST_SESSION_ID and FM_TEST_CLAUDE_PID reach it.
+# are scrubbed and only FM_TEST_SESSION_ID and FM_TEST_CLAUDE_PID reach it. The
+# host is pinned to POSIX so a Windows host runs these cases on the fake ps too.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
   local -a session_env=()
@@ -47,6 +48,7 @@ lib_eval() {  # <fakebin> <expression>
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
+    fm_win_host() { return 1; }
     kill() { return \${FM_TEST_KILL_RC:-0}; }
     $expr
   " "$LIB"
@@ -425,6 +427,242 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
     || fail "no anchor pid was resolved for the healthy chain with a trusted id"
   [ "$got" = 710 ] || fail "the healthy chain with a trusted id anchored '$got', expected 710 rather than the front-end"
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
+}
+
+# --- unit layer: Windows hosts, behind a deterministic Win32 process table ---
+#
+# On Git Bash a shell started by native claude.exe has no POSIX ancestry, so
+# identity comes from the Win32 table. The host seams are replaced after the
+# library is sourced, so these cases run on every platform.
+
+# Run one library expression as a Windows host whose walk starts at pid 10 and
+# whose process table is file <table> (rows: pid|ppid|created|exe|cmdline).
+# kill and ps are made to fail, so any POSIX read on this path shows up.
+win_eval() {  # <table> <expression>
+  local table=$1 expr=$2
+  local -a session_env=()
+  [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
+  [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+    FM_TEST_WIN_TABLE="$table" bash -c "
+    . \"\$0\"
+    fm_win_host() { return 0; }
+    fm_win_self_pid() { printf '10\n'; }
+    fm_win_process_table() { tr '|' '\t' < \"\$FM_TEST_WIN_TABLE\"; }
+    kill() { return 1; }
+    ps() { return 1; }
+    $expr
+  " "$LIB"
+}
+
+# A hook shell under the Git Bash launcher under a native claude.exe session.
+write_win_session_table() {  # <file>
+  cat > "$1" <<'ROWS'
+10|20|500|C:\Program Files\Git\usr\bin\bash.exe|"C:\Program Files\Git\usr\bin\bash.exe" -c ". hook.sh"
+20|30|400|C:\Program Files\Git\bin\bash.exe|"C:\Program Files\Git\bin\bash.exe" -c "source snapshot"
+30|40|300|C:\Users\u\.local\bin\claude.EXE|"C:\Users\u\.local\bin\claude.exe"
+40|50|200|C:\Program Files\PowerShell\7\pwsh.exe|pwsh.exe -NoExit
+50|4|100|C:\WINDOWS\Explorer.EXE|C:\WINDOWS\Explorer.EXE
+ROWS
+}
+
+test_windows_native_session_is_found_through_the_win32_table() {
+  local dir table got
+  dir="$TMP_ROOT/win-native"
+  mkdir -p "$dir/state"
+  table="$dir/table"
+  write_win_session_table "$table"
+  got=$(win_eval "$table" 'fm_harness_ancestry_pid') || fail "windows: the native claude.exe session was not found"
+  [ "$got" = 30 ] || fail "windows: ancestry resolved '$got', expected claude.exe pid 30"
+  win_eval "$table" 'fm_harness_pid_alive 30' || fail "windows: a live claude.exe was not recognized as a harness"
+  if win_eval "$table" 'fm_harness_pid_alive 40'; then
+    fail "windows: a non-harness process passed the harness-liveness predicate"
+  fi
+  if win_eval "$table" 'fm_harness_pid_alive 99'; then
+    fail "windows: a pid absent from the table was treated as live"
+  fi
+  if win_eval "$table" 'fm_harness_pid_alive "30;x"'; then
+    fail "windows: a malformed pid passed the harness-liveness predicate"
+  fi
+  printf '30\n' > "$dir/state/.lock"
+  win_eval "$table" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "windows: the session holding the lock did not recognize itself as the owner"
+  pass "session-lock windows: a native claude.exe session is found through the Win32 process table"
+}
+
+test_windows_trusted_session_anchors_on_claude_pid() {
+  local dir table got
+  dir="$TMP_ROOT/win-trusted"
+  mkdir -p "$dir"
+  table="$dir/table"
+  write_win_session_table "$table"
+  # Claude Code's CLAUDE_PID is a Windows pid on Windows, so the trusted
+  # same-session identity must line up with the Win32 walk.
+  got=$(FM_TEST_SESSION_ID=sess-1 FM_TEST_CLAUDE_PID=30 win_eval "$table" 'fm_session_lock_trusted_session_id') \
+    || fail "windows: a CLAUDE_PID naming the walked claude.exe was not trusted"
+  [ "$got" = sess-1 ] || fail "windows: trusted session id was '$got', expected sess-1"
+  got=$(FM_TEST_SESSION_ID=sess-1 FM_TEST_CLAUDE_PID=30 win_eval "$table" 'fm_session_lock_anchor_pid')
+  [ "$got" = 30 ] || fail "windows: lock anchor was '$got', expected CLAUDE_PID 30"
+  if FM_TEST_SESSION_ID=sess-1 FM_TEST_CLAUDE_PID=40 win_eval "$table" 'fm_session_lock_trusted_session_id'; then
+    fail "windows: a CLAUDE_PID naming a non-harness process was trusted"
+  fi
+  pass "session-lock windows: the trusted Claude session anchors on its Windows CLAUDE_PID"
+}
+
+test_windows_lock_inspect_reads_the_table() {
+  local dir table
+  dir="$TMP_ROOT/win-inspect"
+  mkdir -p "$dir/state"
+  table="$dir/table"
+  write_win_session_table "$table"
+  printf '30\n' > "$dir/state/.lock"
+  [ "$(win_eval "$table" "fm_session_lock_inspect '$dir/state'; echo \$FM_LOCK_INSPECT_STATE")" = held ] \
+    || fail "windows: a lock held by a live claude.exe was not reported held"
+  printf '40\n' > "$dir/state/.lock"
+  [ "$(win_eval "$table" "fm_session_lock_inspect '$dir/state'; echo \$FM_LOCK_INSPECT_STATE")" = unknown ] \
+    || fail "windows: a lock naming a live non-harness process was not reported unknown"
+  printf '99\n' > "$dir/state/.lock"
+  [ "$(win_eval "$table" "fm_session_lock_inspect '$dir/state'; echo \$FM_LOCK_INSPECT_STATE")" = stale ] \
+    || fail "windows: a lock naming a pid absent from the table was not reported stale"
+  : > "$table"
+  printf '30\n' > "$dir/state/.lock"
+  [ "$(win_eval "$table" "fm_session_lock_inspect '$dir/state'; echo \$FM_LOCK_INSPECT_STATE")" = unknown ] \
+    || fail "windows: an unreadable process table reported the lock as anything but unknown"
+  pass "session-lock windows: lock inspection reads liveness from the Win32 table"
+}
+
+test_windows_parent_must_provably_predate_its_child() {
+  local dir table
+  dir="$TMP_ROOT/win-reuse"
+  mkdir -p "$dir"
+  table="$dir/table"
+  # pid 30 is recorded as the shell's parent but was created after it: the real
+  # parent exited and an unrelated claude.exe later received its pid.
+  printf '%s\n' '10|30|500|C:\Program Files\Git\usr\bin\bash.exe|bash.exe' \
+    '30|4|900|C:\Users\u\.local\bin\claude.exe|claude.exe' > "$table"
+  if win_eval "$table" 'fm_harness_ancestry_pid'; then
+    fail "windows: the walk followed a reused parent pid into an unrelated session"
+  fi
+  # A withheld creation time (0) on either side proves no order at all.
+  printf '%s\n' '10|30|0|C:\Program Files\Git\usr\bin\bash.exe|bash.exe' \
+    '30|4|0|C:\Users\u\.local\bin\claude.exe|claude.exe' > "$table"
+  if win_eval "$table" 'fm_harness_ancestry_pid'; then
+    fail "windows: the walk trusted a parent whose creation order was never established"
+  fi
+  pass "session-lock windows: a parent that does not provably predate its child ends the walk"
+}
+
+test_windows_harness_beyond_a_gap_never_owns_the_lock() {
+  local dir table got
+  dir="$TMP_ROOT/win-gap"
+  mkdir -p "$dir/state"
+  table="$dir/table"
+  printf '%s\n' '10|30|500|C:\Program Files\Git\usr\bin\bash.exe|bash.exe' \
+    '30|40|300|C:\Users\u\.local\bin\claude.exe|claude.exe' \
+    '40|50|200|C:\Program Files\PowerShell\7\pwsh.exe|pwsh.exe' \
+    '50|4|100|C:\Users\u\.local\bin\claude.exe|claude.exe' > "$table"
+  got=$(win_eval "$table" 'fm_harness_ancestry_pid') || fail "windows: the contiguous harness run was not resolved"
+  [ "$got" = 30 ] || fail "windows: ancestry crossed a non-harness gap, resolved '$got' instead of 30"
+  printf '50\n' > "$dir/state/.lock"
+  if win_eval "$table" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "windows: an unrelated harness beyond a non-harness gap was accepted as this session's lock owner"
+  fi
+  pass "session-lock windows: ownership stops at the first non-harness gap"
+}
+
+test_windows_unreadable_table_fails_closed() {
+  local dir table
+  dir="$TMP_ROOT/win-empty"
+  mkdir -p "$dir/state"
+  table="$dir/table"
+  : > "$table"
+  printf '30\n' > "$dir/state/.lock"
+  if win_eval "$table" 'fm_harness_ancestry_pid'; then
+    fail "windows: an empty process table produced a harness identity"
+  fi
+  if win_eval "$table" 'fm_harness_pid_alive 30'; then
+    fail "windows: an empty process table reported a live lock owner"
+  fi
+  if win_eval "$table" "fm_session_lock_owned_by_self '$dir/state'"; then
+    fail "windows: an empty process table claimed the session lock"
+  fi
+  pass "session-lock windows: an empty or unreadable process table fails closed"
+}
+
+# Windows cannot rename a process image, so a Node-hosted harness is node.exe
+# there and only its script path names it.
+test_windows_interpreter_hosted_harness_is_found_by_script_word() {
+  local dir table script got
+  dir="$TMP_ROOT/win-interpreter"
+  mkdir -p "$dir/state"
+  table="$dir/table"
+  write_node_table() {  # <script-args>
+    printf '%s\n' '10|30|500|C:\Program Files\Git\usr\bin\bash.exe|bash.exe' \
+      "30|40|300|C:\\Program Files\\nodejs\\node.exe|\"C:\\Program Files\\nodejs\\node.exe\" $1" \
+      '40|4|200|C:\Program Files\PowerShell\7\pwsh.exe|pwsh.exe' > "$table"
+  }
+  for script in \
+    'C:\Users\u\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js' \
+    'C:\Users\u\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js'; do
+    write_node_table "$script"
+    got=$(win_eval "$table" 'fm_harness_ancestry_pid') || fail "windows: node-hosted harness $script was not found"
+    [ "$got" = 30 ] || fail "windows: node-hosted harness resolved '$got', expected node.exe pid 30"
+    printf '30\n' > "$dir/state/.lock"
+    win_eval "$table" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "windows: node-hosted harness $script did not recognize its own lock"
+  done
+  for script in \
+    'C:\Users\u\AppData\Roaming\npm\node_modules\lavish-axi\dist\cli.mjs' \
+    'C:\work\api-client\index.js' \
+    'C:\work\pipeline\run.js' \
+    'C:\work\pi\tool.js' \
+    'C:\tools\pi-helper\main.js' \
+    'C:\Users\u\firstmate\.pi\extensions\lib\fm-sessionstart-supervisor.mjs' \
+    'C:\work\tool.js fix the pi bug'; do
+    write_node_table "$script"
+    if win_eval "$table" 'fm_harness_ancestry_pid'; then
+      fail "windows: node running '$script' was treated as a harness"
+    fi
+  done
+  pass "session-lock windows: a node-hosted harness is found by an exact word of its script path"
+}
+
+# The Win32 table cache is shared by a script's subshells under TMPDIR, so it
+# must hold no command line, be readable by its owner alone, and still let a
+# walk served from it find a node-hosted harness.
+test_windows_table_cache_holds_no_command_line() {
+  local dir table got owner_only
+  dir="$TMP_ROOT/win-cache"
+  mkdir -p "$dir/tmp"
+  table="$dir/table"
+  printf '%s\n' '10|30|500|C:\Program Files\Git\usr\bin\bash.exe|bash.exe -c "export TOKEN=hunter2"' \
+    '30|40|300|C:\Program Files\nodejs\node.exe|"C:\Program Files\nodejs\node.exe" C:\npm\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js --api-key sk-hunter2 -p "hunter2 prompt"' \
+    '40|4|200|C:\Program Files\PowerShell\7\pwsh.exe|pwsh.exe -Command hunter2' > "$table"
+  got=$(TMPDIR="$dir/tmp" win_eval "$table" '
+    fm_win_table_load || exit 3
+    printf "%s\n" "${FM_WIN_ARGS[@]}" > "$TMPDIR/args.copy"
+    cat "$TMPDIR"/.fm-win-table.* > "$TMPDIR/cache.copy" || exit 4
+    FM_WIN_TABLE_LOADED=0
+    fm_win_process_table() { return 1; }
+    fm_harness_ancestry_pid') || fail "windows: a walk served from the table cache failed"
+  [ "$got" = 30 ] || fail "windows: cached walk resolved '$got', expected node.exe pid 30"
+  grep -q 'pi-coding-agent' "$dir/tmp/cache.copy" || fail "windows: the table cache was not written"
+  if grep -q hunter2 "$dir/tmp/cache.copy" "$dir/tmp/args.copy"; then
+    fail "windows: a command-line secret reached the table cache or memory"
+  fi
+  if [ ! -r "/proc/$$/winpid" ]; then
+    owner_only=$(find "$dir/tmp" -name '.fm-win-table.*' -perm 600)
+    [ -n "$owner_only" ] || fail "windows: the table cache is not owner-only"
+  fi
+  pass "session-lock windows: the table cache keeps harness evidence only, owner-only"
+}
+
+# The word rule is Windows-only: a POSIX harness retitles its own process.
+test_posix_interpreter_script_word_is_not_a_harness() {
+  if lib_eval "$TMP_ROOT" "fm_harness_process_matches node 'node /usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'"; then
+    fail "posix: node running a pi-coding-agent script was treated as a harness"
+  fi
+  pass "session-lock posix: a node script path word does not identify a harness"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -1106,12 +1344,29 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
-test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
-test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
-test_same_session_confirmation_does_not_steal_after_wait
-test_failed_lock_write_restores_previous_sidecar
-test_failed_lock_write_removes_new_sidecar_when_none_existed
-test_verified_reclaim_keeps_new_sidecar
+test_windows_native_session_is_found_through_the_win32_table
+test_windows_trusted_session_anchors_on_claude_pid
+test_windows_lock_inspect_reads_the_table
+test_windows_parent_must_provably_predate_its_child
+test_windows_harness_beyond_a_gap_never_owns_the_lock
+test_windows_unreadable_table_fails_closed
+test_windows_interpreter_hosted_harness_is_found_by_script_word
+test_windows_table_cache_holds_no_command_line
+test_posix_interpreter_script_word_is_not_a_harness
+# The real-process fixtures below stand in for a harness with an MSYS bash
+# (named claude, or handed CLAUDE_PID=$$) and assert POSIX pids; on a Windows
+# host identity is the Win32 pid of a native process, which the windows unit
+# cases above cover instead.
+if [ -r "/proc/$$/winpid" ]; then
+  printf 'ok - session-lock real-process fixtures # SKIP POSIX process trees on a Windows host\n'
+else
+  test_e2e_version_named_session_claims_the_home
+  test_e2e_daemon_parented_session_claims_the_home
+  test_e2e_daemon_parented_version_named_session_keeps_its_lock
+  test_e2e_background_session_keeps_its_lock_across_a_recycled_chain
+  test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock
+  test_same_session_confirmation_does_not_steal_after_wait
+  test_failed_lock_write_restores_previous_sidecar
+  test_failed_lock_write_removes_new_sidecar_when_none_existed
+  test_verified_reclaim_keeps_new_sidecar
+fi

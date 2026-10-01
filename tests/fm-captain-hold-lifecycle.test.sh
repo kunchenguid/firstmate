@@ -172,7 +172,8 @@ exec "$FM_TEST_REAL_PERL" "$@"
 SH
   cat > "$home/fakebin/sleep" <<'SH'
 #!/usr/bin/env bash
-if [ "${FM_TEST_REUSE_MERGE:-}" = 1 ] && [ "${1:-}" = 0.1 ] \
+if [ "${FM_TEST_REUSE_MERGE:-}" = 1 ] \
+    && printf '%s\n' "${1:-}" | grep -Eqx '0\.(0[5-9]|1[0-4])[0-9]' \
     && [ ! -e "${FM_TEST_REUSE_MERGE_ONCE:-}" ]; then
   : > "$FM_TEST_REUSE_MERGE_ONCE"
   : > "$FM_TEST_REUSE_MERGE_READY"

@@ -1029,7 +1029,11 @@ fm_procevent_private_directory_valid() {
   fm_procevent_directory_owned_by_current_user "$directory" || return 1
   mode=$(fm_pr_file_mode "$directory") || return 1
   case "$mode" in ''|*[!0-7]*) return 1 ;; esac
-  if [ "$exact_mode" = 1 ]; then
+  # Windows (captain-approved): noacl mounts report fixed modes and ignore
+  # chmod, so ownership alone decides there (see bin/backends/herdr.sh).
+  if declare -F fm_win_host >/dev/null && fm_win_host; then
+    :
+  elif [ "$exact_mode" = 1 ]; then
     [ "$mode" = 700 ] || return 1
   elif [ $((8#$mode & 8#022)) -ne 0 ]; then
     return 1

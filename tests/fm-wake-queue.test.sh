@@ -2528,11 +2528,11 @@ SH
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/waiter.ready" "$dir/release-waiter" &
   waiter_pid=$!
   i=0
-  while [ "$i" -lt 100 ] && ! grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1; do
+  while [ "$i" -lt 100 ] && ! grep -Ex '0\.(0[5-9]|1[0-4])[0-9]' "$sleep_log" >/dev/null 2>&1; do
     sleep 0.05
     i=$((i + 1))
   done
-  grep -Fx '0.1' "$sleep_log" >/dev/null 2>&1 \
+  grep -Ex '0\.(0[5-9]|1[0-4])[0-9]' "$sleep_log" >/dev/null 2>&1 \
     || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded helper never entered its contended wait"; }
   [ ! -e "$dir/waiter.ready" ] \
     || { kill "$holder_pid" "$waiter_pid" 2>/dev/null || true; fail "bounded waiter bypassed a live holder"; }

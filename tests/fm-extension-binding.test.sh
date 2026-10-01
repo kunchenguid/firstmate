@@ -1348,6 +1348,30 @@ assert_absent "$signal_lock" "registration left a recovered lifecycle lock behin
 FM_HOME="$H_SIGNAL_LOCK" "$PROCEVENT" retire signal-source --if-owner "$signal_owner" >/dev/null
 FM_HOME="$H_SIGNAL_LOCK" "$HOST" retire-binding org.example.signal-lock --if-binding-digest "$signal_binding_digest" >/dev/null
 pass "signal interruption leaves lifecycle lock recovery to the next owner"
+
+# A Windows host takes the lifecycle lock as an atomic mkdir of the lock path
+# itself; force that scheme in a copied code root so the host accepts and
+# releases the directory-form handoff on any platform.
+MKDIR_ROOT="$TMP_ROOT/mkdir-lock-root"
+mkdir -p "$MKDIR_ROOT"
+cp -R "$ROOT/bin" "$MKDIR_ROOT/bin"
+printf '\nfm_lock_mkdir_host() { return 0; }\n' >> "$MKDIR_ROOT/bin/fm-wake-lib.sh"
+P_MKDIR_LOCK="$PACKAGES/mkdir-lock"
+make_package "$P_MKDIR_LOCK" org.example.mkdir-lock ext-mkdir-lock
+H_MKDIR_LOCK="$HOMES/mkdir-lock"; new_home "$H_MKDIR_LOCK"
+mkdir_lock="$H_MKDIR_LOCK/state/procevent/.extension-binding-lifecycle.lock"
+mkdir_bind=$(FM_HOME="$H_MKDIR_LOCK" "$MKDIR_ROOT/bin/fm-extension.mjs" bind "$P_MKDIR_LOCK" \
+  --adapter ext-mkdir-lock --trust-same-user-code 2>&1) || fail "bind rejected the mkdir lifecycle lock handoff: $mkdir_bind"
+mkdir_binding_digest=$(printf '%s\n' "$mkdir_bind" | sed -n 's/^binding-digest: //p')
+[ -n "$mkdir_binding_digest" ] || fail "mkdir-lock bind returned no binding identity"
+assert_absent "$mkdir_lock" "bind left the mkdir lifecycle lock behind"
+mkdir_retire=$(FM_HOME="$H_MKDIR_LOCK" "$MKDIR_ROOT/bin/fm-extension.mjs" retire-binding org.example.mkdir-lock \
+  --if-binding-digest "$mkdir_binding_digest" 2>&1) || fail "retirement rejected the mkdir lifecycle lock handoff: $mkdir_retire"
+assert_absent "$mkdir_lock" "retirement left the mkdir lifecycle lock behind"
+for leftover in "$mkdir_lock".*; do
+  [ ! -e "$leftover" ] || fail "mkdir lifecycle lock left a sibling behind: $leftover"
+done
+pass "bind and retirement accept and fully release the mkdir lifecycle lock"
 fi
 
 if section_enabled lifecycle-runner; then

@@ -2019,10 +2019,14 @@ async function assertLifecycleLockOwned() {
   if (!activeLifecycleLock) fail("lifecycle-lock-invalid", "retirement has no lifecycle lock ownership");
   const { lockPath, ownerPath, delegatedOwnerPid } = activeLifecycleLock;
   const lockInfo = await maybeLstat(lockPath);
-  if (!lockInfo?.isSymbolicLink()) fail("lifecycle-lock-lost", "retirement lifecycle lock is no longer held");
-  const target = await readlink(lockPath).catch(() => fail("lifecycle-lock-lost", "retirement lifecycle lock cannot be read"));
-  const resolvedTarget = path.isAbsolute(target) ? target : path.resolve(path.dirname(lockPath), target);
-  if (resolvedTarget !== ownerPath) fail("lifecycle-lock-lost", "retirement lifecycle lock owner changed");
+  if (ownerPath === lockPath) {
+    if (!lockInfo?.isDirectory()) fail("lifecycle-lock-lost", "retirement lifecycle lock is no longer held");
+  } else {
+    if (!lockInfo?.isSymbolicLink()) fail("lifecycle-lock-lost", "retirement lifecycle lock is no longer held");
+    const target = await readlink(lockPath).catch(() => fail("lifecycle-lock-lost", "retirement lifecycle lock cannot be read"));
+    const resolvedTarget = path.isAbsolute(target) ? target : path.resolve(path.dirname(lockPath), target);
+    if (resolvedTarget !== ownerPath) fail("lifecycle-lock-lost", "retirement lifecycle lock owner changed");
+  }
   const ownerInfo = await maybeLstat(ownerPath);
   if (!ownerInfo?.isDirectory() || ownerInfo.isSymbolicLink() || ownerInfo.uid !== currentUid()) {
     fail("lifecycle-lock-invalid", "retirement lifecycle lock owner is unsafe");
@@ -2043,8 +2047,8 @@ async function claimInheritedLifecycleLock(home) {
   const expectedLock = path.join(stateRoot, "procevent", ".extension-binding-lifecycle.lock");
   const lockPath = path.resolve(process.env.FM_EXTENSION_LIFECYCLE_LOCK || "");
   const ownerPath = path.resolve(process.env.FM_EXTENSION_LIFECYCLE_OWNER || "");
-  if (lockPath !== expectedLock || path.dirname(ownerPath) !== path.dirname(lockPath)
-      || !path.basename(ownerPath).startsWith(`${path.basename(lockPath)}.owner.`)) {
+  if (lockPath !== expectedLock || (ownerPath !== lockPath && (path.dirname(ownerPath) !== path.dirname(lockPath)
+      || !path.basename(ownerPath).startsWith(`${path.basename(lockPath)}.owner.`)))) {
     fail("lifecycle-lock-invalid", "retirement lifecycle lock identity is invalid");
   }
   const captureCapability = mode === "process-event" ? await inheritedCaptureCapability(home) : null;
@@ -2057,9 +2061,19 @@ async function claimInheritedLifecycleLock(home) {
 async function releaseLifecycleLock() {
   await assertLifecycleLockOwned();
   const { lockPath, ownerPath } = activeLifecycleLock;
-  await unlink(lockPath);
-  await unlink(path.join(ownerPath, "pid"));
-  await rmdir(ownerPath);
+  if (ownerPath === lockPath) {
+    for (const name of ["pid", "fm-home", "pid-identity", "role", "watcher-path"]) {
+      await rm(path.join(lockPath, name), { force: true });
+    }
+    for (const entry of await readdir(lockPath)) {
+      if (entry.startsWith("owner.")) await rm(path.join(lockPath, entry), { force: true });
+    }
+    await rmdir(lockPath);
+  } else {
+    await unlink(lockPath);
+    await unlink(path.join(ownerPath, "pid"));
+    await rmdir(ownerPath);
+  }
   activeLifecycleLock = null;
 }
 

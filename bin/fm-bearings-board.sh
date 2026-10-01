@@ -223,9 +223,17 @@ lavish_status_field() {  # <lavish-axi output>
 # The server's own listing, keyed on the canonical artifact path. Rows are
 # `<file>,<status>,"<url>",<pending>`, and only a live session is listed `open`.
 lavish_session_listed_open() {  # <canonical-board-path>
-  local listing
+  local listing key=$1
   listing=$(lavish-axi 2>/dev/null) || return 1
-  printf '%s\n' "$listing" | awk -v path="$1" '
+  # Native Windows lavish-axi lists the file by its drive path as a quoted,
+  # backslash-escaped string ("D:\\...\\bearings-board.html"), so match that
+  # spelling of the same file. ENVIRON keeps awk from unescaping it.
+  case "$key" in
+    /*) command -v cygpath >/dev/null 2>&1 \
+          && key="\"$(cygpath -w "$key" | sed 's/\\/\\\\/g')\"" ;;
+  esac
+  printf '%s\n' "$listing" | FM_BOARD_KEY=$key awk '
+    BEGIN { path = ENVIRON["FM_BOARD_KEY"] }
     { line = $0; sub(/^[[:space:]]+/, "", line) }
     index(line, path ",") == 1 {
       rest = substr(line, length(path) + 2)

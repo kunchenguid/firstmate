@@ -55,6 +55,38 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Print the exact harness name that is a whole word of a path-like argument in
+# argument string $1 - words split at / - _ @ and quotes - or return 1.
+#
+# Windows cannot rename a process image, so a Node- or Python-hosted harness
+# that retitles itself elsewhere (Pi sets process.title to "pi") still reports
+# as node.exe there, and only its script path names it: .../pi-coding-agent/...
+# Whole words keep this safe the same way whole path components do above: api,
+# pipeline, and ompd are not pi or omp. A dot does not split, so a dot-directory
+# such as .pi or .omp (the fleet's own extension scripts) is never pi or omp.
+# Pi alone is too short a word to trust as any component, since an unrelated
+# script such as C:/work/pi/tool.js has one, so it is identified only by its own
+# package directory, pi-coding-agent.
+# Only arguments containing a slash are read, so a prompt word never identifies
+# a harness. Windows hosts only: elsewhere every harness retitles its process.
+fm_harness_word_name() {  # <args>
+  local -a tokens words
+  local token word name
+  read -ra tokens <<< "$1"
+  for token in "${tokens[@]:1}"; do
+    case "$token" in */*) ;; *) continue ;; esac
+    case "$token/" in */pi-coding-agent/*) printf 'pi'; return 0 ;; esac
+    IFS='/-_@"'"'" read -ra words <<< "$token"
+    for word in "${words[@]}"; do
+      for name in "${FM_HARNESS_NAMES[@]}"; do
+        [ "$name" != pi ] || continue
+        [ "$word" = "$name" ] && { printf '%s' "$name"; return 0; }
+      done
+    done
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -65,7 +97,8 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python) running a harness script path, by the
+#      loose regex or, on a Windows host, by an exact harness word in that path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -88,6 +121,10 @@ fm_harness_process_matches() {  # <comm> <args>
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
+      if fm_win_host && name=$(fm_harness_word_name "$args"); then
+        case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
@@ -96,6 +133,186 @@ fm_harness_process_matches() {  # <comm> <args>
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   return 1
+}
+
+# --- process reads -------------------------------------------------------------
+# Every per-pid question below goes through fm_proc_read and fm_proc_parent, so
+# the Windows host path lives in exactly one place.
+#
+# Windows hosts (Git Bash, MSYS2, Cygwin). A shell started by a native Win32
+# process such as claude.exe is reparented to pid 1 in the POSIX process
+# namespace, and MSYS ps rejects -o outright, so a POSIX walk sees no harness in
+# its ancestry. The Win32 process table does carry it, so on these hosts every
+# read uses that table, and every pid this library prints or accepts - including
+# the one written to state/.lock - is a Windows pid. Claude Code's CLAUDE_PID is
+# a Windows pid there too, so the trusted same-session check lines up.
+
+# True on a Windows host.
+fm_win_host() {
+  [ -r "/proc/$$/winpid" ]
+}
+
+# Print the Windows pid the walk starts from: the topmost process of this
+# shell's POSIX ancestry, the one a native Win32 process started. An exec (hooks
+# exec their script) replaces the Windows process behind a POSIX pid and the
+# replaced one can exit, which breaks the Win32 parent chain below the topmost
+# shell while the POSIX chain in /proc stays intact. Every POSIX ancestor is an
+# MSYS program and never a native harness, so skipping them loses no match.
+fm_win_self_pid() {
+  local pid=$$ ppid w
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    ppid=$(cat "/proc/$pid/ppid" 2>/dev/null) || break
+    case "$ppid" in ''|*[!0-9]*) break ;; esac
+    [ "$ppid" -gt 1 ] && [ -r "/proc/$ppid/winpid" ] || break
+    pid=$ppid
+  done
+  w=$(cat "/proc/$pid/winpid" 2>/dev/null) || return 1
+  case "$w" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$w"
+}
+
+# Print the Win32 process table: one "pid<TAB>ppid<TAB>created<TAB>exe<TAB>cmdline"
+# row per process. created is the creation time in FILETIME ticks (0 when
+# Windows withholds it); exe falls back to the image name when the path is
+# withheld, so that field is never empty.
+fm_win_process_table() {
+  # shellcheck disable=SC2016 # the $ names are PowerShell's, not the shell's
+  powershell.exe -NoProfile -NonInteractive -Command '
+    Get-CimInstance Win32_Process | ForEach-Object {
+      $exe = if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name }
+      $created = if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 }
+      "{0}`t{1}`t{2}`t{3}`t{4}" -f $_.ProcessId, $_.ParentProcessId, $created, $exe, ($_.CommandLine -replace "[\t\r\n]", " ")
+    }' 2>/dev/null
+}
+
+# Reduce command line $1 (forward slashes) to the harness evidence
+# fm_harness_process_matches reads from it, into FM_WIN_EVIDENCE: argv0 and each
+# argument that names a harness, every other argument replaced by "-" so each
+# verdict is unchanged. Prompts, flags, and secrets never reach memory or the
+# cache. A line that names no harness at all skips the per-argument pass.
+FM_WIN_EVIDENCE=''
+_fm_win_harness_evidence() {  # <cmdline>
+  local -a tokens
+  local token
+  read -ra tokens <<< "$1"
+  FM_WIN_EVIDENCE=${tokens[0]:-}
+  if [ "${#tokens[@]}" -gt 1 ] && ! [[ $1 =~ $FM_HARNESS_RE ]] \
+    && ! fm_harness_word_name "$1" >/dev/null; then
+    FM_WIN_EVIDENCE+=' -'
+    return 0
+  fi
+  for token in "${tokens[@]:1}"; do
+    if [[ $token =~ $FM_HARNESS_RE ]] || fm_harness_word_name "- $token" >/dev/null; then
+      FM_WIN_EVIDENCE+=" $token"
+    else
+      FM_WIN_EVIDENCE+=' -'
+    fi
+  done
+}
+
+# Load the table once per shell into sparse pid-indexed arrays. comm is the
+# executable path with forward slashes and no .exe suffix, so the shared matcher
+# sees the same shape it sees on macOS; args is only the command line's harness
+# evidence (_fm_win_harness_evidence). An empty or unreadable table fails closed.
+# A hot path now needs the file cache: bin/fm-lock.sh's own confirm-own-lock
+# check re-walks the ancestry inside $(...), which forks and loses this
+# in-memory flag, so every such call paid its own fresh multi-second
+# PowerShell round trip - fine alone, but compounding badly when concurrent
+# lock confirmations contend for the same CPU/WMI subsystem. $$ stays the
+# top-level script's pid even inside a command-substitution subshell (unlike
+# BASHPID), so it names one snapshot shared by every subshell of one script
+# run without colliding with a concurrent process's own cache file.
+FM_WIN_TABLE_LOADED=0
+fm_win_table_load() {
+  [ "$FM_WIN_TABLE_LOADED" -eq 1 ] && return 0
+  local table pid ppid created exe cmd rows=0 fresh=1 snapshot=''
+  local cache_dir="${TMPDIR:-/tmp}" cache="${TMPDIR:-/tmp}/.fm-win-table.$$"
+  # Sweep stale caches before adding this one: each is a single short-lived
+  # script invocation's snapshot, so anything a couple of minutes old is a
+  # leftover from a process that already exited, never cleaned up after
+  # itself since no single caller here owns the others' lifetimes. Bounds
+  # growth without needing coordinated cleanup across every source of this
+  # shared library.
+  find "$cache_dir" -maxdepth 1 -name '.fm-win-table.*' -mmin +2 -delete 2>/dev/null || true
+  # Only a cache this user owns is trusted: in a shared TMPDIR another user
+  # could otherwise plant the snapshot this walk decides lock ownership from.
+  if [ -s "$cache" ] && [ -O "$cache" ] && [ ! -L "$cache" ]; then
+    table=$(cat "$cache" 2>/dev/null)
+    fresh=0
+  else
+    table=$(fm_win_process_table | tr -d '\r') || return 1
+  fi
+  FM_WIN_PPID=() FM_WIN_CREATED=() FM_WIN_COMM=() FM_WIN_ARGS=()
+  while IFS=$'\t' read -r pid ppid created exe cmd; do
+    case "$pid:$ppid:$created" in *[!0-9:]*|:*|*::*|*:) continue ;; esac
+    [ -n "$exe" ] || continue
+    exe=${exe//\\//}
+    case "$exe" in *.[eE][xX][eE]) exe=${exe%.*} ;; esac
+    _fm_win_harness_evidence "${cmd//\\//}"
+    FM_WIN_PPID[pid]=$ppid
+    FM_WIN_CREATED[pid]=$created
+    FM_WIN_COMM[pid]=$exe
+    FM_WIN_ARGS[pid]=$FM_WIN_EVIDENCE
+    [ "$fresh" -eq 0 ] || snapshot+="$pid"$'\t'"$ppid"$'\t'"$created"$'\t'"$exe"$'\t'"$FM_WIN_EVIDENCE"$'\n'
+    rows=$((rows + 1))
+  done <<EOF
+$table
+EOF
+  [ "$rows" -gt 0 ] || return 1
+  # The cache holds the parsed columns only, never a raw command line, and is
+  # created readable by this user alone.
+  if [ "$fresh" -eq 1 ] && [ ! -e "$cache" ]; then
+    (umask 077 && printf '%s' "$snapshot" > "$cache") 2>/dev/null || true
+  fi
+  FM_WIN_TABLE_LOADED=1
+}
+
+# Read pid $1's command name and argument string into FM_PROC_COMM and
+# FM_PROC_ARGS, or return 1 when it is not a readable process. A Windows pid is
+# checked to be digits first, because bash evaluates an array subscript as
+# arithmetic and a corrupt lock file must never reach one.
+FM_PROC_COMM=''
+FM_PROC_ARGS=''
+fm_proc_read() {  # <pid>
+  local pid=$1
+  if fm_win_host; then
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    fm_win_table_load || return 1
+    [ -n "${FM_WIN_COMM[pid]:-}" ] || return 1
+    FM_PROC_COMM=${FM_WIN_COMM[pid]}
+    FM_PROC_ARGS=${FM_WIN_ARGS[pid]}
+    return 0
+  fi
+  FM_PROC_COMM=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  FM_PROC_ARGS=$(ps -o args= -p "$pid" 2>/dev/null)
+}
+
+# Print pid $1's parent, or return 1 when there is none worth following.
+#
+# POSIX: examine the top of the chain before stopping. Inside a PID namespace
+# the harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
+# very process the walk exists to find. A host's real pid 1 (init, systemd,
+# launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
+#
+# Windows reuses pids, so a parent that exited can leave its id to an unrelated
+# newer process. The parent must provably predate its child: a recorded parent
+# created after its child is that reuse, and a withheld creation time on either
+# side (stored as 0) proves nothing, so both end the walk rather than crossing
+# into a stranger's tree. Call fm_proc_read on $1 first so the table is loaded.
+fm_proc_parent() {  # <pid>
+  local pid=$1 ppid pc cc
+  if fm_win_host; then
+    ppid=${FM_WIN_PPID[pid]:-}
+    [ -n "$ppid" ] && [ "$ppid" -gt 1 ] && [ -n "${FM_WIN_COMM[ppid]:-}" ] || return 1
+    pc=${FM_WIN_CREATED[ppid]} cc=${FM_WIN_CREATED[pid]}
+    [ "$pc" -gt 0 ] && [ "$cc" -gt 0 ] && [ "$pc" -le "$cc" ] || return 1
+    printf '%s\n' "$ppid"
+    return 0
+  fi
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$ppid" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$ppid" -ge 1 ] || return 1
+  printf '%s\n' "$ppid"
 }
 
 # Walk the current process ancestry (up to 16 hops) and print this session's
@@ -117,11 +334,13 @@ fm_harness_process_matches() {  # <comm> <args>
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
-  local pid=$$ comm args extending=0 printed=0
+  local pid=$$ extending=0 printed=0
+  if fm_win_host; then
+    pid=$(fm_win_self_pid) || return 1
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    if fm_harness_process_matches "$comm" "$args"; then
+    fm_proc_read "$pid" || break
+    if fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"; then
       printf '%s\n' "$pid"
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
@@ -129,13 +348,7 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    # Examine the top of the chain before stopping. Inside a PID namespace the
-    # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
-    # very process this walk exists to find. A host's real pid 1 (init, systemd,
-    # launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
-    case "$pid" in '' | *[!0-9]*) break ;; esac
-    [ "$pid" -ge 1 ] || break
+    pid=$(fm_proc_parent "$pid") || break
   done
   [ "$printed" -eq 1 ]
 }
@@ -164,12 +377,13 @@ EOF
 }
 
 # True if $1 is a live process that looks like a verified harness.
+# A Windows pid is not in the POSIX namespace kill -0 probes, so on a Windows
+# host the process table alone decides.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  local pid=$1
+  fm_win_host || kill -0 "$pid" 2>/dev/null || return 1
+  fm_proc_read "$pid" || return 1
+  fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -199,7 +413,7 @@ fm_harness_pid_alive() {
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -208,9 +422,8 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    fm_proc_read "$pid" || return 1
+    fm_harness_process_matches "$FM_PROC_COMM" "$FM_PROC_ARGS" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -366,6 +579,24 @@ fm_session_lock_inspect() {  # <state>
       return 0
       ;;
   esac
+  # A Windows host has no kill -0 or ps view of a Windows pid. A table that
+  # cannot be read leaves the lock unknown, never stale; a pid absent from a
+  # readable table is gone.
+  if fm_win_host; then
+    fm_win_table_load || return 0
+    if [ -z "${FM_WIN_COMM[pid]:-}" ]; then
+      # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+      FM_LOCK_INSPECT_STATE=stale
+      # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+    elif fm_harness_pid_alive "$pid"; then
+      FM_LOCK_INSPECT_STATE=held
+      FM_LOCK_INSPECT_LIVE_HARNESS=true
+    else
+      FM_LOCK_INSPECT_LIVE_HARNESS=false
+    fi
+    return 0
+  fi
   if kill -0 "$pid" 2>/dev/null; then
     if fm_harness_pid_alive "$pid"; then
       FM_LOCK_INSPECT_STATE=held

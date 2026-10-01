@@ -12,6 +12,17 @@ FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
 # shellcheck source=bin/fm-path-lib.sh
 . "$FM_WAKE_LIB_DIR/fm-path-lib.sh"
+# Directory locks are a symlink to a private owner directory, except on a
+# Windows host (Git Bash, MSYS2, Cygwin - the probe fm_win_host owns in
+# bin/fm-session-lock-lib.sh), where ln -s without Developer Mode silently
+# degrades to a junction or a directory copy that cannot carry ownership. There
+# the lock is an atomic mkdir of the lock path itself; see fm_lock_try_create_dir.
+# Resolved once at source time; tests redefine it to force the mkdir scheme.
+if [ -r "/proc/$$/winpid" ]; then
+  fm_lock_mkdir_host() { return 0; }
+else
+  fm_lock_mkdir_host() { return 1; }
+fi
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -524,8 +535,17 @@ fm_lock_link_owner() {
   esac
 }
 
+# A mkdir lock is its own owner directory, so it belongs to <ownerdir> only
+# while it is that directory and still records this process. Only the holder
+# asks this about its own lock, and a live pid cannot create a second one.
 fm_lock_points_to_owner() {
-  local lockdir=$1 ownerdir=$2 actual
+  local lockdir=$1 ownerdir=$2 actual current
+  if [ "$lockdir" = "$ownerdir" ] && [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_current_pid current || return 1
+    actual=$(cat "$lockdir/pid" 2>/dev/null || true)
+    [ "$actual" = "$current" ]
+    return
+  fi
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
   [ "$actual" = "$ownerdir" ]
 }
@@ -581,9 +601,83 @@ fm_lock_claim() {
   return 0
 }
 
+# Windows lock: mkdir is the atomic arbiter, and the winner then writes a
+# unique owner token file named for itself (owner.<creator-pid>.<random>) and
+# only then its pid, inside the directory it created. No sibling file or link
+# decides ownership.
+#
+# A creator stalled between mkdir and its writes may find its directory reaped
+# and a successor's in its place, so it claims only while its token is the sole
+# token there, and writes its pid only after that: of two tokens that meet, the
+# later check sees both and backs off. A token whose creator is alive is never
+# reaped (fm_lock_recheck_stale_owner), so a stalled creator's directory cannot
+# be replaced under its pending pid write. The token is removed last
+# (fm_lock_remove_dir), and fm_lock_reap_dead_dir elects one reaper by renaming
+# it.
+fm_lock_try_create_dir() {  # <lockdir> [allowed-steal-owner]
+  local lockdir=$1 allowed_steal_owner=${2:-} mypid token back=''
+  fm_current_pid mypid || return 1
+  token="$lockdir/owner.$mypid.$RANDOM$RANDOM"
+  # Back off before creating while a stealer holds the mutex, not only after:
+  # Windows process start is slow enough that contenders arriving mid-steal
+  # otherwise keep occupying the path the stealer is about to recreate.
+  fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner" && return 1
+  mkdir -- "$lockdir" 2>/dev/null || return 1
+  { : > "$token"; } 2>/dev/null || return 1
+  if ! fm_lock_dir_sole_token "$lockdir" "$token"; then
+    rm -f "$token" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+    return 1
+  fi
+  if { printf '%s\n' "$mypid" > "$lockdir/pid"; } 2>/dev/null; then
+    IFS= read -r back < "$lockdir/pid" 2>/dev/null || true
+    if [ "$back" = "$mypid" ] && [ -f "$token" ] \
+      && ! fm_lock_claim_blocked_by_steal "$lockdir" "$allowed_steal_owner"; then
+      FM_LOCK_OWNER_DIR=$lockdir
+      return 0
+    fi
+  fi
+  # Holding the sole token proved this directory ours, and any token that
+  # arrived since has already lost its own sole-token check.
+  [ -f "$token" ] && fm_lock_remove_dir "$lockdir"
+  return 1
+}
+
+fm_lock_dir_sole_token() {  # <lockdir> <token>
+  local entry
+  [ -f "$2" ] || return 1
+  for entry in "$1"/owner.*; do
+    [ "$entry" = "$2" ] || return 1
+  done
+}
+
+# True while any owner token in mkdir lock <lockdir> names a live creator.
+fm_lock_dir_creator_alive() {  # <lockdir>
+  local entry creator
+  for entry in "$1"/owner.*; do
+    [ -f "$entry" ] || continue
+    creator=${entry##*/owner.}
+    fm_pid_alive "${creator%%.*}" && return 0
+  done
+  return 1
+}
+
+# Remove a mkdir lock: identity files first, the owner token last, then the
+# directory. An interruption at any point leaves either a token for the reaper
+# election or an empty directory, which rmdir alone removes safely.
+fm_lock_remove_dir() {  # <lockdir>
+  fm_lock_clean_known_files "$1"
+  rm -f "$1"/owner.* 2>/dev/null || true
+  rmdir "$1" 2>/dev/null
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  if fm_lock_mkdir_host; then
+    fm_lock_try_create_dir "$lockdir" "$allowed_steal_owner"
+    return
+  fi
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -616,8 +710,7 @@ fm_lock_remove_path() {
     [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
     return 0
   fi
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null
+  fm_lock_remove_dir "$lockdir"
 }
 
 fm_lock_mid_acquire_is_fresh() {
@@ -639,6 +732,7 @@ fm_lock_recheck_stale_owner() {
     fm_lock_points_to_owner "$lockdir" "$expected_owner" || return 1
   elif [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     [ -d "$lockdir" ] && [ ! -L "$lockdir" ] || return 1
+    fm_lock_dir_creator_alive "$lockdir" && return 1
   fi
   actual_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$actual_pid" = "$expected_pid" ] || return 1
@@ -1044,6 +1138,10 @@ fm_recovery_marker_reopen_announced() {
 # reaper whose own election a trap interrupted resumes it from its tombstone.
 fm_lock_reap_dead_link() {
   local lockdir=$1 owner pid token tomb current
+  if [ -d "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_reap_dead_dir "$lockdir"
+    return
+  fi
   [ -L "$lockdir" ] || return 1
   owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || return 1
   fm_current_pid current || return 1
@@ -1070,6 +1168,49 @@ fm_lock_reap_dead_link() {
     rm -f "$lockdir" 2>/dev/null || true
   fi
   fm_lock_discard_owner "$tomb"
+}
+
+# The mkdir-lock counterpart of the tombstone election above. Renaming the dead
+# instance's unique owner token to this process's tombstone elects exactly one
+# reaper, and a successor directory at the same path has a different token, so
+# a reaper that verified an older instance can never win against it. A dead
+# reaper's tombstone is re-elected the same way. A directory with no token has
+# no identity yet or any more, and rmdir removes only an empty one, so it can
+# never take a successor that has already written its token. A non-empty one
+# (a copy left by the former Windows link fallback) is given a token named for
+# its dead pid, the same for every reaper, and goes through the election.
+fm_lock_reap_dead_dir() {  # <lockdir>
+  local lockdir=$1 entry token='' tomb pid current reaper
+  fm_current_pid current || return 1
+  for entry in "$lockdir"/owner.*; do
+    [ -f "$entry" ] && token=$entry
+  done
+  if [ -z "$token" ]; then
+    fm_lock_mid_acquire_is_fresh "$lockdir" "" && return 1
+    rmdir "$lockdir" 2>/dev/null && return 0
+    pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+    fm_lock_recheck_stale_owner "$lockdir" "" "$pid" || return 1
+    { : > "$lockdir/owner.$pid.legacy"; } 2>/dev/null || return 1
+    fm_lock_reap_dead_dir "$lockdir"
+    return
+  fi
+  case "$token" in
+    *.reaped.*)
+      reaper=${token##*.reaped.}
+      if [ "$reaper" != "$current" ] && fm_pid_alive "$reaper"; then
+        return 1
+      fi
+      ;;
+    *)
+      pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+      fm_lock_recheck_stale_owner "$lockdir" "" "$pid" || return 1
+      ;;
+  esac
+  tomb="${token%%.reaped.*}.reaped.$current"
+  if [ "$token" != "$tomb" ]; then
+    mv -- "$token" "$tomb" 2>/dev/null || return 1
+  fi
+  fm_lock_remove_dir "$lockdir"
 }
 
 # Acquire the short-lived steal mutex without recursively creating another
@@ -1191,10 +1332,20 @@ fm_lock_try_acquire() {
   return "$rc"
 }
 
+# Random jitter in [0.05, 0.15)s between retries. A fixed interval lets two
+# contenders that started their wait loops close together stay in lockstep,
+# each one's claim tripping the other's steal-mutex guard on every single
+# cycle - a real livelock observed under concurrent lock confirmations on
+# Windows, not merely slow contention. Jitter breaks the synchronization.
+fm_lock_retry_sleep() {
+  local ms=$(( (RANDOM % 100) + 50 ))
+  sleep "$(printf '0.%03d' "$ms")"
+}
+
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
-    sleep 0.1
+    fm_lock_retry_sleep
   done
 }
 
@@ -1207,7 +1358,7 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
   deadline=$((SECONDS + seconds))
   while ! fm_lock_try_acquire "$lockdir"; do
     [ "$SECONDS" -lt "$deadline" ] || return 1
-    sleep 0.1
+    fm_lock_retry_sleep
   done
 }
 
@@ -1315,8 +1466,7 @@ fm_lock_release() {
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$pid" = "$current" ] || return 0
-  fm_lock_clean_known_files "$lockdir"
-  rmdir "$lockdir" 2>/dev/null || true
+  fm_lock_remove_dir "$lockdir" || true
 }
 
 fm_meta_lock_path() {
