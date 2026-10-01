@@ -13,6 +13,7 @@
 #   fm-task-state.sh reconcile <task-id> --expected-revision N --record private.json
 #   fm-task-state.sh coordinate <task-id> --expected-revision N --record receipt.json
 #   fm-task-state.sh branch-patch <task-id> --expected-revision N --record patch.json
+#   fm-task-state.sh continuation-policy [--expected-revision N --record policy.json]
 #   fm-task-state.sh readback <task-id>
 #   fm-task-state.sh action <task-id> --action-id ID --phase PHASE [receipt flags]
 # Canonical schema and flags: bin/fm-task-lifecycle.py --help.
@@ -43,7 +44,21 @@ fi
 # The task-local goal owner is opt-in through enrollment, independent of the
 # provider/process state below. No historical task is enrolled by a state read.
 case "${1:-}" in
-  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|readback|modes)
+  continuation-policy)
+    shift
+    if [ "$#" -gt 0 ]; then
+      [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || { echo 'REFUSED: continuation policy belongs to MAIN' >&2; exit 6; }
+    fi
+    policy_home=${FM_HOME:?}
+    policy_data=${FM_DATA_OVERRIDE:-${DATA:-$policy_home/data}}
+    policy_state=${FM_STATE_OVERRIDE:-${STATE:-$policy_home/state}}
+    policy_config=${FM_CONFIG_OVERRIDE:-$policy_home/config}
+    FM_HOME="$policy_home" FM_DATA_OVERRIDE="$policy_data" \
+      FM_STATE_OVERRIDE="$policy_state" FM_CONFIG_OVERRIDE="$policy_config" \
+      python3 "$SCRIPT_DIR/fm-task-lifecycle.py" policy "$@"
+    exit $?
+    ;;
+  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|observe-receipt|readback|modes)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift

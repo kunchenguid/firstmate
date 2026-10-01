@@ -86,6 +86,81 @@ printf 'New artifact with an unfinished acceptance item\n' > "$FM_HOME/data/b/re
 test "$(wc -l < "$FM_HOME/state/.wake-queue")" -gt "$count"
 pass 'lost wake recovers through bounded existing scan; unchanged observations do not duplicate queue rows'
 
+# A supervision-branch routine report is an existing-owner receipt for the
+# exact lifecycle revision/evidence/generation it observed. It may retire that
+# wake presentation without a synthetic assessment revision; the open goal
+# itself stays due for the independent periodic continuation owner.
+ACK_HOME="$TMP_ROOT/unchanged-branch-ack"
+export FM_HOME="$ACK_HOME"
+mkdir -p "$FM_HOME/data/unchanged" "$FM_HOME/state"
+printf 'Continue this unchanged healthy goal\n' > "$FM_HOME/data/unchanged/brief.md"
+printf 'spawn_gen=ack-g1\nkind=scout\n' > "$FM_HOME/state/unchanged.meta"
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+python3 "$LIB" init unchanged >/dev/null
+# An exact lifecycle-bound result that predates this wake is deliberately
+# created in the same wall-clock second on fast fixtures. Sequence ordering,
+# not coarse timestamps, must keep it from acknowledging the later wake.
+FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task unchanged --verdict routine \
+  --summary 'Earlier exact observation must not cover a later wake.' >/dev/null
+"$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+unchanged_pending=$(grep -l '^task_id=unchanged$' "$FM_HOME/state/terminal-outcomes/"*.pending)
+unchanged_before=$(sha256sum "$FM_HOME/data/unchanged/lifecycle.json" | awk '{print $1}')
+unchanged_revision=$(jq -r .revision "$FM_HOME/data/unchanged/lifecycle.json")
+drain_output=$("$ROOT/bin/fm-wake-drain.sh" 2>&1)
+ack_args=$(printf '%s\n' "$drain_output" | sed -nE 's/.*--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+).*/\1 \2/p' | tail -1)
+read -r ack_seq ack_generation <<< "$ack_args"
+[ -n "$ack_seq" ] && [ -n "$ack_generation" ] \
+  || fail "unchanged lifecycle drain omitted acknowledgement command: $drain_output"
+if "$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" --recovery-generation "$ack_generation" >/dev/null 2>&1; then
+  fail 'unchanged lifecycle wake acknowledged from a receipt predating the wake'
+fi
+FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task unchanged --verdict routine \
+  --summary 'Exact unchanged goal remains under routine branch supervision.' >/dev/null
+"$ROOT/bin/fm-wake-drain.sh" --ack-through "$ack_seq" --recovery-generation "$ack_generation" >/dev/null
+test -f "${unchanged_pending%.pending}.presented" || fail 'exact branch outcome did not retire unchanged wake presentation'
+test "$unchanged_before" = "$(sha256sum "$FM_HOME/data/unchanged/lifecycle.json" | awk '{print $1}')" \
+  || fail 'unchanged branch acknowledgement fabricated lifecycle progress'
+test "$(jq -r .revision "$FM_HOME/data/unchanged/lifecycle.json")" = "$unchanged_revision" \
+  || fail 'unchanged branch acknowledgement advanced the goal revision'
+"$CLI" lifecycle unchanged | jq -e '.disposition=="open" and .assessment.remaining_gap!=""' >/dev/null \
+  || fail 'unchanged branch acknowledgement lost the open goal obligation'
+pass 'exact routine branch outcome acknowledges an unchanged wake without fabricated goal progress'
+
+# The prior receipt is generation/goal-state exact. A real intent edit creates
+# a new lifecycle revision that the old report cannot acknowledge.
+cp "$FM_HOME/data/unchanged/lifecycle.json" "$TMP_ROOT/unchanged-update.json"
+printf 'Continue the updated goal and retain its unfinished proof\n' > "$FM_HOME/data/unchanged/brief.md"
+printf 'Authorized goal update\n' > "$FM_HOME/data/unchanged/update-authority.md"
+updated_brief_sha=$(sha256sum "$FM_HOME/data/unchanged/brief.md" | awk '{print $1}')
+update_authority_sha=$(sha256sum "$FM_HOME/data/unchanged/update-authority.md" | awk '{print $1}')
+jq --arg brief "$updated_brief_sha" --arg authority "$FM_HOME/data/unchanged/update-authority.md" \
+  --arg authority_sha "$update_authority_sha" \
+  '.goal_revision += 1 | .brief_sha256=$brief |
+   .assessment.outcome="Updated goal is still active" |
+   .assessment.remaining_gap="Updated proof remains outstanding" |
+   .assessment.authority_ref=$authority |
+   .assessment.evidence=[{ref:$authority,sha256:$authority_sha}]' \
+  "$TMP_ROOT/unchanged-update.json" > "$TMP_ROOT/unchanged-update-next.json"
+chmod 600 "$TMP_ROOT/unchanged-update-next.json"
+"$CLI" reconcile unchanged --expected-revision "$unchanged_revision" --record "$TMP_ROOT/unchanged-update-next.json" >/dev/null
+"$ROOT/bin/fm-inactive-reconcile.sh" scan --startup >/dev/null
+updated_pending=$(grep -l '^task_id=unchanged$' "$FM_HOME/state/terminal-outcomes/"*.pending)
+updated_drain=$("$ROOT/bin/fm-wake-drain.sh" 2>&1)
+updated_args=$(printf '%s\n' "$updated_drain" | sed -nE 's/.*--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+).*/\1 \2/p' | tail -1)
+read -r updated_seq updated_generation <<< "$updated_args"
+if "$ROOT/bin/fm-wake-drain.sh" --ack-through "$updated_seq" --recovery-generation "$updated_generation" >/dev/null 2>&1; then
+  fail 'old branch outcome acknowledged a materially updated goal'
+fi
+FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task unchanged --verdict routine \
+  --summary 'Updated goal remains under routine branch supervision.' >/dev/null
+"$ROOT/bin/fm-wake-drain.sh" --ack-through "$updated_seq" --recovery-generation "$updated_generation" >/dev/null
+test -f "${updated_pending%.pending}.presented" || fail 'updated goal lacked its own exact branch outcome receipt'
+"$CLI" lifecycle unchanged | jq -e '.goal_revision==2 and .disposition=="open" and .assessment.remaining_gap!=""' >/dev/null \
+  || fail 'updated-goal acknowledgement changed its semantic obligation'
+pass 'old no-change receipt cannot cross a material goal update'
+
+export FM_HOME="$TMP_ROOT/home"
+
 # Repeating an outcome reuses its original delivery sequence, including while
 # it is still unprocessed by main. No pending captain outcome is discarded.
 OUTCOME="$ROOT/bin/fm-branch-outcome.sh"

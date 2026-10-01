@@ -10,9 +10,15 @@ export default function(pi) {
   log({event:'provider',branch,last:last.slice(0,1500)});
   const stream=createAssistantMessageEventStream();const output={role:'assistant',content:[],api:model.api,provider:model.provider,model:model.id,usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}},stopReason:'stop',timestamp:Date.now()};
   setTimeout(()=>{
-   if ((branch || last.includes('Live task continuation obligations')) && context.messages.at(-1)?.role !== 'toolResult') {
-    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'bash',arguments:{command:`python3 '${root}/tests/delegation-host-precheck.py' ${branch?'':'--main'}`,timeout:20}});log({event:'tool',branch,name:'bash'});
-   } else if (branch && context.messages.at(-1)?.toolName === 'bash') {
+   if (branch && context.messages.at(-1)?.role !== 'toolResult') {
+    const message=context.messages.findLast(m=>JSON.stringify(m.content).includes('FIRSTMATE TASK CONTINUATION:'));
+    const text=typeof message?.content==='string'?message.content:message?.content?.filter(x=>x.type==='text').map(x=>x.text).join('')||'';
+    const admitted=JSON.parse(text.slice(text.lastIndexOf('\n{')+1));
+    const patch={delegation_revision:admitted.delegation.revision,precheck:{delegation_revision:admitted.delegation.revision,basis_key:admitted.observation.basis_key,conclusion:'needs-evidence',checks:[{criterion:'brief: progress evidence',result:'missing',evidence:[]}],summary:'Current brief read; final evidence still belongs to MAIN assessment.'}};
+    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'fm_task_continuation',arguments:{action:'patch',task:'routine',expected_revision:admitted.revision,patch_json:JSON.stringify(patch)}});log({event:'tool',branch,name:'fm_task_continuation'});
+   } else if (!branch && last.includes('Live task continuation obligations') && context.messages.at(-1)?.role !== 'toolResult') {
+    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'bash',arguments:{command:`python3 '${root}/tests/delegation-host-precheck.py' --main`,timeout:20}});log({event:'tool',branch,name:'bash'});
+   } else if (branch && context.messages.at(-1)?.toolName === 'fm_task_continuation') {
     output.stopReason='toolUse'; output.content.push({type:'toolCall',id:'report-'+Date.now(),name:'fm_branch_report',arguments:{task:'routine',verdict:'routine',summary:'Bounded preliminary progress checked; final acceptance remains MAIN-owned.'}});log({event:'tool',branch,name:'fm_branch_report'});
    }
    else output.content.push({type:'text',text:'fixture complete'});
@@ -26,8 +32,9 @@ export default function(pi) {
   function run(...args){const p=spawnSync('bash',[root+'/bin/fm-task-state.sh',...args],{encoding:'utf8'});if(p.status!==0)throw Error(p.stderr);return JSON.parse(p.stdout);}
   const r=run('enroll',task);
   if(process.env.FM_HOST_VARIANT==='after'){
-   r.schema='fm-task-lifecycle.v2';r.precheck=null;r.delegation={revision:1,issuer:'main',authority_ref:'data/routine/brief.md',authority_sha256:createHash('sha256').update(readFileSync(home+'/data/routine/brief.md')).digest('hex'),allowed:['inspect','precheck','observe-receipt'],edges:[],expires_at:'2099-01-01T00:00:00Z',revoked:false};
-   writeFileSync(home+'/data/proposal.json',JSON.stringify(r),{mode:0o600});run('reconcile',task,'--expected-revision',String(r.revision),'--record',home+'/data/proposal.json');
+   writeFileSync(home+'/data/routine-policy-authority.md','Standing routine continuation authority for this isolated fixture.\n');
+   const policy={schema:'fm-task-continuation-policy.v1',revision:0,issuer:'main',enabled:true,authority_ref:'data/routine-policy-authority.md',authority_sha256:createHash('sha256').update(readFileSync(home+'/data/routine-policy-authority.md')).digest('hex'),allowed:['inspect','precheck','steer-same-intent','observe-receipt'],expires_at:'2099-01-01T00:00:00Z'};
+   writeFileSync(home+'/data/policy.json',JSON.stringify(policy),{mode:0o600});run('continuation-policy','--expected-revision','0','--record',home+'/data/policy.json');
   }
   pi.sendMessage({customType:'fixture-seed',content:'Fixture seed for same input comparison',display:false},{triggerTurn:true});
  }});

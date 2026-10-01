@@ -34,7 +34,7 @@ When ordinary dispatch has no prepared lifecycle action, observation can still p
 A synthetic launch busy marker cannot supply that proof, and observation never creates an action or accepts the goal.
 
 Save the semantic assessment and any prepared action before acknowledging its wake.
-An open-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances.
+An open-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances, except when the existing branch outcome owner has durably recorded a routine result after the wake for that exact unchanged lifecycle revision, assessment evidence key and execution generation. That narrow receipt retires presentation only: it does not rewrite the lifecycle, close the goal, reset continuation pacing or satisfy an unresolved action.
 For terminal work, the scan binds the current retained resource and release facts; acknowledging that exact observation does not require a new semantic assessment.
 A historical inactive-goal wake recorded with unknown lifecycle state refuses acknowledgement while the current lifecycle remains unreadable; after repair makes the exact current lifecycle readable, acknowledgement retires only that historical presentation and leaves the current goal, pending effect and newer current wake unchanged.
 A lease refusal therefore cannot consume the task's only recovery trigger.
@@ -61,6 +61,28 @@ An uncertain effect must be read back before it can be replaced.
 A refused effect cannot reset its budget by preparing the same kind and payload under another action id in the same goal revision.
 Choose a materially different authorized diagnostic or record the exact missing decision, authority or external change.
 No monitoring default authorizes additional model spend, query spend, merging, file disposal or security changes.
+
+## Routine branch ownership
+
+`fm-task-state.sh continuation-policy` is the existing lifecycle owner's home-scoped grant for routine Pi supervision.
+The policy is explicit MAIN authority, stored in `config/task-continuation-policy.json`, and binds its authority file bytes, revision, expiry and only `inspect`, `precheck`, `steer-same-intent` and `observe-receipt` permissions.
+It is not another task record, queue or clock: the ordinary continuation scan still discovers enrolled tasks, and refresh only materializes a policy-origin v2 grant onto an assigned open task.
+Explicit task grants and handoff edges are not replaced by policy.
+
+Every delegated operation rechecks the current policy digest and the exact task, goal revision, brief hash, execution generation, delegation revision and supervision generation.
+Disabling, expiring or replacing policy therefore fences stale effects immediately.
+A new policy revision can renew its own prior task grant only when no prepared, attempted or uncertain action would cross the authority boundary.
+Missing or unreadable policy, ambiguous execution identity, and parked or paused executors fail closed; none is automatically resumed.
+
+The branch admission already carries the canonical refreshed observation and its semantic fingerprint.
+Routine no-change reads, healthy execution, an unchanged evidenced dependency and an already handled instruction require no extra model-driven continuation call.
+Existing effect owners persist exact send/handoff receipts, so the branch invokes its restricted native continuation surface only for a material precheck or next-action delta, exact handled-receipt recovery, or uncertain-effect readback.
+Repeated observations return a compact `change: none` projection; material transitions return the affected revision/action or precheck projection.
+MAIN still owns intent edits, semantic assessment and acceptance, dispatch, policy mutation, archive/stop, permission and security decisions, merge and cleanup.
+
+A prepared unattempted steer may bind an instruction handled before preparation only through `observe-receipt`.
+The referenced file must be the same task's exact handled inbox message, use the inbox schema, match the payload bytes and execution generation, and have provider-aware working, done or failed activity evidence.
+The owner confirms that receipt with zero attempts; it does not fabricate an effect, accept the goal or discard a later remaining gap.
 
 ## Stops, older records and delivery
 

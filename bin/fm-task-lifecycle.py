@@ -100,6 +100,7 @@ Absent => legacy; invalid/changed brief/execution generation => unknown.
 Semantic disposition is independent of provider/process state and cleanup.
 Usage via fm-task-state.sh:
   lifecycle ID
+  continuation-policy [--expected-revision N --record private.json]
   branch-patch ID --expected-revision N --record private.json
   readback ID
 v2 is an explicit reconcile upgrade preserving v1 fields and coordination.
@@ -107,6 +108,10 @@ MAIN issues delegation {revision,issuer:"main",authority_ref,authority_sha256,
 allowed,edges,expires_at,revoked}; each change advances its revision once and
 clears precheck. Revoke before changing goal/brief/execution. No downgrade.
 Allowed actions: inspect, precheck, steer-same-intent, observe-receipt, handoff.
+The home routine policy is MAIN-issued, authority-byte-bound and restricted to
+the first four permissions above. refresh materializes it as an exact grant only
+for assigned open tasks; every branch operation rechecks its revision/digest and
+expiry. A changed policy renews only safely terminal policy-origin work.
 Each edge binds target, goal_revision, execution_generation, authority_ref/hash
 and scope (maximum 16). Parent lifecycle binds the source identity.
 Branch patch accepts only delegation_revision, precheck and next_action.
@@ -122,6 +127,12 @@ closed on unknown data or unclassified input. No store mirrors that authority.
 Actual send/handoff owners use private effect/bind-inbox/handoff-effect calls
 inside lease/meta critical sections; callers must not pre-mark attempted.
 readback can recover the stable action inbox receipt without re-enqueueing it.
+observe-receipt can bind an already handled, exact-body instruction to a
+prepared steer without fabricating an attempt; it confirms receipt only and
+never goal completion.
+Admission already includes refresh/observe output. Existing effect owners retain
+receipts automatically, so branch models need no native bookkeeping call after
+each action or for an unchanged healthy wait.
 The first version delegates no interrupt/exit/relaunch. Escalate exact recovery
 requests to MAIN through the existing control owner and its transaction receipt.
   reconcile ID --expected-revision N --record private.json
@@ -135,6 +146,7 @@ No operation executes a payload, launches a worker or contacts a provider.
 import argparse
 import copy
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -149,6 +161,8 @@ import subprocess
 SCHEMA = 'fm-task-lifecycle.v1'
 DELEGATED_SCHEMA = 'fm-task-lifecycle.v2'
 PERMISSIONS = {'inspect', 'precheck', 'steer-same-intent', 'observe-receipt', 'handoff'}
+ROUTINE_PERMISSIONS = {'inspect', 'precheck', 'steer-same-intent', 'observe-receipt'}
+POLICY_SCHEMA = 'fm-task-continuation-policy.v1'
 MAX_BYTES = 262144
 MAX_INT = 9007199254740991
 KINDS = {'steer', 'relaunch', 'spawn', 'readback', 'wait', 'decision', 'cleanup', 'remote-followup'}
@@ -162,6 +176,10 @@ SESSION_INDEX_ENTRIES = 50000
 
 class Refusal(Exception):
     pass
+
+
+class TerminalHandoffRefusal(Refusal):
+    """An exact bound handoff can never run because its source is terminal."""
 
 
 def require(ok, reason):
@@ -378,6 +396,113 @@ def native_session(path, index_directory, selected_entry=None, input_id=None):
 
 def load(path):
     return json.loads(regular(path, True), object_pairs_hook=unique_object)
+
+
+class ContinuationPolicy:
+    """Home-scoped authority that materializes exact task-local grants.
+
+    This is policy, not a second lifecycle or scheduler.  Every effect still
+    rechecks the task's v2 delegation and this policy revision through the
+    canonical task owner.
+    """
+    def __init__(self):
+        require(bool(os.environ.get('FM_HOME')), 'FM_HOME must be explicit')
+        self.home = Path(os.environ['FM_HOME']).resolve(strict=True)
+        data = Path(os.environ.get('FM_DATA_OVERRIDE', self.home / 'data'))
+        state = Path(os.environ.get('FM_STATE_OVERRIDE', self.home / 'state'))
+        config = Path(os.environ.get('FM_CONFIG_OVERRIDE', self.home / 'config'))
+        require(not data.is_symlink() and not state.is_symlink() and not config.is_symlink(),
+                'unsafe continuation policy directory')
+        self.data = data.resolve(strict=True)
+        self.state = state.resolve(strict=True)
+        self.config = config.resolve(strict=True) if config.exists() else config.absolute()
+        self.path = self.config / 'task-continuation-policy.json'
+        self.lock = self.state / '.task-continuation-policy.lock'
+
+    def reference(self, ref, sha=None):
+        require(text(ref, 4096), 'missing policy authority reference')
+        path = Path(ref)
+        if not path.is_absolute():
+            path = self.home / path
+        require(not path.is_symlink(), 'symlink policy authority')
+        resolved = path.resolve(strict=True)
+        require(resolved.is_relative_to(self.data) or resolved.is_relative_to(self.state),
+                'policy authority outside this home data/state')
+        raw = regular(path)
+        if sha is not None:
+            require(sha == digest(raw), 'policy authority digest changed: ' + ref)
+        return raw
+
+    def validate(self, record):
+        require(isinstance(record, dict) and set(record) == {
+            'schema', 'revision', 'issuer', 'enabled', 'authority_ref',
+            'authority_sha256', 'allowed', 'expires_at'}, 'invalid continuation policy fields')
+        require(record['schema'] == POLICY_SCHEMA and integer(record['revision'], 1),
+                'invalid continuation policy identity')
+        require(record['issuer'] == 'main' and type(record['enabled']) is bool,
+                'continuation policy belongs to MAIN')
+        require(text(record['authority_ref'], 4096) and
+                re.fullmatch('[a-f0-9]{64}', str(record['authority_sha256'])),
+                'invalid continuation policy authority')
+        allowed = record['allowed']
+        require(isinstance(allowed, list) and allowed and
+                all(isinstance(item, str) and item in ROUTINE_PERMISSIONS for item in allowed) and
+                len(allowed) == len(set(allowed)), 'invalid routine continuation permissions')
+        stamp(record['expires_at'])
+        self.reference(record['authority_ref'], record['authority_sha256'])
+        return record
+
+    def read_with_digest(self):
+        if not self.path.exists() and not self.path.is_symlink():
+            return None, None
+        raw = regular(self.path, True)
+        record = self.validate(json.loads(raw, object_pairs_hook=unique_object))
+        return record, digest(raw)
+
+    def read(self):
+        record, _ = self.read_with_digest()
+        return record
+
+    def update(self, args):
+        require(os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'main',
+                'continuation policy belongs to MAIN')
+        require(args.record and integer(args.expected_revision),
+                'policy update needs expected revision and record')
+        self.config.mkdir(mode=0o700, parents=True, exist_ok=True)
+        require(not self.config.is_symlink(), 'unsafe continuation policy directory')
+        fd = os.open(self.lock, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        try:
+            st = os.fstat(fd)
+            require(stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid(),
+                    'unsafe continuation policy lock')
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            prior, _ = self.read_with_digest()
+            require(args.expected_revision == (prior['revision'] if prior else 0),
+                    'continuation policy revision conflict')
+            candidate = load(Path(args.record))
+            candidate['revision'] = args.expected_revision + 1
+            self.validate(candidate)
+            if prior:
+                require(candidate['enabled'] is False or prior['enabled'] is False or candidate == prior,
+                        'revoke the current continuation policy before replacing it')
+            raw = (json.dumps(candidate, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
+            temporary_fd, temporary = tempfile.mkstemp(prefix='.task-continuation-policy.', dir=self.config)
+            try:
+                with os.fdopen(temporary_fd, 'wb') as stream:
+                    stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, self.path)
+                directory_fd = os.open(self.config, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            return candidate
+        finally:
+            os.close(fd)
 
 
 def complete_cleanup_facts(facts):
@@ -678,14 +803,21 @@ class Task:
             require(grant is None and precheck is None, 'delegation requires explicit v2 upgrade')
             return
         if grant is not None:
-            require(isinstance(grant, dict) and set(grant) == {
+            require(isinstance(grant, dict) and set(grant) in ({
                 'revision', 'issuer', 'authority_ref', 'authority_sha256', 'allowed',
-                'edges', 'expires_at', 'revoked'}, 'invalid delegation fields')
+                'edges', 'expires_at', 'revoked'}, {
+                'revision', 'issuer', 'authority_ref', 'authority_sha256', 'allowed',
+                'edges', 'expires_at', 'revoked', 'policy_revision', 'policy_sha256'}),
+                'invalid delegation fields')
             require(integer(grant['revision'], 1) and grant['issuer'] == 'main' and type(grant['revoked']) is bool, 'invalid delegation issuer/revision')
             require(text(grant['authority_ref'], 4096) and re.fullmatch('[a-f0-9]{64}', str(grant['authority_sha256'])), 'invalid delegation authority')
             allowed = grant['allowed']
             require(isinstance(allowed, list) and all(isinstance(x, str) and x in PERMISSIONS for x in allowed) and len(set(allowed)) == len(allowed), 'invalid delegation permissions')
             stamp(grant['expires_at'])
+            if 'policy_revision' in grant:
+                require(integer(grant['policy_revision'], 1) and
+                        re.fullmatch('[a-f0-9]{64}', str(grant['policy_sha256'])),
+                        'invalid continuation policy binding')
             require(isinstance(grant['edges'], list) and len(grant['edges']) <= 16, 'invalid dependency edges')
             for edge in grant['edges']:
                 require(isinstance(edge, dict) and set(edge) == {'target', 'goal_revision', 'execution_generation', 'authority_ref', 'authority_sha256', 'scope'}, 'invalid dependency edge')
@@ -716,6 +848,17 @@ class Task:
         require(revision is None or revision == grant['revision'], 'delegation revision conflict')
         require(permission in grant['allowed'], 'action outside delegation')
         self.reference(grant['authority_ref'], grant['authority_sha256'])
+        if 'policy_revision' in grant:
+            policy, policy_sha = ContinuationPolicy().read_with_digest()
+            require(policy and policy['enabled'] and stamp(policy['expires_at']) > stamp(now()),
+                    'routine continuation policy revoked or expired')
+            require(policy['revision'] == grant['policy_revision'] and policy_sha == grant['policy_sha256'],
+                    'routine continuation policy changed')
+            require(grant['allowed'] == policy['allowed'] and
+                    grant['authority_ref'] == policy['authority_ref'] and
+                    grant['authority_sha256'] == policy['authority_sha256'] and
+                    grant['expires_at'] == policy['expires_at'],
+                    'task delegation no longer matches routine policy')
         if os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
             pid = os.environ.get('FM_LEASE_HOLDER_PID', '')
             require(pid.isdigit() and int(pid) > 1 and regular(self.state / '.lock').decode().strip() == pid, 'branch no longer owns the home generation')
@@ -727,8 +870,46 @@ class Task:
                                 'execution_generation': record['execution_generation'], 'delegation_revision': grant['revision']},
                     'task intent/delegation changed since branch admission')
         if effect and os.environ.get('FM_SUPERVISION_ACTOR', 'main') == 'branch':
+            current = subprocess.run([str(Path(__file__).with_name('fm-task-state.sh')), self.id],
+                                     text=True, capture_output=True, timeout=3, check=False)
+            match = re.search(r'(?:^|\n)state: ([a-z-]+)', current.stdout)
+            require(current.returncode == 0 and match and match[1] not in ('parked', 'paused', 'unknown'),
+                    'executor state does not permit delegated effects')
             self.input_barrier(os.environ.get('FM_BRANCH_MAIN_SESSION_FILE', ''))
         return grant
+
+    def apply_routine_policy(self, record):
+        """Materialize a standing policy as an exact task/goal/execution grant."""
+        if record['disposition'] != 'open' or record['execution_generation'] == 'unassigned-g1':
+            return record
+        policy, policy_sha = ContinuationPolicy().read_with_digest()
+        if not policy or not policy['enabled'] or stamp(policy['expires_at']) <= stamp(now()):
+            return record
+        grant = record.get('delegation')
+        if grant and 'policy_revision' not in grant:
+            return record
+        if grant and grant.get('policy_revision') == policy['revision'] and grant.get('policy_sha256') == policy_sha:
+            return record
+        action = record.get('next_action')
+        # A policy replacement is already a durable revocation of the old
+        # policy-bound grant.  Renew its exact task binding only when no effect
+        # remains unresolved; prepared/attempted/uncertain work stays stale for
+        # MAIN reconciliation instead of being silently carried across grants.
+        if action and action['phase'] not in ('confirmed', 'refused'):
+            return record
+        record['schema'] = DELEGATED_SCHEMA
+        record['delegation'] = {
+            'revision': grant['revision'] + 1 if grant else 1, 'issuer': 'main',
+            'authority_ref': policy['authority_ref'],
+            'authority_sha256': policy['authority_sha256'],
+            'allowed': policy['allowed'], 'edges': [],
+            'expires_at': policy['expires_at'], 'revoked': False,
+            'policy_revision': policy['revision'], 'policy_sha256': policy_sha,
+        }
+        record['precheck'] = None
+        record['revision'] += 1
+        self.write(record)
+        return record
 
     def input_barrier(self, session_file):
         # Read original input receipts again at effect time. An environment
@@ -813,7 +994,11 @@ class Task:
         record = self.read()
         target = Task(args.target).read()
         for name, actual in (('source', record), ('target', target)):
-            require(actual and actual['disposition'] == 'open' and all(actual.get(k) == v for k, v in binding[name].items()), 'handoff task identity changed')
+            require(actual and all(actual.get(k) == v for k, v in binding[name].items()), 'handoff task identity changed')
+        if record['disposition'] in ('accepted', 'archived'):
+            raise TerminalHandoffRefusal(
+                f"bound source '{self.id}' is terminal ({record['disposition']}); the original handoff cannot be retried")
+        require(record['disposition'] == 'open' and target['disposition'] == 'open', 'handoff task identity changed')
         self.delegated(record, 'handoff', binding['delegation_revision'], effect=True)
         if binding.get('input_session'):
             self.input_barrier(binding['input_session'])
@@ -876,6 +1061,48 @@ class Task:
         action['continuation'] = {'type': 'executor', 'task_id': self.id, 'execution_generation': record['execution_generation'], 'inbox_id': path.stem, 'sha256': digest(raw)}
         action['receipt_ref'] = args.receipt_ref
         action['receipt_sha256'] = digest(raw)
+        record['revision'] += 1
+        self.write(record)
+        return record
+
+    def observe_receipt(self, args):
+        """Confirm a prepared steer from an exact pre-existing handled receipt."""
+        record = self.read()
+        self.delegated(record, 'observe-receipt')
+        action = record.get('next_action')
+        require(action and action['id'] == args.action_id and action['kind'] == 'steer' and
+                action['phase'] == 'prepared' and action['attempts'] == 0,
+                'receipt observation requires the exact unattempted prepared steer')
+        require(args.receipt_ref, 'receipt observation needs an exact handled inbox path')
+        path = Path(args.receipt_ref)
+        if not path.is_absolute():
+            path = self.home / path
+        handled = self.state / (self.id + '.inbox') / 'handled'
+        require(path.parent.resolve(strict=True) == handled.resolve(strict=True) and
+                re.fullmatch(r'[0-9]+\.msg', path.name), 'receipt is not this task handled inbox message')
+        raw = self.reference(str(path))
+        header, sep, body = raw.partition(b'--\n')
+        fields = {}
+        for line in header.decode().splitlines():
+            key, separator, value = line.partition('=')
+            require(separator and key not in fields, 'invalid handled inbox receipt')
+            fields[key] = value
+        require(sep and set(fields) <= {'schema', 'at', 'delivery', 'handoff'} and
+                fields.get('schema') == 'fm-task-inbox.v1' and stamp(fields.get('at')) and
+                fields.get('delivery') in (None, 'fire-and-forget') and
+                (fields.get('handoff') is None or atom(fields['handoff'])),
+                'invalid handled inbox receipt')
+        require(digest(body) == action['payload_sha256'], 'handled instruction body differs from prepared action')
+        current = subprocess.run([str(Path(__file__).with_name('fm-task-state.sh')), self.id],
+                                 text=True, capture_output=True, timeout=3, check=False)
+        match = re.search(r'(?:^|\n)state: ([a-z-]+)', current.stdout)
+        require(current.returncode == 0 and match and match[1] in ('working', 'done', 'failed'),
+                'handled instruction lacks actual executor activity readback')
+        action['continuation'] = {'type': 'executor', 'task_id': self.id,
+            'execution_generation': record['execution_generation'], 'inbox_id': path.stem,
+            'sha256': digest(raw)}
+        action['receipt_ref'], action['receipt_sha256'] = str(path), digest(raw)
+        action['phase'] = 'confirmed'
         record['revision'] += 1
         self.write(record)
         return record
@@ -1309,6 +1536,7 @@ class Task:
         record = self.read()
         if record is None:
             return self.summary(record)
+        record = self.apply_routine_policy(record)
         action = record.get('next_action')
         if action and action['phase'] in ('attempted', 'uncertain'):
             if not action.get('continuation') and action['kind'] == 'steer':
@@ -1546,6 +1774,8 @@ class Task:
         match = re.search(r'(?:^|\n)state: ([a-z-]+)', result.stdout)
         require(match is not None, 'executor state unreadable')
         if match[1] != 'working':
+            if match[1] in ('parked', 'paused'):
+                return 'blocked', 'executor is deliberately ' + match[1] + '; MAIN authority is required to resume it'
             return 'pending', 'executor receipt exists but current state is ' + match[1]
         if continuation.get('brief_sha256'):
             if not re.search(r'harness busy \((?:pi-ext|codex-transcript|traex-transcript)\)', result.stdout):
@@ -2125,13 +2355,13 @@ class Task:
             'next_action': None, 'next_action_seq': 1,
         }
         self.write(result)
-        return result
+        return self.apply_routine_policy(result)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-inspect', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
-    parser.add_argument('task')
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'observe-receipt', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'policy', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-inspect', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('task', nargs='?')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
     parser.add_argument('--action-id')
@@ -2152,6 +2382,12 @@ def main():
     parser.add_argument('--expected-generation')
     args = parser.parse_args()
     try:
+        if args.operation == 'policy':
+            policy = ContinuationPolicy()
+            result = policy.update(args) if args.record else policy.read()
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return
+        require(args.task is not None, 'task id required')
         if args.operation == 'modes':
             require(args.task is not None and len(args.task.encode()) <= MAX_BYTES, 'invalid task batch size')
             tasks = json.loads(args.task)
@@ -2194,6 +2430,8 @@ def main():
             result = task.handoff_effect(args)
         elif args.operation == 'bind-inbox':
             result = task.bind_inbox(args)
+        elif args.operation == 'observe-receipt':
+            result = task.observe_receipt(args)
         elif args.operation == 'effect':
             result = task.effect(args)
         elif args.operation == 'action':
@@ -2233,6 +2471,9 @@ def main():
                 print(json.dumps(task.due(result)))
                 return
         print(json.dumps(result, ensure_ascii=False))
+    except TerminalHandoffRefusal as error:
+        print('REFUSED: lifecycle: ' + str(error), file=sys.stderr)
+        sys.exit(7)
     except (Refusal, OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
         if args.operation == 'mode':
             # Homes without this task data predate the optional lifecycle record.

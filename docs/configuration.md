@@ -214,6 +214,25 @@ The branch prompt's "Verdict: routine or captain" section owns the distinction b
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
 
+### Routine continuation policy (config/task-continuation-policy.json)
+
+`config/task-continuation-policy.json` is the optional, home-local MAIN authority for letting the existing Pi supervision branch inspect and maintain eligible current and future task continuations without enrolling every routine wake individually. It is policy only: `data/<task>/lifecycle.json` remains the single task lifecycle record, and the existing wake, lease, inbox, handoff, and effect owners remain unchanged.
+
+The file is absent by default. Its exact schema is `fm-task-continuation-policy.v1` with fields `schema`, monotonic integer `revision`, `issuer` equal to `main`, boolean `enabled`, `authority_ref`, `authority_sha256`, non-empty unique `allowed`, and ISO-8601 `expires_at`. `allowed` is restricted to `inspect`, `precheck`, `steer-same-intent`, and `observe-receipt`; it cannot grant handoff, process control, spawn, acceptance, archive, merge, cleanup, or shared-service authority. The authority reference must resolve to a current-user-owned, single-linked bounded regular file beneath this home's `data/` or `state/`, and its SHA-256 must match. The policy file itself must be a current-user-owned, single-linked regular file with mode `0600`; the config and lock paths reject symlinks or unsafe ownership.
+
+MAIN performs the one-time activation through the public owner, never by writing the live policy file directly:
+
+```sh
+FM_HOME=/path/to/home bin/fm-task-state.sh continuation-policy \
+  --expected-revision 0 --record /path/to/private-policy-candidate.json
+```
+
+Read the current policy with the same command and no update flags. Every change is CAS-bound to the current revision. Replacing one enabled policy with another is refused: first write the next revision with `enabled=false`, then write the replacement from that disabled revision. Setting `enabled=false` is the immediate rollback; it revokes delegated effects at their next owner check without deleting lifecycle evidence or reactivating archived, parked, paused, stopped, unassigned, or identity-ambiguous work. Expiry has the same fail-closed effect.
+
+On task refresh, an enabled policy materializes an exact policy-origin v2 grant only for a readable assigned open goal. That grant binds the task, goal revision, brief digest, execution generation, policy revision and policy-file digest. Every branch operation rechecks those bindings and the live policy bytes at effect time. A changed policy renews an existing policy-origin grant only when no prepared, attempted, or uncertain action crosses the boundary; unresolved effects stay stale for MAIN readback. An explicit task-local grant remains independent and is never overwritten by the home policy.
+
+The installed extension and canonical branch prompt are loaded at normal Pi session start. Activating the policy authorizes eligible records, but an already-running primary/branch process does not load newly installed code; complete a normal session reload before expecting this feature to operate. Rollback does not require a reload because every effect reads the current policy through the canonical owner.
+
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
 Supervision is an easier job than the captain's own conversation, so the branch can run on a cheaper model than main.
