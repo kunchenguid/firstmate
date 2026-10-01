@@ -588,6 +588,9 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
   Kept the office change.
   local office
+- [x] done-prose-local - Done Prose Local (repo: delta, done 2026-07-11) (kind: ship)
+  local office
+  The office sentence is ordinary prose.
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -709,6 +712,12 @@ EOF
       and .local_note == "local office"
       and .body_excerpt == "Kept the office change. local office"
   ' >/dev/null || fail "a local landing note beside other body text was dropped"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-prose-local")
+    | .title == "Done Prose Local"
+      and .local_note == null
+      and .body_excerpt == "local office The office sentence is ordinary prose."
+  ' >/dev/null || fail "ordinary prose containing local office was treated as a landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -730,6 +739,8 @@ EOF
     "view should render the named local landing note body"
   assert_contains "$view" "| done-body-note | Done Body Note | delta | ship | - | local office |" \
     "view should keep a local landing note when the completed row has other body text"
+  assert_contains "$view" "| done-prose-local | Done Prose Local | delta | ship | - | - |" \
+    "view should not render ordinary prose as a local landing note"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

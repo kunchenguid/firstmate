@@ -535,8 +535,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
               // (if .state == "done" and any(.body_lines[];
                     test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
                   then null
-                  elif .state == "done" then
-                    ([.body_lines[] | local_note(.) | select(. != null)] | last)
+                  elif .state == "done" then local_note(.body_lines[-1])
                   else null
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
