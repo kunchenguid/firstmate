@@ -1411,6 +1411,13 @@ fm_project_origin_identity() {  # <project-dir>
       path=${path#/}
       origin="https://$host/$path"
       ;;
+    ssh://*/* )
+      origin=${origin#ssh://}
+      host=${origin%%/*}
+      path=${origin#*/}
+      host=${host##*@}
+      origin="https://$host/$path"
+      ;;
     /*)
       if [ -d "$origin" ]; then
         origin=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 2

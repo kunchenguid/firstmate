@@ -578,7 +578,7 @@ test_promote_accepts_a_base_chosen_for_an_unbased_scout() {
 }
 
 test_reservations_cover_clones_of_one_origin() {
-  local home remote left right solo fakebin id out status
+  local home remote left right solo fakebin id out status left_lock right_lock
   home="$TMP_ROOT/origin-reserve/home"
   remote="$TMP_ROOT/origin-reserve/remote.git"
   left="$TMP_ROOT/origin-reserve/left"
@@ -635,11 +635,28 @@ test_reservations_cover_clones_of_one_origin() {
   assert_grep 'kind=scout' "$home/state/$id.meta" "cross-clone promotion collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "cross-clone promotion collision published ship instructions"
 
-  git -C "$left" remote set-url origin https://github.com/kunchenguid/firstmate
+  git -C "$left" remote set-url origin ssh://git@github.com/kunchenguid/firstmate.git
   git -C "$right" remote set-url origin git@github.com:kunchenguid/firstmate.git
   if ! FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$left" "$right"; then
-    fail "equivalent HTTPS and SSH origin URLs did not share a reservation"
+    fail "equivalent SSH and SCP origin URLs did not share a reservation"
+  fi
+  left_lock=$(FM_HOME="$home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$left") || fail "SSH origin lock path could not be resolved"
+  right_lock=$(FM_HOME="$home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$right") || fail "SCP origin lock path could not be resolved"
+  [ "$left_lock" = "$right_lock" ] || fail "equivalent SSH and SCP origin URLs used different project locks"
+
+  git -C "$right" remote set-url origin https://github.com/kunchenguid/firstmate
+  if ! FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$left" "$right"; then
+    fail "equivalent SSH and HTTPS origin URLs did not share a reservation"
+  fi
+
+  git -C "$left" remote set-url origin git@github.com:kunchenguid/firstmate
+  if ! FM_HOME="$home" bash -c '. "$1"; fm_project_reservations_overlap "$2" "$3"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$left" "$right"; then
+    fail "equivalent SCP and HTTPS origin URLs did not share a reservation"
   fi
   pass "named branch reservations cover every clone of one origin"
 }
