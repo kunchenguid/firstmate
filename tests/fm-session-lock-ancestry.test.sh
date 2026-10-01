@@ -65,6 +65,15 @@ test_bare_interpreter_harness_token_is_identified() {
     fm_harness_process_matches node "node /home/u/.local/lib/node_modules/bin/claude --resume" \
       && [ "$FM_HARNESS_IS_CLAUDE" = 1 ]' \
     || fail "a node process running a .../bin/claude script was not identified as the claude harness"
+  # Same path-component rule for the other bundled shape: node .../<harness>/cli.js.
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node /home/u/.local/lib/node_modules/@mariozechner/pi/cli.js --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process running a .../pi/cli.js script was not identified as a harness"
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node /home/u/.local/lib/node_modules/@anthropic-ai/claude/cli.js --resume" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 1 ]' \
+    || fail "a node process running a .../claude/cli.js script was not identified as the claude harness"
   if lib_eval "$FAKEBIN" 'fm_harness_process_matches node "node /opt/some-tool/index.js --port 8080"'; then
     fail "a node process running an unrelated script was identified as a harness"
   fi
