@@ -6,6 +6,30 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Gemini shell PTY capacity
+
+Verified on 2026-10-01 with Gemini CLI 0.62.0, Node v26.7.0, and macOS 26.5.2 (arm64).
+The canonical Darwin launch's `GEMINI_PTY_INFO=child_process` override reaches Gemini's real `getPty()` selector even when interactive shell execution is requested.
+The token-free guard executes the generated launch with an isolated driver that imports the installed Gemini core, proves the native backend is available with the override removed, and runs six successful commands with the override present.
+It uses no model, credential, real fleet endpoint, or operator configuration.
+Run:
+
+```sh
+bin/fm-test-run.sh tests/fm-gemini-shell-live-e2e.test.sh
+```
+
+Observed assertion output:
+
+```text
+ok - Gemini 0.62.0: launch override wins; 6 child_process commands; ptmx 0->0
+```
+
+The portable generated-launch regression in `tests/fm-busy-adapter-wiring.test.sh` verifies that Darwin workers receive the override and Linux workers keep their inherited shell behavior.
+The shared launch template applies before tmux, Herdr, zellij, orca, and cmux receive it; those backends' outer PTYs and all other harness templates are unchanged.
+Raw Gemini launches intentionally stay outside canonical wiring.
+The native environment switch is not a documented CLI flag, so the live guard fails explicitly on incompatible installed bundle exports or selector behavior rather than silently claiming support for another release.
+The operational limit and recovery boundary belong to the Gemini harness reference in `.agents/skills/harness-adapters/`.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

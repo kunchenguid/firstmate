@@ -20,6 +20,16 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Model | `-m` / `--model <model>`; discover through the interactive `/model` dialog. There is no `gemini models` subcommand, and the session's exit usage table also names the models actually used. |
 | Effort | None. `gemini --help` on 0.58.0 exposes no effort, reasoning, or thinking flag, so `references/common/model-and-effort.md`'s record-and-omit contract applies. `thinkingLevel` and `thinkingBudget` exist only as generation settings inside `settings.json` and are NOT a verified interactive axis. |
 
+## Shell PTY capacity on macOS
+
+The canonical Gemini launch uses `GEMINI_PTY_INFO=child_process` on Darwin to bypass the native shell PTY backend, whose completed commands can retain PTY masters until the agent exits.
+This is Gemini's own `getPty()` override, verified with Gemini CLI 0.62.0; it is an implementation-level compatibility surface rather than a documented CLI flag, so refresh the token-free guard in `../../../../../tests/fm-gemini-shell-live-e2e.test.sh` after upgrades.
+The agent's outer interactive pane remains available, but its shell tool uses pipes and cannot host interactive terminal programs.
+This applies across runtime backends at the canonical launch boundary; raw launches and non-Darwin workers keep their existing behavior.
+It changes no user or project settings and takes effect for new or normally relaunched workers, without releasing handles already retained by a live process.
+Use the guarded lifecycle for any existing worker recovery; never kill healthy workers merely to reclaim PTYs.
+Current verification is in `../../../../../docs/verification/runtime-backends.md` under "Gemini shell PTY capacity".
+
 ## Trust, and why the two documented options are not equivalent
 
 Every task worktree is a path Gemini has never seen, so an unhandled launch refuses outright:
