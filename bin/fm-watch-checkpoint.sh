@@ -16,6 +16,11 @@
 # "supervision-host:" line other than the park boundary passes through as a
 # wake; the boundary alone is the ordinary quiet checkpoint. On a home that
 # does not run the host nothing below changes.
+#
+# LEFTOVER AWAY DAEMON. Before the plain bounded watcher run, an away daemon
+# that still runs this home's watcher while state/.afk is absent outlived away
+# mode and would take every wake, so the checkpoint stops it and this home's
+# watcher (bin/fm-afk-daemon-lib.sh proves the ownership), or fails loudly.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -150,6 +155,24 @@ if fm_supervision_host_enabled "$CONFIG" codex; then
   fi
   [ "$RC" -ne 0 ] || RC=1
   exit "$RC"
+fi
+
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-afk-daemon-lib.sh
+. "$SCRIPT_DIR/fm-afk-daemon-lib.sh"
+if [ ! -e "$STATE/.afk" ] \
+  && DAEMON=$(fm_afk_daemon_watcher_owner "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$FM_HOME"); then
+  if ! SURVIVORS=$(fm_afk_daemon_stop "$DAEMON"); then
+    echo "checkpoint: leftover away daemon pid=${SURVIVORS//$'\n'/,} did not stop, so it still owns this home's watcher" >&2
+    exit 1
+  fi
+  if ! "$SCRIPT_DIR/fm-watch-arm.sh" --stop >"$OUT" 2>"$ERR"; then
+    [ ! -s "$OUT" ] || cat "$OUT"
+    [ ! -s "$ERR" ] || cat "$ERR" >&2
+    echo "checkpoint: could not stop the watcher of leftover away daemon pid=$DAEMON" >&2
+    exit 1
+  fi
 fi
 
 set +e

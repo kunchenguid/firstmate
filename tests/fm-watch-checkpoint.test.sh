@@ -196,8 +196,139 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
   pass "checkpoint: the real host ends its park at the checkpoint bound as a quiet checkpoint"
 }
 
+pid_running() {  # <pid>
+  local stat
+  kill -0 "$1" 2>/dev/null || return 1
+  stat=$(ps -p "$1" -o stat= 2>/dev/null || true)
+  case "$stat" in Z*) return 1 ;; esac
+}
+
+wait_until_gone() {  # <pid> <polls>
+  local i=0
+  while [ "$i" -lt "$2" ] && pid_running "$1"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! pid_running "$1"
+}
+
+# Acknowledge every queued wake through the attended drain.
+ack_wakes() {  # <home>
+  local err="$1/ack.err" sequence generation
+  FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2>"$err" || return 1
+  sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' "$err" | tail -1)
+  generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err" | tail -1)
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 0
+  FM_HOME="$1" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" --recovery-generation "$generation" >/dev/null 2>&1
+}
+
+# A stand-in for an away daemon from before the presence-gated exit: it runs
+# this home's real watcher as its child, then drains and acknowledges every
+# queued wake whatever state/.afk says. The watcher sees it only as its parent
+# process running fm-supervise-daemon.sh.
+LEFTOVER_PID=
+start_leftover_daemon() {  # <home>
+  local home=$1 i watcher
+  mkdir -p "$home/old-bin"
+  cat > "$home/old-bin/fm-supervise-daemon.sh" <<'SH'
+#!/usr/bin/env bash
+w=
+trap 'kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; exit 0' TERM
+end=$(( $(date +%s) + ${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120} ))
+while [ "$(date +%s)" -lt "$end" ]; do
+  "$FM_TEST_WATCH" >/dev/null 2>&1 &
+  w=$!
+  wait "$w"
+  err=$("$FM_TEST_DRAIN" 2>&1 >/dev/null)
+  seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*$/\1/p' | tail -1)
+  gen=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
+  [ -z "$seq" ] || [ -z "$gen" ] || "$FM_TEST_DRAIN" --ack-through "$seq" --recovery-generation "$gen" >/dev/null 2>&1
+  sleep 0.2
+done
+SH
+  chmod +x "$home/old-bin/fm-supervise-daemon.sh"
+  fm_test_track_watcher_state "$home/state"
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_TEST_WATCH="$ROOT/bin/fm-watch.sh" FM_TEST_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
+    "$home/old-bin/fm-supervise-daemon.sh" &
+  LEFTOVER_PID=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    watcher=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$watcher" ] && [ -e "$home/state/.last-watcher-beat" ] \
+      && [ "$(ps -o ppid= -p "$watcher" 2>/dev/null | tr -d ' ')" = "$LEFTOVER_PID" ]; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -TERM "$LEFTOVER_PID" 2>/dev/null || true
+  fail "the leftover daemon's watcher never took the lock"
+}
+
+test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
+  local home out old_watcher watcher drained status checkpoint i
+  home=$(make_home leftover-daemon)
+  out="$home/out.txt"
+  [ ! -e "$home/state/.afk" ] || fail "fixture must run with away mode off"
+  start_leftover_daemon "$home"
+  old_watcher=$(cat "$home/state/.watch.lock/pid")
+
+  # The fresh watcher may announce the gap the takeover left; the attended
+  # firstmate drains that wake and runs the checkpoint again.
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 5 >"$out" 2>"$home/checkpoint.err" || status=$?
+  case "$status" in 0|124) ;; *) fail "the takeover checkpoint failed ($status): $(cat "$out" "$home/checkpoint.err")" ;; esac
+  wait_until_gone "$LEFTOVER_PID" 50 || { kill -TERM "$LEFTOVER_PID" 2>/dev/null; fail "the leftover away daemon is still running after the checkpoint"; }
+  ! pid_running "$old_watcher" || fail "the leftover daemon's watcher is still running after the checkpoint"
+  ack_wakes "$home" || fail "the attended drain could not acknowledge the takeover wake"
+
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 20 >"$out" 2>"$home/checkpoint.err" &
+  checkpoint=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    watcher=$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)
+    [ -z "$watcher" ] || ! pid_running "$watcher" || break
+    pid_running "$checkpoint" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ "$(ps -o ppid= -p "$watcher" 2>/dev/null | tr -d ' ')" != "$LEFTOVER_PID" ] \
+    || fail "the home watcher still belongs to the leftover daemon"
+  sleep 1
+  printf 'done [at=%s]: PR https://example.test/pr/88 checks green\n' "$(date +%s)" >> "$home/state/task-w8.status"
+  status=0
+  wait "$checkpoint" || status=$?
+  expect_code 0 "$status" "checkpoint after the takeover: $(cat "$out" "$home/checkpoint.err")"
+  assert_contains "$(cat "$out")" "signal:" "the checkpoint did not report the done handoff"
+  drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh" 2>/dev/null)
+  assert_contains "$drained" "task-w8" "the attended drain does not show the done handoff"
+  pass "checkpoint: with away mode off, it stops a leftover away daemon and its watcher, and worker events reach the attended drain"
+}
+
+test_checkpoint_keeps_an_away_daemon_while_away_mode_is_on() {
+  local home out status
+  home=$(make_home away-daemon)
+  out="$home/out.txt"
+  date '+%s' > "$home/state/.afk"
+  start_leftover_daemon "$home"
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$CHECKPOINT" --seconds 2 >"$out" 2>"$home/checkpoint.err" || status=$?
+  expect_code 1 "$status" "checkpoint beside an away daemon"
+  assert_contains "$(cat "$home/checkpoint.err")" "outside this foreground checkpoint" "the checkpoint must report the away daemon's watcher"
+  pid_running "$LEFTOVER_PID" || fail "the checkpoint stopped an away daemon while away mode was on"
+  kill -TERM "$LEFTOVER_PID" 2>/dev/null || true
+  wait_until_gone "$LEFTOVER_PID" 50 || true
+  pass "checkpoint: while away mode is on, it leaves the away daemon and its watcher running"
+}
+
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
+test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon
+test_checkpoint_keeps_an_away_daemon_while_away_mode_is_on
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
 test_host_checkpoint_bounds_the_park_by_posture

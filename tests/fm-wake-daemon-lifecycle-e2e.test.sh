@@ -224,8 +224,6 @@ test_daemon_exits_when_away_mode_ends_and_worker_events_reach_the_attended_drain
   daemon_gone_within "$DAEMON_PID" 100 \
     || fail "the away daemon kept running after away mode ended"
   [ ! -e "$state/.supervise-daemon.pid" ] || fail "the exited daemon left its pid file"
-  [ -z "$(ls -A "$state/.supervise-daemon.instances" 2>/dev/null)" ] \
-    || fail "the exited daemon left its instance record"
 
   # A worker's done handoff, then the attended firstmate's own arm and drain.
   printf 'done [at=%s]: PR https://example.test/pr/77 checks green\n' "$(date +%s)" >> "$state/task-w7.status"

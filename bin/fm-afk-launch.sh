@@ -83,7 +83,8 @@
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM every live daemon of
-#                              this home, including one that lost its lock
+#                              this home, including one that lost its lock but
+#                              still runs this home's watcher
 #                              (bin/fm-afk-daemon-lib.sh), so its cleanup flushes
 #                              WHILE state/.afk is still present, wait for each,
 #                              close a recorded non-native terminal
@@ -837,7 +838,6 @@ EOF
     fm_afk_launch_log "away-mode daemon pid=${survivors//$'\n'/,} did not exit after SIGTERM; preserving lifecycle state"
     return 1
   fi
-  fm_afk_daemon_records_prune "$FM_AFK_LAUNCH_STATE"
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_log "a live away daemon pid=$(daemon_lock_pid) still holds the lock, but nothing proves it is this home's, so it was not signalled; the attended arm stops it once it runs this home's watcher"
   fi

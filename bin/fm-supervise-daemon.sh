@@ -157,9 +157,7 @@
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
-#          instance via portable lock on state/.supervise-daemon.lock, plus an
-#          instance record that lets a return stop it without that lock
-#          (bin/fm-afk-daemon-lib.sh). Trapped
+#          instance via portable lock on state/.supervise-daemon.lock. Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
 #          lock. A crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
@@ -206,8 +204,6 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
-# The instance record this daemon leaves so a return can stop it without its
-# lock (fm_afk_daemon_record_write and fm_afk_daemon_record_remove).
 # shellcheck source=bin/fm-afk-daemon-lib.sh
 . "$FM_DAEMON_DIR/fm-afk-daemon-lib.sh"
 
@@ -1796,16 +1792,12 @@ fm_super_main() {
     rm -f "$LOCK/pid-identity" 2>/dev/null || true
     log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
   fi
-  if ! fm_afk_daemon_record_write "$STATE" "$$"; then
-    log "warn: could not record this daemon instance; a return that finds no lock cannot stop it, so it relies on its own exit when away mode ends"
-  fi
 
   # Release only what this instance owns: the lock and pid file may already
   # name a successor daemon.
   release_instance() {
     fm_lock_release "$LOCK" 2>/dev/null || true
     [ "$(cat "$PIDFILE" 2>/dev/null || true)" != "$$" ] || rm -f "$PIDFILE" 2>/dev/null || true
-    fm_afk_daemon_record_remove "$STATE" "$$"
   }
 
   # The daemon exists only for away or quiet mode (state/.afk) and only while it
