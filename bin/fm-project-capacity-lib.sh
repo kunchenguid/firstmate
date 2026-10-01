@@ -31,10 +31,9 @@
 # with the capacity, for example `#repo 2`. A name that is `#`, or that begins
 # with `#` followed by a space, is the same spelling as a comment and cannot be
 # declared. Any other shape, a project named twice, or an unreadable file makes
-# the whole
-# declaration unreadable, and bin/fm-spawn.sh then refuses every fresh ship or
-# scout spawn from this machine's homes rather than guessing which limit was
-# meant.
+# the whole declaration unreadable, and bin/fm-spawn.sh then refuses every fresh
+# ship or scout spawn from this machine's homes rather than guessing which limit
+# was meant.
 #
 # Occupancy: a place is held by every task record, in any local Firstmate home on
 # this machine (fm_local_firstmate_state_dirs in bin/fm-wake-lib.sh), that
