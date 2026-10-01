@@ -25,11 +25,9 @@ ok - Gemini 0.62.0: CLI graph resolved core exports
 ok - Gemini 0.62.0: launch override wins; 6 child_process commands; ptmx 0->0
 ```
 
-The portable generated-launch regression in `tests/fm-busy-adapter-wiring.test.sh` verifies that Darwin workers receive the override and Linux workers keep their inherited shell behavior.
-The shared launch template applies before tmux, Herdr, zellij, orca, and cmux receive it; those backends' outer PTYs and all other harness templates are unchanged.
-Raw Gemini launches intentionally stay outside canonical wiring.
-The native environment switch is not a documented CLI flag, so the live guard fails explicitly on incompatible installed bundle exports or selector behavior rather than silently claiming support for another release.
-The operational limit and recovery boundary belong to the Gemini harness reference in `.agents/skills/harness-adapters/`.
+The portable generated-launch regression in `tests/fm-busy-adapter-wiring.test.sh` verifies that Darwin workers receive the override and Linux workers leave it unset when absent from the inherited environment.
+The live guard fails explicitly on incompatible installed bundle exports or selector behavior rather than silently claiming support for another release.
+The [Gemini harness reference](../../.agents/skills/harness-adapters/references/harness/gemini.md#shell-pty-capacity-on-macos) owns the override's compatibility status, platform and launch scope, operational limit, and recovery boundary.
 
 ## Harness detection precedence
 
