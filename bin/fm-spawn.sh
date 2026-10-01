@@ -3701,6 +3701,10 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+            # Reclaim is the last presentation mutation on this path. The launch
+            # tail after it does not reorder workspaces, and a concurrent resume
+            # in another home only waits five seconds for this lock.
+            spawn_herdr_presentation_order_lock_release
             ;;
           2)
             spawn_herdr_presentation_order_lock_release
