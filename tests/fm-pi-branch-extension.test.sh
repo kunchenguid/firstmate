@@ -6144,7 +6144,8 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     "Arm the PR check for https://github.com/acme/viewer/pull/7",
     "Arm the future decision recheck for the existing task",
     "Send the approved handoff to the existing other worker",
-    "Recheck the unchanged task after the healthy wait",
+    "Recheck after unrelated target inbox activity",
+    "Recheck the unchanged task with oversized handoff history",
   ][promptCount - 1];
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
@@ -6173,7 +6174,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
       : promptCount === 5
         ? `PATH=${home}/handoff-fail-bin:"$PATH" ${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r1`
-        : promptCount === 6 ? "" :
+        : promptCount >= 6 ? "" :
         `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
@@ -6187,14 +6188,20 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     }
     const failed = await bash.execute("unchanged-failure", { command: "/bin/false" });
     if (!failed.isError) throw new Error("unchanged failure fixture unexpectedly succeeded");
-    appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
-    appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
+    if (promptCount === 6) {
+      const unrelated = run("fm-send.sh", ["other", "Unrelated sender message."]);
+      if (unrelated.status !== 0) throw new Error(`unrelated target message failed: ${unrelated.stderr}`);
+    } else {
+      appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
+      appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
+    }
   }
   reportResult = await report.execute("report", { task: "viewer", verdict: "routine", silent: true,
     summary: promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
       ? "The future decision recheck was armed while captain approval remains pending."
       : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
-      : promptCount === 6 ? "The task remains unchanged after its healthy wait."
+      : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
+      : promptCount === 7 ? "The task remains unchanged with oversized handoff history."
       : "The existing worker received the authorized no-mistakes continuation." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
@@ -6375,6 +6382,30 @@ if (!sentToMain.at(-1)?.message?.content?.includes("approved cross-task handoff 
   throw new Error(`arbitrary-id handoff state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
 }
 
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const unrelatedInbox = { ...handoff,
+  current_state: "The handoff is delivered and the target may receive other work",
+  remaining_gap: "The next scheduled readback is not due",
+  next_step: "Recheck after unrelated target inbox activity",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(unrelatedInbox)]);
+if (result.status !== 0) throw new Error(`MAIN unrelated-inbox progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 6 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "unrelated target inbox isolation");
+if (sentToMain.length !== beforeMain + 5) throw new Error("unrelated target inbox activity interrupted MAIN");
+if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
+  throw new Error("unrelated target inbox activity prevented quiet settlement");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+  throw new Error("unrelated target inbox fixture did not create exactly one independent message");
+}
+
 writeFileSync(`${home}/state/viewer.child.meta`, "spawn_gen=child-g1\nkind=ship\n");
 writeFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task started\n");
 mkdirSync(`${home}/data/viewer/artifacts`, { recursive: true });
@@ -6386,24 +6417,25 @@ for (let index = 0; index < 257; index += 1) {
 }
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
-const quiet = { ...handoff,
+const quiet = { ...unrelatedInbox,
   current_state: "The task is healthy and unchanged",
   remaining_gap: "The next scheduled readback is not due",
-  next_step: "Recheck the unchanged task after the healthy wait",
+  next_step: "Recheck the unchanged task with oversized handoff history",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(quiet)]);
 if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 6 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
-  "dotted sibling isolation");
+await settle(() => promptCount === 7 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "oversized handoff history isolation");
 if (sentToMain.length !== beforeMain + 5) throw new Error("an unrelated dotted task interrupted MAIN");
 if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
   throw new Error("unchanged continuation was not retained quietly in the branch");
 }
-if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
   throw new Error("the earlier handoff effect was replayed after its failing shell result");
 }
 
@@ -6418,7 +6450,7 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 6 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
+if (promptCount !== 7 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length !== 1 ||
@@ -6426,7 +6458,7 @@ if (promptCount !== 6 || routed.filter((item) => item.command.includes("fm-send.
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation delivered partial handoff effects to MAIN and kept oversized unchanged owner state quiet");
+console.log("compact continuation attributed exact handoff receipts and kept oversized unchanged owner state quiet");
 process.exit(0);
 EOF
   status=$?

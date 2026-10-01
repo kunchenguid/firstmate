@@ -65,7 +65,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, type Dir } from "node:fs";
 import { lstat as lstatAsync, open as openAsync, opendir as opendirAsync } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
 // and compiled-binary loaders, the same standing as pi-tui and typebox
@@ -735,6 +735,88 @@ export default function (pi: ExtensionAPI) {
         join(data, task, "lifecycle.json"),
         join(data, task, "report.md"),
       ];
+      const handoffEntries: string[][] = [];
+      const readHeader = async (path: string): Promise<Map<string, string> | null> => {
+        try {
+          const stat = await lstatAsync(path, { bigint: true });
+          if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid handoff receipt");
+          const handle = await openAsync(path, "r");
+          const buffer = Buffer.alloc(1024);
+          let bytesRead = 0;
+          try {
+            ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0));
+          } finally {
+            await handle.close();
+          }
+          const header = new Map<string, string>();
+          for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+            if (line === "--") break;
+            const separator = line.indexOf("=");
+            if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
+          }
+          return header;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }
+      };
+      const addHandoffReceipt = async (id: string, target: string, statusPath: string) => {
+        const inbox = join(state, `${target}.inbox`);
+        const handled = join(inbox, "handled");
+        const statusHeader = await readHeader(statusPath);
+        const recorded = statusHeader?.get("inbox_record") || "";
+        if (recorded) {
+          const name = basename(recorded);
+          const parent = dirname(resolve(recorded));
+          if (!/^[0-9]+\.msg$/.test(name) || (parent !== resolve(inbox) && parent !== resolve(handled))) {
+            throw new Error("invalid task handoff inbox receipt");
+          }
+          for (const path of [join(inbox, name), join(handled, name)]) {
+            const header = await readHeader(path);
+            if (header?.get("handoff") === id) {
+              paths.push(join(inbox, name), join(handled, name));
+              return;
+            }
+          }
+          handoffEntries.push(["task-handoff-receipt", task, id, "absent"]);
+          return;
+        }
+        let count = 0;
+        let receiptName = "";
+        for (const directory of [inbox, handled]) {
+          let handle: Dir | undefined;
+          try {
+            handle = await opendirAsync(directory);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw error;
+          }
+          try {
+            for (;;) {
+              const entry = await handle.read();
+              if (!entry) break;
+              count += 1;
+              if (count > 256) {
+                handoffEntries.push(["task-handoff-receipt", task, id, "overflow"]);
+                return;
+              }
+              if (!entry.name.endsWith(".msg")) continue;
+              const header = await readHeader(join(directory, entry.name));
+              if (header?.get("handoff") === id) {
+                if (receiptName && receiptName !== entry.name) throw new Error("duplicate task handoff inbox receipt");
+                receiptName = entry.name;
+              }
+            }
+          } finally {
+            await handle.close();
+          }
+        }
+        if (receiptName) {
+          paths.push(join(inbox, receiptName), join(handled, receiptName));
+          return;
+        }
+        handoffEntries.push(["task-handoff-receipt", task, id, "absent"]);
+      };
       let handoffNames: string[] = [];
       let handoffOverflow = false;
       let handoffDirectory: Dir | undefined;
@@ -761,7 +843,7 @@ export default function (pi: ExtensionAPI) {
       }
       if (handoffOverflow) {
         handoffNames = [];
-        paths.push(handoffRecords, handoffStatus);
+        handoffEntries.push(["task-handoffs", task, "overflow"]);
       }
       for (const name of handoffNames) {
         const id = name.slice(0, -4);
@@ -789,11 +871,12 @@ export default function (pi: ExtensionAPI) {
             !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(source) ||
             !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(target)) throw new Error("invalid task handoff record");
         if (source === task || target === task) {
-          paths.push(record, join(handoffStatus, `${id}.state`),
-            join(state, `${target}.inbox`), join(state, `${target}.inbox`, "handled"));
+          const statusPath = join(handoffStatus, `${id}.state`);
+          paths.push(record, statusPath);
+          await addHandoffReceipt(id, target, statusPath);
         }
       }
-      const entries = await Promise.all(paths.map(async (path) => {
+      const entries = [...handoffEntries, ...await Promise.all(paths.map(async (path) => {
         const label = relative(fmHome, path);
         try {
           const stat = await lstatAsync(path, { bigint: true });
@@ -804,7 +887,7 @@ export default function (pi: ExtensionAPI) {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return [label, "absent"];
           throw error;
         }
-      }));
+      }))];
       return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
     } catch {
       return "";
