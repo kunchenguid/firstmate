@@ -53,6 +53,10 @@ make_primary_dir() {
   : > "$dir/AGENTS.md"
   : > "$dir/config/supervision-host-off"
   install_autoarm_scripts "$dir"
+  if [ "${INPUT_MATRIX:-0}" = 1 ]; then
+    printf 'v1\n' > "$dir/state/.captain-input"
+    : > "$dir/state/.wake-queue"
+  fi
   printf '%s\n' "$dir"
 }
 
@@ -803,6 +807,10 @@ test_term_mid_arm_commits_failure_and_rewakes() {
   local dir out hook_pid i status=0
   dir=$(make_primary_dir "$TMP_ROOT/term-mid-arm")
   : > "$dir/state/task.meta"
+  if [ "${INPUT_MATRIX:-0}" = 1 ]; then
+    rm "$dir/state/task.meta"
+    printf '1\t1\tcheck\tinbox:timeout-1\tcheck: captain inbox note timeout-1\n' > "$dir/state/.wake-queue"
+  fi
   write_arm_fixture "$dir" blocking-actionable
   out="$dir/state/autoarm.out"
   run_autoarm_bg "$dir" "$out"
@@ -828,6 +836,15 @@ test_term_mid_arm_commits_failure_and_rewakes() {
   assert_contains "$(cat "$out")" "firstmate watcher auto-arm INTERRUPTED" \
     "TERM mid-arm omitted the rewake failure banner"
   pass "auto-arm: TERM mid-arm commits a durable failure and exits 2 for rewake"
+  if [ "${INPUT_MATRIX:-0}" = 1 ]; then
+    assert_contains "$(cat "$dir/state/.wake-queue")" timeout-1 "timeout retains input"
+    write_arm_fixture "$dir" actionable
+    status=0
+    run_autoarm "$dir" > "$out" 2>&1 || status=$?
+    expect_code 2 "$status" "next Stop must re-arm subscribed input after timeout"
+    assert_present "$dir/state/.input-handoff/timeout-1" "re-arm must commit the input handoff"
+    pass "subscribed input survives timeout and re-arms on the next Stop"
+  fi
 }
 
 # --- abandoned single-flight claim recovery (legacy shim) ----------------------
@@ -1682,6 +1699,31 @@ test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates
 test_need_vanished_mid_cycle_closes_quietly
 test_afk_mid_cycle_suppresses_rewake
+
+# Replace the session while its input arm is running: the old session may not
+# commit a handoff, even though the watcher closes actionably afterwards.
+dir=$(make_primary_dir "$TMP_ROOT/input-session-replaced")
+printf 'v1\n' > "$dir/state/.captain-input"
+printf '1\t1\tcheck\tinbox:replacement-1\tcheck: captain inbox note replacement-1\n' > "$dir/state/.wake-queue"
+write_arm_fixture "$dir" slow-actionable
+run_autoarm_bg "$dir" "$dir/state/old-session.out"
+old_session=$RUN_AUTOARM_BG_PID
+for ((i=0; i<100; i++)); do
+  [ ! -f "$dir/state/arm-ran" ] || break
+  sleep 0.02
+done
+assert_present "$dir/state/arm-ran" "old session must be actively arming before replacement"
+"$FAKE_CLAUDE" -c 'sleep 10; :' &
+replacement=$!
+printf '%s\n' "$replacement" > "$dir/state/.lock"
+status=0
+wait "$old_session" || status=$?
+kill "$replacement" 2>/dev/null || true
+wait "$replacement" 2>/dev/null || true
+expect_code 0 "$status" "replaced session must refuse the native rewake"
+assert_absent "$dir/state/.input-handoff/replacement-1" "replaced session must not publish an input handoff"
+assert_contains "$(cat "$dir/state/.wake-queue")" replacement-1 "replacement must preserve queued input"
+pass "input handoff refuses a session replaced during the active arm"
 test_active_in_marked_secondmate_home
 test_long_poll_grace_reaches_arm_wrapper
 test_host_off_flag_keeps_the_arm
@@ -1696,3 +1738,38 @@ test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
 test_stands_down_only_on_pi_code_transcript_path
+
+# No sentinel task/check: registered input alone uses the ordinary generation
+# and respects both away and quiet daemon ownership and session replacement.
+dir=$(make_primary_dir "$TMP_ROOT/subscribed-input")
+printf 'v1\n' > "$dir/state/.captain-input"
+printf '1\t1\tcheck\tinbox:input-1\tcheck: captain inbox note input-1\n' > "$dir/state/.wake-queue"
+write_arm_fixture "$dir" actionable
+status=0
+output=$(run_autoarm "$dir") || status=$?
+expect_code 2 "$status" "subscribed no-task owner should issue a native rewake"
+assert_contains "$output" "firstmate watcher wake" "subscribed input should present the native wake"
+assert_present "$dir/state/.input-handoff/input-1" "input is bound to the winning generation"
+assert_contains "$(cat "$dir/state/.input-handoff/input-1")" fixture-generation "receipt shares recovery generation"
+for posture in away quiet; do
+  printf '%s\n' "$posture" > "$dir/state/.afk"
+  before=$(cat "$dir/state/.claude-autoarm-epoch")
+  status=0
+  output=$(run_autoarm "$dir") || status=$?
+  expect_code 0 "$status" "$posture retains daemon ownership"
+  assert_equals "" "$output" "$posture must not present a competing input wake"
+  assert_equals "$before" "$(cat "$dir/state/.claude-autoarm-epoch")" "$posture must not take a new generation"
+  assert_equals "$posture" "$(cat "$dir/state/.afk")" "$posture remains unchanged"
+done
+rm "$dir/state/.afk"
+pass "continuous input uses the existing Stop generation and preserves away/quiet ownership"
+
+TMP_ROOT="$TMP_ROOT/input-matrix"
+mkdir -p "$TMP_ROOT"
+INPUT_MATRIX=1
+test_inert_without_session_lock
+test_inert_when_lock_held_by_other_harness
+test_single_flight_admits_exactly_one_owner
+test_term_mid_arm_commits_failure_and_rewakes
+test_superseded_owner_goes_silent_and_never_double_translates
+test_afk_mid_cycle_suppresses_rewake

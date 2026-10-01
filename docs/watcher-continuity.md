@@ -32,6 +32,23 @@ Codex and Grok keep their own protocols; see [Manual recovery and other harnesse
 
 On a non-Pi primary, a home that runs the supervision host also changes what the owner runs; see [Supervision host](#supervision-host).
 
+### Continuous captain input
+
+Continuous input demand is default-off and explicitly registered by the session owner through `bin/fm-inbox.sh subscribe`; that script owns registration and the body-free `input-receipts` interface.
+While registered, supervision stays armed with no work in flight, and a new inbox note wakes an idle watcher at its next checkpoint instead of after the routine poll interval.
+That prompt wake applies to the polling watcher: on a backend blocked in its native event wait (for example Herdr), the doorbell is only seen when that wait returns.
+Registered notes use the existing wake queue, handling acknowledgement, and harness owner; the adapter must not run a second waiter.
+The subscription does not authenticate an external human or change away/quiet ownership.
+See [input verification](verification/captain-input.md) for measured limits.
+
+#### Example: a Slack desk
+
+A captain who talks to the first mate from Slack can run a small listener outside Firstmate as a dedicated bot in a private channel.
+The listener records each captain message as an inbox note with `bin/fm-inbox.sh note --request-id <message id>`, with a body that carries the text, the thread it came from, and local paths to any downloaded attachments.
+The session owner runs `bin/fm-inbox.sh subscribe` once, so each note wakes the idle session promptly.
+The first mate handles the note like any other captain input and replies in the same Slack thread through the listener's bot, and it can post a new captain-facing ask as a top-level message in that channel.
+The listener only captures and relays: it keeps its bot credentials outside the Firstmate home, never waits on the session itself, and the channel's membership is what limits who counts as the captain.
+
 ### Pi, omp, and OpenCode adapters
 
 Pi's `.pi/extensions/fm-primary-pi-watch.ts`, omp's `.omp/extensions/fm-primary-omp-watch.ts`, and OpenCode's `.opencode/plugins/fm-primary-watch-arm.js` own continuous re-arm after an actionable child close.

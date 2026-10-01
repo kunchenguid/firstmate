@@ -326,12 +326,13 @@ fail_unexplained_cycle() {
 
 # Close a cycle whose reason line this arm could not read against the bounded
 # terminal-delivery ledger the watcher publishes before releasing its lock.
-close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+close_unobserved_cycle() {  # [input-only]
+  local input_only=${1:-} i reason clean_identity record_pid record_identity record_reason
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
     [ "$i" -lt 20 ] || {
+      [ "$input_only" != input-only ] || return 1
       fail_unexplained_cycle
       return 1
     }
@@ -347,6 +348,9 @@ close_unobserved_cycle() {
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
+  if [ "$input_only" = input-only ]; then
+    case "$reason" in 'check: captain-input '*) ;; *) return 1 ;; esac
+  fi
   if [ -n "$reason" ]; then
     printf '%s\n' "$reason"
     return 0
@@ -397,6 +401,14 @@ attach_and_wait() {
       cycle_log_append unknown unknown attached-holder-stalled none
       echo "watcher: FAILED - attached watcher pid=$attached_pid stalled (beacon ${age}s at or past hard bound ${STALL_BOUND}s)"
       return 1
+    fi
+    # A subscribed input delivery already names the exact closed cycle in the
+    # durable ledger. Forward it now instead of spending the successor grace
+    # window before the Stop owner can request the handling turn. Missing or
+    # ordinary deliveries retain the existing recovery/attachment behavior.
+    if [ -f "$STATE/.captain-input" ] && close_unobserved_cycle input-only; then
+      cycle_log_append unknown unknown attached-delivered-wake none
+      return 0
     fi
     if wait_for_healthy_successor; then
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"

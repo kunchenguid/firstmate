@@ -1342,3 +1342,15 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
+
+# A delivered input must not spend the ordinary successor confirmation window.
+dir=$(make_case attached-input)
+state="$dir/state"
+printf 'v1\n' > "$state/.captain-input"
+start_seed_watcher "$state" "$dir/fakebin" "$dir/watch.out"
+start_attached_arm "$state" "$dir/fakebin" "$dir/arm.out" 20
+FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" note 'synthetic input' >/dev/null
+wait_for_exit "$SEED_PID" 80 || fail "input watcher did not close"
+wait_for_exit "$ARM_PID" 80 || fail "input arm spent the twenty-second successor window"
+grep -q '^check: captain-input ' "$dir/arm.out" || fail "input arm omitted the delivery receipt"
+pass "watch-arm: registered input forwards the exact cycle receipt without successor grace"
