@@ -21,7 +21,8 @@
 # from the window whose summary opens with the "per your away instructions:"
 # marker the branch prompt in bin/fm-branch-prompt.sh requires), then what is
 # waiting on the captain,
-# then what was tried and failed or could not be fixed, then landed work whose
+# then what was tried and failed or could not be fixed (a supervision-host
+# latch or engine errors inside the window lead it), then landed work whose
 # task record is still live (the recorded PR carries the
 # merge-notification marker bin/fm-pr-lib.sh owns, read from durable records
 # only, never the forge - finished work that owes an ordinary teardown, which
@@ -321,16 +322,20 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+  local evidence=$1 beat_age state lines="" note=""
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
-    # (fm-wake-lib.sh _fm_recovery_marker_ack); only pending:* and
-    # announced:* mean the downtime is still open. A marker this read
-    # cannot parse is treated the same as an open gap, conservatively.
+    # (fm-wake-lib.sh _fm_recovery_marker_ack). An open handling episode is
+    # the ordinary state of a wake being handled at return
+    # (docs/watcher-continuity.md "Recovery episode acknowledgement"), so
+    # only an open downtime episode is a gap. A marker this read cannot
+    # parse is treated as a gap, conservatively.
     if fm_recovery_marker_snapshot "$STATE/.watcher-down"; then
+      state=${FM_RECOVERY_MARKER_TOKEN%:*}
       case "$FM_RECOVERY_MARKER_TOKEN" in
         acked:*) : ;;
+        pending:handling:*|announced:handling:*) note="a wake was being handled at return (recovery marker $state); not a gap" ;;
         *) lines="GAP: watcher downtime was detected during the away window (recovery marker present)" ;;
       esac
     else
@@ -352,7 +357,99 @@ delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)
   if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
     lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
   fi
-  append_evidence health "$lines" "$evidence"
+  append_evidence health "$lines
+$note" "$evidence"
+}
+
+# The supervision host's broken-session latch across the window, from its
+# ledger (state/.supervision-host.log) and latch record
+# (state/.supervision-host-health), both owned by bin/fm-supervision-host.sh.
+# An engine error is a failed turn that exited nonzero or lacked a clean
+# engine result, the latch's own definition.
+engine_snapshot() {  # <evidence-file> <since-epoch>
+  local evidence=$1 since=$2 summary errors trip last latch_errors cooldown recovered retry paused="" state line session_start lock_start sidecar_start count_clause episodes episode_count episode lost_trip=""
+  case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  # shellcheck source=bin/fm-supervision-engine-lib.sh
+  . "$SCRIPT_DIR/fm-supervision-engine-lib.sh" || return 0
+  # fm-session-start.sh acquires fm-lock.sh first. That writer refreshes .lock
+  # on takeover and replaces .lock-session on a session-id change, but leaves
+  # both untouched on same-session confirmation. Both contribute to the host key.
+  # shellcheck source=bin/fm-lock-lib.sh
+  . "$SCRIPT_DIR/fm-lock-lib.sh" || return 0
+  lock_start=$(fm_lock_path_mtime "$STATE/.lock" 2>/dev/null) || lock_start=0
+  sidecar_start=$(fm_lock_path_mtime "$STATE/.lock-session" 2>/dev/null) || sidecar_start=0
+  session_start=$lock_start
+  [ "$sidecar_start" -le "$session_start" ] || session_start=$sidecar_start
+  summary=$(awk -F '\t' -v since="$since" -v session_start="$session_start" -v base="${FM_SUPERVISION_HOST_COOLDOWN}s" '
+    $1 !~ /^[0-9]+$/ || ($1 < since && $1 < session_start) { next }
+    $1 >= since && $2 == "failed" && ($5 != "rc=0" || $8 !~ /^error=0/) { errors++ }
+    $2 == "latch" {
+      sub(/^errors=/, "", $3); sub(/^cooldown=/, "", $4)
+      if ($4 == base) {
+        first = $1; trip = $1; recovered = ""
+        if ($1 >= since) { n++; trips[n] = $1; counts[n] = $3 }
+      } else if (!first || recovered != "") { first = $1; trip = ""; recovered = "" }
+      last = $1; cooldown = $4
+      if (n) cools[n] = $4
+    }
+    $2 == "recovered" && first { recovered = $1 }
+    END {
+      printf "%d|%s|%s|%s|%s|%d\n", errors, trip, last, cooldown, recovered, n
+      for (i = 1; i <= n; i++) printf "%s|%s|%s\n", trips[i], counts[i], cools[i]
+    }
+  ' "$STATE/.supervision-host.log" 2>/dev/null) || summary=
+  episodes=${summary#*$'\n'}
+  IFS='|' read -r errors trip last cooldown recovered episode_count <<EOF
+${summary%%$'\n'*}
+EOF
+  if fm_supervision_host_config "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$(fm_supervision_host_primary)" \
+    && retry=$(fm_supervision_host_paused_until "$STATE") \
+    && { [ -z "$recovered" ] || [ "$retry" -gt "$recovered" ]; }; then
+    paused=1
+    if [ "$(date +%s)" -lt "$retry" ]; then
+      state="still paused at return: every wake reaches main until $(epoch_to_iso "$retry"), then one wake probes the engine again"
+    else
+      state="still paused at return: its cooldown has ended, so the next wake probes the engine again"
+    fi
+  elif [ -n "$recovered" ]; then
+    state="it recovered at $(epoch_to_iso "$recovered") after a successful probe"
+  else
+    state="not paused at return"
+  fi
+  count_clause=""
+  [ "${errors:-0}" -eq 0 ] || count_clause="at least $errors engine error(s) in the window, "
+  if [ "${episode_count:-0}" -gt 0 ]; then
+    episode=0
+    while IFS='|' read -r trip latch_errors cooldown; do
+      episode=$((episode + 1))
+      line="the supervision session latched at $(epoch_to_iso "$trip") after $latch_errors consecutive engine errors and paused away supervision (${count_clause}last cooldown $cooldown)"
+      if [ "$episode" -eq "$episode_count" ]; then
+        if [ -n "$paused" ] && [ -n "$recovered" ] && [ "$recovered" -ge "$trip" ]; then
+          line="$line; it recovered at $(epoch_to_iso "$recovered") after a successful probe"
+          lost_trip=1
+        else
+          line="$line; $state"
+        fi
+      fi
+      append_evidence engine "$line" "$evidence"
+    done <<EOF
+$episodes
+EOF
+    if [ -n "$lost_trip" ]; then
+      line="the supervision session latched after engine errors and paused away supervision (trip time unavailable${count_clause:+, ${count_clause%, }}); $state"
+      append_evidence engine "$line" "$evidence"
+    fi
+    return 0
+  elif [ -n "$paused" ] && [ -n "$trip" ] && [ -z "$recovered" ]; then
+    line="the supervision session was already latched after engine errors when the window began; $state"
+  elif [ -n "$paused" ] || { [ -z "$trip" ] && [ -n "$last" ] && [ "$last" -ge "$since" ]; }; then
+    line="the supervision session latched after engine errors and paused away supervision (trip time unavailable${count_clause:+, ${count_clause%, }}); $state"
+  elif [ "${errors:-0}" -gt 0 ]; then
+    line="at least $errors supervision engine turn(s) ended in an engine error during the away window without latching; $state"
+  else
+    return 0
+  fi
+  append_evidence engine "$line" "$evidence"
 }
 
 # --- the return brief -------------------------------------------------------
@@ -530,6 +627,11 @@ EOF
   # 4. tried and failed, or could not be fixed.
   printf 'Tried and failed, or could not be fixed:\n'
   count=0
+  while IFS="$(printf '\t')" read -r tag kind text; do
+    [ "$tag" = evidence ] && [ "$kind" = engine ] || continue
+    count=$((count + 1))
+    printf '  - %s\n' "$text"
+  done < "$evidence"
   while IFS="$(printf '\t')" read -r tag task key summary; do
     [ "$tag" = blocker ] || continue
     count=$((count + 1))
@@ -563,7 +665,7 @@ EOF
 
   # 6. handled while away. Every outcome the away session recorded in the
   # store during the window counts as handled. On Pi the supervision branch,
-  # and on an opted-in home the supervision host (docs/supervision-host.md), took
+  # and on a home that runs it the supervision host (docs/supervision-host.md), took
   # every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
@@ -604,7 +706,10 @@ return_reconcile() {
 
   # Health is read before the shutdown below so the shutdown cannot read as a gap;
   # a repeated begin/check keeps the first snapshot.
-  grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null || health_snapshot "$evidence"
+  if ! grep -q "^evidence$(printf '\t')health$(printf '\t')" "$evidence" 2>/dev/null; then
+    health_snapshot "$evidence"
+    engine_snapshot "$evidence" "$since"
+  fi
 
   while IFS="$(printf '\t')" read -r tag kind text; do
     [ "$tag" = evidence ] && [ "$kind" = lifecycle ] || continue

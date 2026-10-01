@@ -99,6 +99,7 @@ It distinguishes preemption from a wait window that closes with no data:
 
 - Only a genuinely quiet window proves channel freshness.
 - Either outcome can re-arm without losing data.
+- The parent's reply listener polls again under the same claim after either one, so a same-home command such as the per-cycle liveness probe never tears the listener down; [`bin/fm-procevent-remote-reply.sh`](../bin/fm-procevent-remote-reply.sh) owns that mapping.
 
 ### Cancelled and orphaned jobs
 
@@ -486,6 +487,7 @@ When deduplication finds that the worker already moved the matching record into 
 The remote host runs no doorbell re-ring ladder of its own.
 A swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation.
 Its recovery request rings the doorbell again when it is enqueued.
+A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane, and only when `config/wait-no-turns` is present: the remote steer leg owes no re-ring, so a swallowed remote doorbell for one waits for the next ring into that inbox, and a remote-side retry is known follow-up scope.
 
 ### Remote reads
 

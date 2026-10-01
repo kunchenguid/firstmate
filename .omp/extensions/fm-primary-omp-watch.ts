@@ -24,7 +24,8 @@
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //   - Supervision host: a home opted in with config/supervision-host
-//     (docs/configuration.md "Supervision host" owns the opt-in) spawns
+//     (docs/configuration.md "Supervision host" owns the gate, which
+//     bin/fm-supervision-engine-lib.sh enabled answers; config/supervision-host-off opts out) spawns
 //     bin/fm-supervision-host.sh park --restart in the arm's place, which
 //     takes away-posture wakes itself and closes only when main is needed; its
 //     header owns the output read here. A "supervision-host:" line is
@@ -33,8 +34,8 @@
 //     eight-line cap. The host
 //     prints the first cycle's status line as soon as it is verified, so
 //     readiness and the handling handoff work as they do for the arm, with a
-//     longer readiness budget for the host's own startup. Without the file
-//     nothing below changes.
+//     longer readiness budget for the host's own startup. On a home that does
+//     not run the host nothing below changes.
 //
 // Session-generation ownership (stated once here):
 // omp emits session_shutdown for ordinary same-process replacements (/new,
@@ -256,8 +257,28 @@ function completedActionableLine(output: string): string {
   return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
 }
 
+// An away record, never quiet mode's (bin/fm-afk-contract.sh mode owns that
+// reading): a record whose mode cannot be read as quiet reads as away.
+function awayRecordPresent(): boolean {
+  if (!existsSync(`${state}/.afk-contract`)) return false;
+  const result = spawnSync("bash", [`${fmRoot}/bin/fm-afk-contract.sh`, "mode"], {
+    encoding: "utf8",
+    env: { ...process.env, FM_STATE_OVERRIDE: state },
+  });
+  return String(result.stdout || "").trim() !== "quiet";
+}
+
+// Whether this home runs the supervision host for an omp primary; the gate's
+// owner answers, and a query that cannot run reads as no host.
+function hostModeEnabled(): boolean {
+  const result = spawnSync("bash", [`${fmRoot}/bin/fm-supervision-engine-lib.sh`, "enabled", config, "omp"], {
+    stdio: "ignore",
+  });
+  return result.status === 0;
+}
+
 // The host-mode wake message: every "supervision-host:" line in order, wake
-// lines capped at eight, and the away note while the posture record exists.
+// lines capped at eight, and the away note while an away record exists.
 function hostWakeMessage(output: string): string {
   let shown = 0;
   const lines = output.split(/\r?\n/).filter((line) => {
@@ -269,7 +290,7 @@ function hostWakeMessage(output: string): string {
     return false;
   });
   if (lines.length === 0) return "";
-  if (existsSync(`${state}/.afk-contract`)) {
+  if (awayRecordPresent()) {
     lines.push("This wake comes from automatic supervision under the away-posture record, not from the captain: it is not a return, so handle it under the away posture.");
   }
   return lines.join("\n");
@@ -937,7 +958,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
     const id = ++owner.seq;
-    const hostMode = existsSync(`${config}/supervision-host`);
+    const hostMode = hostModeEnabled();
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       FM_HOME: fmHome,

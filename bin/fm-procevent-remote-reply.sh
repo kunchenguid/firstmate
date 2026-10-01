@@ -19,6 +19,8 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. `relisten` tells that runner to poll again in the same
 # process, still holding the claim, after an empty window and after that re-arm.
+# A window the remote job worker preempted is reported to the runner as an empty
+# window, so it relistens too (see JOB_PREEMPTED below).
 # A continuity break is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
 #
@@ -95,7 +97,7 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
@@ -256,6 +258,14 @@ cmd_arm() {
 # honest watermark, and bin/fm-pending-reply-lib.sh consumes it so a missing
 # correlated report is judged only against a channel known to have caught up.
 WINDOW_CLOSED_EMPTY=75
+# The remote job worker's exit when it preempted this long-poll to run another
+# job for the same home (bin/fm-remote-job-lib.sh header), such as the watcher's
+# per-cycle liveness probe. The read is cursor-anchored and non-destructive, so a
+# preempted window loses nothing: it is a window that closed early, and the
+# runner relistens exactly as after WINDOW_CLOSED_EMPTY instead of reading it as
+# a failed read that releases the listener's claim. It proves nothing about the
+# channel being caught up, so it records no watermark.
+JOB_PREEMPTED=76
 
 cmd_source() {
   local id=${1:-} started rc=0
@@ -266,6 +276,8 @@ cmd_source() {
     "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
   if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
     fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+  elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
+    rc=$WINDOW_CLOSED_EMPTY
   fi
   return "$rc"
 }
