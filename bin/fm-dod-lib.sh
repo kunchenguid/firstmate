@@ -613,6 +613,18 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
   [ -n "$head_tree" ] && [ "$head_tree" = "$revision_tree" ]
 }
 
+# 0 when the run reports no explicit outstanding custody action. Missing legacy
+# branch_sync fields do not invent a recovery obligation or prove product output.
+fm_dod_nm_custody_released() {  # <captured-run-output>
+  local code
+  code=$(fm_nm_branch_sync_nested "$1" next_action code)
+  case "$code" in
+    recover_custody|continue_active_run)
+      printf '%s\n' "the no-mistakes run still holds this copy's branch (next action $code), so its fixes are not recovered into the published work"
+      return 1 ;;
+  esac
+}
+
 # 0 when the worker copy holds the result of its own passed no-mistakes run:
 # the run's outcome is passed, passed-with-skips or passed-with-override (the
 # passing set bin/fm-crew-state.sh reads), that pipeline owns no unreturned work (branch_sync.next_action.code is neither
@@ -624,9 +636,9 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 # are compared rather than ancestry because the publish stamps a Change-Id and
 # rewrites the branch's messages. An unreadable status refuses, as an unreadable
 # change does. 1 when refused; stdout then holds a one-line reason.
-fm_dod_nm_custody_returned() {  # <worktree>
-  local wt=$1 out outcome code pipeline_head head_tree pipeline_tree
-  if ! out=$(fm_nm_run_checked "$wt" 15 axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
+fm_dod_nm_custody_returned() {  # <worktree> [<captured-run-output>]
+  local wt=$1 out=${2:-} outcome pipeline_head head_tree pipeline_tree
+  if { [ -z "$out" ] && ! out=$(fm_nm_run_checked "$wt" 15 axi status); } || ! printf '%s\n' "$out" | grep -q '^run:'; then
     printf '%s\n' "the no-mistakes run for this copy could not be read, so its fixes cannot be proven recovered"
     return 1
   fi
@@ -637,14 +649,10 @@ fm_dod_nm_custody_returned() {  # <worktree>
       printf '%s\n' "the no-mistakes run for this copy has outcome ${outcome:-(none)}, not a pass, so the published work is not validated"
       return 1 ;;
   esac
-  code=$(fm_nm_branch_sync_nested "$out" next_action code)
-  case "$code" in
-    recover_custody|continue_active_run)
-      printf '%s\n' "the no-mistakes run still holds this copy's branch (next action $code), so its fixes are not recovered into the published work"
-      return 1 ;;
-  esac
+  fm_dod_nm_custody_released "$out" || return 1
   pipeline_head=$(fm_nm_branch_sync_nested "$out" pipeline current_head)
   [ -n "$pipeline_head" ] || pipeline_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head_sha)")
+  [ -n "$pipeline_head" ] || pipeline_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
   head_tree=$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null) || head_tree=
   pipeline_tree=
   if fm_pr_head_valid "$pipeline_head"; then
@@ -677,8 +685,13 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+# A validation result is not a final declaration: callers folding validation
+# readiness first require fm_dod_should_gate_ship_done. Legacy tasks use that
+# same mode-specific declaration and named-head proof, not a new opt-in marker.
+# Optional captured run output preserves an explicit unreturned-custody refusal
+# even when the declared head is already on the forge.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta> <run-output>]
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} run_out=${9:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || sha=
   if fm_dod_forge_head_is_named_head "$mode" && [ -f "$meta" ]; then
@@ -690,6 +703,10 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     fi
   fi
   fm_dod_receipt_accept "$state" "$id" "$meta" "$sha" || return 1
+  [ -z "$run_out" ] || fm_dod_nm_custody_released "$run_out" || return 1
+  if [ "$mode" = local-only ] && [ -n "$run_out" ]; then
+    fm_dod_nm_custody_returned "$wt" "$run_out" || return 1
+  fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

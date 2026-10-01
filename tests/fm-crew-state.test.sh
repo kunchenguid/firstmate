@@ -1169,16 +1169,16 @@ test_ci_ready_done_log_beats_monitoring_run() {
 
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
-# but the ci step's log shows CI is actually green and only waiting on
-# merge/close. fm-crew-state must surface this as done, not "validating
-# (running)", so a green PR is never silently absorbed as still-in-progress.
+# but the ci step's log shows CI is green and only waiting on merge/close.
+# That readiness remains visible, not "validating (running)", while the task
+# awaits its mode's final accepted declaration.
 test_ci_monitoring_checks_green_surfaces_done() {
   reset_fakes
   local d; d=$(new_case ci-green)
   make_repo_on_branch "$d/wt" fm/feat-cigreen
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cigreen.meta" "window=fm:fm-feat-cigreen" "worktree=$d/wt" "kind=ship"
-  # No status-log line at all: the crew never reported its own checks-green line.
+  # No final declaration: checks are green, but task acceptance is pending.
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cigreen)"
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 CI checks running, waiting for results...
@@ -1186,11 +1186,11 @@ all CI checks passed - still monitoring until merged or closed
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cigreen)
-  assert_contains "$out" "state: done" "green ci-monitor run -> done"
+  assert_contains "$out" "state: paused" "green CI without a final declaration awaits acceptance"
   assert_contains "$out" "source: run-step" "green ci-monitor -> run-step source"
   assert_contains "$out" "checks green" "green ci-monitor detail mentions checks green"
   assert_not_contains "$out" "state: working" "green ci-monitor must not read as still validating"
-  pass "ci-monitoring run with checks already green surfaces done"
+  pass "green CI monitoring retains readiness while awaiting final acceptance"
 }
 
 test_top_level_ci_checks_green_surfaces_done() {
@@ -1202,7 +1202,7 @@ test_top_level_ci_checks_green_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-topcigreen)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-topcigreen)
-  assert_contains "$out" "state: done" "top-level ci with green log -> done"
+  assert_contains "$out" "state: paused" "top-level green CI alone awaits acceptance"
   assert_contains "$out" "source: run-step" "top-level ci green -> run-step source"
   assert_contains "$out" "checks green" "top-level ci green detail mentions checks green"
   assert_not_contains "$out" "state: working" "top-level ci green must not stay working"
@@ -1218,9 +1218,9 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-cinochecks)"
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
-  assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
+  assert_contains "$out" "state: paused" "no-checks CI alone awaits final acceptance"
   assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
-  pass "terminal no-checks ci-monitor marker surfaces done"
+  pass "terminal no-checks CI retains readiness while awaiting final acceptance"
 }
 
 # The monitor logs a checks state only when it changes, and a base-branch
@@ -1241,7 +1241,7 @@ base branch advanced (bbbbbbb..ccccccc), re-arming CI monitor timeout
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cirearm)
-  assert_contains "$out" "state: done" "a base-advance re-arm after green keeps the PR green"
+  assert_contains "$out" "state: paused" "re-armed green CI awaits final acceptance"
   assert_contains "$out" "source: run-step" "re-armed green monitoring stays run-step sourced"
   assert_contains "$out" "checks green: PR ready for review" "re-armed green monitoring reads held for merge"
   assert_contains "$out" "https://github.com/o/r/pull/2" "the held-for-merge reading names the run's PR"
@@ -1268,12 +1268,12 @@ test_ci_monitoring_green_before_log_tail_stays_green() {
     done
   })
   local out; out=$(run_crew_state "$d" feat-citail)
-  assert_contains "$out" "state: done" "a green marker older than the log tail still reads green"
+  assert_contains "$out" "state: paused" "old green marker retains readiness, not task acceptance"
   assert_contains "$out" "source: run-step" "the full-log green reading stays run-step sourced"
   assert_contains "$out" "checks green: PR ready for review" "the full-log reading is held for merge"
   assert_contains "$out" "https://github.com/o/r/pull/2" "the full-log reading names the run's PR"
   assert_not_contains "$out" "state: working" "a truncated ci log must not hide a green PR"
-  pass "a green marker before the ci log tail still surfaces done"
+  pass "green before the log tail still surfaces validation readiness"
 }
 
 test_ci_monitoring_no_checks_yet_stays_working() {
@@ -1401,7 +1401,112 @@ test_top_level_fixing_done_log_stays_working() {
   pass "top-level fixing is not overridden by a stale done log"
 }
 
-# (d) terminal run-step is authoritative
+# Fake deterministic output-acceptance counterexamples on real throwaway heads.
+test_validation_ready_requires_final_acceptance() {
+  reset_fakes
+  local d out payload
+  d=$(new_case validation-output-acceptance)
+  make_repo_on_branch "$d/wt" fm/output-acceptance
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/output-acceptance.meta" "window=fm:fm-output-acceptance" \
+    "worktree=$d/wt" "project=$d/wt" "kind=ship" "mode=no-mistakes" "harness=claude"
+  for payload in "$(run_passed_no_pr fm/output-acceptance)" \
+    "$(run_passed_with_skips fm/output-acceptance)" \
+    "$(run_passed_no_pr fm/output-acceptance | sed '/^outcome:/d')"; do
+    FM_FAKE_AXI_STATUS=$payload
+    printf 'paused [at=1790876000]: product output acceptance pending\n' > "$d/state/output-acceptance.status"
+    out=$(run_crew_state "$d" output-acceptance)
+    assert_contains "$out" 'state: paused' 'completed validation cannot close unfinished output'
+    assert_contains "$out" 'product output acceptance pending' 'actual wait survives validation'
+    assert_not_contains "$out" 'superseded' 'output wait is not stale validation'
+  done
+  FM_FAKE_AXI_STATUS=$(run_passed_no_pr fm/output-acceptance)
+  printf 'blocked [at=1790876001]: product output incorrect\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: blocked' 'genuinely later product blocker survives'
+  assert_contains "$out" 'run passed: PR state unknown' 'validation result stays visible'
+  printf 'done: implementation complete\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: paused' 'pipeline handoff is not final output acceptance'
+  printf 'needs-decision [key=validation]: validation finding\nresolved [key=validation]: finding answered\ndone: PR https://example.test/o/r/pull/1 checks green\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: done' 'legacy final-ready declaration plus head proof accepts'
+  assert_contains "$out" 'run passed: PR state unknown' 'acceptance does not invent forge disposition'
+  FM_FAKE_AXI_STATUS="$FM_FAKE_AXI_STATUS
+branch_sync:
+  state: pipeline_owned
+  next_action:
+    code: recover_custody"
+  # Even recorded forge proof cannot erase explicitly unreturned custody.
+  printf 'pr=https://example.test/o/r/pull/1\npr_head=%s\n' "$FM_FAKE_RUN_HEAD" >> "$d/state/output-acceptance.meta"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: blocked' 'final-ready cannot bypass outstanding custody'
+  assert_contains "$out" 'recover_custody' 'custody refusal retains actionable reason'
+  FM_FAKE_AXI_STATUS=$(run_passed_no_pr fm/output-acceptance)
+  rm "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: paused' 'a pass alone never declares acceptance'
+  assert_contains "$out" 'final output acceptance pending' 'missing declaration is explicit'
+  printf 'mode=local-only\n' >> "$d/state/output-acceptance.meta"
+  printf 'done: ready in branch fm/output-acceptance\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: done' 'local-only accepted head is on its shared branch'
+  # The pipeline has a later tree, but no explicit recover action: the existing
+  # local-copy custody predicate still requires that result, not ancestry alone.
+  git -C "$d/wt" checkout -q -b fake-pipeline-result
+  printf 'fake pipeline fix\n' > "$d/wt/result.txt"
+  git -C "$d/wt" add result.txt
+  git -C "$d/wt" commit -q -m 'fake pipeline result'
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" checkout -q fm/output-acceptance
+  FM_FAKE_AXI_STATUS=$(run_passed_no_pr fm/output-acceptance)
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: blocked' 'local-only cannot accept an unrecovered pipeline tree'
+  assert_contains "$out" 'does not carry' 'tree custody refusal is explicit'
+  # Unrelated run custody must never contaminate the no-attributed-run fallback.
+  FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/other-task)
+branch_sync:
+  next_action:
+    code: recover_custody"
+  arm_idle_record "$d/state" output-acceptance
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: done' 'foreign run custody cannot refuse this local-only declaration'
+  # Integration with the independently landed receipt owner, still entirely fake.
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
+  FM_FAKE_AXI_STATUS=$(run_passed_no_pr fm/output-acceptance)
+  printf 'mode=no-mistakes\nreceipt_required=1\nspawn_gen=fixture-output-acceptance\n' >> "$d/state/output-acceptance.meta"
+  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'completion receipt missing' 'completed run cannot bypass required receipt'
+  mkdir -p "$d/config"
+  printf 'manual\n' > "$d/config/backlog-backend"
+  printf 'fake validation checkpoint only; product output still pending\n' > "$d/evidence.txt"
+  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance FAIL "$d/evidence.txt" "$d/wt" >/dev/null \
+    || fail 'fake FAIL receipt publication failed'
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'completion receipt refused' 'completed run cannot bypass explicit FAIL'
+  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance PASS "$d/evidence.txt" "$d/wt" >/dev/null \
+    || fail 'fake checkpoint receipt publication failed'
+  printf 'paused: product output acceptance pending\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: paused' 'checkpoint-only attestation is not independent output acceptance'
+  printf 'fake final output comparison accepted; fixture checks PASS\n' > "$d/evidence.txt"
+  FM_HOME="$d" "$ROOT/bin/fm-run-receipt.sh" output-acceptance PASS "$d/evidence.txt" "$d/wt" >/dev/null \
+    || fail 'fake final receipt publication failed'
+  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$d/state/output-acceptance.status"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: done' 'final declaration, head proof and matching receipt accept'
+  FM_FAKE_AXI_STATUS="$FM_FAKE_AXI_STATUS
+branch_sync:
+  next_action:
+    code: recover_custody"
+  out=$(run_crew_state "$d" output-acceptance)
+  assert_contains "$out" 'state: blocked' 'matching PASS cannot bypass unrecovered custody'
+  assert_contains "$out" 'recover_custody' 'receipt integration retains custody refusal'
+  pass 'validation readiness and final output/custody acceptance remain separate'
+}
+
+# (d) terminal validation retains its outcome and bounded forge detail
 test_terminal_passed() {
   reset_fakes
   local d; d=$(new_case passed)
@@ -1410,11 +1515,11 @@ test_terminal_passed() {
   fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
   local out; out=$(run_crew_state "$d" feat-d)
-  assert_contains "$out" "state: done" "passed run -> done"
+  assert_contains "$out" "state: paused" "passed run alone awaits final acceptance"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
   assert_contains "$out" "run passed: PR merged" "passed run reports merged only after the PR record says merged"
   assert_not_contains "$out" "merged/closed" "passed merged PR must not keep the old ambiguous label"
-  pass "terminal passed run is authoritative"
+  pass "terminal passed run retains validation and forge evidence without declaring acceptance"
 }
 
 test_terminal_passed_with_override() {
@@ -1425,12 +1530,12 @@ test_terminal_passed_with_override() {
   fm_write_meta "$d/state/feat-override.meta" "window=fm:fm-feat-override" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override)"
   local out; out=$(run_crew_state "$d" feat-override)
-  assert_contains "$out" "state: done" "passed-with-override run -> done, not unknown"
+  assert_contains "$out" "state: paused" "passed-with-override alone awaits final acceptance"
   assert_contains "$out" "source: run-step" "passed-with-override -> run-step source"
   assert_contains "$out" "run passed: PR merged" "passed-with-override run reports merged only after the PR record says merged"
   assert_not_contains "$out" "state: unknown" "passed-with-override must not fall through to unknown"
   assert_not_contains "$out" "outcome: passed-with-override" "passed-with-override must not surface as a raw unmapped outcome detail"
-  pass "terminal passed-with-override run reads done like a clean pass"
+  pass "terminal passed-with-override retains readiness like a clean pass"
 }
 
 test_terminal_passed_with_skips() {
@@ -1441,13 +1546,13 @@ test_terminal_passed_with_skips() {
   fm_write_meta "$d/state/feat-skips.meta" "window=fm:fm-feat-skips" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_with_skips fm/feat-skips)"
   local out; out=$(run_crew_state "$d" feat-skips)
-  assert_contains "$out" "state: done" "passed-with-skips run -> done, not unknown"
+  assert_contains "$out" "state: paused" "passed-with-skips alone awaits final acceptance"
   assert_contains "$out" "source: run-step" "passed-with-skips -> run-step source"
   assert_contains "$out" "run passed: PR merged" "passed-with-skips run reports merged only after the PR record says merged"
   assert_contains "$out" "publication/CI verification skipped" "passed-with-skips keeps the skip visible, unlike a clean pass"
   assert_not_contains "$out" "state: unknown" "passed-with-skips must not fall through to unknown"
   assert_not_contains "$out" "outcome: passed-with-skips" "passed-with-skips must not surface as a raw unmapped outcome detail"
-  pass "terminal passed-with-skips run reads done with the skip kept visible"
+  pass "terminal passed-with-skips retains readiness with the skip kept visible"
 }
 
 test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
@@ -1466,7 +1571,7 @@ test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
   FM_FAKE_PR_READ_FAIL=1
   FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dreceipt)"
   out=$(run_crew_state "$d" feat-dreceipt)
-  assert_contains "$out" "state: done" "passed run with retired PR receipt -> done"
+  assert_contains "$out" "state: paused" "merged evidence alone cannot attest to output acceptance"
   assert_contains "$out" "run passed: PR merged" "matching retirement receipt is local merged evidence"
   [ ! -s "$read_log" ] || fail "matching retirement receipt still attempted a forge read"
   pass "terminal passed run uses matching retirement receipt without forge"
@@ -1509,7 +1614,7 @@ test_terminal_passed_with_open_pr_does_not_claim_merged() {
   FM_FAKE_PR_MERGED=false
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-dopen)"
   local out; out=$(run_crew_state "$d" feat-dopen)
-  assert_contains "$out" "state: done" "passed run with open PR -> done"
+  assert_contains "$out" "state: paused" "open PR alone cannot attest to output acceptance"
   assert_contains "$out" "run passed: PR open" "open PR state is named"
   assert_not_contains "$out" "merged/closed" "open PR must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "open PR must not be reported merged"
@@ -1529,7 +1634,7 @@ test_terminal_passed_run_pr_overrides_stale_metadata() {
   FM_FAKE_PR_48_MERGED=false
   FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-dstale https://github.com/o/r/pull/48)"
   local out; out=$(run_crew_state "$d" feat-dstale)
-  assert_contains "$out" "state: done" "passed run with stale task metadata -> done"
+  assert_contains "$out" "state: paused" "passing validation alone awaits final acceptance"
   assert_contains "$out" "run passed: PR open" "run PR identity outranks stale task metadata"
   assert_not_contains "$out" "PR merged" "stale merged metadata must not report merged"
   pass "terminal passed run PR overrides stale task metadata"
@@ -1543,7 +1648,7 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown() {
   fm_write_meta "$d/state/feat-dnopr.meta" "window=fm:fm-feat-dnopr" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_no_pr fm/feat-dnopr)"
   local out; out=$(run_crew_state "$d" feat-dnopr)
-  assert_contains "$out" "state: done" "passed run without PR identity -> done"
+  assert_contains "$out" "state: paused" "unknown publication without a final declaration is not accepted"
   assert_contains "$out" "run passed: PR state unknown (no PR identity)" "missing PR identity is honest unknown"
   assert_not_contains "$out" "merged/closed" "unknown PR state must not get the old merged/closed label"
   assert_not_contains "$out" "PR merged" "unknown PR state must not be reported merged"
@@ -1704,6 +1809,7 @@ test_cancelled_delivery_and_skipped_rebase() {
       make_repo_on_branch "$d/wt" fm/delivery
       make_fakebin "$d" >/dev/null
       fm_write_meta "$d/state/delivery.meta" "window=fm:fm-delivery" "worktree=$d/wt" "kind=ship"
+      printf 'done: PR https://github.com/o/r/pull/203 checks green\n' > "$d/state/delivery.status"
       FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/delivery)"
       case "$scenario" in
         cancelled*) FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//failed/cancelled} ;;
@@ -1756,6 +1862,11 @@ test_terminal_green_delivery_disposition() {
             gerrit) url=https://review.example.com/c/r/+/203 ;;
           esac
           FM_FAKE_AXI_STATUS=${FM_FAKE_AXI_STATUS//https:\/\/github.com\/o\/r\/pull\/203/$url}
+          case "$disposition" in
+            open|merged)
+              printf 'done: PR %s checks green\n' "$url" > "$d/state/delivery.status"
+              printf 'pr=%s\npr_head=%s\n' "$url" "$FM_FAKE_RUN_HEAD" >> "$d/state/delivery.meta" ;;
+          esac
           FM_FAKE_PR_STATE=OPEN
           FM_FAKE_PR_MERGED=false
           FM_FAKE_PR_STATE_AXI=open
@@ -1952,6 +2063,7 @@ test_terminal_failed_ci_orphan_after_green_reads_done() {
   make_repo_on_branch "$d/wt" fm/feat-ci-orphan
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ci-orphan.meta" "window=fm:fm-feat-ci-orphan" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/203 checks green\n' > "$d/state/feat-ci-orphan.status"
   FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/feat-ci-orphan)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
 daemon shutting down"
@@ -1969,6 +2081,7 @@ test_terminal_failed_ci_orphan_status_only_reads_done() {
   make_repo_on_branch "$d/wt" fm/feat-ci-orphan2
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ci-orphan2.meta" "window=fm:fm-feat-ci-orphan2" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/203 checks green\n' > "$d/state/feat-ci-orphan2.status"
   FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_status_only fm/feat-ci-orphan2)"
   FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
 daemon shutting down"
@@ -4103,6 +4216,8 @@ base branch advanced (f9f74a1d91cc..6f0f139962ea), re-arming CI monitor timeout
 base branch advanced (6f0f139962ea..c5131a33a1b2), re-arming CI monitor timeout
 EOF
 )
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-green.status"
+  printf 'pr=https://github.com/o/r/pull/2\npr_head=%s\n' "$FM_FAKE_RUN_HEAD" >> "$d/state/feat-green.meta"
   out=$(run_crew_state "$d" feat-green)
   assert_not_contains "$out" 'unreadable' 'a linked worktree reads its run through the repo line'
   assert_not_contains "$out" 'state: unknown' 'a green PR in merge monitoring is never unknown'
@@ -5621,6 +5736,7 @@ test_ci_ready_done_log_relapse_stays_working
 test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
+test_validation_ready_requires_final_acceptance
 test_terminal_passed
 test_terminal_passed_with_override
 test_terminal_passed_with_skips
