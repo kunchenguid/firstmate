@@ -2,7 +2,7 @@
 # tests/fm-composer-pi-codex-banner-live-e2e.test.sh - the live guard for the
 # Pi Codex usage-limit banner shape (live-harness-optin family; issue #5000).
 #
-# bin/fm-composer-lib.sh admits a Pi separator pair with a stale identity
+# bin/fm-composer-pi-adapter.sh (sourced by bin/fm-composer-lib.sh) admits a Pi separator pair with a stale identity
 # status as `empty` when the last non-blank row above the pair is the fixed
 # banner Pi draws once a turn ended on Codex's usage limit
 # (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT). That banner text and the solid
@@ -73,6 +73,12 @@ PATH="$WORK:$PATH"
 
 VERSION=$(pi --version 2>/dev/null | head -1)
 [ -n "$VERSION" ] || VERSION='version-unknown'
+# The adapter is version-pinned: an unpinned installed pi must fail here by
+# name rather than silently treating any rendering as empty proof.
+FM_COMPOSER_PI_ADAPTER_VERSION=$VERSION
+if ! fm_composer_pi_adapter_version_pinned "$VERSION"; then
+  fail "pi $VERSION is outside the pinned banner-adapter set ($FM_COMPOSER_PI_BANNER_PINNED_VERSIONS); refresh the pin after verifying the live shape"
+fi
 
 # The stub Codex endpoint: every SSE request answers with the exact stream
 # error event Pi's Codex provider turns into `Codex error: <message>`; the
