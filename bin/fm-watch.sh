@@ -1841,18 +1841,29 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
-# Bound a due stale alarm for an ordinary crew task held for the captain.
+# Bound a due stale alarm for an ordinary crew task held for the captain, or
+# whose status log still holds a `needs-decision` no `resolved` line for its key
+# has closed (status_has_open_needs_decision owns that fold). The open decision
+# is the worker's own declaration that it waits for an answer, so it takes the
+# same first-sight alarm and long re-surface cadence as a declared pause; its
+# scope is the status-log signature, so the closing `resolved` line - or any
+# other new event - ends the bound and the next sighting alarms as before.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
 # preserves their no-backlog-read hot path.
-# While the away-posture record exists the bound is absolute: an open captain
-# call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# While the away-posture record exists the backlog bound is absolute: an open
+# captain call is never rechecked, whatever the throttle says, because nobody is
+# there to answer it and the return brief lists it.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
-  task_captain_call_open "$task" || return 1
-  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  afk_record_present && return 0
+  if task_captain_call_open "$task"; then
+    STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
+    afk_record_present && return 0
+  elif [ -n "$task" ] && status_has_open_needs_decision "$STATE/$task.status"; then
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+  else
+    return 1
+  fi
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
@@ -1933,7 +1944,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait, open captain call, or open decision already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"
@@ -3045,7 +3056,8 @@ EOF
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further NEW pane hashes with
+              # the captain already holds this work, or the log still holds the
+              # worker's own unanswered needs-decision: further NEW pane hashes with
               # the same status-log state have nothing to add while they are
               # deciding. Only that new-hash repetition is bounded - the first
               # sight already alarmed, a new hash inside the window is absorbed,
@@ -3054,7 +3066,7 @@ EOF
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+              triage_log "absorbed stale (open captain call or decision already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
