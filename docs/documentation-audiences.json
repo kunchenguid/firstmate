@@ -305,6 +305,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/jsonl-viewer.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/short-agents.md",
       "audience": "operator-current"
     },

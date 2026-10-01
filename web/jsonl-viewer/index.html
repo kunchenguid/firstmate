@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Firstmate JSONL Viewer</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">FIRSTMATE</p>
+        <h1>Agent journal viewer</h1>
+      </div>
+      <div class="connection">
+        <label for="token">Access token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false">
+        <button id="connect" type="button">Connect</button>
+      </div>
+    </header>
+    <main>
+      <aside>
+        <label for="source">Journal kind</label>
+        <select id="source">
+          <option value="all">All</option>
+          <option value="short">Short agents</option>
+          <option value="supervisor">Supervisor sessions</option>
+        </select>
+        <label for="session-search">Find session</label>
+        <input id="session-search" type="search" placeholder="ID or date">
+        <div id="sessions" class="sessions" aria-live="polite"></div>
+      </aside>
+      <section class="journal">
+        <div class="toolbar">
+          <div>
+            <p id="session-title" class="session-title">Enter the access token to begin.</p>
+            <p id="status" class="status" role="status"></p>
+          </div>
+          <div class="filters">
+            <input id="event-search" type="search" placeholder="Search visible events">
+            <select id="role-filter" aria-label="Filter by role"><option value="all">All roles</option></select>
+            <select id="type-filter" aria-label="Filter by type"><option value="all">All types</option></select>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="from-start" type="button" disabled>Load from start</button>
+          <button id="load-more" type="button" disabled>Load more</button>
+          <label><input id="follow" type="checkbox" checked> Follow appended events</label>
+        </div>
+        <div id="notice" class="notice" hidden></div>
+        <div id="events" class="events" aria-live="polite"></div>
+      </section>
+    </main>
+    <template id="event-template">
+      <article class="event-card">
+        <div class="event-meta"><time></time><span class="badge role"></span><span class="badge type"></span></div>
+        <p class="event-summary"></p>
+        <div class="event-content"></div>
+        <details class="raw"><summary>Raw JSON</summary><pre></pre></details>
+      </article>
+    </template>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
