@@ -365,6 +365,43 @@ test_kiro_hooks_drive_semantic_busy_idle_and_progress() {
   pass "Kiro hooks report semantic busy/idle/progress and reject stale generations"
 }
 
+# A worker's PreToolUse must deny a shell command that backgrounds itself
+# (data/done-archive.md's 28/09 retro, "censo R4": build-mingw.sh ran with &
+# against the brief) rather than only telling it not to in prose.
+test_kiro_pretool_denies_a_backgrounded_worker_command() {
+  local id rec state kh hook gen rc out
+  id="kiro-background-z6-$$"
+  rec=$(make_kiro_spawn_case background "$id")
+  read_kiro_spawn_record "$rec"
+  run_kiro_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --model auto >/dev/null 2>&1
+  state="$HOME_DIR/state"
+  kh="$state/$id.kiro-home"
+  hook="$ROOT/bin/fm-kiro-turnend-hook.sh"
+  gen=$(cat "$state/$id.busy-gen" 2>/dev/null) || fail "Kiro spawn did not arm a busy generation"
+
+  drive_kiro_pretool() {  # <command>
+    local cmd=$1
+    printf '{"hook_event_name":"PreToolUse","cwd":"%s","tool_input":{"command":"%s"}}
+' "$WT_DIR" "$cmd" |       (cd "$WT_DIR" && FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$state"         KIRO_HOME="$kh" KIRO_WORKSPACE_ROOT="$WT_DIR"         FM_KIRO_TASK_ID="$id" FM_KIRO_STATE="$state" FM_KIRO_BUSY_GEN="$gen"         bash "$hook") 2>&1
+  }
+
+  rm -f "$state/$id.progress"
+  out=$(drive_kiro_pretool 'bin/build-mingw.sh --release &'); rc=$?
+  [ "$rc" -eq 2 ] || fail "a trailing & worker command should be denied, got exit $rc"
+  assert_contains "$out" "detaches itself from the current turn" "the deny reason must name self-detachment"
+  assert_absent "$state/$id.progress" "a denied PreToolUse call must not record progress for work that never ran"
+
+  rm -f "$state/$id.progress"
+  out=$(drive_kiro_pretool 'nohup bin/build-mingw.sh --release'); rc=$?
+  [ "$rc" -eq 2 ] || fail "a nohup worker command should be denied, got exit $rc"
+
+  rm -f "$state/$id.progress"
+  drive_kiro_pretool 'make build && make test' >/dev/null; rc=$?
+  [ "$rc" -eq 0 ] || fail "an ordinary foreground worker command should be allowed, got exit $rc"
+  assert_present "$state/$id.progress" "an allowed PreToolUse call must still publish native progress"
+  pass "Kiro PreToolUse denies a self-detaching worker command before recording progress"
+}
+
 # --- launch / spawn ---------------------------------------------------------
 
 make_kiro_fakebin() {
@@ -1392,6 +1429,7 @@ test_kiro_busy_signatures_are_harness_scoped
 test_kiro_classify_busy_on_anchor_unknown_when_scrolled_out
 test_kiro_semantic_busy_source_is_registered
 test_kiro_hooks_drive_semantic_busy_idle_and_progress
+test_kiro_pretool_denies_a_backgrounded_worker_command
 test_kiro_launch_is_the_interactive_tui_with_brief_model_effort_and_scope
 test_kiro_trust_dialog_refuses_without_answering
 test_kiro_trust_decoy_does_not_block_the_launch

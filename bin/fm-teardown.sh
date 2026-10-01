@@ -1451,6 +1451,28 @@ pr_number_from_branch() {
   printf '%s' "$n"
 }
 
+# An OPEN PR's URL for the task's own branch, when its record never carries
+# pr= because the worker opened a PR without calling bin/fm-pr-check.sh. Scoped
+# to a backlog item returning to Queued (fm-captain-hold.sh still has it open),
+# so a merged or closed PR for an old incarnation of the branch is never
+# surfaced as this item's unresolved deliverable - see
+# data/lloegrys-backlog-reconcile/report.md's retro: PRs 636 and 637 stayed
+# open with the backlog item showing links: none.
+open_pr_url_for_branch() {
+  local branch=$1 out
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
+  [ -d "$WT" ] || return 1
+  out=$( cd "$WT" && gh-axi pr list --state open --head "$branch" --limit 1 --json url -q '.[0].url' 2>/dev/null ) || return 1
+  case "$out" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    *$'\n'*) return 1 ;;
+  esac
+  printf '%s' "$out"
+}
+
 pr_number_from_target() {
   local target=$1 n
   case "$target" in
@@ -1590,7 +1612,7 @@ work_is_landed() {
 # other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
+  local data_relative branch discovered_pr
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1602,6 +1624,11 @@ backlog_done_args() {
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+      elif [ "$BACKLOG_TRANSITION" = retain ] && [ -d "$WT" ]; then
+        branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+        if discovered_pr=$(open_pr_url_for_branch "$branch"); then
+          BACKLOG_DONE_ARGS=(--pr "$discovered_pr")
+        fi
       fi
       ;;
   esac

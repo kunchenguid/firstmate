@@ -16,7 +16,10 @@
 #
 # Worker/scout lifecycle, generation-bound to the current task incarnation:
 #   UserPromptSubmit  -> busy kiro-hook
-#   PreToolUse        -> native progress marker
+#   PreToolUse        -> denies a shell command that backgrounds itself
+#                        (trailing &, nohup, disown, setsid; see
+#                        bin/fm-kiro-worker-background-pretool-check.sh) before
+#                        recording the native progress marker
 #   PostToolUse       -> native progress marker
 #   Stop              -> idle kiro-hook plus the guarded turn-ended notification
 #
@@ -356,7 +359,16 @@ case "$EVENT_KIND" in
     kiro_busy_apply busy user-prompt-submit
     exit 0
     ;;
-  pre-tool-use|post-tool-use)
+  pre-tool-use)
+    # A worker's own shell command, checked for self-detachment (trailing &,
+    # nohup, disown, setsid) before progress is recorded; a denied call never
+    # ran, so it carries no progress to record.
+    printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-kiro-worker-background-pretool-check.sh" --claude >/dev/null
+    [ "$?" -ne 2 ] || exit 2
+    kiro_busy_progress
+    exit 0
+    ;;
+  post-tool-use)
     kiro_busy_progress
     exit 0
     ;;

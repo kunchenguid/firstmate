@@ -704,6 +704,71 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# A task returning to Queued without a recorded pr= should pick up its own
+# branch's open PR from GitHub, so a cancelled or captain-held task never
+# shows links: none while a PR for its exact work sits open
+# (data/lloegrys-backlog-reconcile/report.md's retro: PRs 636 and 637).
+hold_task_for_captain() {  # <case-dir>
+  FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+    FM_DATA_OVERRIDE="$1/data" FM_CONFIG_OVERRIDE="$1/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold task-x1 --reason "captain must decide" >/dev/null \
+    || fail "could not hold task-x1 for the captain"
+}
+
+add_gh_pr_open_for_branch() {  # <case-dir> <branch> <url>
+  local case_dir=$1 branch=$2 url=$3
+  cat > "$case_dir/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr list")
+    case " \$* " in
+      *"--state open"*"--head $branch"*)
+        printf '%s\n' '$url' ;;
+      *)
+        printf '%s\n' "count: 0 (showing first 0)" "pull_requests[]: []" ;;
+    esac
+    exit 0 ;;
+  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+test_teardown_retain_discovers_an_open_pr_for_the_task_branch() {
+  local case_dir out url
+  case_dir=$(make_case tasks-axi-retain-pr)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  hold_task_for_captain "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  url="https://github.com/example/repo/pull/42"
+  add_gh_pr_open_for_branch "$case_dir" fm/task-x1 "$url"
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog: $out"
+  [ "$(backlog_row_state "$case_dir")" = "queued" ] \
+    || fail "a captain-held item should return to Queued, not close: $(backlog_row_state "$case_dir")"
+  assert_grep "$url" "$case_dir/data/backlog.md" \
+    "a retained backlog item did not pick up its branch's open PR"
+  pass "teardown discovers an undeclared open PR for the task branch on retain"
+}
+
+test_teardown_retain_without_a_discoverable_pr_records_nothing_extra() {
+  local case_dir out
+  case_dir=$(make_case tasks-axi-retain-no-pr)
+  write_meta "$case_dir" no-mistakes ship
+  seed_backlog_in_flight "$case_dir"
+  hold_task_for_captain "$case_dir"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+
+  out=$(run_teardown "$case_dir") || fail "teardown failed with a real backlog: $out"
+  [ "$(backlog_row_state "$case_dir")" = "queued" ] \
+    || fail "a captain-held item should return to Queued, not close: $(backlog_row_state "$case_dir")"
+  assert_no_grep "Deliverable of the finished work" "$case_dir/data/backlog.md" \
+    "a retained item with no discoverable PR must not fabricate a deliverable line"
+  pass "teardown retain with no discoverable PR records nothing extra"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -4065,6 +4130,8 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_teardown_retain_discovers_an_open_pr_for_the_task_branch
+test_teardown_retain_without_a_discoverable_pr_records_nothing_extra
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
