@@ -88,6 +88,15 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+# Completes <id>'s captain-call inventory through a separate held task, because
+# the origin task is never accepted as its own inventory entry.
+complete_through_sibling() {  # <home> <origin-id>
+  local home=$1 id=$2
+  run_captain "$home" hold "$id-call" --title "Sibling captain call for $id" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    && run_captain "$home" complete "$id" "$id-call"
+}
+
 request_reconciles() {  # <home> <source-id> <task-id>...
   local home=$1 source_id=$2 id
   shift 2
@@ -2575,7 +2584,7 @@ test_teardown_never_closes_a_captain_held_task() {
   run_captain "$home" hold "$id" \
     --reason "captain must choose inline or by-reference attachments" >/dev/null \
     || fail "could not hold the originating work item for the captain"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed with the origin as its own captain call"
 
   run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
@@ -2666,7 +2675,7 @@ test_retained_row_artifacts_survive_captain_answers() {
     > "$home/data/$retained_id/report.md"
   run_captain "$home" hold "$retained_id" --reason "captain must choose the report follow-up" \
     >/dev/null || fail "could not hold the retained report"
-  run_captain "$home" complete "$retained_id" "$retained_id" >/dev/null \
+  complete_through_sibling "$home" "$retained_id" >/dev/null \
     || fail "completion gate failed for the retained report"
   run_teardown "$home" "$retained_id" > "$home/retained-teardown.out" \
     2> "$home/report-teardown.err" \
@@ -2687,7 +2696,7 @@ test_retained_row_artifacts_survive_captain_answers() {
   run_captain "$home" hold "$precedence_id" \
     --reason "captain must choose the report follow-up" >/dev/null \
     || fail "could not hold the report precedence fixture"
-  run_captain "$home" complete "$precedence_id" "$precedence_id" >/dev/null \
+  complete_through_sibling "$home" "$precedence_id" >/dev/null \
     || fail "completion gate failed for the report precedence fixture"
   run_teardown "$home" "$precedence_id" > "$home/precedence-teardown.out" \
     2> "$home/precedence-teardown.err" \
@@ -2815,7 +2824,7 @@ test_retained_row_artifacts_survive_captain_answers() {
   printf '# Released report\n' > "$home/data/$released_id/report.md"
   run_captain "$home" hold "$released_id" --reason "captain report release pending" \
     >/dev/null || fail "could not hold the released report"
-  run_captain "$home" complete "$released_id" "$released_id" >/dev/null \
+  complete_through_sibling "$home" "$released_id" >/dev/null \
     || fail "completion gate failed for the released report"
   printf 'Release the completed report.\n' > "$home/released-answer.txt"
   run_captain "$home" answer "$released_id" --release \
@@ -2920,7 +2929,7 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
   printf '# Failed cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after cleanup retry" >/dev/null \
     || fail "could not hold the cleanup-failure fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the cleanup-failure fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -2979,7 +2988,7 @@ test_answer_before_cleanup_replay_preserves_the_retained_report() {
   printf '# Interrupted cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
     >/dev/null || fail "could not hold the answer-before-replay fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the answer-before-replay fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3090,7 +3099,7 @@ test_unusable_pending_close_record_names_its_reason() {
   printf '# Unusable pending close\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
   run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
     >/dev/null || fail "could not hold the unusable pending-close fixture"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "completion gate failed for the unusable pending-close fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3154,7 +3163,12 @@ EOF
     || fail "could not hold the relocated answer-before-replay fixture"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id-call" --title "Sibling captain call" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the sibling captain call"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated answer-before-replay fixture"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
@@ -3231,7 +3245,12 @@ EOF
     || fail "could not hold the relocated work item"
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id-call" --title "Sibling captain call" \
+    --reason "captain must decide the sibling call" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the sibling captain call"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id-call" >/dev/null \
     || fail "completion gate failed for the relocated captain hold"
 
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -4061,7 +4080,7 @@ PM
     > "$home/data/$scout/report.md"
   run_captain "$home" hold "$scout" --reason "captain must choose" >/dev/null \
     || fail "could not hold the investigation for the captain"
-  run_captain "$home" complete "$scout" "$scout" >/dev/null \
+  complete_through_sibling "$home" "$scout" >/dev/null \
     || fail "the completion gate failed with the origin as its own captain call"
   PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
     run_teardown "$home" "$scout" > "$home/nonref.out" 2> "$home/nonref.err" \
@@ -4099,7 +4118,7 @@ retain_row_with_body() {  # <home> <id> <body>
     || fail "could not give $id a body carrying non-ASCII characters"
   run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
     || fail "could not hold $id for the captain"
-  run_captain "$home" complete "$id" "$id" >/dev/null \
+  complete_through_sibling "$home" "$id" >/dev/null \
     || fail "the completion gate failed for $id"
   run_teardown "$home" "$id" > "$home/$id.out" 2> "$home/$id.err" \
     || fail "cleanup of captain-held $id failed: $(cat "$home/$id.err")"
@@ -4137,6 +4156,120 @@ test_retained_body_keeps_its_utf8_bytes() {
   pass "cleanup preserves every byte of a retained body's non-ASCII characters"
 }
 
+# A refused hold must never read as a recorded one. The gate used to accept the
+# origin as its own inventory whenever the origin row looked durable, so a hold
+# that failed just before `complete <origin> <origin>` left a satisfied gate
+# with no captain call recorded.
+test_origin_is_never_its_own_inventory_entry() {
+  local home id
+  home=$(make_home origin-self-inventory)
+  id=sample-self-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample self review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  if run_captain "$home" hold "$id" --reason "" >/dev/null 2> "$home/hold.err"; then
+    fail "hold accepted an empty reason"
+  fi
+  if run_captain "$home" complete "$id" "$id" > "$home/self.out" 2> "$home/self.err"; then
+    fail "complete accepted the origin as its own inventory after a failed hold"
+  fi
+  assert_grep "cannot be its own captain-call inventory entry" "$home/self.err" \
+    "the refusal does not say why the origin was rejected"
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "the refused completion recorded an inventory attestation"
+
+  # Holding the origin row itself must not let it vouch for itself either.
+  run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
+    || fail "could not hold the origin row"
+  if run_captain "$home" complete "$id" "$id" > "$home/held.out" 2> "$home/held.err"; then
+    fail "complete accepted a held origin row as its own inventory"
+  fi
+  pass "complete refuses the origin as its own captain-call inventory"
+}
+
+# `hold --origin` records which origin a call was held for, and `complete`
+# refuses a task held for a different origin. A hold recorded before that
+# record existed, or without --origin, still verifies and is flagged.
+test_complete_refuses_an_entry_held_for_another_origin() {
+  local home id other o out
+  home=$(make_home origin-mismatch)
+  id=sample-first-review
+  other=sample-second-review
+  for o in "$id" "$other"; do
+    mkdir -p "$home/data/$o"
+    tasks_in "$home" add "$o" "Investigate $o" --kind scout --repo sample --start >/dev/null \
+      || fail "could not create the $o fixture"
+    write_origin_meta "$home" "$o"
+    printf 'done: report complete\n' > "$home/state/$o.status"
+  done
+  run_captain "$home" hold sample-other-call --title "Call for the second review" \
+    --reason "captain must decide" --repo sample --origin "$other" >/dev/null \
+    || fail "could not hold the call recorded for the second review"
+  if run_captain "$home" complete "$id" sample-other-call > "$home/mismatch.out" 2> "$home/mismatch.err"; then
+    fail "complete accepted an entry held for a different origin"
+  fi
+  assert_grep "was held for origin $other, not $id" "$home/mismatch.err" \
+    "the refusal does not name both origins"
+  assert_no_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "the refused completion recorded an inventory attestation"
+
+  run_captain "$home" hold sample-own-call --title "Call for the first review" \
+    --reason "captain must decide" --repo sample --origin "$id" >/dev/null \
+    || fail "could not hold the call recorded for the first review"
+  out=$(run_captain "$home" complete "$id" sample-own-call) \
+    || fail "complete refused an entry held for its own origin"
+  assert_not_contains "$out" "no recorded origin" \
+    "an entry with a recorded origin was flagged as unrecorded"
+
+  tasks_in "$home" add sample-old-call "Call held before origins were recorded" --kind captain --repo sample >/dev/null \
+    || fail "could not create the older call"
+  tasks_in "$home" hold sample-old-call --reason "captain must decide" --kind captain >/dev/null \
+    || fail "could not hold the older call"
+  out=$(run_captain "$home" complete "$other" sample-old-call) \
+    || fail "complete refused an older hold with no recorded origin"
+  assert_contains "$out" "no recorded origin on: sample-old-call" \
+    "an older hold with no recorded origin was not flagged"
+  pass "complete refuses an entry held for another origin and flags one with none recorded"
+}
+
+# tasks-axi refuses parentheses and line breaks in a hold reason and stores the
+# rest on one markdown line. The reason is encoded where it is written and
+# decoded wherever it is shown, so prose with every awkward character survives.
+test_hold_reason_round_trips_awkward_characters() {
+  local home id reason stored json shown start
+  home=$(make_home reason-round-trip)
+  id=sample-reason-call
+  reason=$'Pick route (north); say "yes" or \'no\' - 100% sure %28x%29\nSecond line'
+  run_captain "$home" hold "$id" --title "Choose the route" --reason "$reason" \
+    --repo sample >/dev/null \
+    || fail "hold refused a reason containing parentheses, a semicolon, quotes, and a newline"
+  stored=$(grep "^- \[ \] $id " "$home/data/backlog.md") \
+    || fail "the held row is not on one backlog line"
+  assert_contains "$stored" "(hold-kind: captain)" \
+    "parentheses in the reason broke the hold-kind tag"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
+  shown=$(printf '%s' "$json" | jq -r --arg id "$id" \
+    '.backlog.records[] | select(.id == $id) | .hold_reason')
+  [ "$shown" = "$reason" ] \
+    || fail "the reason did not read back unchanged: $(printf '%s' "$shown" | od -c | head -3)"
+  start=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-session-start.sh" 2>&1 || true)
+  assert_contains "$start" 'Pick route (north); say' \
+    "the session-start backlog listing did not decode the stored reason"
+  assert_not_contains "$start" 'Pick route %28north' \
+    "the session-start backlog listing shows the stored escapes"
+  pass "a hold reason with parentheses, a semicolon, quotes, and a newline reads back unchanged"
+}
+
+
+test_origin_is_never_its_own_inventory_entry
+test_complete_refuses_an_entry_held_for_another_origin
+test_hold_reason_round_trips_awkward_characters
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes

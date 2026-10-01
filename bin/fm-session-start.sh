@@ -371,6 +371,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -541,13 +543,16 @@ print_backlog_compact() {
   subsection "$label"
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
-      if fm_tasks_axi_backend_available "$CONFIG"; then
-        print_backlog_tasks_axi_compact "$path"
-      elif fm_backlog_backend_manual "$CONFIG"; then
-        print_backlog_manual_compact "$path" "manual backend"
-      else
-        print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
-      fi
+      # Held rows carry the stored, escaped hold reason (bin/fm-hold-reason-lib.sh).
+      {
+        if fm_tasks_axi_backend_available "$CONFIG"; then
+          print_backlog_tasks_axi_compact "$path"
+        elif fm_backlog_backend_manual "$CONFIG"; then
+          print_backlog_manual_compact "$path" "manual backend"
+        else
+          print_backlog_manual_compact "$path" "tasks-axi unavailable or incompatible"
+        fi
+      } | fm_hold_reason_decode_stream
       print_backlog_pointer
     else
       printf '(present, empty)\n'

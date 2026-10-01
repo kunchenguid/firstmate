@@ -426,8 +426,13 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         elif ($rest | test("^SCOUT(?![A-Za-z0-9_])")) then "scout"
         elif ($rest | test("^SHIP(?![A-Za-z0-9_])")) then "ship"
         else null end;
+    # bin/fm-hold-reason-lib.sh owns this encoding: the stored reason has its
+    # parentheses, line breaks, and percent signs escaped, and %25 decodes last.
+    def decode_hold_reason:
+      gsub("%28"; "(") | gsub("%29"; ")") | gsub("%0A"; "\n") | gsub("%0D"; "\r") | gsub("%25"; "%");
     def hold_metadata($rest):
-      cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)");
+      cap($rest; ".*\\(hold:[[:space:]]*(?<v>[^)]*)")
+      | if . == null then null else decode_hold_reason end;
     def metadata_word($rest; $key):
       cap($rest; ".*(?:\\(|,[[:space:]]*)" + $key + "[[:space:]]+(?<v>[^,)]*)");
     def url_pattern: "https?://[^[:space:])\"<>]+";
