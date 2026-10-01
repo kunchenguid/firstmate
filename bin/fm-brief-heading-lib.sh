@@ -84,12 +84,12 @@ fm_brief_heading_present() {  # <file> <heading>
 fm_brief_task_heading_body() {  # <file> <heading>
   local task
   task=$(fm_brief_heading_body "$1" "# Task")
-  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" body
+  fm_brief_heading_parse - "$2" body <<<"$task"
 }
 
 fm_brief_task_heading_present() {  # <file> <heading>
   local task
   task=$(fm_brief_heading_body "$1" "# Task")
-  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" present >/dev/null
+  fm_brief_heading_parse - "$2" present >/dev/null <<<"$task"
 }
 

@@ -1224,7 +1224,7 @@ install_integrated_autoarm() {
   # These cases drive the watcher arm, so the home opts out of the supervision
   # host a Claude home otherwise runs by default.
   mkdir -p "$dir/config"
-  printf 'off\n' > "$dir/config/supervision-host"
+  : > "$dir/config/supervision-host-off"
 }
 
 run_integrated_autoarm() {

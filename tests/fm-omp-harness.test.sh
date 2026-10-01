@@ -669,7 +669,7 @@ EOF
 }
 
 # The omp owner stays file-gated: a home without config/supervision-host, or
-# one whose file says off, spawns the plain arm and never the host.
+# one opted out by config/supervision-host-off, spawns the plain arm and never the host.
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
   local line label repo home log out status
   for line in - off; do
@@ -677,7 +677,7 @@ test_watch_extension_keeps_the_arm_without_the_file_or_with_off() {
     repo="$TMP_ROOT/watch-host-gate-$label/repo"; home="$TMP_ROOT/watch-host-gate-$label/home"; log="$TMP_ROOT/watch-host-gate-$label/arm.log"
     install_omp_extension_fixture "$repo"
     mkdir -p "$home/state" "$home/config"
-    [ "$line" = - ] || printf '%s\n' "$line" > "$home/config/supervision-host"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
     cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = --handling-delivered ] && exit 0

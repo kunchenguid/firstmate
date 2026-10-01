@@ -65,7 +65,7 @@
 #     host owns its own successors, so its path is unchanged.
 #   - Supervision host: a home that runs it (by default on this Claude
 #     primary; docs/configuration.md "Supervision host" owns the gate and its
-#     `off` opt-out) runs bin/fm-supervision-host.sh in the arm's place, bound
+#     opt-out) runs bin/fm-supervision-host.sh in the arm's place, bound
 #     to this generation.
 #     To this hook it is an arm that also takes away-posture wakes itself and
 #     ends its own park before the hook timeout with a "supervision-host:"

@@ -948,6 +948,7 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
 apply_pending_retained_artifact() {  # <task-id>
   local id=$1 marker
   local -a args=()
+  RETAINED_CLOSE_ARGS=()
   marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
   [ -e "$marker" ] || [ -L "$marker" ] || return 0
   fm_backlog_close_marker_validate "$marker" "$DATA" "$id" "$STATE" \
@@ -956,6 +957,10 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
+      if [ "${args[0]}" = --pr ] && fm_backlog_pr_is_gerrit_change "${args[1]-}"; then
+        RETAINED_CLOSE_ARGS=(--note "Gerrit change ${args[1]}")
+        return 0
+      fi
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
       fm_backlog_mutate "$DATA" update "$id" "${args[@]}" \
         || { report_retained_artifact_failure "$id" "$marker"; return 1; }
@@ -968,7 +973,7 @@ close_answered() {  # <task-id> <release-0-or-1>
     tasks_axi unhold "$1" >/dev/null
   else
     apply_pending_retained_artifact "$1" || return 1
-    tasks_axi "done" "$1" >/dev/null
+    tasks_axi "done" "$1" "${RETAINED_CLOSE_ARGS[@]+"${RETAINED_CLOSE_ARGS[@]}"}" >/dev/null
   fi
 }
 

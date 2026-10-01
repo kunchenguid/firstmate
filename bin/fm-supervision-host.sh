@@ -8,8 +8,8 @@
 #
 # A primary's arm owner runs this in place of bin/fm-watch-arm.sh when the home
 # runs the host (by default on Claude, by config/supervision-host elsewhere,
-# never with an `off` file; docs/configuration.md "Supervision host"): the
-# Claude Stop auto-arm
+# never with config/supervision-host-off; docs/configuration.md "Supervision
+# host"): the Claude Stop auto-arm
 # (bin/fm-claude-stop-autoarm.sh), the Cursor stop-hook park
 # (bin/fm-turnend-guard-cursor.sh), the OpenCode TUI plugin
 # (.opencode/plugins/fm-primary-watch-arm.js), the omp watch extension
@@ -155,10 +155,15 @@
 # a new engine conversation after this many turns; every main session start
 # also opens a new one), FM_SUPERVISION_HOST_READY_TIMEOUT (25: how long a
 # successor cycle may take to verify), FM_SUPERVISION_HOST_POLL (1).
+# Park duration uses Bash's process-relative SECONDS counter (including Bash
+# 3.2), while durable timestamps still use epoch time. This is not a portable
+# monotonic-clock guarantee. Arm exit probes use ordinary 0.5-second child
+# sleeps within the unchanged POLL-cadence maintenance and boundary checks;
+# close observation and a shell-only caught signal may wait that interval plus
+# work/scheduling time. No stop-signal disposition or cleanup bound changes.
 # FM_TEST_SUPERVISION_HOST_CLOCK names a file holding the park's elapsed
-# seconds, which the park and turn boundary checks read in place of the wall
-# clock only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated
-# suites.
+# seconds, which the park and turn boundary checks read in place of SECONDS
+# only when FM_TEST_SEAM=1; tests/lib.sh arms the marker for isolated suites.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -228,6 +233,7 @@ HEALTH_FILE="$STATE/.supervision-host-health"
 MIRROR_FEED="$STATE/.supervision-host-mirror"
 
 HOST_PID=$$
+HOST_STARTED_SECONDS=$SECONDS
 HOST_STARTED=$(date +%s)
 GEN="host-$HOST_PID-$HOST_STARTED"
 TURN_SEQ=0
@@ -442,22 +448,24 @@ start_arm() {  # <predecessor-arm-pid or empty> [--restart]; sets the started pi
   STARTED_ARM_OUT=$out
 }
 
-park_elapsed() {
+park_elapsed() {  # Sets PARK_ELAPSED without a production clock/helper fork.
   if [ "${FM_TEST_SEAM:-}" = 1 ] && [ -n "${FM_TEST_SUPERVISION_HOST_CLOCK:-}" ]; then
-    numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0
+    PARK_ELAPSED=$(numeric_or "$(cat "$FM_TEST_SUPERVISION_HOST_CLOCK" 2>/dev/null)" 0)
     return
   fi
-  printf '%s\n' $(( $(date +%s) - HOST_STARTED ))
+  PARK_ELAPSED=$((SECONDS - HOST_STARTED_SECONDS))
 }
 
 boundary_reached() {
-  [ "$(park_elapsed)" -ge "$PARK_SECONDS" ]
+  park_elapsed
+  [ "$PARK_ELAPSED" -ge "$PARK_SECONDS" ]
 }
 
 # True when an engine turn started now could still be running at the turn
 # limit (the boundary unless the owner set a later one).
 turn_crosses_boundary() {
-  [ $(( $(park_elapsed) + TURN_TIMEOUT + ENGINE_GRACE )) -ge "$PARK_LIMIT" ]
+  park_elapsed
+  [ $((PARK_ELAPSED + TURN_TIMEOUT + ENGINE_GRACE)) -ge "$PARK_LIMIT" ]
 }
 
 # End the park at the boundary: stop the current and successor arms and this
@@ -471,7 +479,8 @@ boundary_exit() {
   SUCCESSOR_PID=
   SUCCESSOR_OUT=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
-  log_line "boundary	after $(park_elapsed)s"
+  park_elapsed
+  log_line "boundary	after ${PARK_ELAPSED}s"
   emit 'supervision-host: cycle boundary - the host ended its park at its bound; drain, acknowledge, and end the turn, and the next park starts on its own'
   exit 0
 }
@@ -491,11 +500,18 @@ stream_ready_line() {
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
+  local i
   while fm_pid_alive "$ARM_PID"; do
     refresh_process "$ARM_PID"
     [ "$READY_PENDING" -eq 0 ] || stream_ready_line
     boundary_reached && return 1
-    sleep "$POLL"
+    # Probe the arm's exit twice a second between POLL-cadence checks, without
+    # changing the outer identity refresh, readiness, or boundary cadence.
+    i=$((POLL * 2))
+    while [ "$i" -gt 0 ] && fm_pid_alive "$ARM_PID"; do
+      sleep 0.5
+      i=$((i - 1))
+    done
   done
   wait "$ARM_PID" 2>/dev/null || true
   ARM_TEXT=$(cat "$ARM_OUT" 2>/dev/null || true)

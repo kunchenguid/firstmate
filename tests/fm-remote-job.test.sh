@@ -107,6 +107,85 @@ git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add AGENTS.md bin
 git -C "$REMOTE_ROOT" commit -qm 'remote job fixture'
 
+# Observe the actual sleep executable boundary for the result consumer, a
+# top-level command lane, and the dispatcher. Re-source the public library as
+# callers may do; its own dispatcher default must not become a legacy override.
+poll_cadence_case() (
+  local label=$1 legacy=$2 active=$3 expected=$4 dispatch=$5 poll_dir pid='' i
+  poll_dir="$TMP_ROOT/poll-$label"
+  mkdir -p "$poll_dir/bin"
+  cat > "$poll_dir/bin/sleep" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FM_POLL_SLEEP_LOG"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$poll_dir/bin/sleep"
+  trap '[ -z "$pid" ] || { kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }' EXIT
+  unset FM_REMOTE_JOB_POLL_SECONDS FM_REMOTE_JOB_ACTIVE_POLL_SECONDS
+  # shellcheck disable=SC2030 # The legacy override is local to this cadence fixture.
+  [ -z "$legacy" ] || export FM_REMOTE_JOB_POLL_SECONDS="$legacy"
+  # shellcheck disable=SC2030 # The active override is local to this cadence fixture.
+  [ -z "$active" ] || export FM_REMOTE_JOB_ACTIVE_POLL_SECONDS="$active"
+  export FM_REMOTE_JOB_STATE_ROOT="$poll_dir/state" FM_ROOT_OVERRIDE="$REMOTE_ROOT"
+  # shellcheck disable=SC2030 # Each cadence fixture owns its subshell's bounds.
+  export FM_REMOTE_JOB_QUEUE_TIMEOUT=60 FM_REMOTE_JOB_TIMEOUT=30
+  # shellcheck disable=SC2030 # The recording executable is local to this fixture.
+  export PATH="$poll_dir/bin:$PATH" FM_POLL_SLEEP_LOG="$poll_dir/sleeps"
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-delay-job.sh 0.8 "$poll_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
+  # Publish a real bounded result after the caller has entered its wait, without
+  # a lane's own samples contaminating this consumer-only executable log.
+  (
+    /bin/sleep 0.8
+    : > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/stdout"
+    : > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/stderr"
+    printf '0\n' > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/exit"
+    fm_remote_job_write_state "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID" 'done'
+  ) &
+  pid=$!
+  fm_remote_job_wait "$ACCOUNT_HOME" "$FM_REMOTE_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+  wait "$pid" || fail "$label result producer failed"
+  pid=''
+  [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "$label result consumer lost the exit status"
+  grep -qx "$expected" "$FM_POLL_SLEEP_LOG" || fail "$label consumer never sampled at $expected seconds"
+  [ "$(sort -u "$FM_POLL_SLEEP_LOG")" = "$expected" ] || fail "$label consumer used another cadence"
+
+  : > "$FM_POLL_SLEEP_LOG"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-delay-job.sh 0.8 "$poll_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
+  HOME="$ACCOUNT_HOME" "$BASH" "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --lane "$FM_REMOTE_JOB_ID" &
+  pid=$!
+  wait "$pid" || fail "$label command lane failed"
+  pid=''
+  [ -e "$poll_dir/ran" ] || fail "$label lane did not execute its command"
+  [ "$(fm_remote_job_read_state "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID")" = 'done' ] || fail "$label lane did not publish completion"
+  grep -qx "$expected" "$FM_POLL_SLEEP_LOG" || fail "$label lane never sampled at $expected seconds"
+  if [ "$expected" != 0.05 ]; then
+    ! grep -qx 0.05 "$FM_POLL_SLEEP_LOG" || fail "$label lane still sampled at the dispatcher default"
+  fi
+
+  : > "$FM_POLL_SLEEP_LOG"
+  HOME="$ACCOUNT_HOME" "$BASH" "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$poll_dir/worker.log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    grep -qx 1 "$FM_POLL_SLEEP_LOG" && break
+    /bin/sleep 0.05
+  done
+  grep -qx 1 "$FM_POLL_SLEEP_LOG" || fail "$label dispatcher never reached its one-second quiet wait"
+  [ "$(grep -cx "$dispatch" "$FM_POLL_SLEEP_LOG")" -eq 4 ] || fail "$label dispatcher did not limit its fast burst to four $dispatch-second waits"
+  kill -TERM "$pid" || fail "$label dispatcher stopped unexpectedly"
+  wait "$pid" 2>/dev/null || true
+  pid=''
+  pass "$label: result and command samples use $expected seconds; dispatcher uses four $dispatch-second waits then one second"
+)
+poll_cadence_case default '' '' 0.25 0.05 || exit 1
+poll_cadence_case legacy 0.07 '' 0.07 0.07 || exit 1
+poll_cadence_case active 0.07 0.12 0.12 0.07 || exit 1
+
 DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
 DEFAULT_BOUNDS=$(
   unset FM_REMOTE_JOB_QUEUE_TIMEOUT
@@ -957,6 +1036,7 @@ fi
 exec '$(command -v sleep)' "\$@"
 SH
 chmod +x "$STALL_BIN/sleep"
+# shellcheck disable=SC2031 # Cadence fixture PATH changes stayed in their subshells.
 HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux PATH="$STALL_BIN:$PATH" \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \

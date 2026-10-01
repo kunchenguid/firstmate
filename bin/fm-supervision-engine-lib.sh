@@ -8,13 +8,14 @@
 # main-session key (fm_supervision_host_main_key) and the attended readiness
 # check (fm_supervision_host_attended_ready) the host's parts share.
 #
-# THE HOME GATE (config/supervision-host). docs/configuration.md
-# "Supervision host" owns the file's schema, its default on a Claude primary,
-# its `off` opt-out, and its no-engine outcome; this file implements them
+# THE HOME GATE (config/supervision-host-off, config/supervision-host).
+# docs/configuration.md "Supervision host" owns both files: the inherited
+# opt-out flag, the home-local engine line's schema, the default on a Claude
+# primary, and the no-engine outcome; this file implements them
 # (fm_supervision_host_enabled, fm_supervision_host_config) and holds the
 # verified-engine list and each engine's default model
-# (docs/supervision-host.md "Engines"). Every reader of the file asks
-# fm_supervision_host_enabled rather than testing the file itself, and a
+# (docs/supervision-host.md "Engines"). Every reader of either file asks
+# fm_supervision_host_enabled rather than testing the files itself, and a
 # reader outside bash runs this file:
 #   bash fm-supervision-engine-lib.sh enabled <config-dir> <primary-harness>
 # which exits 0 when that home runs the host for that primary and 1
@@ -64,18 +65,14 @@ fm_supervision_host_primary() {
 }
 
 # fm_supervision_host_enabled <config-dir> [<primary-harness>]: 0 iff this home
-# runs the supervision host. A file whose first word is "off" opts out on
-# every primary; any other file opts in; with no file, a Claude primary runs
-# the host at its default engine and every other primary does not. The
-# primary is detected (fm_supervision_host_primary) only when the file is
-# absent and the caller did not name one.
+# runs the supervision host. A present supervision-host-off opts out on every
+# primary; otherwise a supervision-host file opts in, and with neither file a
+# Claude primary runs the host at its default engine and every other primary
+# does not. The primary is detected (fm_supervision_host_primary) only when
+# both files are absent and the caller did not name one.
 fm_supervision_host_enabled() {
-  local word='' rest
-  if [ -f "$1/supervision-host" ]; then
-    read -r word rest < "$1/supervision-host" 2>/dev/null || true
-    [ "$word" != off ]
-    return
-  fi
+  [ ! -e "$1/supervision-host-off" ] && [ ! -L "$1/supervision-host-off" ] || return 1
+  [ ! -f "$1/supervision-host" ] || return 0
   [ "${2-$(fm_supervision_host_primary)}" = claude ]
 }
 
@@ -341,7 +338,7 @@ _fm_engine_reap() {
 # an engine its crashed predecessor left running.
 fm_supervision_engine_turn() {
   local engine=$1 model=$2 prompt=$3 message=$4 session=$5 mode=$6 timeout=$7 result=$8 errors=$9
-  local pid_file=${10:-} bin grace ledger watched rc home_phys root_phys state_phys identity recorded
+  local pid_file=${10:-} bin grace i ledger watched rc home_phys root_phys state_phys identity recorded
   local -a args
   bin=$(fm_supervision_engine_bin "$engine" 2>"$errors") || return 127
   case "$timeout" in ''|0*|*[!0-9]*) timeout=1200 ;; esac
@@ -395,7 +392,14 @@ fm_supervision_engine_turn() {
       fi
     fi
     _fm_engine_snapshot_descendants "$watched" "$ledger"
-    sleep 1
+    # Between the one-second snapshots the engine's exit is probed at a tenth
+    # of a second: the turn closes promptly when the engine dies while the
+    # process-table scans keep their one-second cadence.
+    i=0
+    while [ "$i" -lt 10 ] && fm_pid_alive "$watched"; do
+      sleep 0.1
+      i=$((i + 1))
+    done
   done
   wait "$watched"
   rc=$?
