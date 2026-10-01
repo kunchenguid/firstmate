@@ -362,6 +362,31 @@ test_originless_slot_on_feature_branch_starts_on_local_main() {
   pass "an origin-less slot left on a feature branch starts ships and scouts on local main"
 }
 
+test_originless_malformed_registry_refuses() {
+  local rec id kind out status before
+  for kind in ship scout; do
+    id="pool-originless-malformed-$kind-r1"
+    rec=$(make_originless_side_branch_case "originless-malformed-$kind" "$id")
+    read_case_record "$rec"
+    printf -- '- project [local-only forge=gerrit] - malformed fixture (added 2026-10-01)\n' \
+      > "$HOME_DIR/data/projects.md"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode local-only --yolo off)
+    else
+      out=$(run_spawn "$id" --scout)
+    fi
+    status=$?
+    [ "$status" -ne 0 ] || fail "an origin-less $kind launched although its registry entry resolves to no posture"
+    assert_contains "$out" "does not resolve to a delivery posture" \
+      "the origin-less $kind refusal did not name the unresolved registry entry"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "a refused origin-less $kind moved the slot"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused origin-less $kind published task metadata"
+  done
+  pass "an origin-less ship or scout whose registry entry resolves to no posture refuses"
+}
+
 test_attached_slot_branch_survives_refresh() {
   local rec id out status local_main hand_old
   id='pool-attached-branch-r1'
@@ -918,6 +943,7 @@ test_originless_pool_launches_without_a_freshness_fetch
 test_local_only_ship_starts_on_local_main_ahead_of_lagging_origin
 test_registered_local_only_scout_starts_on_local_main
 test_originless_slot_on_feature_branch_starts_on_local_main
+test_originless_malformed_registry_refuses
 test_attached_slot_branch_survives_refresh
 test_originless_without_default_branch_refuses_pool
 test_originless_dirty_pool_refuses_without_discarding_work

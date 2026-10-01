@@ -3320,23 +3320,23 @@ spawn_worktree_has_origin_config() { # <worktree>
 # the ref bin/fm-merge-local.sh fast-forwards, because an origin a local-only
 # project still carries can lag it by weeks. A ship decides by its explicit
 # --mode; a scout records no delivery mode, so it decides by the project's
-# registered posture. A worktree with no origin configuration has no other
-# base to start from. Treehouse alone does not cover that last case: with no
-# origin it places a slot on whatever the primary has checked out, which a
-# local-only project's primary can leave on a feature branch.
+# registered posture, which must resolve even when the worktree has no
+# origin, just as a ship's registry entry must. A worktree with no origin
+# configuration has no other base to start from. Treehouse alone does not
+# cover that last case: with no origin it places a slot on whatever the
+# primary has checked out, which a local-only project's primary can leave on a
+# feature branch.
 spawn_base_is_local() { # <worktree>
-  local worktree=$1 posture
+  local worktree=$1 posture=
+  if [ "$KIND" = scout ] && ! posture=$("$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" >/dev/null || true
+    echo "error: the registry entry for $(basename "$PROJ_ABS") does not resolve to a delivery posture (see the refusal above), so this scout's base branch is unknown; correct data/projects.md and spawn again" >&2
+    return 2
+  fi
   spawn_worktree_has_origin_config "$worktree" || return 0
   case "$KIND" in
   ship) [ "$MODE" = local-only ] ;;
-  scout)
-    if ! posture=$("$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" 2>/dev/null); then
-      "$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" >/dev/null || true
-      echo "error: the registry entry for $(basename "$PROJ_ABS") does not resolve to a delivery posture (see the refusal above), so this scout's base branch is unknown; correct data/projects.md and spawn again" >&2
-      return 2
-    fi
-    [ "${posture%% *}" = local-only ]
-    ;;
+  scout) [ "${posture%% *}" = local-only ] ;;
   *) return 1 ;;
   esac
 }
