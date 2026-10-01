@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Bootstrap detection, best-effort fleet refresh/prune, and installs.
+# The bounded home-summary failure excerpt is capped at 200 UTF-8 characters.
 # Usage: fm-bootstrap.sh
 #          Detect: prints one line per actionable problem, or an explicit
 #          BOOTSTRAP_INFO no-action fact for completed benign bootstrap work, and
@@ -1534,7 +1535,13 @@ detect_home_summary_publication() {
   last=${counted#*$'\t'}
   case "$failures" in ''|*[!0-9]*) return 0 ;; esac
   [ "$failures" -ge "$threshold" ] || return 0
-  last=$(printf '%s' "$last" | cut -c1-200)
+  last=$(printf '%s' "$last" | perl -MEncode=decode -e '
+    binmode STDIN, ":raw";
+    binmode STDOUT, ":encoding(UTF-8)";
+    local $/;
+    my $text = decode("UTF-8", scalar <STDIN>);
+    print substr($text, 0, 200);
+  ')
   if [ -z "$since" ]; then
     echo "HOME_SUMMARY: this home has never published state/home-summary.json; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   else

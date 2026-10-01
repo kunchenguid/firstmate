@@ -544,3 +544,71 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# Every bounded preview crosses a multibyte boundary under the byte-counting
+# locale without leaving an invalid fragment in a wake or the status display.
+home=$(make_home utf8-previews)
+note_preview=$(perl -CS -e 'print "a" x 99, "\x{00e9}", "tail"')
+LC_ALL=C run_inbox "$home" note "$note_preview" >/dev/null \
+  || fail "UTF-8 note preview could not be queued"
+if ! python3 - "$home/state/.wake-queue" <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
+assert "a" * 99 + "é" in text
+assert "tail" not in text
+PY
+then
+  fail "note wake split or miscounted its UTF-8 preview"
+fi
+cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+- [ ] $(perl -CS -e 'print "b" x 147, "\x{00e9}", "tail"')
+
+## Queued
+EOF
+fm_write_meta "$home/state/utf8.meta" 'kind=ship' 'mode=no-mistakes'
+printf 'done: %s\n' "$(perl -CS -e 'print "c" x 93, "\x{00e9}", "tail"')" > "$home/state/utf8.status"
+status_out=$(LC_ALL=C run_inbox "$home" status) || fail "UTF-8 status view failed"
+printf '%s' "$status_out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' \
+  || fail "status view split a UTF-8 character"
+assert_contains "$status_out" "$(perl -CS -e 'print "b" x 147, "\x{00e9}"')" \
+  "backlog preview did not retain its complete boundary character"
+assert_contains "$status_out" "$(perl -CS -e 'print "c" x 93, "\x{00e9}"')" \
+  "status preview did not retain its complete boundary character"
+pass "bounded inbox previews preserve UTF-8 characters under the C locale"
+
+# A backlog with several in-flight items caps each item on its own 150-char
+# budget instead of piping the whole section through one shared truncation,
+# which used to let every item after the first one or two vanish silently.
+home=$(make_home multiline-status)
+long_y=$(perl -CS -e 'print "y" x 200')
+mb_prefix_c=$(perl -CS -e 'print "c" x 141')
+mb_char=$(perl -CS -e 'print "\x{00e9}"')
+cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+- [ ] alpha short entry
+- [ ] beta $long_y
+- [ ] gamma $mb_prefix_c${mb_char}tail
+
+## Queued
+EOF
+status_out=$(LC_ALL=C run_inbox "$home" status) || fail "multi-item UTF-8 status view failed"
+printf '%s' "$status_out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' \
+  || fail "multi-item status view split a UTF-8 character"
+assert_contains "$status_out" "alpha short entry" \
+  "first in-flight item vanished from a multi-item status preview"
+assert_contains "$status_out" "beta $(perl -CS -e 'print "y" x 143')" \
+  "second in-flight item vanished or was cut short of its own 150-character cap"
+assert_not_contains "$status_out" "$(perl -CS -e 'print "y" x 144')" \
+  "second in-flight item ran past its own 150-character cap"
+assert_contains "$status_out" "gamma ${mb_prefix_c}${mb_char}" \
+  "third in-flight item vanished or its boundary character was dropped"
+assert_not_contains "$status_out" "gamma ${mb_prefix_c}${mb_char}tail" \
+  "third in-flight item ran past its own cap into its trailing text"
+beta_line=$(printf '%s\n' "$status_out" | grep '^  beta ')
+beta_len=$(printf '%s' "$beta_line" | python3 -c 'import sys; print(len(sys.stdin.read()))')
+assert_equals "150" "$beta_len" \
+  "the long in-flight item was not capped at exactly 150 characters"
+pass "each in-flight item is truncated independently on its own 150-character budget"

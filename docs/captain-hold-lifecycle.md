@@ -231,6 +231,10 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 It reads only rows tagged `choice` and relays a card's declared close mode.
 It can never let freeform captain prose forge a task id or a mode.
 
+The Lavish adapter rejects a captured note longer than 512 decoded Unicode characters and truncates its display label to 512 characters.
+The keyed-answer intake folds control characters and truncates its source, answer, and display label to 512 decoded Unicode characters before recording them.
+Character counting keeps multibyte UTF-8 sequences intact regardless of the caller's locale.
+
 Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.
 
 ## Reconcile: re-check reality, never a blind close
@@ -275,6 +279,7 @@ Failures remain best-effort and never acknowledge or suppress the captured resul
 
 This captured-source intake records a durable reconcile request under `state/reconcile-requests/`.
 There is one private record per task, carrying the requesting provenance and a UTC timestamp.
+The recorded provenance is capped at 1,024 decoded Unicode characters after any captain note is appended, so the same locale-independent boundary cannot split a multibyte UTF-8 sequence.
 The record exists so the obligation to re-check cannot be lost between the wake that carried the answer and the turn that acts on it.
 It is idempotent per task: repeating a reconcile keeps one request and its original timestamp.
 The supported creator is the runner carrying the captain's board selection.
@@ -521,6 +526,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 - Answer-time resolution works through a bound channel with task-id keys.
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
+- A keyed answer crossing the 512-character cap preserves a multibyte character at its documented boundary under the C locale.
 - The chat channel reaches the same intake.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
@@ -568,6 +574,7 @@ The reconcile path is pinned in the same suite:
 - A reconcile answer arriving through the keyed-answer intake is refused, in the default close mode and in the `release` mode a captain-gated work card declares.
   It leaves both tasks held with no resolution record or request.
 - Only the separately bound captured-source intake records one durable request per task, idempotently across a replay.
+- Reconcile provenance preserves a multibyte character at its documented boundary under the C locale.
 
 It also proves the two verification outcomes:
 

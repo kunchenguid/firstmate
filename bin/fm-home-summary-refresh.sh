@@ -25,6 +25,7 @@
 # teardown use that mode so this side-band publication can never change their
 # result. Without it, failures are printed and returned to the direct caller
 # for tests and diagnostics.
+# A producer diagnostic is folded to one line and capped at 500 UTF-8 characters.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -139,7 +140,13 @@ home_summary_refresh_once() {
   fi
   if [ "$producer_rc" -ne 0 ]; then
     producer_error=$(tail -n 1 "$HOME_SUMMARY_ERR_TMP" 2>/dev/null \
-      | tr '\t\r\n' '   ' | cut -c1-500)
+      | tr '\t\r\n' '   ' | perl -MEncode=decode -e '
+        binmode STDIN, ":raw";
+        binmode STDOUT, ":encoding(UTF-8)";
+        local $/;
+        my $text = decode("UTF-8", scalar <STDIN>);
+        print substr($text, 0, 500);
+      ')
     if [ -n "$producer_error" ]; then
       home_summary_fail "summary producer failed with exit $producer_rc: $producer_error"
     else

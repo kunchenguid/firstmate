@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fm-inactive-reconcile.sh - bounded reconciliation of suspicious inactive terminal outcomes.
+# Parent-channel free-text fields are folded and capped at 1200 UTF-8 characters.
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
@@ -144,7 +145,13 @@ reconcile_now() {
 }
 
 clean_field() {
-  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
+  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | perl -MEncode=decode -e '
+    binmode STDIN, ":raw";
+    binmode STDOUT, ":encoding(UTF-8)";
+    local $/;
+    my $text = decode("UTF-8", scalar <STDIN>);
+    print substr($text, 0, 1200);
+  '
 }
 
 valid_id() {

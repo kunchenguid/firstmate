@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fm-parent-channel-lib.sh - the one owner of a secondmate home's parent channel.
+# Parent-channel notes are folded and capped at 1200 UTF-8 characters.
 #
 # WHY THIS EXISTS. A secondmate is a firstmate in its own home, and nobody reads
 # its chat: the captain and the main firstmate see only what is appended to the
@@ -148,7 +149,13 @@ fm_parent_channel_outbound_status() {  # <home> <state>
 # Fold <text> onto one bounded line, so a note copied from a child ledger or a
 # hold reason cannot break the channel's line framing.
 fm_parent_channel_clean_note() {  # <text>
-  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
+  printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | perl -MEncode=decode -e '
+    binmode STDIN, ":raw";
+    binmode STDOUT, ":encoding(UTF-8)";
+    local $/;
+    my $text = decode("UTF-8", scalar <STDIN>);
+    print substr($text, 0, 1200);
+  '
 }
 
 # Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:

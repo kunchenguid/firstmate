@@ -1076,3 +1076,51 @@ case "$report_out" in
     ;;
 esac
 pass "repeated publication failure is reported at session start until it clears"
+
+# Both the writer's producer diagnostic and bootstrap's later excerpt must cap
+# UTF-8 characters even when the surrounding process is forced into C.
+UTF8_BIN="$TMP_ROOT/utf8-summary-bin"
+UTF8_HOME="$TMP_ROOT/utf8-summary-home"
+mkdir -p "$UTF8_BIN" "$UTF8_HOME"/{state,data,config,projects}
+cp "$WRITER" "$UTF8_BIN/fm-home-summary-refresh.sh"
+cp "$ROOT/bin/fm-timeout-lib.sh" "$UTF8_BIN/fm-timeout-lib.sh"
+cp "$ROOT/bin/fm-wake-lib.sh" "$UTF8_BIN/fm-wake-lib.sh"
+cat > "$UTF8_BIN/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+perl -CS -e 'print STDERR "a" x 494, "\t\r\x{00e9}\x{6f22}\x{754c}\x{7d42}tail\n"'
+exit 1
+SH
+chmod +x "$UTF8_BIN/fm-home-summary-refresh.sh" "$UTF8_BIN/fm-fleet-snapshot.sh"
+set +e
+utf8_out=$(LC_ALL=C FM_HOME="$UTF8_HOME" "$UTF8_BIN/fm-home-summary-refresh.sh" 2>&1)
+utf8_rc=$?
+set -e
+[ "$utf8_rc" -ne 0 ] || fail "the UTF-8 producer fixture unexpectedly succeeded"
+printf '%s' "$utf8_out" | python3 -c '
+import sys
+
+text = sys.stdin.buffer.read().decode("utf-8")
+prefix = "fm-home-summary-refresh: summary producer failed with exit 1: "
+assert text.startswith(prefix), text
+diagnostic = text.removeprefix(prefix)
+assert len(diagnostic) == 500, len(diagnostic)
+assert all(control not in diagnostic for control in "\t\r\n") and diagnostic[494:496] == "  ", repr(diagnostic)
+' || fail "producer diagnostic was not 500 valid UTF-8 characters"
+utf8_expected=$(perl -CS -e 'print "fm-home-summary-refresh: summary producer failed with exit 1: ", "a" x 494, "  \x{00e9}\x{6f22}\x{754c}\x{7d42}"')
+assert_equals "$utf8_expected" "$utf8_out" \
+  "producer diagnostic changed the character cap or control folding"
+printf '# Seeded Firstmate home\n' > "$UTF8_HOME/AGENTS.md"
+cat > "$UTF8_HOME/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+EOF
+printf '[2026-08-28T09:58:00Z] retry\n' > "$UTF8_HOME/state/.home-summary-refresh.log"
+printf '[2026-08-28T09:59:00Z] %s\n' "$(perl -CS -e 'print "b" x 199, "\x{00e9}", "tail"')" \
+  >> "$UTF8_HOME/state/.home-summary-refresh.log"
+utf8_out=$(LC_ALL=C run_bootstrap_detect "$UTF8_HOME")
+printf '%s' "$utf8_out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' \
+  || fail "bootstrap failure excerpt split a UTF-8 character"
+assert_contains "$utf8_out" "$(perl -CS -e 'print "b" x 199, "\x{00e9}"')" \
+  "bootstrap failure excerpt miscounted its UTF-8 boundary"
+pass "home-summary diagnostics preserve UTF-8 boundaries under the C locale"

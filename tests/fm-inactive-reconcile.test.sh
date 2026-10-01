@@ -1076,4 +1076,27 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 
+test_parent_delivery_preserves_utf8_terminal_note() {
+  local note expected
+  make_world utf8-terminal-note
+  bind_secondmate local
+  write_mate_meta
+  note=$(perl -CS -e 'print "a" x 1199, "\x{00e9}", "tail"')
+  write_child "$MATE" child "done: $note"
+  LC_ALL=C run_report "$MATE" child || fail "UTF-8 terminal outcome could not be delivered"
+  expected=$(perl -CS -e 'print "a" x 1199, "\x{00e9}"')
+  if ! python3 - "$MAIN/state/mate.status" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).read_bytes().decode("utf-8")
+PY
+  then
+    fail "parent terminal delivery split a UTF-8 character"
+  fi
+  grep -Fq "$expected" "$MAIN/state/mate.status" \
+    || fail "parent terminal delivery miscounted its UTF-8 boundary"
+  pass "inactive reconciliation preserves UTF-8 terminal notes under the C locale"
+}
+
+test_parent_delivery_preserves_utf8_terminal_note
+
 echo "all inactive reconciliation tests passed"

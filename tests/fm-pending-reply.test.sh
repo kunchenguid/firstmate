@@ -1852,6 +1852,20 @@ test_mechanical_helper_writes_parent_channel() {
   pass "mechanical helper writes the parent channel from verb, corr, and note"
 }
 
+# cut -c counts bytes under the C locale, which can split a multibyte UTF-8
+# character at the 1200-character boundary.
+test_parent_channel_clean_note_preserves_utf8() {
+  local note out
+  note=$(perl -CS -e 'print "a" x 1199, "\x{00e9}", "tail"')
+  out=$(LC_ALL=C bash -c '. "$1"; fm_parent_channel_clean_note "$2"' _ \
+    "$ROOT/bin/fm-parent-channel-lib.sh" "$note")
+  printf '%s' "$out" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' \
+    || fail "parent-channel cleaner split a UTF-8 character"
+  [ "$(printf '%s' "$out" | wc -m | tr -d ' ')" = 1200 ] \
+    || fail "parent-channel cleaner did not use its 1200-character cap"
+  pass "parent-channel note cleaner preserves UTF-8 under the C locale"
+}
+
 test_remote_parent_replies_is_not_wrong_home() {
   local home state sm_home corr rec hits
   home=$(setup_parent remote-parent-replies)
@@ -2037,6 +2051,7 @@ test_same_basename_self_home_corr_resolves_on_tick
 test_same_basename_reply_resolves_after_recovery_failure
 test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
+test_parent_channel_clean_note_preserves_utf8
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable
