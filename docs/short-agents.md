@@ -170,6 +170,7 @@ The CLI `reconcile` retries missing notifications and reconciles ordinary receip
 ## Verify the installed path
 
 Run `bin/fm-test-run.sh tests/fm-short-agent.test.sh tests/fm-short-operations.test.sh tests/fm-pi-primary-types.test.sh` for uncapped input, output, duration and call behavior plus lifecycle, permission, isolated Git/forge effects, replay, and SDK checks.
+Run `bin/fm-test-run.sh tests/fm-pi-branch-extension.test.sh` for inline and bounded-reference notification delivery, explicit full-result loading, acknowledgement evidence, and recovery across compaction and session replacement.
 The operation suite doubles the model and forge; it does not perform an external merge.
 Set `FM_SHORT_INSTALL_LIVE=1` for its optional verified ShellCheck install into a temporary directory.
 Run `FM_SHORT_HERDR_E2E=1 bash tests/fm-short-operations-herdr.test.sh` for cleanup through a generated named Herdr lab and its default-session safety tripwire.
