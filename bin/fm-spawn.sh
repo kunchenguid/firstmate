@@ -83,10 +83,17 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
-#   OpenCode has no interactive effort flag, so its effort is written as the
-#   build agent's variant, keyed to the resolved model, inside the
-#   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
-#   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode has no interactive model or effort flag on its TUI path
+#   (opencode v2 moved --model to `opencode run` only; the TUI rejects a
+#   top-level --model). Its resolved model rides the OPENCODE_CONFIG_CONTENT
+#   JSON its launch already carries as the v2 top-level `model` value
+#   (config schema verified on opencode v2.0.20; OPENCODE_CONFIG_CONTENT is
+#   still honored as a virtual config source). Its effort is written as the
+#   build agent's variant, keyed to the resolved model, in that same JSON
+#   (config schema verified on opencode 1.18.32); without a model the axis
+#   is recorded but omitted, and opencode-go families carry no verified
+#   variant so the effort stays recorded-but-omitted there.
+#   Unattended opencode launches also pass the verified top-level `--auto` flag.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -364,6 +371,10 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __OPENCODEMODEL__ quoted top-level `"model":"<provider/id>"` fragment for
+#                  the opencode TUI launch's OPENCODE_CONFIG_CONTENT JSON
+#                  (opencode_config_model_flag below; empty for other harnesses
+#                  or a default/unset model)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -2026,7 +2037,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode --auto --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2549,10 +2560,30 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
+  # opencode is deliberately absent: opencode v2 accepts --model only on
+  # `opencode run`, while firstmate launches the interactive TUI path
+  # (`opencode --prompt`), which rejects a top-level --model. Its model
+  # rides OPENCODE_CONFIG_CONTENT via opencode_config_model_flag() below.
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+# OpenCode v2 TUI model carrier: the resolved --model axis as the top-level
+# `model` value ("provider/id") inside the launch's OPENCODE_CONFIG_CONTENT
+# JSON. Emitted for any non-default model; empty otherwise. The fragment
+# lands inside the launch's single-quoted assignment, so a literal quote in
+# the model id must close and reopen that quoting, exactly like the effort
+# fragment below.
+opencode_config_model_flag() {
+  local harness=$1 model=$2
+  [ "$harness" = opencode ] || return 0
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  local model_json
+  model_json=$(json_escape "$model")
+  model_json=${model_json//\'/\'\\\'\'}
+  printf ',"model":"%s"' "$model_json"
 }
 
 effort_flag_for_harness() {
@@ -2611,23 +2642,28 @@ effort_flag_for_harness() {
     esac
     ;;
   opencode)
-    # opencode's interactive `opencode --prompt` launch has no effort flag
-    # (`opencode run --variant` is a different, non-interactive mode). Its
-    # config schema (opencode 1.18.32, `opencode debug config` / config.json)
-    # carries per-model reasoning effort as agent.<name>.variant, "Default model
-    # variant for this agent (applies only when using the agent's configured
-    # model)", so the effort rides the OPENCODE_CONFIG_CONTENT JSON the launch
-    # already writes: the default build agent is pinned to the resolved model
-    # and the effort named as its variant, which OpenCode resolves against that
-    # model's own variant list. Those lists are per-provider (anthropic/* expose
-    # high|max, openai/* expose low|medium|high|xhigh), so emit the variant only
-    # when the resolved model's provider is known to expose that effort; any
-    # other provider, or an effort outside its family's list, keeps the
-    # permission-only launch and omits the variant (record-and-omit, as codex
-    # and grok do). Without a resolved model the variant has nothing to key to
-    # and is likewise omitted. The fragment lands inside the launch's
-    # single-quoted assignment, so a literal quote in the model id must close and
-    # reopen that quoting.
+    # opencode's interactive `opencode --prompt` launch has no model or
+    # effort flag (opencode v2 moved --model to `opencode run` only, and
+    # that mode's variant rides --model's #suffix, not this path). The model
+    # rides opencode_config_model_flag() above as the v2 top-level `model`
+    # value. Its config schema (opencode 1.18.32, `opencode debug config` /
+    # config.json; agent model/variant shape still present in the v2.0.20
+    # binary) carries per-model reasoning effort as agent.<name>.variant,
+    # "Default model variant for this agent (applies only when using the
+    # agent's configured model)", so the effort rides the
+    # OPENCODE_CONFIG_CONTENT JSON the launch already writes: the default
+    # build agent is pinned to the resolved model and the effort named as
+    # its variant, which OpenCode resolves against that model's own variant
+    # list. Those lists are per-provider (anthropic/* expose high|max,
+    # openai/* expose low|medium|high|xhigh), so emit the variant only when
+    # the resolved model's provider is known to expose that effort; any
+    # other provider - including opencode-go/*, whose variant list is
+    # unverified - or an effort outside its family's list, keeps the
+    # permission-and-model launch and omits the variant (record-and-omit,
+    # as codex and grok do). Without a resolved model the variant has
+    # nothing to key to and is likewise omitted. The fragment lands inside
+    # the launch's single-quoted assignment, so a literal quote in the model
+    # id must close and reopen that quoting.
     [ -n "$model" ] && [ "$model" != default ] || return 0
     case "${model%%/*}:$effort" in
     anthropic:high | anthropic:max) ;;
@@ -5020,8 +5056,12 @@ sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
+# OpenCode v2 TUI model carrier (top-level `model` in OPENCODE_CONFIG_CONTENT);
+# empty for every other harness and for a default/unset model.
+OPENCODEMODEL=$(opencode_config_model_flag "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+LAUNCH=${LAUNCH//__OPENCODEMODEL__/$OPENCODEMODEL}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
