@@ -25,8 +25,7 @@
 # rendering cannot become a shared empty proof and the classifier keeps its
 # ordinary unknown answer. The live guard proves the pinned shape on a pinned
 # install, and on an unpinned install proves that refusal and names the release
-# whose pin needs refreshing.
-#
+# whose pin needs refreshing.#
 # Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
 
 # shellcheck shell=bash
@@ -51,8 +50,7 @@ FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'
 # error banner. It is vendor boilerplate attached to the banner, not a
 # transcript row proving a new turn, so the scan skips at most one occurrence.
 # FM_COMPOSER_PI_TERMINAL_ERROR_RE and FM_COMPOSER_PI_ERROR_HINT_RE override
-# for an unverified rendering.
-# Fixed banner Pi draws once a turn ended on Codex's usage limit.
+# for an unverified rendering.# Fixed banner Pi draws once a turn ended on Codex's usage limit.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
 # Fixed bug-report hint row pi 0.87.1 draws under every error banner.
 FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT='^If this looks like a pi bug, /bug sends a report to the developers\.$'
@@ -69,8 +67,7 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   [ -n "$v" ] || return 1
   v=${v%%[[:space:]]*}
   for pin in $FM_COMPOSER_PI_BANNER_PINNED_VERSIONS; do
-    [ "$v" = "$pin" ] && return 0
-  done
+    [ "$v" = "$pin" ] && return 0  done
   return 1
 }
 
@@ -107,8 +104,7 @@ fm_composer_pi_adapter_installed_pinned() {
     fi
     fm_composer_pi_adapter_version_pinned "$v" || return 1
   done
-  [ "$found" = 1 ]
-}
+  [ "$found" = 1 ]}
 
 # 0 when the last non-blank row above the scanned pair's opening separator is
 # pi's terminal provider-error banner, tolerating at most one occurrence of
@@ -117,8 +113,7 @@ fm_composer_pi_adapter_installed_pinned() {
 # unpinned Pi rendering cannot prove emptiness through this path.
 fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
   local screen=$1 row raw trimmed hint_seen=0
-  fm_composer_pi_adapter_installed_pinned || return 1
-  # Requires the shared scan context from fm-composer-lib.sh.
+  fm_composer_pi_adapter_installed_pinned || return 1  # Requires the shared scan context from fm-composer-lib.sh.
   [ -n "${FM_COMPOSER_SCAN_PI_OPEN:-}" ] || return 1
   row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
   while [ "$row" -ge 0 ]; do
