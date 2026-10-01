@@ -633,6 +633,128 @@ SH
   pass "captain-hold mutations address the beads backend without a markdown override"
 }
 
+# --- markdown archive resolution ---------------------------------------------
+#
+# The markdown backend's done_keep retention rotates a closed row out of
+# data/backlog.md into the configured archive once it ages past the kept
+# count. A recorded captain answer stays durable even after that rotation:
+# resolve_entry falls back to a direct, read-only scan of the archive file
+# when the exact, legacy, and migrated lookups all come up empty.
+
+test_verify_resolves_an_answer_rotated_into_the_markdown_archive() {
+  local home scout out
+  home=$(make_home archived-answer)
+  scout=sample-archived-scout
+  mkdir -p "$home/data/$scout"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout" \
+    "decisions_reviewed=1" \
+    "decision_keys=sample-archived-call"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+
+  run_captain "$home" hold sample-archived-call \
+    --title "Choose the archived option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the captain-held task"
+  printf 'Captain chose the archived option.\n' > "$home/archived-decision.txt"
+  run_captain "$home" answer sample-archived-call --decision-file "$home/archived-decision.txt" >/dev/null \
+    || fail "answer could not close the captain-held task"
+  tasks_in "$home" prune --keep 0 --state 'done' >/dev/null \
+    || fail "could not rotate the answered row into the archive"
+  assert_no_grep "sample-archived-call" "$home/data/backlog.md" \
+    "the answered row was not rotated out of the live backlog"
+  assert_grep "sample-archived-call" "$home/data/done-archive.md" \
+    "the answered row did not land in the archive"
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve an answer rotated into the markdown archive"
+  out=$(run_captain "$home" complete "$scout" --none) \
+    || fail "the completion gate refused a reviewed inventory whose only entry is archived"
+  assert_contains "$out" "sample-archived-call" \
+    "completion dropped the archived entry from the reviewed inventory"
+  pass "verify and complete resolve a captain answer rotated into the markdown archive"
+}
+
+test_verify_resolves_a_legacy_answer_rotated_into_the_markdown_archive() {
+  local home scout out
+  home=$(make_home archived-legacy-answer)
+  scout=sample-archived-legacy-scout
+  mkdir -p "$home/data/$scout"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout" \
+    "decisions_reviewed=1" \
+    "decision_keys=legacy-archived-call"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+
+  run_captain "$home" hold "$scout-decision-legacy-archived-call" \
+    --title "Choose the legacy option" --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not register the legacy captain-held task"
+  printf 'Captain chose the legacy option.\n' > "$home/legacy-archived-decision.txt"
+  run_captain "$home" answer "$scout-decision-legacy-archived-call" \
+    --decision-file "$home/legacy-archived-decision.txt" >/dev/null \
+    || fail "answer could not close the legacy captain-held task"
+  tasks_in "$home" prune --keep 0 --state 'done' >/dev/null \
+    || fail "could not rotate the answered legacy row into the archive"
+  assert_no_grep "$scout-decision-legacy-archived-call" "$home/data/backlog.md" \
+    "the answered legacy row was not rotated out of the live backlog"
+  assert_grep "$scout-decision-legacy-archived-call" "$home/data/done-archive.md" \
+    "the answered legacy row did not land in the archive"
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve a legacy answer rotated into the markdown archive"
+  out=$(run_captain "$home" complete "$scout" --none) \
+    || fail "the completion gate refused a reviewed inventory whose only entry is an archived legacy row"
+  assert_contains "$out" "legacy-archived-call" \
+    "completion dropped the archived legacy entry from the reviewed inventory"
+  pass "verify and complete resolve a legacy captain answer rotated into the markdown archive"
+}
+
+test_archived_row_without_a_recorded_answer_still_fails_resolution() {
+  local home scout out status
+  home=$(make_home archived-unanswered)
+  scout=sample-archived-unanswered-scout
+  mkdir -p "$home/data/$scout"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout" \
+    "decisions_reviewed=1" \
+    "decision_keys=sample-archived-plain-work"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+
+  tasks_in "$home" add sample-archived-plain-work "Ordinary work" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the ordinary work fixture"
+  tasks_in "$home" "done" sample-archived-plain-work >/dev/null \
+    || fail "could not close the ordinary work fixture"
+  tasks_in "$home" prune --keep 0 --state 'done' >/dev/null \
+    || fail "could not rotate the closed row into the archive"
+  assert_grep "sample-archived-plain-work" "$home/data/done-archive.md" \
+    "the closed row did not land in the archive"
+
+  status=0
+  out=$(run_captain "$home" verify "$scout" 2>&1) || status=$?
+  [ "$status" -ne 0 ] || fail "verify accepted an archived row with no recorded captain answer"
+  assert_contains "$out" "no captain-held task sample-archived-plain-work and no migrated hold for it" \
+    "the failure message changed for an archived row with no recorded answer"
+  pass "an archived row with no recorded captain answer still fails the completion gate"
+}
+
 # A Beads workspace with due.required and no types.custom captain type is the
 # live fleet shape. hold must still create a fresh captain row there: waive
 # due rather than invent one, and map to native type task rather than register
@@ -4191,4 +4313,7 @@ test_complete_accepts_a_migrated_inventory_on_beads
 test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
+test_verify_resolves_an_answer_rotated_into_the_markdown_archive
+test_verify_resolves_a_legacy_answer_rotated_into_the_markdown_archive
+test_archived_row_without_a_recorded_answer_still_fails_resolution
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
