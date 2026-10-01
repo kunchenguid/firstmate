@@ -55,29 +55,6 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
-# Print the harness name carried by one argv token, or return 1.
-# Absolute paths and explicit ./ or ../ relatives may match any path component;
-# other tokens only match when the whole token is exactly a harness word, so a
-# space-split relative fragment such as pi/file.js cannot own the lock.
-# Kept outside fm_harness_process_matches because stock macOS Bash 3.2 cannot
-# parse a case/;; nested inside $().
-fm_harness_argv_token_name() {  # <token>
-  local tok=$1 name
-  case "$tok" in
-    /*|./*|../*)
-      fm_harness_path_name "$tok"
-      ;;
-    *)
-      # Bare harness word only (e.g. token pi).
-      if name=$(fm_harness_path_name "$tok") && [ "$tok" = "$name" ]; then
-        printf '%s' "$name"
-        return 0
-      fi
-      return 1
-      ;;
-  esac
-}
-
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -108,10 +85,7 @@ fm_harness_process_matches() {  # <comm> <args>
   # token. A full args line like `node /home/.../bin/pi` never matches ^pi$ as a
   # whole string; fm_harness_path_name on each token does (.../bin/pi -> pi).
   # Word-split only, inside a noglob subshell, so a literal wildcard token
-  # cannot pick up a harness-named path from the lock checker's cwd. Only
-  # absolute paths, explicit ./ or ../ relatives, or an exact harness word
-  # count: a space inside a real path turns into a relative fragment such as
-  # pi/file.js after ps joins argv, and that fragment must not own the lock.
+  # cannot pick up a harness-named path from the lock checker's cwd.
   case "$comm" in
     *node*|*python*)
       local _name
@@ -119,7 +93,7 @@ fm_harness_process_matches() {  # <comm> <args>
         set -f
         # shellcheck disable=SC2086 # intentional IFS split of the ps args blob
         for _tok in $args; do
-          if _n=$(fm_harness_argv_token_name "$_tok"); then
+          if _n=$(fm_harness_path_name "$_tok"); then
             printf '%s' "$_n"
             exit 0
           fi
