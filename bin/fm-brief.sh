@@ -360,6 +360,7 @@ IFS= read -r -d '' INBOX_SECTION <<EOF || true
 # Firstmate instruction inbox
 Firstmate steers you through durable message files in $INBOX_DIR.
 When a terminal message says an instruction is waiting there - and at any natural checkpoint when you are unsure - list $INBOX_DIR/*.msg, read the complete contents of each record (including its final line even when it is not newline-terminated) and act on each message in numeric order, then acknowledge each handled message by moving it: \`mv $INBOX_DIR/NNN.msg $INBOX_DIR/handled/\`.
+Prefer the format-aware \`fm_task_inbox_body\` reader from \`bin/fm-task-inbox-lib.sh\` when it is available. If you read manually, a header line \`body-terminator=1\` means the writer added exactly one synthetic final newline to terminate the record file; that marked newline is not part of the logical message body, so remove only it and preserve any intentional trailing newlines. Legacy records without that marker may end without a newline; read them through the file end.
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 if [ -e "$CONFIG/wait-no-turns" ]; then
