@@ -193,6 +193,47 @@ promote_keeps_the_named_branches() {
   pass "fm-promote: a named crew branch and base survive promotion"
 }
 
+test_promote_keeps_published_artifacts_after_interruption() {
+  local home project fakebin real_mv id status
+  home="$TMP_ROOT/promote-interrupted/home"
+  project="$TMP_ROOT/promote-interrupted/project"
+  fakebin="$TMP_ROOT/promote-interrupted/bin"
+  id=promote-interrupted
+  mkdir -p "$home/state" "$home/data" "$project" "$fakebin"
+  git init -q -b main "$project"
+  git_identity "$project"
+  commit_file "$project" base base base
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\nproject=%s\n' \
+    "$id" "$project" "$project" > "$home/state/$id.meta"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<EOF
+#!/usr/bin/env bash
+target=\${!#}
+"$real_mv" "\$@"
+case "\$target" in
+  *"/$id.meta") kill -TERM "\$PPID" ;;
+esac
+EOF
+  chmod +x "$fakebin/mv"
+
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    PATH="$fakebin:$PATH" "$PROMOTE" "$id" --mode local-only --yolo off >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "promotion interruption was reported as success"
+  assert_grep 'kind=ship' "$home/state/$id.meta" \
+    "interrupted promotion lost the published ship metadata"
+  assert_present "$home/data/$id/ship-instructions.md" \
+    "interrupted promotion removed committed ship instructions"
+  assert_present "$home/data/$id/brief.md" \
+    "interrupted promotion removed the promoted brief"
+  if compgen -G "$home/data/$id/.brief.md.scout.*" >/dev/null; then
+    fail "interrupted promotion retained the staged scout brief"
+  fi
+  pass "fm-promote: published artifacts survive interruption after metadata commit"
+}
+
 test_promote_rejects_base_changes_and_branch_collisions() {
   local home project remote scout id out status
   home="$TMP_ROOT/promote-refuse/home"
@@ -607,6 +648,7 @@ test_brief_refuses_unusable_branch_selections
 test_bare_originless_project_lock_resolves
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
+test_promote_keeps_published_artifacts_after_interruption
 test_promote_accepts_a_base_chosen_for_an_unbased_scout
 test_promote_rejects_base_changes_and_branch_collisions
 test_reservations_cover_clones_of_one_origin

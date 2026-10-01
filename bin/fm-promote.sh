@@ -187,6 +187,10 @@ promote_cleanup() {
   local status=$?
   [ -z "$TMP" ] || rm -f -- "$TMP" 2>/dev/null || true
   [ -z "$BRIEF_REPLACEMENT" ] || rm -f -- "$BRIEF_REPLACEMENT" 2>/dev/null || true
+  if [ "$PROMOTION_COMMITTED" = 0 ] && [ -n "$META" ] && [ -f "$META" ] \
+    && grep -qx 'kind=ship' "$META"; then
+    PROMOTION_COMMITTED=1
+  fi
   if [ "$PROMOTION_COMMITTED" = 1 ]; then
     [ -z "$BRIEF_ORIGINAL" ] || rm -f -- "$BRIEF_ORIGINAL" 2>/dev/null || true
   elif [ "$status" -ne 0 ] && [ "$INSTRUCTIONS_PUBLISHED" = 1 ] && [ -n "$INSTRUCTIONS" ]; then
