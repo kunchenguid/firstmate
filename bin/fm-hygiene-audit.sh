@@ -31,21 +31,28 @@
 #   clone-behind (routine) - a clone under projects/ whose local default branch
 #     is behind its remote-tracking default branch as of the last fetch; refresh
 #     it through bin/fm-fleet-sync.sh.
+#   branch-scan-truncated (action) - a repository has more local fm/* branches
+#     than FM_HYGIENE_BRANCH_LIMIT; the finding counts the branches not scanned,
+#     any of which may hold unlanded work.
 #   landed-branch (info) - an unowned fm/* branch with commits on no remote whose
 #     content already landed; safe leftover, reported only as a count by views.
 #
-# A branch is owned when state/<id>.meta exists for its fm/<id> name or a task
-# record's copy has it checked out; owned branches are live work, never findings.
+# A branch is owned when a state/<id>.meta for its fm/<id> name records this
+# repository as its project, or a task record's copy has it checked out; owned
+# branches are live work, never findings. A same-named task in another project
+# does not own it.
 # Landed means any of: the branch tip is an ancestor of the default ref; every
 # unpushed commit is patch-equivalent to one on the default ref (git cherry);
-# a 3-way merge of the branch into the default ref leaves the default tree
-# unchanged (a squash landing); or a merged pull request from that head branch
-# whose head is the local tip, contains it, or carries patch-equivalent commits
-# (a pipeline that rebased the branch before pushing).
+# every path the branch changed since its merge base already has the branch's
+# content on the default ref (a squash landing); or a merged pull request from
+# that head branch whose head is the local tip, contains it, or carries
+# patch-equivalent commits (a pipeline that rebased the branch before pushing).
 # The default ref is refs/remotes/origin/<default> when present, else the local
 # default branch; nothing is fetched, so results are as fresh as the last fetch.
 # A pull-request head is judged only when its commit is already local.
 #
+# Every inspection is read-only: git runs with GIT_OPTIONAL_LOCKS=0 so status
+# never refreshes an index, and no command writes objects or refs.
 # Network: none by default. --pr-lookup opts in to at most FM_HYGIENE_PR_LOOKUPS
 # (default 10) `gh pr list` calls, each bounded by FM_HYGIENE_PR_TIMEOUT
 # (default 10 seconds), only for branches the offline checks call unlanded.
@@ -54,7 +61,8 @@
 # snapshot, which never passes --pr-lookup - reports that branch as landed
 # without a network call. A moved tip no longer matches its record. Only
 # positive results are cached; the file is safe to delete.
-# Bounds: FM_HYGIENE_BRANCH_LIMIT (default 100) fm/* branches per repository,
+# Bounds: FM_HYGIENE_BRANCH_LIMIT (default 100) fm/* branches scanned per
+# repository, with the rest counted in a branch-scan-truncated finding,
 # FM_HYGIENE_GIT_TIMEOUT (default 5 seconds) per landed-content check, and
 # FM_HYGIENE_MAX_FINDINGS (default 50) reported findings with the overflow
 # counted in `truncated`.
@@ -72,6 +80,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+export GIT_OPTIONAL_LOCKS=0
 
 usage() {
   cat <<'EOF'
@@ -124,7 +133,8 @@ positive_int FM_HYGIENE_PR_TIMEOUT "$FM_HYGIENE_PR_TIMEOUT"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"  # fm_run_timed
 
 FINDINGS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-hygiene-audit.XXXXXX") || exit 1
-trap 'rm -f "$FINDINGS_FILE"' EXIT
+PATHS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-hygiene-audit-paths.XXXXXX") || { rm -f "$FINDINGS_FILE"; exit 1; }
+trap 'rm -f "$FINDINGS_FILE" "$PATHS_FILE"' EXIT
 
 finding() {  # <class> <severity> <repo> <path> <branch> <task> <commits> <detail> [<evidence>]
   jq -cn --arg class "$1" --arg severity "$2" --arg repo "$3" --arg path "$4" \
@@ -141,6 +151,12 @@ real_dir() {  # <dir>
   (CDPATH='' cd -- "$1" 2>/dev/null && pwd -P)
 }
 
+common_dir() {  # <dir>: the repository's real git common directory
+  local common
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  real_dir "$common"
+}
+
 # --- task records --------------------------------------------------------------
 
 # Parallel arrays over task records whose copy still exists. A secondmate's home
@@ -149,6 +165,7 @@ TASK_IDS=()
 TASK_COPIES=()
 TASK_KINDS=()
 TASK_PROJECTS=()
+BRANCH_OWNERS=()  # "<common-dir> <id>" for each task record's project
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] && [ ! -L "$meta" ] || continue
   id=$(basename "$meta" .meta)
@@ -158,7 +175,10 @@ for meta in "$STATE"/*.meta; do
     [ -n "$worktree" ] || worktree=$(fm_meta_get "$meta" worktree)
   else
     project=$(fm_meta_get "$meta" project)
-    [ -n "$project" ] && TASK_PROJECTS+=("$project")
+    if [ -n "$project" ]; then
+      TASK_PROJECTS+=("$project")
+      common=$(common_dir "$project") && BRANCH_OWNERS+=("$common $id")
+    fi
     worktree=$(fm_meta_get "$meta" worktree)
   fi
   [ -n "$worktree" ] || continue
@@ -176,10 +196,20 @@ copy_owner() {  # <real-path>: prints the first task id whose record names this 
   return 1
 }
 
-# Slot claims and shared copies. The slot helpers are loaded only when needed,
-# because loading them creates the state directory.
+owns_branch_name() {  # <common-dir> <id>
+  local o
+  for o in "${BRANCH_OWNERS[@]+"${BRANCH_OWNERS[@]}"}"; do
+    [ "$o" = "$1 $2" ] && return 0
+  done
+  return 1
+}
+
+# Slot claims and shared copies. Loading the slot helpers creates the state
+# directory, so they load only once it already exists; a home without one has
+# no task records and no claims.
 load_slot_lib() {
   command -v fm_treehouse_slot_owner_state >/dev/null 2>&1 && return 0
+  [ -d "$STATE" ] || return 1
   # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"  # fm_treehouse_pool_slot, fm_treehouse_slot_owner_*
@@ -225,8 +255,7 @@ add_repo() {  # <dir> [main-only]
   top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || return 0
   top=$(real_dir "$top") || return 0
   [ "$top" = "$dir" ] || return 0
-  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
-  common=$(real_dir "$common") || return 0
+  common=$(common_dir "$dir") || return 0
   if [ "${2:-}" = main-only ] && [ "$common" != "$dir/.git" ]; then
     return 0
   fi
@@ -288,10 +317,14 @@ patch_equivalent() {  # <repo> <default-ref> <branch-ref>
 }
 
 content_in_default() {  # <repo> <default-ref> <branch-ref>
-  local default_tree merged
-  default_tree=$(git -C "$1" rev-parse --quiet --verify "$2^{tree}" 2>/dev/null) || return 1
-  merged=$(fm_run_timed "$FM_HYGIENE_GIT_TIMEOUT" git -C "$1" merge-tree --write-tree "$2" "$3" 2>/dev/null) || return 1
-  [ "$(printf '%s\n' "$merged" | head -1)" = "$default_tree" ]
+  local base path paths=()
+  base=$(fm_run_timed "$FM_HYGIENE_GIT_TIMEOUT" git -C "$1" merge-base "$2" "$3" 2>/dev/null) || return 1
+  fm_run_timed "$FM_HYGIENE_GIT_TIMEOUT" git -C "$1" diff --no-renames --name-only -z "$base" "$3" \
+    > "$PATHS_FILE" 2>/dev/null || return 1
+  while IFS= read -r -d '' path; do paths+=("$path"); done < "$PATHS_FILE"
+  [ "${#paths[@]}" -gt 0 ] || return 0
+  fm_run_timed "$FM_HYGIENE_GIT_TIMEOUT" git -C "$1" --literal-pathspecs diff --quiet --no-renames \
+    "$2" "$3" -- "${paths[@]}" >/dev/null 2>&1
 }
 
 PR_CACHE="$STATE/hygiene-landed-prs"
@@ -343,7 +376,7 @@ EOF
 
 pool_copy() {  # <repo> <real-path>
   local marker
-  load_slot_lib
+  load_slot_lib || return 1
   fm_treehouse_pool_slot "$1" "$2" && return 0
   marker=$(fm_treehouse_slot_owner_marker "$2") || return 1
   [ -e "$marker" ] || [ -L "$marker" ]
@@ -367,7 +400,7 @@ owned_by_checkout() {  # <repo> <branch-ref>
 audit_repo() {  # <repo>
   local repo=$1 label name ref line path main='' branch_ref branch id tip unpushed evidence count=0 dirty common
   label=$(repo_label "$repo")
-  common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=$repo
+  common=$(common_dir "$repo") || common=$repo
 
   # Dirty pool copies no task record names.
   while IFS= read -r line; do
@@ -396,10 +429,10 @@ audit_repo() {  # <repo>
   while IFS= read -r branch_ref; do
     [ -n "$branch_ref" ] || continue
     count=$((count + 1))
-    [ "$count" -le "$FM_HYGIENE_BRANCH_LIMIT" ] || break
+    [ "$count" -le "$FM_HYGIENE_BRANCH_LIMIT" ] || continue
     branch=${branch_ref#refs/heads/}
     id=${branch#fm/}
-    [ -f "$STATE/$id.meta" ] && continue
+    owns_branch_name "$common" "$id" && continue
     owned_by_checkout "$repo" "$branch_ref" && continue
     unpushed=$(git -C "$repo" rev-list --count "$branch_ref" --not --remotes 2>/dev/null) || continue
     [ "$unpushed" -gt 0 ] || continue
@@ -425,6 +458,10 @@ audit_repo() {  # <repo>
         "no task record owns this branch and its commits are on no remote and not on ${name:-the default branch}; bin/fm-hygiene-audit.sh --pr-lookup checks for a merged pull request"
     fi
   done < <(git -C "$repo" for-each-ref --format='%(refname)' 'refs/heads/fm/' 2>/dev/null)
+  if [ "$count" -gt "$FM_HYGIENE_BRANCH_LIMIT" ]; then
+    finding branch-scan-truncated action "$label" "" "" "" "" \
+      "$((count - FM_HYGIENE_BRANCH_LIMIT)) local fm/* branch(es) beyond FM_HYGIENE_BRANCH_LIMIT=$FM_HYGIENE_BRANCH_LIMIT were not scanned and may hold unlanded work"
+  fi
 }
 
 for repo in "${REPOS[@]+"${REPOS[@]}"}"; do

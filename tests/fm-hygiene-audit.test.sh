@@ -191,6 +191,45 @@ assert_equals "" "$(cat "$FAKE_GH_LOG")" "the default audit makes no network cal
 git -C "$REPO" rev-parse --verify -q fm/lost >/dev/null || fail "the audit deleted a branch"
 pass "unowned unpushed branches split into landed leftovers and unlanded work offline"
 
+# --- branch ownership is keyed by project and task ----------------------------------
+
+HOME_COL=$(make_home collide)
+fm_git_init_commit "$HOME_COL/projects/beta"
+for p in alpha beta; do
+  git -C "$HOME_COL/projects/$p" checkout -q -b fm/foo
+  commit_file "$HOME_COL/projects/$p" foo.txt "$p" "$p foo work"
+  git -C "$HOME_COL/projects/$p" checkout -q main
+done
+fm_write_meta "$HOME_COL/state/foo.meta" "project=$HOME_COL/projects/alpha" kind=ship
+json=$(audit "$HOME_COL" --json)
+assert_equals "unlanded-branch:beta:fm/foo" \
+  "$(printf '%s' "$json" | jq -r '[.findings[] | "\(.class):\(.repo):\(.branch)"] | join(",")')" \
+  "a task record owns its branch only in its own project"
+pass "a same-named task in another project does not hide unlanded work"
+
+# --- the audit is read-only ----------------------------------------------------------
+
+objects_snapshot() {  # <repo>
+  find "$1/.git/objects" -type f | LC_ALL=C sort
+}
+HOME_RO=$(make_home readonly)
+REPO=$HOME_RO/projects/alpha
+git -C "$REPO" checkout -q -b fm/unlanded
+commit_file "$REPO" unlanded.txt unlanded "unlanded work"
+git -C "$REPO" checkout -q main
+commit_file "$REPO" later.txt later "later main work"
+git -C "$REPO" push -q origin main
+# A claimed pool copy makes the audit inspect slot claims in a home with no state.
+git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/readonly-pool/1/alpha"
+printf 'task=gone\nhome=%s\n' "$HOME_RO" > "$TMP_ROOT/readonly-pool/1/.fm-slot-owner"
+rmdir "$HOME_RO/state"
+before=$(objects_snapshot "$REPO")
+json=$(audit "$HOME_RO" --json)
+assert_equals "unlanded-branch:fm/unlanded" "$(classes "$json")" "the unlanded branch is still reported"
+assert_equals "$before" "$(objects_snapshot "$REPO")" "the audit writes no objects into an audited repository"
+[ ! -e "$HOME_RO/state" ] || fail "the audit created the home's state directory"
+pass "the audit changes no repository or home state"
+
 # --- merged pull request, gated behind --pr-lookup and then cached ----------------
 
 HOME_PR=$(make_home pr)
@@ -259,6 +298,10 @@ pass "clone lag is a routine refresh item"
 json=$(FM_HYGIENE_MAX_FINDINGS=1 audit "$HOME_BR" --json)
 assert_equals "1 3 unlanded-branch" "$(printf '%s' "$json" | jq -r '"\(.findings | length) \(.truncated) \(.findings[0].class)"')" \
   "the finding cap keeps the most severe finding and counts the rest"
+json=$(FM_HYGIENE_BRANCH_LIMIT=2 audit "$HOME_BR" --json)
+assert_equals "alpha 4 local fm/* branch(es) beyond FM_HYGIENE_BRANCH_LIMIT=2 were not scanned and may hold unlanded work" \
+  "$(printf '%s' "$json" | jq -r '.findings[] | select(.class == "branch-scan-truncated") | "\(.repo) \(.detail)"')" \
+  "branches beyond the scan limit are counted, not silently skipped"
 rc=0
 FM_HOME="$HOME_BR" FM_HYGIENE_BRANCH_LIMIT=abc "$AUDIT" --json >/dev/null 2>&1 || rc=$?
 expect_code 2 "$rc" "an invalid bound is refused"
