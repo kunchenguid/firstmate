@@ -394,7 +394,7 @@ live_cands=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-cands.XXXXXX") \
 parse_lsof_listeners() {  # <proto>
   awk -v proto="$1" '
     /^p[0-9]+$/ { pid = substr($0, 2) }
-    /^n/ { name = substr($0, 2); sub(/ \(.*\)$/, "", name); port = name; sub(/^.*:/, "", port);
+    /^n/ { name = substr($0, 2); sub(/ \(.*\)$/, "", name); if (index(name, "->") > 0) next; port = name; sub(/^.*:/, "", port);
       if (port ~ /^[0-9]+$/) print proto "\t" port "\t" pid }'
 }
 live_listeners=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-listeners.XXXXXX") \
