@@ -19,6 +19,7 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
+#   - earlier primary-session transcripts named by path, never by content
 #   - per-task endpoint-liveness lines for a live and a dead recorded target,
 #     tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
@@ -2636,6 +2637,31 @@ EOF
   pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
 }
 
+test_fleet_digest_names_prior_session_transcripts() {
+  local rec root home fakebin login enc out
+  rec=$(new_world prior-sessions)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  login="$TMP_ROOT/prior-sessions-login"
+  enc=${home#/}
+  mkdir -p "$login/.pi/agent/sessions/--${enc//\//-}--"
+  printf '{"text":"PRIOR-ANSWER"}\n' > "$login/.pi/agent/sessions/--${enc//\//-}--/s.jsonl"
+
+  out=$(HOME="$login" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Prior session transcripts" "digest lacks the prior-session subsection"
+  assert_contains "$out" "$login/.pi/agent/sessions/--${enc//\//-}--/s.jsonl" "digest did not name this home's earlier transcript"
+  assert_contains "$out" "Before telling the captain a decision is still open" "digest lacks the check-before-reopening rule"
+  assert_not_contains "$out" "PRIOR-ANSWER" "digest printed transcript content"
+
+  out=$(HOME="$TMP_ROOT/prior-sessions-empty" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "(none found)" "digest without transcripts did not say none found"
+
+  pass "the fleet digest names this home's earlier session transcripts by path only"
+}
+
 test_next_step_sources_x_mode_cadence() {
   local rec root home fakebin out
   rec=$(new_world next-step-x)
@@ -2985,6 +3011,7 @@ test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
+test_fleet_digest_names_prior_session_transcripts
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
