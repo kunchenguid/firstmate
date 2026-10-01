@@ -293,6 +293,46 @@ test_ring_skips_dead_agent() {
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
 }
 
+# A doorbell whose send fails on a composer the pane read cannot parse names
+# the cause: a Claude composer under an unpinned titled top rule reports that
+# title, any other unreadable composer reports the generic cause, and a pane
+# whose composer reads cleanly adds nothing. The ring's return code and the
+# durable record are unchanged by the diagnosis.
+ring_with_screen() {  # <state> <record> (screen in FM_FAKE_SCREEN) -> "<rc>|<reason>"
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    fm_backend_agent_state() { printf idle; }
+    fm_backend_composer_state() { printf unknown; }
+    fm_backend_send_text_submit() { printf send-failed; }
+    fm_backend_capture() { printf "%s\n" "$FM_FAKE_SCREEN"; }
+    rc=0
+    fm_task_inbox_ring herdr fm-remote:w1:p2 "$2" fm-t1 || rc=$?
+    printf "%s|%s" "$rc" "$FM_TASK_INBOX_RING_REASON"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$2"
+}
+
+test_ring_names_unreadable_composer_title() {
+  local dir state rec rule out
+  dir="$TMP_ROOT/ring-unreadable"
+  state="$dir/state"
+  mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  rule='────────────────────────────────────────────────────────────'
+  out=$(FM_FAKE_SCREEN="transcript"$'\n'"$rule plan ─"$'\n'"❯ "$'\n'"$rule" \
+    ring_with_screen "$state" "$rec")
+  [ "$out" = "2|composer unreadable: unrecognised titled rule 'plan'" ] \
+    || fail "an unpinned titled rule should be named in the ring reason, got '$out'"
+  out=$(FM_FAKE_SCREEN="transcript"$'\n'"❯ "$'\n'"$rule" \
+    ring_with_screen "$state" "$rec")
+  [ "$out" = "2|composer unreadable" ] \
+    || fail "another unreadable composer should report the generic cause, got '$out'"
+  out=$(FM_FAKE_SCREEN="transcript"$'\n'"$rule"$'\n'"❯ "$'\n'"$rule" \
+    ring_with_screen "$state" "$rec")
+  [ "$out" = "2|" ] || fail "a readable composer should add no reason, got '$out'"
+  [ -f "$rec" ] || fail "a failed ring must leave the durable record in place"
+  pass "inbox: a doorbell refused on an unreadable composer names what could not be read"
+}
+
 # A fake tmux whose pane is a Claude-style composer that keeps its content in
 # FM_FAKE_COMPOSER: literal input appends to it, capture renders it wrapped
 # between rules, and Enter submits it (logged as SUBMIT) unless
@@ -959,6 +999,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_names_unreadable_composer_title
 test_ring_submits_its_own_stuck_doorbell
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack

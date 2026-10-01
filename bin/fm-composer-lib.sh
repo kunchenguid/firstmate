@@ -761,26 +761,77 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
+# _fm_composer_claude_rule_title_var: when <row> has the Claude titled
+# composer rule shape - at least 8 `─`, one space, a title, one space, one `─` -
+# set <out-varname> to its title, pinned or not. Fails, leaving it empty,
+# otherwise.
+_fm_composer_claude_rule_title_var() {  # <out-varname> <row>
+  local __fmcr_out=$1 __fmcr_trim=$2 __fmcr_body __fmcr_head __fmcr_title
+  printf -v "$__fmcr_out" '%s' ''
+  fm_composer_normalize_trim_var __fmcr_trim
+  case "$__fmcr_trim" in
+    '────────'*' ─') ;;
+    *) return 1 ;;
+  esac
+  __fmcr_body=${__fmcr_trim%' ─'}
+  __fmcr_head=${__fmcr_body%%' '*}
+  [ "$__fmcr_head" != "$__fmcr_body" ] && [ -z "${__fmcr_head//─/}" ] || return 1
+  __fmcr_title=${__fmcr_body#"$__fmcr_head "}
+  case "$__fmcr_title" in
+    ''|' '*|*' ') return 1 ;;
+  esac
+  printf -v "$__fmcr_out" '%s' "$__fmcr_title"
+}
+
 # _fm_composer_claude_titled_rule_var: when <row> is a Claude titled composer
-# rule (FM_COMPOSER_CLAUDE_RULE_TITLES), set <out-varname> to <row> with its
-# title replaced by `─` of the same width. Fails, leaving it empty, otherwise.
+# rule whose title is pinned (FM_COMPOSER_CLAUDE_RULE_TITLES), set
+# <out-varname> to <row> with its title replaced by `─` of the same width.
+# Fails, leaving it empty, otherwise.
 _fm_composer_claude_titled_rule_var() {  # <out-varname> <row>
-  local __fmct_out=$1 __fmct_row=$2 __fmct_trim __fmct_title __fmct_head __fmct_fill
+  local __fmct_out=$1 __fmct_row=$2 __fmct_title __fmct_pinned __fmct_fill
   printf -v "$__fmct_out" '%s' ''
-  __fmct_trim=$__fmct_row
-  fm_composer_normalize_trim_var __fmct_trim
-  for __fmct_title in $FM_COMPOSER_CLAUDE_RULE_TITLES; do
-    case "$__fmct_trim" in
-      '────────'*" $__fmct_title ─") ;;
-      *) continue ;;
-    esac
-    __fmct_head=${__fmct_trim%" $__fmct_title ─"}
-    [ -z "${__fmct_head//─/}" ] || continue
+  _fm_composer_claude_rule_title_var __fmct_title "$__fmct_row" || return 1
+  for __fmct_pinned in $FM_COMPOSER_CLAUDE_RULE_TITLES; do
+    [ "$__fmct_title" = "$__fmct_pinned" ] || continue
     __fmct_fill=$(printf '%*s' "$(( ${#__fmct_title} + 3 ))" '')
     printf -v "$__fmct_out" '%s' "${__fmct_row/" $__fmct_title ─"/${__fmct_fill// /─}}"
     return 0
   done
   return 1
+}
+
+# fm_composer_unreadable_reason: why a composer read of <screen> refused, for
+# an operator notice. Names the first Claude titled composer rule directly
+# above a `❯` row whose title is not pinned in FM_COMPOSER_CLAUDE_RULE_TITLES;
+# otherwise the generic `composer unreadable`. Diagnostic only, never proof.
+fm_composer_unreadable_reason() {  # <screen>
+  local plain line prev='' have_prev=0 next title known pinned
+  plain=$(printf '%s\n' "$1" | fm_composer_strip_ansi)
+  while IFS= read -r line; do
+    next=$line
+    fm_composer_normalize_trim_var next
+    if [ "$have_prev" = 1 ]; then
+      case "$next" in
+        '❯'*)
+          if _fm_composer_claude_rule_title_var title "$prev"; then
+            pinned=0
+            for known in $FM_COMPOSER_CLAUDE_RULE_TITLES; do
+              [ "$title" != "$known" ] || pinned=1
+            done
+            if [ "$pinned" = 0 ]; then
+              printf "composer unreadable: unrecognised titled rule '%s'" "$title"
+              return 0
+            fi
+          fi
+          ;;
+      esac
+    fi
+    prev=$next
+    have_prev=1
+  done <<EOF
+$plain
+EOF
+  printf 'composer unreadable'
 }
 
 # _fm_composer_claude_untitle_rules: <plain-screen> with every Claude titled
