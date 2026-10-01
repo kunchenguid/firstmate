@@ -62,7 +62,7 @@ const asPort = (value: unknown): number | null =>
 const escapeMarkdown = (value: string): string =>
   value.replace(/\n/g, " ").replace(/([`*_{}[\]()#+\-.!|])/g, "\\$1");
 
-const FLEET_OMITTED_RE = /server|branch|listen|lsof|preview|collect|unavail|truncat|omit/i;
+const FLEET_OMITTED_RE = /servers?|project_branches|listener table|preview service|branch state|branch collection|collection deadline/i;
 
 const isUdp = (server: FleetServer): boolean =>
   typeof server.proto === "string" && server.proto.toUpperCase() === "UDP";
@@ -149,7 +149,7 @@ function renderPanel(snapshot: FleetSnapshot): string {
   for (const entry of omitted) {
     const surface = asText(entry.surface, "");
     const reveal = asText(entry.reveal, "-");
-    if (surface === "" || !FLEET_OMITTED_RE.test(`${surface} ${reveal}`)) continue;
+    if (surface === "" || !FLEET_OMITTED_RE.test(surface)) continue;
     lines.push(`- _Omitted: ${escapeMarkdown(surface)} (${escapeMarkdown(reveal)})_`);
   }
   return lines.join("\n");

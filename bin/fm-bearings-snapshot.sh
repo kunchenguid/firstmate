@@ -73,7 +73,8 @@
 # every git-backed fleet clone plus registered projects with no clone (branch
 # "-", clean null). Both are additive fm-bearings.v1 fields bounded by
 # FM_BEARINGS_SERVERS and FM_BEARINGS_BRANCHES with omitted[] disclosure; any
-# collection failure degrades to [] with a disclosure, never a hard error, and
+# collection failure degrades to [] (or an `(unknown)` branch row when the clone
+# is known to be git-backed) with a disclosure, never a hard error, and
 # the whole live-state collection shares FM_BEARINGS_COLLECT_TIMEOUT.
 #
 # The landed section merges this home's Done with the canonical snapshot's
@@ -447,7 +448,8 @@ if [ -s "$live_listeners" ]; then
     fi
     for _pid in $(printf '%s' "$_pid_list" | tr ',' ' '); do
       if [ "$(collect_remaining)" -le 0 ]; then
-        [ -n "$SERVERS_NOTE" ] || SERVERS_NOTE="server detail truncated (collection deadline exceeded; some servers omitted)"
+        _note="server detail truncated (collection deadline exceeded; some servers omitted)"
+        if [ -n "$SERVERS_NOTE" ]; then SERVERS_NOTE="$SERVERS_NOTE; $_note"; else SERVERS_NOTE="$_note"; fi
         break
       fi
       _probe_cap=$(collect_remaining)
@@ -466,11 +468,21 @@ live_previews=$(mktemp "${TMPDIR:-/tmp}/fm-bearings-previews.XXXXXX") \
 : > "$live_previews"
 if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; then
   _launch_list=""
-  if command -v launchctl >/dev/null 2>&1 && [ "$(collect_remaining)" -gt 0 ]; then
-    _launch_list=$(fm_run_timed "$(collect_remaining)" launchctl list 2>/dev/null) || _launch_list=""
+  _launch_ok=1
+  if ! command -v launchctl >/dev/null 2>&1; then
+    _launch_ok=0
+  elif [ "$(collect_remaining)" -le 0 ]; then
+    _launch_ok=0
+  elif ! _launch_list=$(fm_run_timed "$(collect_remaining)" launchctl list 2>/dev/null); then
+    _launch_ok=0
+    _launch_list=""
+  elif [ -z "$_launch_list" ]; then
+    _launch_ok=0
   fi
+  _preview_plists=0
   for _plist in "$FM_BEARINGS_PREVIEW_DIR"/com.firstmate.preview-*.plist; do
     [ -f "$_plist" ] || continue
+    _preview_plists=$((_preview_plists + 1))
     _label=$(basename "$_plist" .plist)
     _workdir=$(sed -n '/<key>WorkingDirectory<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$_plist" | head -n 1)
     _port=$(grep -A1 '<string>--port</string>' "$_plist" | sed -n 's/.*<string>\([0-9][0-9]*\)<\/string>.*/\1/p' | head -n 1)
@@ -489,6 +501,10 @@ if [ -n "${FM_BEARINGS_PREVIEW_DIR:-}" ] && [ -d "$FM_BEARINGS_PREVIEW_DIR" ]; t
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$_label" "${_workdir:-}" "$_port" "$_spid" "$_sup" >> "$live_previews"
   done
+  if [ "$_launch_ok" = 0 ] && [ "$_preview_plists" -gt 0 ]; then
+    _note="preview service state incomplete (launchd list failed or exceeded the collection deadline; some servers omitted)"
+    if [ -n "$SERVERS_NOTE" ]; then SERVERS_NOTE="$SERVERS_NOTE; $_note"; else SERVERS_NOTE="$_note"; fi
+  fi
 fi
 
 # Assemble servers[]: listeners whose process cwd sits under a fleet project
@@ -558,22 +574,45 @@ elif [ -n "$PROJECTS_DIR" ] && [ -d "$PROJECTS_DIR" ]; then
     fi
     _git_cap=$(collect_remaining)
     [ "$_git_cap" -gt 5 ] && _git_cap=5
-    fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --git-dir >/dev/null 2>&1 || continue
-    _branch=$(fm_run_timed "$_git_cap" git -C "$_clone" branch --show-current 2>/dev/null) || _branch=""
-    if [ -z "$_branch" ]; then
-      _sha=$(fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --short HEAD 2>/dev/null) || _sha=""
-      _branch="(detached ${_sha:-unknown})"
-    fi
-    _status_cap=$(collect_remaining)
-    [ "$_status_cap" -gt 10 ] && _status_cap=10
-    if [ "$_status_cap" -gt 0 ] && _status_out=$(fm_run_timed "$_status_cap" git -C "$_clone" status --porcelain 2>/dev/null); then
-      if printf '%s' "$_status_out" | grep -q '[^[:space:]]'; then
-        _clean=false
-      else
-        _clean=true
-      fi
-    else
+    _branch_bad=0
+    if ! fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --git-dir >/dev/null 2>&1; then
+      [ -e "$_clone/.git" ] || continue
+      _branch="(unknown)"
       _clean=null
+      _branch_bad=1
+    else
+      _branch_failed=0
+      _branch=""
+      if ! _branch=$(fm_run_timed "$_git_cap" git -C "$_clone" branch --show-current 2>/dev/null); then
+        _branch_failed=1
+        _branch=""
+      fi
+      if [ "$_branch_failed" -ne 0 ]; then
+        _branch="(unknown)"
+        _branch_bad=1
+      elif [ -z "$_branch" ]; then
+        _sha=""
+        if ! _sha=$(fm_run_timed "$_git_cap" git -C "$_clone" rev-parse --short HEAD 2>/dev/null); then
+          _sha=""
+          _branch_bad=1
+        fi
+        _branch="(detached ${_sha:-unknown})"
+      fi
+      _status_cap=$(collect_remaining)
+      [ "$_status_cap" -gt 10 ] && _status_cap=10
+      if [ "$_status_cap" -gt 0 ] && _status_out=$(fm_run_timed "$_status_cap" git -C "$_clone" status --porcelain 2>/dev/null); then
+        if printf '%s' "$_status_out" | grep -q '[^[:space:]]'; then
+          _clean=false
+        else
+          _clean=true
+        fi
+      else
+        _clean=null
+      fi
+    fi
+    if [ "$_branch_bad" -ne 0 ]; then
+      _note="branch state incomplete (git failed or exceeded the collection deadline; some branches omitted or unknown)"
+      if [ -n "$BRANCHES_NOTE" ]; then BRANCHES_NOTE="$BRANCHES_NOTE; $_note"; else BRANCHES_NOTE="$_note"; fi
     fi
     printf '%s\t%s\t%s\n' "$_proj" "$_branch" "$_clean" >> "$live_branches"
   done
