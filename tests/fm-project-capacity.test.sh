@@ -310,8 +310,6 @@ test_symlinked_home_counts_each_worker_once() {
   pass "a home reached through a symlink counts each of its workers once"
 }
 
-# A place frees when a worker records its ready PR and when a task is cleaned
-# up; each release admits exactly one more worker.
 # A fresh spawn that restarts an existing task id replaces that task's own
 # record, so the record does not hold a place against it. Any other task on the
 # project still sees that record as a holder.
@@ -334,6 +332,8 @@ test_restart_does_not_count_its_own_record() {
   pass "a restart of a task id does not count that task's own record"
 }
 
+# A place frees when a worker records its ready PR and when a task is cleaned
+# up; each release admits exactly one more worker.
 test_release_frees_a_place() {
   local case_dir home out rc=0
   case_dir=$(make_case release task-c task-d)
