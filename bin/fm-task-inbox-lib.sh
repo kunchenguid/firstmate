@@ -315,15 +315,15 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Before any of that, a Claude agent selector pointing away from main is walked
 # back to main (fm_task_inbox_focus_main); a walk that cannot prove main
 # returns 2 with nothing typed.
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
-  fm_task_inbox_focus_main "$backend" "$target" "$label" || return 2
+  fm_task_inbox_focus_main "$backend" "$target" "$label" "$harness" || return 2
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
@@ -369,8 +369,9 @@ fm_task_inbox_agent_view() {  # <backend> <target> [expected-label]
 # a second one on main's composer would interrupt a busy turn. Left is never
 # sent: from main's composer it opens a dialog whose default stops every
 # background task. Fails when the walk cannot prove main within the step budget.
-fm_task_inbox_focus_main() {  # <backend> <target> [expected-label]
+fm_task_inbox_focus_main() {  # <backend> <target> [expected-label] [harness]
   local backend=$1 target=$2 label=${3:-} view next key steps=0 polls escaped=0
+  case "${4:-}" in claude*) ;; *) return 0 ;; esac
   view=$(fm_task_inbox_agent_view "$backend" "$target" "$label") || return 1
   while :; do
     case "$view" in

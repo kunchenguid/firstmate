@@ -570,7 +570,7 @@ inbox_steer_check() {  # <window> <task>
   case "$verb" in
     ring)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$(window_harness "$w")" || ring_rc=$?
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
@@ -590,7 +590,7 @@ inbox_steer_check() {  # <window> <task>
       ;;
     retry)
       ring_rc=0
-      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" || ring_rc=$?
+      fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$(window_harness "$w")" || ring_rc=$?
       if ! fm_task_inbox_clear_retry "$STATE" "$task" "$rec" && [ -f "$rec" ]; then
         reason="stale: $w (steering-inbox retry mark unremovable: ${rec%/*}/.retry-ring cannot be removed, so $rec would ring on every poll - inspect the inbox directory)"
         fm_wake_append stale "$w" "$reason" || exit 1
@@ -926,7 +926,7 @@ secondmate_ring_to_drain() {  # <task> <window>
   rec=$(fm_task_inbox_write "$STATE" "$task" \
     "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
     fire-and-forget) || return 1
-  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
+  fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")" "$(window_harness "$w")"
 }
 
 # Surface one durable parent check when the foreign queue's drain position has

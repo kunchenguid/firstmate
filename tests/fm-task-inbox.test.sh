@@ -492,7 +492,7 @@ test_ring_returns_claude_selector_to_main() {
   ring() {
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
       FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
-      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 claude
   }
 
   for start in subagent list-other list-main list-main-viewed main; do
@@ -533,7 +533,7 @@ test_selector_capture_failure_leaves_ring_undelivered() {
     PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
       FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURE_FAILURE="$failure" \
       FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
-      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 claude
   }
   for fail_view in subagent pill; do
     : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
@@ -570,7 +570,7 @@ test_typed_send_returns_claude_selector_to_main() {
       FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" FM_SEND_SETTLE=0 \
       bash "$ROOT/bin/fm-send.sh" "$target" "$message" > "$dir/send.out" 2> "$err"
   }
-  for target in sess:fm-t1 sess:unrecorded t1 domain; do
+  for target in sess:fm-t1 t1 domain; do
     case "$target" in
       *:*) message='please continue' ;;
       *) message='/help' ;;
@@ -617,6 +617,57 @@ test_typed_send_returns_claude_selector_to_main() {
   done
   [ ! -d "$state/t1.inbox" ] && [ ! -d "$state/domain.inbox" ] || fail "typed delivery was rerouted to an inbox"
   pass "fm-send: explicit targets and local slash invocations preflight the Claude selector before typing"
+}
+
+test_non_claude_delivery_ignores_selector_capture_failure() {
+  local dir state log composer viewf failure err harness route target message rec expected rc
+  dir="$TMP_ROOT/non-claude-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"
+  failure="$dir/capture-failure"; err="$dir/send.err"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  for harness in codex pi ''; do
+    fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=$harness"
+    for route in slash explicit unrecorded inbox ring; do
+      : > "$log"; : > "$composer"; printf 'main\n' > "$viewf"; printf 'main\n' > "$failure"
+      target=t1
+      message='please continue'
+      case "$route" in
+        slash) message=/help ;;
+        explicit) target=sess:fm-t1 ;;
+        unrecorded) target=sess:unrecorded ;;
+      esac
+      expected=$message
+      case "$route" in
+        inbox|ring) expected=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") ;;
+      esac
+      rc=0
+      if [ "$route" = ring ]; then
+        PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+          FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURE_FAILURE="$failure" \
+          FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+          inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$harness" \
+          > "$dir/send.out" 2> "$err" || rc=$?
+      else
+        PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+          FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" FM_FAKE_VIEW="$viewf" \
+          FM_FAKE_CAPTURE_FAILURE="$failure" FM_SEND_SETTLE=0 \
+          FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+          bash "$ROOT/bin/fm-send.sh" "$target" "$message" > "$dir/send.out" 2> "$err" || rc=$?
+      fi
+      expect_code 0 "$rc" "${harness:-unidentified} $route delivery should survive the first capture failure: $(cat "$err")"
+      [ ! -e "$failure" ] || fail "the $route capture failure was not exercised"
+      [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "the $route delivery did not submit exactly once: $(cat "$log")"
+      grep -qxF "SUBMIT: $expected" "$log" || fail "the $route delivery changed the submitted text: $(cat "$log")"
+      [ ! -s "$composer" ] || fail "the $route delivery left pending text"
+      ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)|^KEY (Up|Down|Escape)' "$log" \
+        || fail "the $route delivery navigated a non-Claude target: $(cat "$log")"
+      assert_not_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "non-Claude delivery should not run the preflight"
+    done
+  done
+  pass "fm-send and inbox: non-Claude and unidentified targets retain delivery after a failed capture"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -1188,6 +1239,7 @@ test_ring_submits_its_own_stuck_doorbell
 test_ring_returns_claude_selector_to_main
 test_selector_capture_failure_leaves_ring_undelivered
 test_typed_send_returns_claude_selector_to_main
+test_non_claude_delivery_ignores_selector_capture_failure
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

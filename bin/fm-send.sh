@@ -1086,7 +1086,7 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" "$TARGET_HARNESS" || ring_rc=$?
     ring_retry="the watcher will re-ring"
     if [ -n "$FIRE_AND_FORGET_ID" ] \
       && [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wait-no-turns" ]; then
@@ -1142,7 +1142,7 @@ else
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
-  if ! fm_task_inbox_focus_main "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL"; then
+  if ! fm_task_inbox_focus_main "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "$TARGET_HARNESS"; then
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T (Claude agent-selector preflight failed; tried $RESOLUTION_TRIED)" >&2
