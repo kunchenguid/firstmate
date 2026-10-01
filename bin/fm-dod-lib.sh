@@ -627,9 +627,31 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
+# 0 when a task's own steering inbox has at least one durable message that was
+# never acknowledged (moved to its handled/ directory, bin/fm-task-inbox-lib.sh's
+# contract). A worker that never checked the inbox before writing its
+# deliverable is exactly the failure data/lloegrys-lancamento-cliente-prontidao/report.md's
+# retro names: three steered messages sat unread while the report shipped
+# without them. 1 when the inbox is absent, unreadable, or empty.
+fm_dod_ship_inbox_unhandled() {  # <state-dir> <task-id>
+  local state=$1 id=$2 dir f
+  [ -n "$state" ] && [ -n "$id" ] || return 1
+  dir="$state/$id.inbox"
+  [ -d "$dir" ] || return 1
+  for f in "$dir"/*.msg; do
+    [ -e "$f" ] || continue
+    return 0
+  done
+  return 1
+}
+
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  if fm_dod_ship_inbox_unhandled "$state" "$id"; then
+    printf '%s\n' "the task's steering inbox has a message outside handled/; read and acknowledge it before done"
+    return 1
+  fi
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

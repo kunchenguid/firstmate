@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -1359,6 +1361,26 @@ test_post_publication_launch_failure_keeps_the_new_record() {
   pass "fm-control relaunch: post-publication failure keeps the new durable record"
 }
 
+test_relaunch_records_control_relaunch_tx_before_a_recorded_pr() {
+  local dir out rc
+  dir=$(new_case prafter rl31)
+  add_ship_task "$dir" rl31 claude
+  printf 'pr=https://github.com/example/repo/pull/42\n' >> "$dir/home/state/rl31.meta"
+  out=$(run_control "$dir" rl31 relaunch --note "relaunch over a recorded pr"); rc=$?
+  expect_code 0 "$rc" "a relaunch over a recorded pr should succeed"$'\n'"$out"
+  [ -n "$(meta_field "$dir" rl31 control_relaunch_tx)" ] \
+    || fail "the relaunched record should identify its relaunch transaction"
+  [ "$(meta_field "$dir" rl31 pr)" = "https://github.com/example/repo/pull/42" ] \
+    || fail "the relaunched record should keep the recorded pr"
+  grep -n '^control_relaunch_tx=' "$dir/home/state/rl31.meta" > "$dir/tx-line"
+  grep -n '^pr=' "$dir/home/state/rl31.meta" > "$dir/pr-line"
+  [ "$(cut -d: -f1 "$dir/tx-line")" -lt "$(cut -d: -f1 "$dir/pr-line")" ] \
+    || fail "control_relaunch_tx must be written before the preserved pr= line, or the watcher's identity parse rejects every key after pr="
+  fm_pr_metadata_identity_parse "$dir/home/state/rl31.meta" \
+    || fail "fm_pr_metadata_identity_parse must still accept the relaunched record"
+  pass "fm-control relaunch: control_relaunch_tx is recorded before a preserved pr= line"
+}
+
 test_stop_transport_failure_reconciles_a_dead_agent() {
   local dir out rc
   dir=$(new_case stopfail rl25)
@@ -2425,6 +2447,7 @@ test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
 test_prepublication_failure_keeps_concurrent_durable_metadata
 test_post_publication_launch_failure_keeps_the_new_record
+test_relaunch_records_control_relaunch_tx_before_a_recorded_pr
 test_stop_transport_failure_reconciles_a_dead_agent
 test_complete_journal_failure_rolls_back_from_durable_phase
 test_prepublication_abort_retires_replacement_wiring_and_busy_state

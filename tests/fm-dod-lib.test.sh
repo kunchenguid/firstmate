@@ -177,6 +177,39 @@ test_recorded_merged_pr_is_landed_after_prune() {
   pass "a recorded merged PR satisfies the gate after prune"
 }
 
+test_unhandled_inbox_message_refuses_a_ship_done() {
+  local repo wt meta state reason rc
+  repo="$TMP_ROOT/inbox-repo"
+  wt="$TMP_ROOT/inbox-wt"
+  state="$TMP_ROOT/inbox-state"
+  mkdir -p "$state/inboxed.inbox/handled"
+  fm_git_worktree "$repo" "$wt" fm/inboxed
+  git -C "$wt" commit -q --allow-empty -m 'fix, pushed, but the inbox was never checked'
+  git -C "$wt" update-ref refs/remotes/origin/fm/inboxed "$(git -C "$wt" rev-parse HEAD)"
+  meta="$state/inboxed.meta"
+  printf 'kind=ship
+mode=no-mistakes
+worktree=%s
+project=%s
+' "$wt" "$repo" > "$meta"
+  printf 'fm-task-inbox.v1
+steer this
+' > "$state/inboxed.inbox/001.msg"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green" \
+    "$state" inboxed "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a ship done: with an unhandled inbox message was accepted (exit $rc)"
+  case "$reason" in
+    *"steering inbox has a message outside handled/"*) ;;
+    *) fail "the refusal did not name the unhandled inbox message: $reason" ;;
+  esac
+  mv "$state/inboxed.inbox/001.msg" "$state/inboxed.inbox/handled/001.msg"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green" \
+    "$state" inboxed "$meta" >/dev/null \
+    || fail "a ship done: was refused once every inbox message was moved to handled/"
+  pass "an unhandled inbox message refuses a ship done: until it is moved to handled/"
+}
+
 test_merge_marker_binds_to_the_named_pr() {
   local repo wt meta state reason rc sha
   repo="$TMP_ROOT/bind-repo"
@@ -387,6 +420,7 @@ test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
+test_unhandled_inbox_message_refuses_a_ship_done
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr

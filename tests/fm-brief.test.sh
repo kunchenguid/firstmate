@@ -221,6 +221,25 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# A ship worker that discards uncommitted work with `git checkout --` or
+# `git restore` leaves no recovery path: the worktree is the only copy, and
+# rule 1's push restriction says nothing about losing local, uncommitted
+# changes. PR 659 against lloegrys-live lost a worker's own uncommitted fix
+# this way.
+test_ship_brief_forbids_discarding_uncommitted_work() {
+  local home id brief
+  home="$TMP_ROOT/ship-discard-home"
+  write_registry "$home"
+  id="brief-discard-a1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "fm-brief.sh $id should exit 0"
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "$id: brief was not scaffolded"
+  assert_grep "Never run \`git checkout --\` or \`git restore\` over uncommitted work" "$brief" \
+    "$id: ship brief must forbid discarding uncommitted work with git checkout -- or git restore"
+  pass "fm-brief.sh: a ship brief forbids git checkout -- and git restore over uncommitted work"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -1329,6 +1348,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_ship_brief_forbids_discarding_uncommitted_work
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
