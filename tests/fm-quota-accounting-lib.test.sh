@@ -91,6 +91,18 @@ cat > "$SNAP_END_ROUND" <<'JSON'
 ]}
 JSON
 
+# Closing snapshot whose resetsAt jittered across a whole-second boundary
+# (live quota-axi reports sub-second jitter): same window, one second later.
+SNAP_END_JITTER="$TMP_ROOT/end-jitter.json"
+cat > "$SNAP_END_JITTER" <<'JSON'
+{"schemaVersion":5,"providers":[
+ {"provider":"claude",
+  "windows":[{"id":"five_hour","kind":"session","percentRemaining":42.25,"resetsAt":"2026-10-01T05:00:01.02Z"}],
+  "quotaSemantics":{"status":"known","effectiveAvailability":[
+    {"scope":"all_models","status":"known","effectivePercentRemaining":42.25,"runway":{"status":"through_reset"}}]}}
+]}
+JSON
+
 # Closing snapshot after the window refilled: same id, new reset time.
 SNAP_END_RESET="$TMP_ROOT/end-reset.json"
 cat > "$SNAP_END_RESET" <<'JSON'
@@ -351,6 +363,17 @@ lines=$(
 has_line "$lines" 'quota_delta_percent_points=45.17' \
   || fail "the delta was not rounded to two decimals: $lines"
 pass "a measured delta is rounded to two decimals"
+
+write_start_meta "$META"
+lines=$(
+  export PATH="$FAKEBIN:$PATH" FAKE_QUOTA_SNAPSHOT="$SNAP_END_JITTER"
+  fm_quota_accounting_end_lines "$META"
+)
+has_line "$lines" 'quota_delta_status=measured' \
+  || fail "a one-second resetsAt jitter discarded the measured delta: $lines"
+has_line "$lines" 'quota_delta_percent_points=45.25' \
+  || fail "the jitter-tolerant delta is wrong: $lines"
+pass "sub-second resetsAt jitter across a second boundary still measures the delta"
 
 write_start_meta "$META"
 lines=$(

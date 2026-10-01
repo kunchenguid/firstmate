@@ -65,7 +65,10 @@
 #   quota_end_reason                Why no closing reading exists.
 #   quota_delta_status              `measured` when both readings exist and came
 #                                   from the same provider, account, window id,
-#                                   and reset time; `window_reset` when they did
+#                                   and reset time (within a few seconds, since
+#                                   live resetsAt carries sub-second jitter
+#                                   across whole-second boundaries);
+#                                   `window_reset` when they did
 #                                   not, so the difference spans a refill and
 #                                   means nothing; `no_start` when only the
 #                                   closing reading exists; `unavailable` when
@@ -255,6 +258,19 @@ fm_quota_accounting_start_lines() {
   return 0
 }
 
+# fm_quota_accounting_same_reset <a> <b>
+# Whether two normalized reset times name the same quota window. Live
+# quota-axi reports resetsAt with sub-second jitter that can wobble across a
+# whole-second boundary between the opening and closing readings, so times
+# within a few seconds are the same window identity. Times that cannot be
+# parsed fall back to exact string equality.
+fm_quota_accounting_same_reset() {
+  [ "$1" = "$2" ] && return 0
+  jq -en --arg a "$1" --arg b "$2" \
+    '(($a | fromdateiso8601) - ($b | fromdateiso8601)) as $d
+     | (if $d < 0 then -$d else $d end) <= 5' >/dev/null 2>&1
+}
+
 # fm_quota_accounting_delta <start-percent> <end-percent>
 # Percentage points drained between the two readings, rounded to two decimals.
 fm_quota_accounting_delta() {
@@ -300,7 +316,7 @@ fm_quota_accounting_end_lines() {
   if [ "$start_provider" != "$FM_QUOTA_ACCOUNTING_PROVIDER" ] ||
     [ "$start_account" != "$FM_QUOTA_ACCOUNTING_ACCOUNT" ] ||
     [ "$start_window" != "$FM_QUOTA_ACCOUNTING_WINDOW" ] ||
-    [ "$start_resets" != "$FM_QUOTA_ACCOUNTING_RESETS" ]; then
+    ! fm_quota_accounting_same_reset "$start_resets" "$FM_QUOTA_ACCOUNTING_RESETS"; then
     printf 'quota_delta_status=window_reset\n'
     return 0
   fi
