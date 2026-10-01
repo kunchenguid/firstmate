@@ -35,8 +35,8 @@ When a material result leaves an authorized gap without a healthy executor, it f
 The branch may inspect current artifacts and route the already-authorized next step through the existing owner; a no-mistakes start or ordinary gate continuation goes back to the same worker, which alone runs or responds to the pipeline.
 A declined or failed branch offer falls back to MAIN.
 It never derives task identity from a backend endpoint label.
-Successful routine branch advancement or a healthy unchanged wait is retained quietly in the branch session.
-Goal-ready evidence, a genuine blocker, or an authority decision is delivered to MAIN; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
+A healthy unchanged wait is retained quietly in the branch session.
+Material routine advancement, goal-ready evidence, a genuine blocker, or an authority decision is delivered to MAIN; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
 These transcript entries are delivery receipts only and never become another progress source.
 Topic switches, session reload and compaction therefore recover from the original task row, while ordinary commands and unchanged observations add no progress writes.
 
@@ -48,7 +48,8 @@ No progress action accepts evidence paths, authority references, lifecycle JSON 
 
 Neither the monitor nor the branch replaces an action owner.
 The branch may call that owner's existing interface for an already-authorized routine next step, while MAIN handles genuine scope/product/architecture, destructive, security, merge and cleanup decisions, reviews actual artifacts, writes material progress changes, and alone accepts the goal.
-For ask-user findings, the branch may route an answer to the same worker only when the accepted brief makes the required fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
+For no-mistakes ask-user findings delivered with their exact task-local snapshot, the branch may route an answer to the same worker only when the accepted brief makes the required fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
+Every other decision remains MAIN-owned.
 Project-required routine confirmations follow the same in-scope rule; all other decisions return to MAIN.
 An empty inbox or unchanged wait is quiet, but a recorded actionable gap does not disappear until MAIN advances it, records a genuine blocker, or satisfies acceptance.
 

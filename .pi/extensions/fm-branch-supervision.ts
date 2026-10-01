@@ -63,7 +63,7 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -691,6 +691,7 @@ export default function (pi: ExtensionAPI) {
   let recordContinuationReceipt: (() => void) | null = null;
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
   let branchProgressBindings: Record<string, string> = {};
+  let branchProgressSnapshots: Record<string, string> = {};
   let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
   let branchTaskAdmissionRevisions: Record<string, number> = {};
   let branchTaskAdmissionSnapshots: Record<string, string> = {};
@@ -701,6 +702,32 @@ export default function (pi: ExtensionAPI) {
   function taskContinuationSnapshot(record: any): string {
     const { revision: _revision, coordination: _coordination, ...taskState } = record || {};
     return JSON.stringify(taskState);
+  }
+  function compactResumeSnapshot(task: string): string {
+    try {
+      const statusPath = join(state, `${task}.status`);
+      let status = "";
+      if (existsSync(statusPath)) {
+        const stat = lstatSync(statusPath);
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("invalid task status");
+        status = readFileSync(statusPath, "utf8");
+      }
+      const inbox: Array<[string, string]> = [];
+      for (const relativeDir of ["", "handled"]) {
+        const directory = join(state, `${task}.inbox`, relativeDir);
+        if (!existsSync(directory)) continue;
+        for (const name of readdirSync(directory).sort()) {
+          if (!name.endsWith(".msg")) continue;
+          const path = join(directory, name);
+          const stat = lstatSync(path);
+          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("invalid inbox record");
+          inbox.push([join(relativeDir, name), createHash("sha256").update(readFileSync(path)).digest("hex")]);
+        }
+      }
+      return createHash("sha256").update(JSON.stringify({ status, inbox })).digest("hex");
+    } catch {
+      return "";
+    }
   }
   // The admission is the branch's canonical, bounded lifecycle read. Keep the
   // semantic gap and current operation beside the already-projected
@@ -1414,7 +1441,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event. A compact task continuation may use silent:true with verdict routine when authorized work advanced or a healthy wait remains; that stays inside the branch session and does not interrupt MAIN. Other reports write durably to the outcome store and merge into MAIN. verdict captain is reserved for goal-ready evidence, genuine blockers, or authority decisions.",
+        "Record the outcome of one handled fleet event. A compact task continuation may request silent:true with verdict routine; it remains quiet only when its resumable task state is unchanged, while material changes go through the outcome store to MAIN. verdict captain is reserved for goal-ready evidence, genuine blockers, or authority decisions.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1427,7 +1454,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True for a no-change fleet heartbeat or a routine compact continuation that should remain quiet while authorized work advances or waits healthily",
+          description: "True for a no-change fleet heartbeat or a compact continuation whose resumable task state is unchanged",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1450,8 +1477,6 @@ export default function (pi: ExtensionAPI) {
         if (scopeRefusal) {
           return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
         }
-        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
-        if (wake) appendArgs.push("--wake", wake);
         // Ownership, the durable append, and the delivery it authorizes are
         // ONE unit of the delivery queue: store-before-visible-delivery and
         // this report's place in sequence order are exactly what another
@@ -1466,12 +1491,15 @@ export default function (pi: ExtensionAPI) {
           }
           const binding = branchTaskBindings[task];
           const progressToken = branchProgressBindings[task];
+          let unchangedContinuation = false;
           if (progressToken) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
             if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state === "done") {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
+            const before = branchProgressSnapshots[task];
+            unchangedContinuation = Boolean(before) && compactResumeSnapshot(task) === before;
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1481,7 +1509,7 @@ export default function (pi: ExtensionAPI) {
               return { content: [{ type: "text", text: "report refused: newer task intent invalidated this branch result" }], details: undefined, isError: true };
             }
           }
-          if (quietContinuation) {
+          if (quietContinuation && unchangedContinuation) {
             const manager = branch?.sessionManager;
             const entryId = manager?.appendCustomEntry("fm-task-continuation-settlement", {
               task, admission: wakeTaskScope?.token, record_token: progressToken, summary,
@@ -1496,6 +1524,9 @@ export default function (pi: ExtensionAPI) {
             }, pi.events);
             return { content: [{ type: "text", text: "routine continuation retained quietly in branch" }], details: undefined };
           }
+          const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary,
+            "--silent", String(silent && !progressToken)];
+          if (wake) appendArgs.push("--wake", wake);
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
             return {
@@ -2019,9 +2050,9 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const { modes, routineDecisionTasks } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, heartbeat);
+        const { modes, reviewableDecisionTasks } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, heartbeat);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
-        const scope = scopeForUnreadWake(state, heartbeat, modes, new Set(routineDecisionTasks));
+        const scope = scopeForUnreadWake(state, heartbeat, modes, new Set(reviewableDecisionTasks));
         const disposition = dispositionForWakeTrigger(message, scope);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
@@ -2067,6 +2098,7 @@ ${context.command}
         await continuation.preserve([...admittedTasks]);
         branchTaskBindings = {};
         branchProgressBindings = {};
+        branchProgressSnapshots = {};
         branchTaskObservations = {};
         branchTaskAdmissionRevisions = {};
         branchTaskAdmissionSnapshots = {};
@@ -2077,6 +2109,7 @@ ${context.command}
               const progress = JSON.parse(compact.stdout);
               if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step) {
                 branchProgressBindings[task] = progress.record_token;
+                branchProgressSnapshots[task] = compactResumeSnapshot(task);
               }
             } catch { /* Malformed compact progress grants no branch capability. */ }
           }
@@ -2119,6 +2152,7 @@ ${context.command}
           wakeTaskScope = null;
           branchTaskBindings = {};
           branchProgressBindings = {};
+          branchProgressSnapshots = {};
           branchTaskObservations = {};
           branchTaskAdmissionRevisions = {};
           branchTaskAdmissionSnapshots = {};
@@ -2209,6 +2243,7 @@ ${context.command}
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchTaskBindings = {};
       branchProgressBindings = { [offer.task]: progress.record_token };
+      branchProgressSnapshots = { [offer.task]: compactResumeSnapshot(offer.task) };
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
       trace("prompt", "started");
@@ -2219,7 +2254,7 @@ ${context.command}
           `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
           `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text. Route bounded ordinary gate continuations back to that same worker; do not run or respond to no-mistakes yourself. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
-          `Use silent routine reporting while work advanced or a healthy executor/run is unchanged. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
+          `Request silent routine reporting only when the executor and resumable task state are unchanged. Material progress is delivered through the existing outcome channel so MAIN can update the original task record. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
           `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,
@@ -2233,6 +2268,7 @@ ${context.command}
         recordContinuationReceipt = null;
         branchTaskBindings = {};
         branchProgressBindings = {};
+        branchProgressSnapshots = {};
         wakeTaskScope = null;
       }
       const error = settledPromptProviderError(sessionManager, entryOffset);

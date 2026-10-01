@@ -54,7 +54,7 @@ Presentation acknowledgement does not establish task acceptance.
 The original in-flight backlog row is the active continuation record.
 Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
-The opaque record token binds the task row to the current authenticated brief and executor generation, preventing a stale MAIN update or branch steer after a concurrent user correction or worker replacement.
+The opaque record token binds the task row to the current authenticated brief and executor generation, preventing a stale MAIN update or stale continuation admission after a concurrent user correction or worker replacement; it does not authorize effects.
 The branch can read only the exact token-bound compact admission; it cannot write progress or make final semantic acceptance.
 
 The Pi extension uses the existing heartbeat coordinator's tick and `progress-list` to inspect canonical task ids.
@@ -63,14 +63,15 @@ An actionable gap without healthy execution is offered to the branch with the ca
 The branch inspects current artifacts and routes an already-authorized next step through its existing owner; failure or refusal falls back to MAIN.
 Endpoint text is never substituted for task identity.
 For a no-mistakes checkpoint, the branch instructs the same worker to start or continue its run; only that worker calls `no-mistakes axi run/respond` and retains branch custody.
-A routine advancement or healthy unchanged executor is settled quietly in the branch session.
-Goal-ready evidence, genuine blockers and authority decisions reach MAIN; repeated unsuccessful offers retain the bounded escalation path.
+A healthy unchanged executor or wait is settled quietly in the branch session.
+Material routine advancement, goal-ready evidence, genuine blockers and authority decisions reach MAIN; repeated unsuccessful offers retain the bounded escalation path.
 The extension paces at most two unchanged offers and one visible coordination escalation in the session transcript.
 Those entries are delivery receipts only; reload and compaction recover task progress from the original row, not from transcript pacing.
 
 Neither monitoring nor branch admission grants authority or replaces an effect owner.
 The branch may use that owner's existing interface for one in-scope routine step; MAIN owns progress writes, final artifact review, semantic acceptance, and genuine scope/product/architecture, destructive, security, merge or cleanup decisions.
-An ask-user finding stays on the branch only when the accepted brief makes the fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
+A no-mistakes ask-user finding delivered with its exact task-local snapshot stays on the branch only when the accepted brief makes the fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
+Every other decision remains MAIN-owned.
 Project-required routine confirmations use the same rule; every other decision is reported to MAIN.
 Attempted or uncertain effects retain their existing readback and no-replay contracts.
 A queued handoff, successful send, provider terminal state, report or pull request cannot independently establish acceptance.
@@ -91,8 +92,8 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   A busy branch also declines a newly arrived iDA result unless its live grant already contains that exact row, so an unowned result falls back to main instead of waiting between actors.
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
   `signal_files_actionable` marks the queued payload `needs-decision:` for a newly surfaced `needs-decision` or a `captain-held` declaration surfaced through the no-verb fallback.
-  Such rows stay MAIN-owned unless their exact canonical task currently has an in-flight compact progress record with an actionable gap; only then may the branch claim the row to apply the bounded routine-versus-genuine decision criteria above.
-  For a stale row, `scopeForUnreadWake` folds the mapped task's status log and applies the same compact-task qualification when a `needs-decision` remains open or the current meaningful declaration is `captain-held`; an unreadable or symlinked status log fails the scope closed rather than influencing routing.
+  Such rows stay MAIN-owned unless every open decision for their exact canonical task is a no-mistakes ask-user record with its exact regular task-local snapshot and the task currently has an in-flight compact progress record with an actionable gap; only then may the branch claim the row to apply the bounded routine-versus-genuine decision criteria above.
+  For a stale row, `scopeForUnreadWake` folds the mapped task's status log and applies the same exact no-mistakes snapshot qualification when a `needs-decision` remains open; a current `captain-held` declaration, another decision class, or an unreadable or symlinked record stays MAIN-owned.
   Task metadata contributes aliases only from one current-user-owned regular single-linked file with exactly one project field and at most one window field; task ids, status files, turn-ended files, and complete window values are opaque exact aliases.
   An alias claimed by more than one task remains unresolved and main-owned rather than inheriting filesystem iteration order.
   The dispatcher resolves trigger keys and every currently unread decision row to task identity before cross-referencing them.
@@ -155,7 +156,7 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   That asymmetry is a known limitation of the routine delivery representation rather than of the ordering above, it predates delivery moving off Pi's render thread, and closing it means giving routine delivery a durable idempotent record - tracked as follow-up `fm-pi-routine-delivery-idempotency-followup-r1` and pinned meanwhile by `tests/fm-pi-branch-extension.test.sh`.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
-  During compact continuation, `fm-send.sh` additionally requires the exact canonical task in both the branch scope and its current progress-token binding; another task or a changed token refuses before inbox mutation.
+  During compact continuation, the progress token proves only read freshness; v2 effects still require their exact delegated action id and existing effect, inbox, and receipt owners.
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
   A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below).
   Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.
@@ -237,7 +238,8 @@ Routine outcomes never enter this path and stay turn-free.
 A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note.
-A token-bound compact continuation may also settle `routine` with `silent=true`; that receipt stays in the branch session and does not enter the outcome store or open MAIN.
+A token-bound compact continuation may also request `routine` with `silent=true`; the receipt stays only in the branch session when the task status and inbox are unchanged.
+A material status or inbox change instead enters the existing outcome store and reaches MAIN so MAIN can update the original task record.
 Every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized task and effect owners when acceptance is incomplete, satisfied acceptance becomes a candidate for MAIN retirement, explicit stops remain stopped, and delivery or merge authority never expands.

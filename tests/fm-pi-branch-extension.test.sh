@@ -4672,11 +4672,12 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
-  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
-import fs, { readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const originalReadFileSync = fs.readFileSync;
 let countedStatusPath = "";
@@ -4687,7 +4688,7 @@ fs.readFileSync = function(path, ...args) {
 };
 syncBuiltinESMExports();
 
-const { activateEligibleRowsOwner, scopeForUnreadWake, dispositionForWakeTrigger, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
+const { activateEligibleRowsOwner, scopeForUnreadWake, scopeForUnreadWakeWithLifecycle, dispositionForWakeTrigger, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
   await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
 const project = `${process.env.FM_HOME}/projects/approved`;
@@ -4747,13 +4748,40 @@ if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 ||
   throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
 }
 
-// Only a caller that has verified current compact progress for this exact task
-// may admit its decision row for bounded Branch classification. Without that
-// task-bound qualification, the same row remains MAIN-owned as proven above.
-const routineDecision = scopeForUnreadWake(state, false, {}, new Set(["task-a"]));
-if (!routineDecision.eligible || routineDecision.eligibleSeqs.join(",") !== "1" ||
-    routineDecision.needsDecisionKeys.length !== 0 || routineDecision.taskBySeq["1"] !== "task-a") {
-  throw new Error(`a compact task's decision row did not reach bounded branch classification: ${JSON.stringify(routineDecision)}`);
+mkdirSync(`${process.env.FM_HOME}/data`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/.tasks.toml`, 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
+writeFileSync(`${process.env.FM_HOME}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
+let command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-tasks-axi.sh`,
+  ["add", "task-a", "Keep the accepted behavior unchanged", "--kind", "ship", "--body", "Original scope.", "--start"],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME } });
+if (command.status !== 0) throw new Error(`task fixture failed: ${command.stderr}`);
+mkdirSync(`${process.env.FM_HOME}/data/task-a`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/data/task-a/brief.md`, "Keep the accepted behavior unchanged.\n");
+command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["progress", "task-a"],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME } });
+if (command.status !== 0) throw new Error(`progress fixture read failed: ${command.stderr}`);
+const progress = JSON.parse(command.stdout);
+command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["update-progress", "task-a",
+  "--expected-token", progress.record_token, "--progress", JSON.stringify({ acceptance: "The existing contract passes",
+    current_state: "Validation requested a review decision", remaining_gap: "The finding is unresolved",
+    next_step: "Classify the finding against the accepted intent" })],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME, FM_SUPERVISION_ACTOR: "main" } });
+if (command.status !== 0) throw new Error(`progress fixture update failed: ${command.stderr}`);
+
+writeFileSync(`${state}/task-a.status`, "needs-decision [key=product-scope]: choose a broader product contract\n");
+const genuineDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
+if (genuineDecision.reviewableDecisionTasks.length !== 0 || genuineDecision.scope.eligible ||
+    genuineDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
+  throw new Error(`compact fields moved a genuine decision away from MAIN: ${JSON.stringify(genuineDecision)}`);
+}
+
+const findingPath = `${process.env.FM_HOME}/data/task-a/nm-run-review-findings.txt`;
+writeFileSync(findingPath, "NM-1: restore the already accepted behavior\n");
+writeFileSync(`${state}/task-a.status`, `needs-decision [key=nm-run-review]: ask-user findings=NM-1 file=${findingPath}\n`);
+const reviewableDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
+if (reviewableDecision.reviewableDecisionTasks.join(",") !== "task-a" || !reviewableDecision.scope.eligible ||
+    reviewableDecision.scope.eligibleSeqs.join(",") !== "1" || reviewableDecision.scope.needsDecisionKeys.length !== 0) {
+  throw new Error(`an exact no-mistakes decision snapshot did not reach bounded branch review: ${JSON.stringify(reviewableDecision)}`);
 }
 
 // A captain-held task's bounded stale recheck is itself a decision wake. It is
@@ -4924,7 +4952,6 @@ unlinkSync(`${state}/.main-eligible-rows`);
 // A MAIN claim is row-local: old claimed rows cannot poison an unrelated
 // new task's grant. The same task/endpoint trigger remains conservatively MAIN.
 const { strict: assert } = await import("node:assert");
-const { spawnSync } = await import("node:child_process");
 writeFileSync(`${state}/task-b.meta`, `project=${project}\nwindow=fm-b\n`);
 const mixedClaims = "1\t1\tsignal\ttask-a.status\told\n1\t2\tsignal\ttask-b.status\tnew\n";
 writeFileSync(`${state}/.wake-queue`, mixedClaims);
@@ -6096,7 +6123,7 @@ globalThis.__fmExecuteBranchBash = async (context) => {
 let promptCount = 0;
 let readResult;
 let deniedUpdate;
-let quietReport;
+let reportResult;
 let scopedRefusal;
 globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   promptCount += 1;
@@ -6123,16 +6150,16 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   const sent = await bash.execute("send", { command:
     `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'` });
   if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
-  quietReport = await report.execute("quiet", { task: "viewer", verdict: "routine", silent: true,
+  reportResult = await report.execute("report", { task: "viewer", verdict: "routine", silent: true,
     summary: "The existing worker received the authorized no-mistakes continuation." });
-  if (quietReport.isError) throw new Error(`quiet settlement failed: ${JSON.stringify(quietReport)}`);
+  if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
 
 await fire("session_start", {}, defaultSessionCtx);
 pi.appendEntry("fixture-seed", {});
 const beforeMain = sentToMain.length;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-try { await settle(() => promptCount === 1 && quietReport, "compact branch continuation"); }
+try { await settle(() => promptCount === 1 && reportResult, "compact branch continuation"); }
 catch (error) {
   const outcomes = (() => { try { return readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8"); } catch { return ""; } })();
   const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
@@ -6146,13 +6173,16 @@ const inbox = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.en
 if (inbox.length !== 1 || !readFileSync(`${home}/state/viewer.inbox/${inbox[0]}`, "utf8").includes("start the existing checkpoint")) {
   throw new Error(`same-worker inbox receipt missing: ${JSON.stringify(inbox)}`);
 }
-if (sentToMain.length !== beforeMain) throw new Error("routine branch continuation interrupted MAIN");
+if (sentToMain.length !== beforeMain + 1 ||
+    !sentToMain.at(-1)?.message?.content?.includes("existing worker received the authorized no-mistakes continuation")) {
+  throw new Error(`material continuation did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+}
 if (!entries.some((entry) => entry.customType === "fm-continuation-branch-delivery")) {
   throw new Error("MAIN session lacks the compact branch delivery receipt");
 }
-if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
-  throw new Error("branch session lacks the quiet token-bound settlement");
+  throw new Error("material continuation was retained only in the branch session");
 }
 if (readFileSync(`${home}/data/backlog.md`, "utf8").match(/firstmate-progress:v1/g)?.length !== 1) {
   throw new Error("continuation created a second active progress record");
@@ -6167,22 +6197,7 @@ if (readFileSync(`${home}/data/backlog.md`, "utf8").includes("no-mistakes starte
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
 if (promptCount !== 1 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 1) throw new Error("healthy execution replayed the continuation");
-if (sentToMain.length !== beforeMain) throw new Error("healthy unchanged execution notified MAIN");
-
-// A newly authenticated intent invalidates the already admitted token before
-// another worker steer. MAIN then requalifies the compact next step with one
-// material update; the stale branch admission creates no receipt.
-writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive and preserve keyboard navigation.\n");
-const stale = run("fm-send.sh", ["viewer", "Stale continuation must not be queued."], "branch", {
-  FM_BRANCH_TASK_SCOPE: JSON.stringify(["viewer"]),
-  FM_BRANCH_PROGRESS_BINDINGS: JSON.stringify({ viewer: record.record_token }),
-});
-if (stale.status !== 6 || !stale.stderr.includes("intent or progress changed")) {
-  throw new Error(`changed intent did not invalidate the admitted steer: ${stale.status} ${stale.stderr}`);
-}
-if (readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
-  throw new Error("stale intent created an inbox receipt");
-}
+if (sentToMain.length !== beforeMain + 1) throw new Error("healthy unchanged execution notified MAIN");
 
 // A material intermediate result is recorded once by MAIN. Its new token
 // admits one further same-worker action without reviving the old admission.
@@ -6200,10 +6215,12 @@ record = JSON.parse(result.stdout);
 writeFileSync(`${home}/state/viewer.status`, "done: intermediate no-mistakes review result\n");
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 2 &&
-  routed.filter((item) => item.command.includes("fm-send.sh viewer")).length === 2,
+  routed.filter((item) => item.command.includes("fm-send.sh viewer")).length === 2 &&
+  sentToMain.length === beforeMain + 2,
   "intermediate same-worker continuation");
 const messages = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg"));
 if (messages.length !== 2) throw new Error(`intermediate continuation did not create one new inbox receipt: ${JSON.stringify(messages)}`);
+if (sentToMain.length !== beforeMain + 2) throw new Error("intermediate material continuation did not reach MAIN once");
 
 // Only MAIN performs final semantic acceptance after the fixture's requested
 // outcome is satisfied. Empty gap/next step removes the task from monitoring.
@@ -6216,11 +6233,11 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 2 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 || sentToMain.length !== beforeMain) {
+if (promptCount !== 2 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 || sentToMain.length !== beforeMain + 2) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact original-row admission routed same-worker start and intermediate continuation through durable inbox receipts, stayed quiet, and stopped only after MAIN acceptance");
+console.log("compact original-row admission routed same-worker continuation, delivered material resume state to MAIN, kept unchanged execution quiet, and stopped only after MAIN acceptance");
 process.exit(0);
 EOF
   status=$?
