@@ -54,7 +54,9 @@ JS
 chmod +x "$FIXTURE/bin/fm-fleet-snapshot.sh" "$FIXTURE/bin/fm-send.sh"
 : > "$HOME_DIR/state/send-args.jsonl"
 
-NODE_NO_WARNINGS=1 FIXTURE="$FIXTURE" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$FIXTURE" node --input-type=module <<'NODE'
+export NODE_NO_WARNINGS=1
+export FIXTURE FM_HOME FM_ROOT_OVERRIDE
+node --input-type=module <<'NODE'
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
