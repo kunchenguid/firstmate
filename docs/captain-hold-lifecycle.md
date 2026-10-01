@@ -120,6 +120,41 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+## The raise-time decision card
+
+A call is answerable the moment it is raised, but the board and the captain's
+deck can show options, context, and a recommendation only when a card carries
+them. That structure exists in the agent that raises the call and in nothing
+later, so `bin/fm-captain-hold.sh hold` accepts card flags - or `--card-file`
+for a bare card or an `fm-decision-card.v1` envelope - and writes the same
+record `bin/fm-bearings-board.sh build` persists, under
+`state/decision-cards/<task>.json`; `card <task-id>` rewrites it for an open
+call. Validation is fail-closed and runs before the hold's first mutation, so
+a malformed card leaves the task, the backlog, and the store untouched.
+
+**The store is a source as well as a sink, and it wins.** For a key the payload
+also carries, `build` uses the durable record: it was authored where the
+question was raised and can be newer than the payload's snapshot, while a
+payload card is used only for a key the store does not hold. A record that
+fails the stored form of the contract, or whose card names another task, is
+named on stderr as `ignored-store-card:` and skipped rather than failing the
+build. Because the store is now authoritative for its keys, refining a card's
+copy is `bin/fm-captain-hold.sh card`, not a payload rewrite.
+
+**The deterministic floor.** `bin/fm-bearings-board.sh refresh` composes the
+fleet rows and one fallback card per open call from the canonical snapshot and
+then builds, so a raised call, a new landed row, or a changed live stage
+reaches the board with no agent turn at all - the shape a scheduled pass runs.
+It never invents the richer copy or the dispatch picker a `/bearings lavish`
+composition owns, and it composes every Charted Next gate `dispatchable=false`
+and classifies warnings only by the parenthesized sentinel ids, because the
+snapshot proves neither a cleared blocker-and-time gate nor a richer kind and
+prose is never read to guess either.
+
+The authored-card contract is owned once by `bin/fm-decision-card-lib.sh`, so
+the payload validator, the raise-time writer, and the store reader cannot
+disagree about what a valid card is.
+
 ## Cleanup never closes a captain call
 
 The policy prefers holding the very work item a question gates.
@@ -281,6 +316,8 @@ The supported creator is the runner carrying the captain's board selection.
 The binding-checked `reconcile-requests` command is that internal intake rather than an operator reconciliation outcome.
 
 ### Verifying and retiring a request
+
+A pending request is also a classification fact, not merely bookkeeping: the canonical snapshot buckets a hold with a pending request `reconciling`, so it leaves the live Captain's Call (it is no longer waiting on the captain) and is disclosed under Charted Next as `reconcile requested <timestamp>: <hold reason>`. Retiring the request restores the live call when the hold is still due and unblocked.
 
 Verification retires a request through one of two outcomes.
 Each outcome requires both the pending board-created request and the operator input that supports its claim:
