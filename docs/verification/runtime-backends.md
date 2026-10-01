@@ -795,6 +795,7 @@ Both returned `unknown` and `send-failed` respectively before the fix.
 
 This reading is a standing debt.
 It is pinned to a capture whose Claude version is unknown, and it is expected to break on a Claude release that changes the label or its position.
+Such a break still refuses, but the doorbell notice now names it (`composer unreadable: unrecognised titled rule '<title>'`, from `fm_composer_unreadable_reason`), so it is diagnosable from the sender's side.
 A live render is owed and is not token-free: on 2026-10-01, Claude Code 2.1.286 launched idle in an isolated tmux server drew solid rules, typing `ultracode` without submitting showed only a `Dynamic workflow requested for this turn` banner, and `/config` exposes only an `Ultracode keyword trigger` setting, so the titled rule appears only after a prompt carrying the keyword is submitted, which starts a dynamic workflow.
 No guard in the composer-matrix family exercises it yet.
 
