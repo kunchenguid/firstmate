@@ -46,7 +46,8 @@
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
+#                       state/.afk daemon flag), the newest primary-session
+#                       transcript paths (bin/fm-prior-sessions.sh), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
 #                       isolated so one task's read can never abort the
 #                       digest: read-only, always runs. The per-task reads
@@ -953,6 +954,19 @@ elif [ -e "$STATE/.afk" ]; then
   fi
 else
   printf 'absent\n'
+fi
+
+subsection "Prior session transcripts (newest first; paths only)"
+# A captain answer given in an earlier conversation - possibly on another
+# harness this home alternates with - may exist nowhere else.
+# bin/fm-prior-sessions.sh owns the lookup and never prints content.
+PRIOR_SESSIONS=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-prior-sessions.sh" 2>/dev/null) || PRIOR_SESSIONS=
+if [ -n "$PRIOR_SESSIONS" ]; then
+  printf '%s\n' "$PRIOR_SESSIONS"
+  printf 'The newest is usually this session. Before telling the captain a decision is still open,\n'
+  printf 'search the earlier ones for his answer; when found, record it with bin/fm-captain-hold.sh answer.\n'
+else
+  printf '(none found)\n'
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
