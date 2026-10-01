@@ -93,7 +93,7 @@ TARGET="$SESSION:$PANE"
 VERSION=$(PATH="$ORIGINAL_PATH" claude --version 2>/dev/null | head -1 || printf 'version-unknown')
 HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || printf 'herdr-unknown')
 
-CLAUDE_LAUNCH="claude --settings '{\"feedbackDrafts\":\"off\"}'"
+CLAUDE_LAUNCH="claude --name ultracode --settings '{\"feedbackDrafts\":\"off\"}'"
 if [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" != 1 ]; then
   CLAUDE_LAUNCH="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'"
 fi

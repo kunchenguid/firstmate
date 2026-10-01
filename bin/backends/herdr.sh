@@ -3557,9 +3557,22 @@ fm_backend_herdr_composer_clear() {  # <target> <text>
   return 1
 }
 
+# Supported submit-refusal diagnostics stay on stderr; stdout and exit codes
+# keep their existing delivery contract. Guard names are fixed and contain no
+# payload, composer text, endpoint or environment values. See the allowlist
+# below for the complete diagnostic vocabulary, including clear uncertainty.
+fm_backend_herdr_submit_refusal() {  # <guard-name>
+  case "${1-}" in
+    pre-content-extraction|pre-content-not-empty|literal-transport|\
+    post-content-extraction|post-payload-proof|post-clear-unverified|enter-transport)
+      printf 'fm-herdr-submit: refused guard=%s\n' "$1" >&2 ;;
+    *) printf 'fm-herdr-submit: refused guard=internal-unrecognized\n' >&2 ;;
+  esac
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 content refusal=''
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   # Claude on Herdr is the live-verified truncation shape: Enter is withheld
   # unless the composer, empty before the send, shows this payload. A suffix
@@ -3569,17 +3582,25 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
   if [ "${identity%%$'\t'*}" = claude ]; then
     proof=1
     content=$(fm_backend_herdr_composer_content "$target") \
-      || { printf 'send-failed'; return 0; }
-    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+      || { fm_backend_herdr_submit_refusal pre-content-extraction; printf 'send-failed'; return 0; }
+    [ -z "${content//[$' \t\r\n\v\f']/}" ] \
+      || { fm_backend_herdr_submit_refusal pre-content-not-empty; printf 'send-failed'; return 0; }
   fi
-  fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
+  fm_backend_herdr_send_literal "$target" "$text" \
+    || { fm_backend_herdr_submit_refusal literal-transport; printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target") \
-      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
+    if ! content=$(fm_backend_herdr_composer_content "$target"); then
+      refusal=post-content-extraction
+    elif ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
+      refusal=post-payload-proof
+    fi
+    if [ -n "$refusal" ]; then
+      fm_backend_herdr_submit_refusal "$refusal"
       if fm_backend_herdr_composer_clear "$target" "$text"; then
         printf 'send-failed'
       else
+        fm_backend_herdr_submit_refusal post-clear-unverified
         printf 'unknown'
       fi
       return 0
@@ -3601,6 +3622,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     elif [ "$enter_sent" -eq 0 ]; then
       i=$((i + 1))
       if [ "$i" -ge "$retries" ]; then
+        fm_backend_herdr_submit_refusal enter-transport
         printf 'send-failed'
         return 0
       fi
@@ -3648,6 +3670,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     i=$((i + 1))
     if [ "$i" -ge "$retries" ]; then
       if [ "$enter_sent" -eq 0 ]; then
+        fm_backend_herdr_submit_refusal enter-transport
         printf 'send-failed'
       else
         fm_composer_queued_enter_verdict "$verdict" \
