@@ -221,6 +221,8 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
+  # bash 3.2 (macOS /bin/bash) has no BASHPID, so under set -u read the frame
+  # pid from a short child's parent instead.
   [ "$owner" != "${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}" ] || owner=$PPID
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
