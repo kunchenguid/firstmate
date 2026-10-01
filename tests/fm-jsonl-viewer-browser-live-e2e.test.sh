@@ -164,8 +164,10 @@ try {
   if (await page.locator(".event-card:visible").count()) throw new Error("search did not filter rendered events");
   await page.locator("#event-search").fill("");
   if (await page.locator(".event-card:visible").count() !== 2) throw new Error("live append did not preserve both events");
+  if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.locator("#journal-filters").isVisible() || await page.locator("#journal-actions").isVisible() || await page.locator("#events").isVisible()) throw new Error("journal-only controls remained visible in report mode");
   if (!await page.locator(".markdown-body table").count()) throw new Error("Markdown table was not rendered");
   if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
   if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
