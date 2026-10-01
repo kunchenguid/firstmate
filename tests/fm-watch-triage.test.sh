@@ -4473,25 +4473,34 @@ test_paused_fresh_recheck_marker_does_not_mask_working() {
 }
 
 test_redeclared_identical_pause_gets_a_new_first_sight() {
-  local dir state fakebin out capture_file statusf window key pane_hash sig old_declaration pid
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid
   dir=$(make_case identical-redeclared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/redeclared.status"
   window="test:fm-redeclared-pause"
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=ship\n' "$window" > "$state/redeclared.meta"
   printf 'paused: awaiting the upstream release\n' > "$statusf"
-  old_declaration="declared:$(status_observed_signature "$statusf")"
-  printf '%s' "$old_declaration" > "$state/.paused-resurfaced-$(printf '%s' "$window" | tr ':/.' '___')"
-  printf 'resolved [key=other]: unrelated phase completed\npaused: awaiting the upstream release\n' >> "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redeclared_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "idle awaiting external")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   printf '1\n' > "$state/.count-$key"
-  : > "$state/.paused-$key"
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting the upstream release'
 
+  # The first declaration's own first sight records its identity on the throttle.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the first declaration did not alert on its first stale sight"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the first declaration's first sight was not a stale alert: $(cat "$out")"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first declaration's wake"
+
+  printf 'resolved: upstream release landed\npaused: awaiting the upstream release\n' >> "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-redeclared_status"
+  : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -6740,6 +6749,23 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
   pass "a wrong-year declared time cannot silence the watcher beyond the recheck cadence"
 }
 
+test_paused_until_anchor_is_the_declaration_stamp() {
+  local dir state statusf now
+  dir=$(paused_until_fixture until-stamped-anchor "$(( $(date +%s) + 31536000 ))" 0); state="$dir/state"
+  statusf="$state/until.status"; now=$(date +%s)
+  # The declaration is stamped 300s ago; an unrelated event appended since makes
+  # the status file fresh, so only the stamp proves the cadence already elapsed.
+  sed "s/^paused:/paused [at=$(( now - 300 ))]:/" "$statusf" > "$statusf.tmp" && mv "$statusf.tmp" "$statusf"
+  printf 'resolved [key=other] [at=%s]: unrelated phase completed\n' "$now" >> "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-until_status"
+  until_watch "$dir" 240
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "an unrelated event appended before the first sight deferred the declared pause recheck"; }
+  grep -F 'declared time is beyond the recheck cadence' "$dir/watch.out" >/dev/null \
+    || fail "the stamped declaration was not rechecked on its cadence: $(cat "$dir/watch.out")"
+  pass "a declared pause's recheck is anchored on its own stamp, not a later unrelated status event"
+}
+
 test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   local dir state
   dir=$(paused_until_fixture until-passed "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
@@ -6912,4 +6938,5 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
+test_paused_until_anchor_is_the_declaration_stamp
 test_paused_until_that_passed_is_rechecked_before_the_cadence

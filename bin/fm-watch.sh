@@ -1587,8 +1587,9 @@ declared_wait_identity() {  # <status-file> <declared-line>
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The age is anchored once per declaration
-# on the status file's mtime when that declaration is first recorded, so unrelated
-# later status appends and a churny idle pane cannot restart the cadence.
+# on the declared line's own [at=] stamp, or the status file's mtime for an
+# unstamped line or a later-dated stamp, so unrelated status appends and a churny
+# idle pane cannot restart or defer the cadence.
 # The bounded re-surface itself is the shared resurface_absorbed above, throttled
 # by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
@@ -1599,7 +1600,7 @@ declared_wait_identity() {  # <status-file> <declared-line>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
-  local win=$1 task=$2 h=$3 absorb_first=${4-} key statusf age detail reason declaration last until now min_age since_file
+  local win=$1 task=$2 h=$3 absorb_first=${4-} key statusf age detail reason declaration last until now min_age since_file declared_at stamp
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -1614,6 +1615,10 @@ handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
   if [ "$(cat "$since_file" 2>/dev/null || true)" != "$declaration" ]; then
     printf '%s' "$declaration" > "$since_file"
     touch -r "$statusf" "$since_file" 2>/dev/null || true
+    if declared_at=$(status_line_at_epoch "$last") && [ "$(age_of "$since_file")" -lt $(( now - declared_at )) ] \
+      && stamp=$(date -d "@$declared_at" +%Y%m%d%H%M.%S 2>/dev/null || date -r "$declared_at" +%Y%m%d%H%M.%S 2>/dev/null); then
+      touch -t "$stamp" "$since_file" 2>/dev/null || true
+    fi
   fi
   age=$(age_of "$since_file")
   if status_is_captain_held "$last"; then
