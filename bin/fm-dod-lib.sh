@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Single owner of a ship task's mode-specific "Definition of done" block and of
-# the named-head reachability gate that accepts a ship `done:` claim.
+# the completion-evidence and named-head gates that accept a ship `done:` claim.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
@@ -104,6 +104,47 @@
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-brief-heading-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-brief-heading-lib.sh"
+
+# Completion receipts are task-owned state/<id>.run-receipt.json records.
+# schema=1 binds task, mode, spawn_gen and exact candidate head to PASS or FAIL,
+# with a nonempty evidence body (commands, outcomes and relevant limitations).
+# bin/fm-run-receipt.sh publishes them atomically; evidence is embedded so the
+# proof survives deletion of temporary logs and the disposable worktree.
+# receipt_required=1 is set only for briefs carrying Completion receipt: required.
+# Older records need no absent receipt, but ANY present receipt must validate:
+# explicit FAIL, malformed, stale incarnation/head and empty proof all refuse.
+# This is evidence supplied by the worker, not a replacement for forge checks,
+# no-mistakes validation or merge authority. Both landing entrypoints consume
+# the same gate against the exact head they will submit to the merge command.
+fm_dod_receipt_accept() {  # <state> <id> <meta> <candidate-head>
+  local state=$1 id=$2 meta=$3 head=$4 receipt required mode gen count
+  [ -n "$state" ] && [ -n "$id" ] && [ -f "$meta" ] || return 0
+  receipt="$state/$id.run-receipt.json"
+  required=$(fm_dod_meta_value "$meta" receipt_required)
+  count=$(awk -F= '$1 == "receipt_required" { n++ } END { print n+0 }' "$meta") || return 1
+  if [ "$count" -gt 1 ] || { [ "$count" -eq 1 ] && [ "$required" != 1 ]; }; then
+    echo "completion receipt requirement malformed for $id"
+    return 1
+  fi
+  if [ ! -e "$receipt" ] && [ ! -L "$receipt" ]; then
+    [ "$required" != 1 ] && return 0
+    echo "completion receipt missing for $id"
+    return 1
+  fi
+  mode=$(fm_dod_meta_value "$meta" mode)
+  gen=$(fm_dod_meta_value "$meta" spawn_gen)
+  if fm_pr_head_valid "$head" && [ -f "$receipt" ] && [ ! -L "$receipt" ] && command -v jq >/dev/null 2>&1 \
+    && jq -se --arg task "$id" --arg mode "$mode" --arg gen "$gen" --arg head "$head" '
+      length == 1 and (.[0] | .schema == 1 and .task == $task and .mode == $mode and
+      .spawn_gen == $gen and .head == $head and .verdict == "PASS" and
+      (.evidence | type == "string" and test("[^[:space:]]")) and
+      (.at | type == "number" and . > 0))
+    ' "$receipt" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "completion receipt refused for $id: FAIL, mismatched candidate/incarnation, malformed or absent evidence"
+  return 1
+}
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -339,8 +380,10 @@ EOF
 }
 
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
-  local mode=$1 id=$2 forge=${4:-none}
+  local mode=$1 id=$2 forge=${4:-none} receipt_home_q receipt_tool_q
   local branch=${3:-fm/$id}
+  receipt_home_q=$(printf '%q' "${FM_HOME:-${FM_ROOT:-}}")
+  receipt_tool_q=$(printf '%q' "${FM_ROOT:-.}/bin/fm-run-receipt.sh")
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   case "$mode:$forge" in
     direct-PR:gerrit)
@@ -444,6 +487,13 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  cat <<EOF
+Completion receipt: required
+Before the final ready report (after validation in no-mistakes mode), write a nonempty evidence file containing commands run, results and limitations, then run \`FM_HOME=$receipt_home_q $receipt_tool_q $id PASS <evidence-file>\` from the clean candidate checkout.
+Use FAIL when verification failed; never label failed or unperformed checks PASS.
+The evidence file may be a task-owned temporary file outside your worktree; that write and the helper's completion-receipt write into its supervising state directory are authorized.
+Regenerate the receipt after any candidate change, including validation fixes or a rebase.
+EOF
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
@@ -630,6 +680,16 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
+  sha=$(git -C "$wt" rev-parse --verify HEAD 2>/dev/null) || sha=
+  if fm_dod_forge_head_is_named_head "$mode" && [ -f "$meta" ]; then
+    url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") || url=
+    if [ -n "$url" ] && [ "$(fm_dod_meta_value "$meta" pr)" = "$url" ]; then
+      if fm_pr_head_valid "$(fm_dod_meta_value "$meta" pr_head)"; then
+        sha=$(fm_dod_meta_value "$meta" pr_head)
+      fi
+    fi
+  fi
+  fm_dod_receipt_accept "$state" "$id" "$meta" "$sha" || return 1
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0

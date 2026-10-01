@@ -91,6 +91,8 @@
 # recorded value stale. Reading that state needs glab and jq, and either one
 # absent stops the merge before any state is recorded.
 #
+# Completion evidence is checked by bin/fm-dod-lib.sh against the verified
+# forge head before either merge command, independently of forge check waivers.
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
@@ -147,6 +149,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
@@ -1343,6 +1347,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
+    fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
@@ -1401,6 +1406,7 @@ case "$PROVIDER" in
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then
       gitlab_merge_args=(--auto-merge=false)
     fi
+    fm_dod_receipt_accept "$STATE" "$ID" "$META" "$FM_PR_MERGE_HEAD" >&2 || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
