@@ -588,7 +588,7 @@ write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
     "window=firstmate:fm-$id" \
     "endpoint_task_id=$id" \
     "worktree=$case_dir/absent-worktree" \
-    "project=$case_dir/absent-project" \
+    "project=$case_dir/project" \
     "harness=claude" \
     "kind=$kind" \
     "mode=$mode" \
@@ -1575,6 +1575,23 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   assert_grep 'local main' "$(backlog_of "$case_dir")" \
     "a local-only landing was closed without its local-main note"
   pass "completion closes a local-only ship, with its landing note, before reporting success"
+}
+
+test_completion_records_the_non_main_default_landing_branch() {
+  local case_dir id out
+  id=atomic-close-default-master
+  case_dir=$(make_home close-default-master)
+  git -C "$case_dir/project" branch -m main master
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-close-default-master"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed for the master-default project: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown did not close the master-default item"
+  assert_grep 'local master <!-- fm-local-landing -->' "$(backlog_of "$case_dir")" \
+    "a non-main default landing was recorded with the wrong branch"
+  pass "completion records the repository's non-main default landing branch"
 }
 
 test_completion_closes_a_scout_with_its_report() {
@@ -3102,6 +3119,7 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
+test_completion_records_the_non_main_default_landing_branch
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata

@@ -1630,11 +1630,7 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        if [ -n "$(meta_value "$META" base_branch)" ]; then
-          landing=$(landing_branch) || return 1
-        else
-          landing=main
-        fi
+        landing=$(landing_branch) || return 1
         BACKLOG_DONE_ARGS=(--note "local $landing <!-- fm-local-landing -->")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
