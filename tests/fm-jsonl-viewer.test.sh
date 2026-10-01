@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Executable HTTP behavior for the read-only agent journal and task report
+# Executable HTTP behavior for the read-only agent journal and task document
 # viewer, including auth, root confinement, record shapes, append recovery,
 # report changes, malformed/long lines, and explicit rotation/truncation signals.
 set -eu
@@ -14,11 +14,44 @@ SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 SUPERVISOR_DIR="$HOME_FIXTURE/state/branch-session"
 REPORT_DIR="$HOME_FIXTURE/data/task-one"
 PREFIXED_REPORT_DIR="$HOME_FIXTURE/data/_task-two"
+BRIEF_DIR="$HOME_FIXTURE/data/held-task"
 TOKEN=viewer-test-token-value
 TOKEN_FILE="$TMP_ROOT/viewer.token"
 PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR"
+mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR" "$BRIEF_DIR"
+cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+TOML
+cat > "$HOME_FIXTURE/data/backlog.md" <<'MARKDOWN'
+## In flight
+- [ ] task-one - Processing task (repo: viewer) (kind: ship)
+
+## Queued
+- [ ] held-task - Held task blocked-by: upstream-task (blocked-reason: waiting for upstream) (repo: viewer) (kind: ship)
+
+## Done
+- [x] completed-task - Accepted completed task (repo: viewer) (kind: ship)
+MARKDOWN
+cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
+## Archived 2026-09
+- [x] archived-task - Archived historical task (repo: viewer) (kind: ship)
+MARKDOWN
+mkdir -p "$HOME_FIXTURE/data/cancelled-task"
+printf 'outcome: retained cancelled task\n' > "$HOME_FIXTURE/data/cancelled-task/brief.md"
+printf 'Explicitly stop this task\n' > "$HOME_FIXTURE/data/cancelled-task/stop.txt"
+printf 'spawn_gen=cancelled-generation\nkind=secondmate\n' > "$HOME_FIXTURE/state/cancelled-task.meta"
+FM_HOME="$HOME_FIXTURE" python3 "$ROOT/bin/fm-task-lifecycle.py" init cancelled-task >/dev/null
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" lifecycle cancelled-task \
+  | jq --arg ref "$HOME_FIXTURE/data/cancelled-task/stop.txt" '.disposition="archived" | .assessment.authority_ref=$ref' \
+  > "$TMP_ROOT/cancelled-lifecycle.json"
+chmod 600 "$TMP_ROOT/cancelled-lifecycle.json"
+FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" reconcile cancelled-task --expected-revision 1 --record "$TMP_ROOT/cancelled-lifecycle.json" >/dev/null
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 
@@ -42,11 +75,15 @@ cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
 
 Visible report body.
 MARKDOWN
+printf '# Superseded task brief\n\nReport selection must take precedence.\n' > "$REPORT_DIR/brief.md"
+printf '# Held task instructions\n\nVisible brief body.\n' > "$BRIEF_DIR/brief.md"
 printf 'not allowlisted\n' > "$REPORT_DIR/secret.md"
 printf '# Prefixed task report\n' > "$PREFIXED_REPORT_DIR/report.md"
 mkdir -p "$HOME_FIXTURE/data/escaped"
 printf 'outside report\n' > "$TMP_ROOT/outside.md"
 ln -s "$TMP_ROOT/outside.md" "$HOME_FIXTURE/data/escaped/report.md"
+mkdir -p "$HOME_FIXTURE/data/escaped-brief"
+ln -s "$TMP_ROOT/outside.md" "$HOME_FIXTURE/data/escaped-brief/brief.md"
 ln -s "$TMP_ROOT" "$HOME_FIXTURE/data/linked-task"
 
 node - "$SUPERVISOR_DIR/long.jsonl" <<'NODE'
@@ -86,6 +123,10 @@ status=$(curl -sS -o "$TMP_ROOT/wrong.json" -w '%{http_code}' -H 'Authorization:
 [ "$status" = 401 ] || fail "wrong-token discovery returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/report-denied.json" -w '%{http_code}' "$BASE/api/report?id=task-one")
 [ "$status" = 401 ] || fail "unauthenticated report read returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/tasks-denied.json" -w '%{http_code}' "$BASE/api/tasks")
+[ "$status" = 401 ] || fail "unauthenticated task discovery returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/task-document-denied.json" -w '%{http_code}' "$BASE/api/task-document?id=held-task")
+[ "$status" = 401 ] || fail "unauthenticated task document read returned HTTP $status"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/sessions" > "$TMP_ROOT/sessions.json"
 jq -e --arg id "$SHORT_ID" '.sessions | any(.source == "short" and .id == $id)' "$TMP_ROOT/sessions.json" >/dev/null || fail "ShortTask journal was not discovered"
@@ -94,6 +135,16 @@ jq -e '.sessions | all(.id != "escaped.jsonl")' "$TMP_ROOT/sessions.json" >/dev/
 jq -e '.reports | any(.source == "report" and .id == "task-one" and .label == "task-one")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical task report was not discovered"
 jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "_task-two")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical report for a valid prefixed task id was not discovered"
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
+
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
+jq -e '
+  (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report"))
+    and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null))
+    and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief"))
+    and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
+    and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled"))
+    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait"]))
+' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 
 status=$(curl -sS -o "$TMP_ROOT/traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=..%2Foutside.jsonl&cursor=0")
 [ "$status" = 404 ] || fail "traversal selection returned HTTP $status"
@@ -105,14 +156,31 @@ status=$(curl -sS -o "$TMP_ROOT/report-symlink.json" -w '%{http_code}' -H "Autho
 [ "$status" = 404 ] || fail "symlinked report selection returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/report-arbitrary.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one%2Fsecret.md")
 [ "$status" = 404 ] || fail "non-canonical report file selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/report-brief-only.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=held-task")
+[ "$status" = 404 ] || fail "standalone report API exposed a task brief"
+status=$(curl -sS -o "$TMP_ROOT/task-document-traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=..%2F..%2Foutside")
+[ "$status" = 404 ] || fail "task document traversal selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/task-document-symlink.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=escaped-brief")
+[ "$status" = 404 ] || fail "symlinked task brief selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/task-document-missing.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=completed-task")
+[ "$status" = 404 ] || fail "task without a canonical document returned HTTP $status"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report.json"
 jq -e '.source == "report" and .id == "task-one" and (.content | contains("Visible report body.")) and .size > 0 and (.identity | length) > 0' "$TMP_ROOT/report.json" >/dev/null || fail "canonical task report was not read intact"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=_task-two" > "$TMP_ROOT/prefixed-report.json"
 jq -e '.source == "report" and .id == "_task-two" and (.content | contains("Prefixed task report"))' "$TMP_ROOT/prefixed-report.json" >/dev/null || fail "canonical report for a valid prefixed task id was not read intact"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one" > "$TMP_ROOT/task-report-document.json"
+jq -e '.source == "report" and (.content | contains("Visible report body.")) and (.content | contains("Superseded task brief") | not)' "$TMP_ROOT/task-report-document.json" >/dev/null || fail "task document did not prefer the canonical report"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=held-task" > "$TMP_ROOT/task-brief-document.json"
+jq -e '.source == "brief" and .id == "held-task" and (.content | contains("Visible brief body."))' "$TMP_ROOT/task-brief-document.json" >/dev/null || fail "task document did not fall back to the canonical brief"
 printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report-changed.json"
 jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/report-changed.json" >/dev/null || fail "changed task report was not refreshed"
+
+sed -i 's/## In flight/## In flight\n\n## Done/; /task-one - Processing task/d' "$HOME_FIXTURE/data/backlog.md"
+sed -i '/Accepted completed task/a\- [x] task-one - Processing task (repo: viewer) (kind: ship)' "$HOME_FIXTURE/data/backlog.md"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
+jq -e '.tasks | any(.id == "task-one" and .category == "completed" and .status == "Completed")' "$TMP_ROOT/tasks-refreshed.json" >/dev/null || fail "task status refresh did not replace processing with accepted completion"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$SHORT_ID&cursor=0" > "$TMP_ROOT/short-page.json"
 jq -e '.events | any(.value.message.role == "assistant" and (.value.message.content | any(.type == "toolCall")))' "$TMP_ROOT/short-page.json" >/dev/null || fail "nested ShortTask tool call was not preserved"

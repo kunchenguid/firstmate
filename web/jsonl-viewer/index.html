@@ -10,28 +10,67 @@
     <header>
       <div>
         <p class="eyebrow">FIRSTMATE</p>
-        <h1>Agent journals and reports</h1>
+        <h1>Task dashboard and agent records</h1>
       </div>
       <div class="connection">
-        <label for="token">Access token</label>
-        <input id="token" type="password" autocomplete="off" spellcheck="false">
+        <div class="token-entry">
+          <label for="token">Access token</label>
+          <input id="token" type="password" autocomplete="off" spellcheck="false">
+          <label class="remember-token"><input id="remember-token" type="checkbox"> Remember access token</label>
+          <small id="token-note">Remembering grants access to anyone using this browser profile. Leave it off on shared devices.</small>
+        </div>
         <button id="connect" type="button">Connect</button>
+        <button id="forget" class="secondary" type="button" disabled>Forget / log out</button>
       </div>
     </header>
     <main>
       <aside>
         <label for="source">View</label>
         <select id="source">
+          <option value="tasks">Task dashboard</option>
           <option value="all">All</option>
           <option value="short">Short agents</option>
           <option value="supervisor">Supervisor sessions</option>
           <option value="report">Task reports</option>
         </select>
-        <label for="session-search">Find item</label>
+        <label for="session-search">Find task or item</label>
         <input id="session-search" type="search" placeholder="Task, session, or date">
         <div id="sessions" class="sessions" aria-live="polite"></div>
       </aside>
       <section class="journal">
+        <section id="task-dashboard" class="task-dashboard" aria-live="polite">
+          <div class="task-dashboard-heading">
+            <div>
+              <p class="eyebrow">TASK OVERVIEW</p>
+              <h2>Work across this Firstmate home</h2>
+              <p id="task-status" class="status">Connect to load task status.</p>
+            </div>
+            <label><input id="task-follow" type="checkbox" checked> Refresh statuses and documents</label>
+          </div>
+          <div id="task-counts" class="task-counts"></div>
+          <div id="task-groups" class="task-groups"></div>
+          <article id="task-detail" class="task-detail" hidden>
+            <div class="task-detail-heading">
+              <div>
+                <p id="task-detail-state" class="eyebrow"></p>
+                <h2 id="task-detail-title"></h2>
+                <p id="task-detail-meta" class="status"></p>
+                <p id="task-detail-wait" class="task-wait" hidden></p>
+              </div>
+              <button id="close-task" class="secondary" type="button">Close details</button>
+            </div>
+            <div id="task-document" class="task-document">
+              <p id="task-document-type" class="eyebrow" hidden></p>
+              <p id="task-document-empty" class="empty"></p>
+              <div id="task-document-rendered" class="markdown-body"></div>
+              <details id="task-document-source" class="report-source" hidden>
+                <summary>Plain source</summary>
+                <pre></pre>
+              </details>
+            </div>
+          </article>
+        </section>
+        <div id="artifact-viewer" hidden>
         <div class="toolbar">
           <div>
             <p id="session-title" class="session-title">Enter the access token to begin.</p>
@@ -59,6 +98,7 @@
             <pre></pre>
           </details>
         </article>
+        </div>
       </section>
     </main>
     <template id="event-template">
