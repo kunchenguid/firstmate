@@ -154,6 +154,7 @@ status=$(curl -sS -o "$TMP_ROOT/timeout-slow.json" -w '%{http_code}' -H "Authori
 jq -e '.generatedAt == "2026-10-01T00:00:00Z" and .tasks == []' "$TMP_ROOT/timeout-slow.json" >/dev/null \
   || fail "slow fleet snapshot response was not preserved"
 printf 'hang\n' > "$TIMEOUT_HOME/snapshot-mode"
+sleep 6
 started_at=$(date +%s)
 status=$(curl --max-time 4 -sS -o "$TMP_ROOT/timeout-hang.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
 elapsed=$(( $(date +%s) - started_at ))
@@ -207,6 +208,10 @@ jq -e '
     and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
+jq -e '.cacheHit == true and (.cacheAgeMs | type) == "number"' "$TMP_ROOT/tasks-cached.json" >/dev/null \
+  || fail "repeated task overview did not use the bounded cache"
+
 status=$(curl -sS -o "$TMP_ROOT/traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=..%2Foutside.jsonl&cursor=0")
 [ "$status" = 404 ] || fail "traversal selection returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/symlink.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=escaped.jsonl&cursor=0")
@@ -240,6 +245,7 @@ jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/r
 
 sed -i 's/## In flight/## In flight\n\n## Done/; /task-one - Processing task/d' "$HOME_FIXTURE/data/backlog.md"
 sed -i '/Accepted completed task/a\- [x] task-one - Processing task (repo: viewer) (kind: ship)' "$HOME_FIXTURE/data/backlog.md"
+sleep 6
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
 jq -e '.tasks | any(.id == "task-one" and .category == "completed" and .status == "Completed")' "$TMP_ROOT/tasks-refreshed.json" >/dev/null || fail "task status refresh did not replace processing with accepted completion"
 

@@ -32,6 +32,9 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
 const TASK_DISPOSITION_TIMEOUT_MS = 15000;
+const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
+
+let taskOverviewCache = null;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -263,10 +266,9 @@ function taskDispositions(codeRoot, dataRoot, environment) {
   return dispositions;
 }
 
-function lifecycleDispositions(codeRoot, dataRoot, environment) {
+function lifecycleDispositions(codeRoot, dataRoot, environment, candidateIds) {
   const values = new Map();
-  let ids = [];
-  try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
+  const ids = [...candidateIds].filter(id => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id));
   for (const id of ids) {
     const directory = join(dataRoot, id);
     const lifecycle = join(directory, "lifecycle.json");
@@ -303,7 +305,11 @@ function taskOverview(home, roots, codeRoot) {
     throw new Error("unsupported task snapshot");
   }
   const dispositions = taskDispositions(codeRoot, dataRoot, environment);
-  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
+  const lifecycleIds = new Set([
+    ...snapshot.tasks.map(task => task?.id),
+    ...snapshot.backlog.records.map(record => record?.id),
+  ]);
+  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment, lifecycleIds);
   const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
   const items = new Map();
   const ensure = id => {
@@ -398,6 +404,19 @@ function taskOverview(home, roots, codeRoot) {
     tasks,
     warning: snapshot.main_inventory?.valid === false ? "Some current task records need reconciliation." : null,
   };
+}
+
+function cachedTaskOverview(home, roots, codeRoot) {
+  const now = Date.now();
+  if (taskOverviewCache
+    && taskOverviewCache.home === home
+    && taskOverviewCache.codeRoot === codeRoot
+    && now - taskOverviewCache.servedAt < TASK_OVERVIEW_CACHE_TTL_MS) {
+    return { ...taskOverviewCache.body, cacheHit: true, cacheAgeMs: now - taskOverviewCache.servedAt };
+  }
+  const body = taskOverview(home, roots, codeRoot);
+  taskOverviewCache = { home, codeRoot, servedAt: Date.now(), body };
+  return { ...body, cacheHit: false, cacheAgeMs: 0 };
 }
 
 function resolveSelection(roots, source, id) {
@@ -643,7 +662,7 @@ function serve() {
       roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
     });
     if (url.pathname === "/api/tasks") {
-      try { return json(res, 200, taskOverview(home, roots, codeRoot)); }
+      try { return json(res, 200, cachedTaskOverview(home, roots, codeRoot)); }
       catch { return json(res, 503, { error: "task overview is temporarily unavailable" }); }
     }
     if (url.pathname === "/api/events") {

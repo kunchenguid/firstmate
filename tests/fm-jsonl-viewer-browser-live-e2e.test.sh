@@ -171,6 +171,7 @@ try {
   await page.locator("#remember-token").check();
   await page.locator("#connect").click();
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-groups .task-card[data-category="completed"]').count() !== 1) throw new Error("completed task category was not rendered");
   if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
@@ -178,6 +179,9 @@ try {
   await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#open-task-report").click();
+  await page.locator("#source").selectOption("tasks");
+  await page.getByRole("button", { name: /Held with task instructions/ }).first().waitFor({ state: "visible", timeout: 3000 });
   if (await page.getByText("This must not replace the report.", { exact: true }).count()) throw new Error("task brief took precedence over its report");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });

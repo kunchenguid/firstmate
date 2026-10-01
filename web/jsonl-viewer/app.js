@@ -62,7 +62,26 @@ const elements = {
   taskDocumentRendered: document.getElementById("task-document-rendered"),
   taskDocumentSource: document.getElementById("task-document-source"),
   closeTask: document.getElementById("close-task"),
+  openTaskReport: document.getElementById("open-task-report"),
 };
+
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const displayTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: DISPLAY_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+function displayTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "" : `${displayTimeFormatter.format(date)} UTC+8`;
+}
 
 function setStatus(message, error = false) {
   elements.status.textContent = message;
@@ -328,7 +347,7 @@ function renderEntry(entry) {
   card.dataset.type = type;
   card.dataset.search = `${role} ${type} ${entry.raw ?? ""}`.toLowerCase();
   if (entry.error) card.classList.add("error");
-  fragment.querySelector("time").textContent = timestampOf(value) ? new Date(timestampOf(value)).toLocaleString() : `byte ${entry.offset}`;
+  fragment.querySelector("time").textContent = timestampOf(value) ? displayTime(timestampOf(value)) : `byte ${entry.offset}`;
   fragment.querySelector(".role").textContent = role;
   fragment.querySelector(".type").textContent = type;
   fragment.querySelector(".event-summary").textContent = summaryOf(value, entry);
@@ -451,7 +470,7 @@ async function loadReport({ resetDisplay = false } = {}) {
       elements.report.querySelector(".report-source pre").textContent = body.content;
       state.reportContent = body.content;
     }
-    setStatus(`${body.size.toLocaleString()} bytes · updated ${new Date(body.modifiedAt).toLocaleString()}`);
+    setStatus(`${body.size.toLocaleString()} bytes · updated ${displayTime(body.modifiedAt)}`);
   } catch (error) {
     if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) setStatus(error.message, true);
   } finally {
@@ -546,6 +565,7 @@ function renderTaskDetail() {
   elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");
   elements.taskDetailWait.hidden = !task.wait;
   elements.taskDetailWait.textContent = task.wait || "";
+  elements.openTaskReport.hidden = task.documentType !== "report";
 }
 
 function clearTaskDocument(message) {
@@ -614,7 +634,8 @@ async function loadTasks() {
       clearTaskDocument("");
     }
     renderSessions();
-    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${new Date(body.generatedAt).toLocaleString()}${body.warning ? ` · ${body.warning}` : ""}`;
+    const cacheLabel = body.cacheHit ? ` · cached ${Math.round(body.cacheAgeMs / 1000)}s ago` : "";
+    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${body.warning ? ` · ${body.warning}` : ""}`;
   } catch (error) {
     if (requestGeneration !== state.taskRequestGeneration) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
@@ -659,7 +680,7 @@ function renderSessions() {
     name.textContent = session.label;
     const metadata = document.createElement("small");
     const sourceLabel = session.source === "short" ? "Short agent" : session.source === "supervisor" ? "Supervisor" : "Task report";
-    metadata.textContent = `${sourceLabel} · ${new Date(session.modifiedAt).toLocaleString()} · ${session.bytes.toLocaleString()} B`;
+    metadata.textContent = `${sourceLabel} · ${displayTime(session.modifiedAt)} · ${session.bytes.toLocaleString()} B`;
     button.append(name, metadata);
     button.addEventListener("click", () => selectSession(session));
     elements.sessions.append(button);
@@ -727,6 +748,14 @@ elements.closeTask.addEventListener("click", () => {
   state.selectedTaskId = null;
   state.taskSelectionGeneration += 1;
   renderTaskDashboard();
+});
+elements.openTaskReport.addEventListener("click", () => {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  const report = state.sessions.find(item => item.source === "report" && item.id === task?.id);
+  if (!report) return;
+  elements.source.value = "report";
+  showSelectedView();
+  selectSession(report);
 });
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
 elements.source.addEventListener("change", showSelectedView);
