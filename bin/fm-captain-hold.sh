@@ -946,7 +946,7 @@ report_retained_artifact_failure() {  # <task-id> <marker-path>
 }
 
 apply_pending_retained_artifact() {  # <task-id>
-  local id=$1 marker
+  local id=$1 marker note
   local -a args=()
   RETAINED_CLOSE_ARGS=()
   marker=$(fm_backlog_close_marker_path "$STATE" "$id") || return 1
@@ -957,8 +957,8 @@ apply_pending_retained_artifact() {  # <task-id>
   args=("${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]+"${FM_BACKLOG_CLOSE_VALIDATED_ARGS[@]}"}")
   case "${args[0]-}" in
     --pr|--report)
-      if [ "${args[0]}" = --pr ] && fm_backlog_pr_is_gerrit_change "${args[1]-}"; then
-        RETAINED_CLOSE_ARGS=(--note "Gerrit change ${args[1]}")
+      if [ "${args[0]}" = --pr ] && note=$(fm_backlog_pr_note "${args[1]-}"); then
+        RETAINED_CLOSE_ARGS=(--note "$note")
         return 0
       fi
       fm_backlog_row_artifact_supported "$id" "${args[@]}" || return 0
