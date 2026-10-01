@@ -3188,7 +3188,7 @@ EOF
 
 test_codex_compat_package_failures_return_the_wake_to_main() {
   local mode repo home out status
-  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
+  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup missing-handoff unexpected-tools unrestorable-bash; do
     repo="$TMP_ROOT/codex-failure-$mode-root"
     home="$TMP_ROOT/codex-failure-$mode-home"
     mkdir -p "$home/state" "$home/config"
@@ -3220,6 +3220,7 @@ if (mode.startsWith("wrong-")) {
     { metadata: { source: "npm:pi-openai-codex-compat", scope: "user", origin: "package",
       [mode.slice(6)]: "untrusted" } };
 }
+if (mode === "missing-handoff") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
 if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report", "exec_command"];
 if (mode === "unrestorable-bash") {
   globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"];

@@ -2150,7 +2150,8 @@ ${context.command}
       // removed, restore our registered guarded override, then verify the exact
       // active set again. This depends on runtime state, not release metadata.
       if (
-        activeTools.length === 3 && activeTools[0] === "read" && activeTools[1] === "fm_task_continuation" && activeTools[2] === "fm_branch_report"
+        activeTools.length === 4 && activeTools[0] === "read" && activeTools[1] === "fm_task_continuation" &&
+        activeTools[2] === "fm_task_handoff" && activeTools[3] === "fm_branch_report"
       ) {
         created.session.setActiveToolsByName([...BRANCH_TOOL_NAMES]);
         activeTools = created.session.getActiveToolNames();
