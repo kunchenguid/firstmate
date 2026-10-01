@@ -701,6 +701,38 @@ export default function (pi: ExtensionAPI) {
     const { revision: _revision, coordination: _coordination, ...taskState } = record || {};
     return JSON.stringify(taskState);
   }
+  // The admission is the branch's canonical, bounded lifecycle read. Keep the
+  // semantic gap and current operation beside the already-projected
+  // observation so the model does not have to rediscover them from historical
+  // reports or guess evidence labels as paths. Lifecycle validation bounds the
+  // evidence list and record size before this projection is constructed.
+  function taskContinuationContext(record: any) {
+    const assessment = record?.assessment;
+    const action = record?.next_action;
+    return {
+      assessment: assessment ? {
+        outcome: assessment.outcome,
+        remaining_gap: assessment.remaining_gap,
+        evidence_key: assessment.evidence_key,
+        authority_ref: assessment.authority_ref,
+        evidence: assessment.evidence.map((item: any) => ({ ref: item.ref, sha256: item.sha256 })),
+      } : null,
+      next_action: action ? {
+        id: action.id,
+        kind: action.kind,
+        phase: action.phase,
+        attempts: action.attempts,
+        attempt_limit: action.attempt_limit,
+        expected_execution_generation: action.expected_execution_generation,
+        payload_ref: action.payload_ref,
+        payload_sha256: action.payload_sha256,
+        recheck_at: action.recheck_at,
+        deadline: action.deadline,
+        receipt_ref: action.receipt_ref,
+        ...(action.continuation ? { continuation: action.continuation } : {}),
+      } : null,
+    };
+  }
   // Accepted wake turns that have not settled yet. A newly offered iDA result
   // must fall back to main while the branch is busy unless the current live
   // row grant already owns that exact result row; accepting an unclaimed
@@ -2098,10 +2130,12 @@ ${context.command}
       const { session, sessionManager } = branchForTask;
       await flushMirror(session, acceptedGeneration);
       if (!(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver lost ownership");
+      const currentContext = taskContinuationContext(record);
       const entryId = sessionManager.appendCustomEntry("fm-task-continuation-admission", {
         task: offer.task, admission: offer.admission, observation: offer.observation,
         goal_revision: record.goal_revision, delegation_revision: record.delegation.revision,
         execution_generation: record.execution_generation, generation: acceptedGeneration,
+        ...currentContext,
       });
       const sessionFile = sessionManager.getSessionFile();
       if (!sessionFile || !sessionManager.getEntries().some((entry) => entry.id === entryId)) throw new Error("branch admission was not retained");
@@ -2134,8 +2168,8 @@ ${context.command}
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is not a queue wake: do not drain/ack queue rows.\n` +
-          `The admission below already contains the canonical refresh/observation. Do not repeat inspect, refresh or observe for no-change bookkeeping, after every action, for an already handled instruction, or for an unchanged healthy wait. ` +
-          `Read only the durable brief, exact inbox/current state or bounded evidence needed to decide a material delta. ` +
+          `The admission below contains the canonical refresh/observation plus the bounded current assessment and next action. Do not repeat inspect, refresh or observe for no-change bookkeeping, after every action, for an already handled instruction, or for an unchanged healthy wait. ` +
+          `For a material comparison or prepared readback, inspect only the exact authority/evidence/payload refs in the admission; labels such as "current task state" are not paths. ` +
           `Only the MAIN-issued delegation permits routine actions. Use fm_task_continuation patch for a material precheck or changed already-authorized next_action, ` +
           `fm-send --action-id for its exact body, and existing stable handoff identities for explicit dependency edges. ` +
           `Existing send/handoff owners persist exact effect receipts automatically; do not call fm_task_continuation merely to record them. Read back attempted/uncertain effects only when the receipt is unresolved; never replay. ` +
@@ -2145,7 +2179,7 @@ ${context.command}
           `Finish with fm_branch_report: routine for healthy progress, captain only for a candidate, real decision, exhausted blocker or failure.\n` +
           JSON.stringify({ task: offer.task, goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
             execution_generation: record.execution_generation, revision: record.revision, delegation: record.delegation,
-            observation: offer.observation }));
+            observation: offer.observation, ...currentContext }));
         recordContinuationReceipt();
         if (!receipted) throw new Error("branch admission has no durable receipt");
       } finally { clearTimeout(timeout); continuationToolsRemaining = null; recordContinuationReceipt = null; branchTaskBindings = {}; branchTaskObservations = {}; branchTaskAdmissionRevisions = {}; branchTaskAdmissionSnapshots = {}; wakeTaskScope = null; }

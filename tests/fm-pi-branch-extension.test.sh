@@ -6008,8 +6008,8 @@ test_branch_native_continuation_is_scoped_compact_and_material_only() {
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
-const { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot }; })()`);
+const { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot } = globalThis.__t;
 const { createHash } = await import("node:crypto");
 const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
@@ -6023,15 +6023,36 @@ const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});
 writeFileSync(`${home}/data/${task}/brief.md`,"Retain the unchanged goal and report only material evidence.\n");
 writeFileSync(`${home}/state/${task}.meta`,"spawn_gen=g1\nkind=ship\nexecutor=local-agent\n");
 writeFileSync(`${home}/data/policy-authority.md`,"Standing routine branch authority for this isolated fixture.\n");
+writeFileSync(`${home}/data/historical-report.md`,"Rollout is inactive pending landing, reload and policy enablement.\n");
+writeFileSync(`${home}/data/current-readback.md`,"Rollout is enabled after reload and the exact task grant is active.\n");
+writeFileSync(`${home}/data/readback-action.md`,"Inspect data/current-readback.md and retain final semantic acceptance for MAIN.\n");
 const sha=path=>createHash("sha256").update(readFileSync(path)).digest("hex");
 const run=args=>spawnSync(`${realRoot}/bin/fm-task-state.sh`,args,{encoding:"utf8",env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:`${home}/state`,FM_DATA_OVERRIDE:`${home}/data`,FM_CONFIG_OVERRIDE:`${home}/config`,FM_SUPERVISION_ACTOR:"main"}});
 let result=run(["enroll",task]);if(result.status!==0)throw Error(result.stderr);
 const policy={schema:"fm-task-continuation-policy.v1",revision:0,issuer:"main",enabled:true,authority_ref:"data/policy-authority.md",authority_sha256:sha(`${home}/data/policy-authority.md`),allowed:["inspect","precheck","steer-same-intent","observe-receipt"],expires_at:"2099-01-01T00:00:00Z"};
 writeFileSync(`${home}/data/policy.json`,JSON.stringify(policy),{mode:0o600});result=run(["continuation-policy","--expected-revision","0","--record",`${home}/data/policy.json`]);if(result.status!==0)throw Error(result.stderr);
-let nativeCalls=0,compactNoChanges=0,material;
+result=run(["refresh",task]);if(result.status!==0)throw Error(result.stderr);
+const mainNative=mainTools.find(tool=>tool.name==="fm_task_continuation");
+if(!mainNative)throw Error("main native continuation tool absent");
+const inspected=await mainNative.execute("seed-inspect",{action:"inspect",task,evidence:[`data/${task}/brief.md`,"data/current-readback.md","data/readback-action.md"]},undefined,undefined,defaultSessionCtx);
+if(inspected.isError)throw Error(`seed inspect refused ${JSON.stringify(inspected)}`);
+const basis=JSON.parse(inspected.content[0].text).basis;
+const assessed=await mainNative.execute("seed-assess",{action:"assess",task,basis,judgment:{disposition:"open",outcome:"Rollout enabled; current branch readback remains pending.",remaining_gap:"Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.",authority_ref:`data/${task}/brief.md`,evidence:[`data/${task}/brief.md`,`data/current-readback.md`],next_action:{kind:"readback",payload_ref:"data/readback-action.md",recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z",attempt_limit:2}}},undefined,undefined,defaultSessionCtx);
+if(assessed.isError)throw Error(`seed assessment refused ${JSON.stringify(assessed)}`);
+const seedObservation=run(["observe",task]);if(seedObservation.status!==0)throw Error(`seed observation refused ${seedObservation.stderr}`);
+let nativeCalls=0,compactNoChanges=0,material,currentReadback,promptCount=0;
 globalThis.__fmOnBranchPrompt=async({session,text})=>{
+ promptCount++;
  const native=session.options.customTools.find(tool=>tool.name==="fm_task_continuation"),report=session.options.customTools.find(tool=>tool.name==="fm_branch_report");
  if(!native||!report)throw Error("branch-native tools absent");const admitted=JSON.parse(text.slice(text.lastIndexOf("\n{")+1));
+ if(admitted.assessment?.remaining_gap!=="Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN."||admitted.next_action?.kind!=="readback"||admitted.next_action?.payload_ref!=="data/readback-action.md")throw Error(`current lifecycle context omitted ${JSON.stringify(admitted)}`);
+ const selectEvidence=context=>context.next_action?.phase==="prepared"?context.next_action.payload_ref:context.observation?.state==="pending"?"data/historical-report.md":null;
+ if(selectEvidence({...admitted,assessment:undefined,next_action:undefined})!=="data/historical-report.md")throw Error("masked counterfactual did not reproduce stale historical selection");
+ if(selectEvidence(admitted)!=="data/readback-action.md")throw Error("current action did not displace historical rollout text");
+ if(selectEvidence({observation:{state:"waiting"},assessment:{remaining_gap:"unchanged dependency"},next_action:null})!==null)throw Error("unchanged healthy wait requested a native call");
+ currentReadback=await native.execute("current-readback",{action:"inspect",task,evidence:[...new Set([admitted.assessment.authority_ref,...admitted.assessment.evidence.map(item=>item.ref),admitted.next_action.payload_ref])]});nativeCalls++;
+ if(currentReadback.isError)throw Error(`current readback refused ${JSON.stringify(currentReadback)}`);const current=JSON.parse(currentReadback.content[0].text);
+ if(current.assessment?.remaining_gap!==admitted.assessment.remaining_gap||current.next_action?.id!==admitted.next_action.id)throw Error(`current readback lost canonical action ${JSON.stringify(current)}`);
  const wrong=await native.execute("wrong",{action:"observe",task:"other"});if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
  for(let i=0;i<5;i++){const observed=await native.execute(`same-${i}`,{action:"observe",task});nativeCalls++;const body=JSON.parse(observed.content[0].text);if(observed.isError||body.change!=="none"||body.assessment||body.delegation)throw Error(`noncompact ${JSON.stringify(observed)}`);compactNoChanges++;}
  const patch={delegation_revision:admitted.delegation.revision,precheck:{delegation_revision:admitted.delegation.revision,basis_key:admitted.observation.basis_key,conclusion:"needs-evidence",checks:[{criterion:"brief: verified milestone",result:"missing",evidence:[]}],summary:"No verified milestone yet; retain the unchanged gap without another action."}};
@@ -6042,11 +6063,11 @@ globalThis.__fmOnBranchPrompt=async({session,text})=>{
 await fire("session_start",{},defaultSessionCtx);pi.appendEntry("fixture-seed",{});const before=sentToMain.length;
 await fire("agent_before_settle",{},defaultSessionCtx);
 try { await settle(()=>outcomeScript(["list","--recent","10"]).includes("Routine evidence unchanged"),"native report"); }
-catch (error) { throw Error(`${error}; outcomes=${outcomeScript(["list","--recent","10"])} nativeCalls=${nativeCalls} sessions=${globalThis.__fmSessions?.length}`); }
+catch (error) { throw Error(`${error}; seedObservation=${seedObservation.stdout.trim()} outcomes=${outcomeScript(["list","--recent","10"])} promptCount=${promptCount} nativeCalls=${nativeCalls} sessions=${globalThis.__fmSessions?.length}`); }
 if(sentToMain.length!==before)throw Error("routine work opened MAIN");
-if(nativeCalls!==6||compactNoChanges!==5||!material)throw Error("tool counts changed");
+if(nativeCalls!==7||compactNoChanges!==5||!material||!currentReadback)throw Error("tool counts changed");
 const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck?.conclusion!=="needs-evidence")throw Error("material delta missing");
-console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,no_change_native_tools:compactNoChanges,material_native_tools:1,branch_reports:1}));
+console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,current_readback_tools:1,no_change_native_tools:compactNoChanges,material_native_tools:1,healthy_wait_extra_tools:0,branch_reports:1}));
 process.exit(0);
 EOF
   status=$?; out=$(cat "$TMP_ROOT/node-output")

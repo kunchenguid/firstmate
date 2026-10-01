@@ -33,7 +33,7 @@ for mode in ('before','after'):
   calls=[x for x in rows() if x['event']=='provider'];routine=[x for x in calls if 'Live task continuation obligations' in x['last']]
   native_receipts=sum(json.loads(line).get('entry',{}).get('customType')=='fm-continuation-receipt' for line in (home/'rpc.jsonl').read_text().splitlines() if line.startswith('{'))
   tools=[x for x in rows() if x['event']=='tool']
-  results.append(dict(variant=mode,native_readback_receipts=native_receipts,main_routine_requests=sum(not x['branch'] and 'Fixture seed' not in x['last'] and 'independent fixture question' not in x['last'] for x in calls),main_routine_turns=len([x for x in routine if not x['branch']]),main_tools=sum(not x['branch'] for x in tools),branch_tools=sum(x['branch'] for x in tools),branch_native_tools=sum(x['branch'] and x['name']=='fm_task_continuation' for x in tools),branch_report_tools=sum(x['branch'] and x['name']=='fm_branch_report' for x in tools),branch_turns=len([x for x in calls if x['branch']]),calls=calls))
+  results.append(dict(variant=mode,native_readback_receipts=native_receipts,main_routine_requests=sum(not x['branch'] and 'Fixture seed' not in x['last'] and 'independent fixture question' not in x['last'] for x in calls),main_routine_turns=len([x for x in routine if not x['branch']]),main_tools=sum(not x['branch'] for x in tools),branch_tools=sum(x['branch'] for x in tools),branch_native_tools=sum(x['branch'] and x['name']=='fm_task_continuation' for x in tools),branch_report_tools=sum(x['branch'] and x['name']=='fm_branch_report' for x in tools),branch_turns=len([x for x in calls if x['branch']]),tools=tools,calls=calls))
  finally:
   p.stdin.close()
   try:p.wait(timeout=15)
@@ -44,7 +44,10 @@ assert results[0]['main_routine_turns']>=1,results
 assert results[1]['main_routine_turns']==0 and results[1]['main_tools']==0 and results[1]['branch_turns']>=3,results
 assert results[1]['branch_native_tools']==1 and results[1]['branch_report_tools']==1,results
 record=json.loads((base/'after/data/routine/lifecycle.json').read_text())
-assert record['precheck']['conclusion']=='needs-evidence' and record['disposition']=='open',record
+assert record['disposition']=='open' and record['next_action']['kind']=='readback',record
+assert record['assessment']['remaining_gap']=='Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.',record
+inspect_call=next(x for x in results[1]['tools'] if x['branch'] and x['name']=='fm_task_continuation')
+assert inspect_call['action']=='inspect' and inspect_call['evidence'][-1]=='data/readback-action.md',inspect_call
 calls=results[1]['calls'];branch_first=next(x['at'] for x in calls if x['branch']);branch_last=max(x['at'] for x in calls if x['branch'])
 question=next(x['at'] for x in calls if not x['branch'] and 'independent fixture question' in x['last'])
 assert branch_first<question<branch_last,(branch_first,question,branch_last)
