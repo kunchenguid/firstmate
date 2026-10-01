@@ -341,6 +341,35 @@ assert_contains "$out" 'entrypoint=yes' "the remote doctor did not detect its en
 assert_contains "$out" 'required git=' "the remote doctor did not report the required tool"
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
 
+# A host is checked before it is seeded, so no record selects its alias yet.
+mv "$LOCAL_HOME/data/secondmates.md" "$TMP_ROOT/secondmates.unseeded"
+set +e
+out=$(fm_on --root "$REMOTE_ROOT" --home "$REMOTE_HOME/unseeded" remote-mac fm-remote-doctor.sh 2>/dev/null)
+set -e
+assert_contains "$out" 'entrypoint=yes' "the explicit pre-seed route did not reach the doctor through the entrypoint"
+assert_contains "$out" "path=$EXPECTED_PATH" "the explicit pre-seed route did not report the entrypoint child PATH"
+ssh_before_explicit_refusals=$(cat "$SSH_COUNT")
+if fm_on --root "$REMOTE_ROOT" --home "$REMOTE_HOME" remote-mac fm-probe-two.sh >/dev/null 2>&1; then
+  fail "the explicit route ran a command other than the doctor"
+fi
+if fm_on --root "$REMOTE_ROOT" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "the explicit route was accepted without a remote home"
+fi
+if fm_on --root relative/root --home "$REMOTE_HOME" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "the explicit route accepted a relative remote root"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_explicit_refusals" ] || fail "a refused explicit route reached SSH"
+if out=$(fm_on remote-mac fm-remote-doctor.sh 2>&1); then
+  fail "an unregistered alias was routed without an explicit root and home"
+fi
+assert_contains "$out" 'pass --root and --home' "the missing-registry refusal did not name the pre-seed route"
+mv "$TMP_ROOT/secondmates.unseeded" "$LOCAL_HOME/data/secondmates.md"
+if out=$(fm_on other-host fm-remote-doctor.sh 2>&1); then
+  fail "an unregistered alias was routed without an explicit root and home"
+fi
+assert_contains "$out" 'pass --root and --home' "the unregistered-alias refusal did not name the pre-seed route"
+pass "an explicit root and home check an unseeded host with the doctor only"
+
 fm_on ios fm-probe-two.sh >/dev/null
 : > "$TOOL_PROBE_LOG"
 set +e

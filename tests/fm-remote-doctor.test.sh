@@ -779,6 +779,60 @@ assert_contains "$DOCTOR_OUT" 'check herdr-server=ok:' "the started server was n
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || fail "the linux path invoked launchctl"
 pass "a non-darwin host skips launch agents and starts its herdr server directly"
 
+# --- linux --fix returns over a pipe while the server it started keeps running
+
+# Over SSH the doctor's stdin, stdout, and stderr are the channel, which stays
+# open until every process holding one of them exits. A server that inherits
+# any of them keeps the call from ever returning, so the fake server here lives
+# on and the doctor runs with every standard descriptor on a pipe.
+new_case Linux with-herdr no-gui
+cat > "$CASE_BIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    running=false
+    if pid=$(cat "$FM_FAKE_STATE/server.pid" 2>/dev/null) && kill -0 "$pid" 2>/dev/null; then running=true; fi
+    printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":%s,"socket":"%s"}}\n' "$running" "$FM_FAKE_HERDR_SOCKET"
+    ;;
+  server)
+    printf '%s\n' "$$" > "$FM_FAKE_STATE/server.pid"
+    exec /bin/sleep 120
+    ;;
+esac
+exit 0
+SH
+chmod +x "$CASE_BIN/herdr"
+# The holder at the head of the pipeline keeps the doctor's stdin pipe open like a live channel.
+sh -c 'printf "%s\n" "$$" > "$1"; exec /bin/sleep 120' _ "$CASE_STATE/stdin-holder.pid" |
+  FM_FAKE_HERDR_RUNNING="$CASE_HERDR_RUNNING" FM_FAKE_STATE="$CASE_STATE" \
+  FM_FAKE_HERDR_SOCKET="$CASE_STATE/herdr.sock" FM_REMOTE_JOB_ACTIVE=1 \
+  HOME="$CASE_HOME" FM_HOME="$CASE_PROJECT_HOME" PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
+  "$ROOT/bin/fm-remote-doctor.sh" --fix 2>&1 | cat > "$CASE_STATE/doctor.out" &
+DOCTOR_PIPE_PID=$!
+for _ in $(seq 1 100); do
+  kill -0 "$DOCTOR_PIPE_PID" 2>/dev/null || break
+  /bin/sleep 0.1
+done
+SERVER_PID=$(cat "$CASE_STATE/server.pid" 2>/dev/null || true)
+STDIN_HOLDER_PID=$(cat "$CASE_STATE/stdin-holder.pid" 2>/dev/null || true)
+[ -z "$SERVER_PID" ] || HOLDER_PIDS+=("$SERVER_PID")
+[ -z "$STDIN_HOLDER_PID" ] || HOLDER_PIDS+=("$STDIN_HOLDER_PID")
+if kill -0 "$DOCTOR_PIPE_PID" 2>/dev/null; then
+  [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+  [ -z "$STDIN_HOLDER_PID" ] || kill "$STDIN_HOLDER_PID" 2>/dev/null || true
+  wait "$DOCTOR_PIPE_PID" 2>/dev/null || true
+  fail "--fix on linux did not return while its started herdr server held the caller's descriptors"
+fi
+[ -z "$STDIN_HOLDER_PID" ] || kill "$STDIN_HOLDER_PID" 2>/dev/null || true
+wait "$DOCTOR_PIPE_PID" 2>/dev/null || true
+if [ -z "$SERVER_PID" ] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+  fail "the herdr server started by --fix did not keep running after the call returned"
+fi
+kill "$SERVER_PID" 2>/dev/null || true
+assert_grep 'fix herdr-server=applied:' "$CASE_STATE/doctor.out" "--fix did not report starting the server"
+pass "linux --fix returns over a pipe and leaves the herdr server it started running"
+
 # --- --fix may add only owned wrappers for version-manager tools -------------
 
 new_case Linux with-herdr no-gui

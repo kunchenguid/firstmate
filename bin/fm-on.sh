@@ -3,12 +3,19 @@
 #
 # Usage:
 #   fm-on.sh [--stdin] <secondmate-id|unambiguous-ssh-alias> <fm-command> [args...]
+#   fm-on.sh --root <remote-root> --home <remote-home> <ssh-alias> fm-remote-doctor.sh [--fix]
 #
 # Routes come only from remote records in data/secondmates.md. A record names an
 # SSH config alias, remote Firstmate code root, and remote FM_HOME. A host alias
 # may be used directly only when exactly one record selects it; an ambiguous
 # alias is refused. The command must be a genuine executable in this checkout's
 # bin/fm-*.sh namespace. No per-command table exists.
+#
+# The one exception is checking a host before it is seeded: --root and --home
+# name an absolute remote code root and future remote FM_HOME for an SSH alias
+# that no record selects yet. That explicit route reaches fm-remote-doctor.sh
+# only and never consults the registry. The remote entrypoint applies its usual
+# root and home rules, so the home's parent must already exist.
 #
 # argv is encoded as one NUL-delimited stream and passed through the fixed
 # fm-remote-entrypoint.sh. The remote command's stdin is /dev/null by default,
@@ -45,17 +52,23 @@ PROTOCOL=1
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 encode_base64() {
   base64 | tr -d '\n'
 }
 
 STDIN_MODE=closed
-if [ "${1:-}" = --stdin ]; then
-  STDIN_MODE=caller
-  shift
-fi
+EXPLICIT_ROOT=
+EXPLICIT_HOME=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stdin) STDIN_MODE=caller; shift ;;
+    --root) [ "$#" -ge 2 ] || usage; EXPLICIT_ROOT=$2; shift 2 ;;
+    --home) [ "$#" -ge 2 ] || usage; EXPLICIT_HOME=$2; shift 2 ;;
+    *) break ;;
+  esac
+done
 [ "$#" -ge 2 ] || usage
 ROUTE=$1
 COMMAND=$2
@@ -72,25 +85,34 @@ LOCAL_COMMAND="$FM_ROOT/bin/$COMMAND"
   || die "remote command is not a genuine tracked executable in this Firstmate checkout: $COMMAND"
 git -C "$FM_ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
   || die "remote command is not tracked by this Firstmate checkout: $COMMAND"
-[ -f "$REG" ] && [ ! -L "$REG" ] || die "no safe secondmate registry at $REG"
 
-MATCHES=0
-HOST=
-ROOT=
-HOME_PATH=
-while IFS= read -r line || [ -n "$line" ]; do
-  case "$line" in '- '*) ;; *) continue ;; esac
-  secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
-  [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
-  if [ "$SECONDMATE_REGISTRY_ID" = "$ROUTE" ] || [ "$SECONDMATE_REGISTRY_HOST" = "$ROUTE" ]; then
-    MATCHES=$((MATCHES + 1))
-    HOST=$SECONDMATE_REGISTRY_HOST
-    ROOT=$SECONDMATE_REGISTRY_ROOT
-    HOME_PATH=$SECONDMATE_REGISTRY_HOME
-  fi
-done < "$REG"
-[ "$MATCHES" -gt 0 ] || die "no remote secondmate or SSH alias matches '$ROUTE'"
-[ "$MATCHES" -eq 1 ] || die "remote route '$ROUTE' is ambiguous across $MATCHES configured secondmates; use a secondmate id"
+if [ -n "$EXPLICIT_ROOT$EXPLICIT_HOME" ]; then
+  [ -n "$EXPLICIT_ROOT" ] && [ -n "$EXPLICIT_HOME" ] || die "an explicit route needs both --root and --home"
+  [ "$COMMAND" = fm-remote-doctor.sh ] || die "an explicit --root/--home route runs only fm-remote-doctor.sh; seed the host to route other commands"
+  [ "$STDIN_MODE" = closed ] || die "an explicit --root/--home route does not forward stdin"
+  HOST=$ROUTE
+  ROOT=$EXPLICIT_ROOT
+  HOME_PATH=$EXPLICIT_HOME
+else
+  [ -f "$REG" ] && [ ! -L "$REG" ] || die "no safe secondmate registry at $REG; to check a host before seeding it, pass --root and --home"
+  MATCHES=0
+  HOST=
+  ROOT=
+  HOME_PATH=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '- '*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
+    if [ "$SECONDMATE_REGISTRY_ID" = "$ROUTE" ] || [ "$SECONDMATE_REGISTRY_HOST" = "$ROUTE" ]; then
+      MATCHES=$((MATCHES + 1))
+      HOST=$SECONDMATE_REGISTRY_HOST
+      ROOT=$SECONDMATE_REGISTRY_ROOT
+      HOME_PATH=$SECONDMATE_REGISTRY_HOME
+    fi
+  done < "$REG"
+  [ "$MATCHES" -gt 0 ] || die "no remote secondmate or SSH alias matches '$ROUTE'; to check a host before seeding it, pass --root and --home"
+  [ "$MATCHES" -eq 1 ] || die "remote route '$ROUTE' is ambiguous across $MATCHES configured secondmates; use a secondmate id"
+fi
 case "$HOST" in ''|-*|*[!A-Za-z0-9._-]*) die "configured SSH alias is unsafe: $HOST" ;; esac
 case "$ROOT" in /*) ;; *) die "configured remote root is not absolute: $ROOT" ;; esac
 case "$HOME_PATH" in /*) ;; *) die "configured remote home is not absolute: $HOME_PATH" ;; esac
