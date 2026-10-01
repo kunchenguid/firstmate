@@ -219,8 +219,16 @@ fi
 
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
 PMAP='{}'
+PI_HOME_ACCOUNT=false
 while IFS= read -r h; do
   [ -n "$h" ] || continue
+  if [ "$h" = pi ] || [ "$h" = pi-signed ]; then
+    if fm_quota_pi_home_matches "$CONFIG"; then
+      PI_HOME_ACCOUNT=true
+    elif [ "$?" -ne 1 ]; then
+      exit 2
+    fi
+  fi
   p=$(fm_quota_single_provider_for_harness "$h" 2>/dev/null) || p=''
   PMAP=$(jq -c --arg h "$h" --arg p "$p" '. + {($h): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
@@ -349,8 +357,6 @@ jq -e --slurpfile rules "$RULES" '
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
-PI_HOME_ACCOUNT=false
-fm_quota_pi_home_matches "$CONFIG" && PI_HOME_ACCOUNT=true
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \

@@ -318,8 +318,6 @@ else
 fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
-PI_HOME_ACCOUNT=false
-fm_quota_pi_home_matches "${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$SCRIPT_DIR/..}}/config}" && PI_HOME_ACCOUNT=true
 
 # provider_for_harness <harness> [<model>]
 # The harness -> primary provider family table is owned by
@@ -360,12 +358,20 @@ effective_for_provider_model() {
   ' 2>/dev/null
 }
 
+PI_HOME_ACCOUNT=false
 for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
+  if [ "$harness" = pi ] || [ "$harness" = pi-signed ]; then
+    if fm_quota_pi_home_matches "${FM_CONFIG_OVERRIDE:-${FM_HOME:-${FM_ROOT_OVERRIDE:-$SCRIPT_DIR/..}}/config}"; then
+      PI_HOME_ACCOUNT=true
+    elif [ "$?" -ne 1 ]; then
+      exit 2
+    fi
+  fi
   provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
     omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;

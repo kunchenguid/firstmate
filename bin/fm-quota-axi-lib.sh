@@ -51,12 +51,10 @@ fm_quota_pi_home_matches() {
   local selection root ordinary="${HOME:?HOME is required to resolve the Pi account}/.pi/agent"
   # shellcheck source=bin/fm-worker-account-lib.sh
   . "${BASH_SOURCE[0]%/*}/fm-worker-account-lib.sh"
-  selection=$(fm_worker_account_resolve pi "$1") || return 1
-  root=${PI_CODING_AGENT_DIR:-$ordinary}
-  if [ -n "$selection" ]; then
-    root=${selection#*$'\t'}
-    root=${root%%$'\t'*}
-  fi
+  selection=$(fm_worker_account_resolve pi "$1") || return 2
+  [ -n "$selection" ] || return 1
+  root=${selection#*$'\t'}
+  root=${root%%$'\t'*}
   [ "$root" = "$ordinary" ] || [ "$root" -ef "$ordinary" ]
 }
 

@@ -73,9 +73,9 @@ A provider-level or `all_models`/`all_products` scope bounds every model you est
 A named-model or named-product scope is an additional bound for that model alone.
 Match the candidate to its `quota[]` row by that established provider and scope.
 For schema 6, first match its exact `accountKey`: a Pi lane's auth provider id such as `openai-codex-work`, or `codex-home` for native Codex including Pi's `codex-native/` adapter.
-Pi's builtin `openai-codex/` home lane, on both `pi` and `pi-signed`, uses `codex-home` only when no exact `openai-codex` row exists and the selected Pi root is the ordinary `~/.pi/agent` directory.
-Resolve `config/pi-account` through the worker-account resolver before matching; without a pin, the selected root is `PI_CODING_AGENT_DIR` or the ordinary directory when unset.
-An unmatched root or missing `codex-home` row leaves that fallback unmeasured and never reaches `default`.
+Pi's builtin `openai-codex/` home lane, on both `pi` and `pi-signed`, uses `codex-home` only when no exact `openai-codex` row exists and `config/pi-account` explicitly pins the worker to the ordinary `~/.pi/agent` directory.
+Resolve that pin through the worker-account resolver; an invalid pin is a configuration error for Pi candidates.
+An absent pin, unmatched root, or missing `codex-home` row leaves that fallback unmeasured regardless of `PI_CODING_AGENT_DIR` and never reaches `default`.
 Every other lane with no exact row uses `default` if present; otherwise it stays unmeasured.
 Never pick schema-6 rows by position or sum rows across accounts.
 A stale, auth-required, or unmeasurable scope is named in `attention[]` instead of a fabricated number.
