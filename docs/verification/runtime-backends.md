@@ -596,17 +596,17 @@ None of these three runs ever answered its dialog (Escape only, never Enter), so
 
 ## Interactive confirmation-prompt signature
 
-`bin/fm-busy-lib.sh`'s `fm_busy_confirmation_prompt_pending` detects Claude Code's command-safety classifier confirmation dialog in a captured pane, independent of busy-state classification.
-`bin/fm-watch.sh`'s `interactive_prompt_check` calls it directly on every recorded window every poll.
+`bin/fm-busy-lib.sh`'s `fm_busy_confirmation_prompt_pending` (dispatching to `fm_busy_claude_confirmation_prompt_tail` for Claude) detects a live interactive confirmation/permission prompt - Claude Code's own command-safety classifier dialog - in a window's captured pane, independent of busy-state classification entirely; `bin/fm-watch.sh`'s `interactive_prompt_check` calls it directly on every recorded window every poll (task fleet-stuck-prompt-detection-20260925).
 
-This signature has not been live-verified against a real Claude Code session because Claude's classifier decides per command whether to render its confirmation dialog, and no reliable CLI flag or environment shape is known to force it.
-The signature is built from the literal phrases reported from the originating incident plus the numbered Yes/No menu with a cursor line, and it is pinned by the portable regression suite below.
+This signature has NOT been live-verified against a real Claude Code session: Claude's command-safety classifier decides per command whether to render its confirmation dialog at all, so there is no CLI flag or environment shape that reliably forces it to appear.
+Reproducing it on demand in an automated `live-harness-optin` guard was judged not practically achievable for that reason, so none was added; the requirement's fallback applies instead.
+The signature is built from the literal phrases the captain reported from the real incident that motivated this task ("requires confirmation for this command", "Blocked by classifier") plus the general numbered Yes/No menu with a `❯`-marked cursor line every Claude confirmation menu renders, and is pinned by the portable regression suite below, which is the primary proof for this check and also exercises the negative cases (ordinary busy/idle pane text).
 
 ```sh
 bash tests/fm-busy-state.test.sh
 ```
 
-Refresh this record if a real captured classifier-confirmation dialog becomes available, or if a reliable way to force the dialog on demand is found.
+Refresh this record's live-verification status if a real captured classifier-confirmation dialog ever becomes available (for example from a future incident's saved pane capture): replace the reconstructed fixture in `tests/fm-busy-state.test.sh` with the real bytes and, if a reliable way to force the dialog on demand is found, add a `live-harness-optin` guard.
 
 ## Worker account pin sign-in check
 

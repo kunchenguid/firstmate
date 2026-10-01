@@ -1015,6 +1015,43 @@ fm_busy_launch_prompt_parked() {  # <harness>
 # ordinary turn, while the busy-state record still legitimately reads busy.
 # bin/fm-watch.sh calls this detector directly against every captured pane.
 
+# --- confirmation-prompt signatures (fm_busy_confirmation_prompt_pending) ---
+#
+# NOT part of fm_busy_classify's busy/idle/unknown precedence chain: a
+# command-safety confirmation prompt (the harness's own classifier asking
+# whether to run a command it flagged) can render in the middle of an
+# otherwise ordinary turn, AFTER real hook events have posted, with the
+# busy-state record still legitimately reading busy (no Stop event fires
+# while the harness waits on a human). Folding that into fm_busy_classify
+# would either suppress a genuine busy verdict or need its own precedence
+# rule; instead task fleet-stuck-prompt-detection-20260925 calls this
+# detector directly against every window's captured pane on every poll,
+# independent of busy state, kind, or the idle-secondmate staleness
+# exemption (bin/fm-watch.sh's interactive_prompt_check), and turns a match
+# straight into an actionable wake carrying the captured prompt text.
+#
+# Detection only: this never authorizes answering a prompt with a key.
+# AGENTS.md section 8 and the stuck-crewmate-recovery skill own what
+# firstmate does with a reported match.
+
+# fm_busy_claude_confirmation_prompt_tail: Claude Code's built-in command-
+# safety classifier dialog, verified against the literal captured text
+# reported in task fleet-stuck-prompt-detection-20260925's originating
+# incident: the body carries "requires confirmation for this command" and
+# "Blocked by classifier", and the menu renders a numbered option list with a
+# `❯`-marked cursor line and both a "Yes" and a "No" option. All five
+# signals are required together so ordinary prose alone (a worker narrating
+# a summary that happens to mention "confirmation" or "blocked", or a
+# transcript containing an unrelated numbered list) cannot false-positive.
+# This dialog's default/highlighted option is APPROVING ("1. Yes"), unlike
+# the workspace-trust, external-imports, and once-per-machine
+# bypass-permissions dialogs in
+# .agents/skills/harness-adapters/references/harness/claude.md's "Workspace
+# trust" section, whose default is always the DECLINING option - none of
+# those three renders either literal phrase above, so this signature cannot
+# be confused with them. Consumes the full captured tail on stdin rather than
+# a reduced non-blank window, since a bordered dialog's padding rows can push
+# its heading outside a reduced window.
 fm_busy_claude_confirmation_prompt_tail() {
   local buf
   buf=$(cat)
@@ -1025,6 +1062,12 @@ fm_busy_claude_confirmation_prompt_tail() {
     && printf '%s' "$buf" | grep -qiE '[0-9]+\.[[:space:]]*No([^A-Za-z]|$)'
 }
 
+# fm_busy_confirmation_prompt_pending: dispatch to the signature above for
+# <harness>, or fail when this harness has none registered yet. Consumes the
+# tail on stdin. Broadening to another harness is welcome but must stay
+# proven end to end against that harness's own real dialog text, the same
+# `firstmate-coding-guidelines` "Harness-dependent checks" bar every
+# signature above already meets.
 fm_busy_confirmation_prompt_pending() {  # <harness>
   case "${1:-}" in
     claude*) fm_busy_claude_confirmation_prompt_tail ;;
