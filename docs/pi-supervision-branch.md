@@ -238,8 +238,8 @@ Routine outcomes never enter this path and stay turn-free.
 A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note.
-A token-bound compact continuation may also request `routine` with `silent=true`; the receipt stays only in the branch session when the task status and inbox are unchanged.
-A material status or inbox change instead enters the existing outcome store and reaches MAIN so MAIN can update the original task record.
+A token-bound compact continuation may also request `routine` with `silent=true`; the receipt stays only in the branch session when the task-owned resumable state is unchanged.
+A material task-owned resume-state change instead enters the existing outcome store and reaches MAIN so MAIN can update the original task record.
 Every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
 Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized task and effect owners when acceptance is incomplete, satisfied acceptance becomes a candidate for MAIN retirement, explicit stops remain stopped, and delivery or merge authority never expands.

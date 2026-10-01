@@ -705,26 +705,32 @@ export default function (pi: ExtensionAPI) {
   }
   function compactResumeSnapshot(task: string): string {
     try {
-      const statusPath = join(state, `${task}.status`);
-      let status = "";
-      if (existsSync(statusPath)) {
-        const stat = lstatSync(statusPath);
-        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("invalid task status");
-        status = readFileSync(statusPath, "utf8");
-      }
-      const inbox: Array<[string, string]> = [];
-      for (const relativeDir of ["", "handled"]) {
-        const directory = join(state, `${task}.inbox`, relativeDir);
-        if (!existsSync(directory)) continue;
-        for (const name of readdirSync(directory).sort()) {
-          if (!name.endsWith(".msg")) continue;
-          const path = join(directory, name);
-          const stat = lstatSync(path);
-          if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("invalid inbox record");
-          inbox.push([join(relativeDir, name), createHash("sha256").update(readFileSync(path)).digest("hex")]);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) throw new Error("invalid task id");
+      const entries: Array<[string, "directory" | "file", string?]> = [];
+      const visit = (path: string, label: string) => {
+        const stat = lstatSync(path);
+        if (stat.isSymbolicLink()) throw new Error("invalid task state");
+        if (stat.isFile()) {
+          entries.push([label, "file", createHash("sha256").update(readFileSync(path)).digest("hex")]);
+          return;
+        }
+        if (!stat.isDirectory()) throw new Error("invalid task state");
+        entries.push([label, "directory"]);
+        for (const name of readdirSync(path).sort()) visit(join(path, name), join(label, name));
+      };
+      for (const name of readdirSync(state).sort()) {
+        if (name === task || name.startsWith(`${task}.`) || name.startsWith(`.${task}.`)) {
+          visit(join(state, name), join("state", name));
         }
       }
-      return createHash("sha256").update(JSON.stringify({ status, inbox })).digest("hex");
+      for (const [root, label] of [
+        [join(state, "remote-tasks", task), join("state", "remote-tasks", task)],
+        [join(state, "cloud-tasks", task), join("state", "cloud-tasks", task)],
+        [join(process.env.FM_DATA_OVERRIDE || join(fmHome, "data"), task), join("data", task)],
+      ]) {
+        if (existsSync(root)) visit(root, label);
+      }
+      return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
     } catch {
       return "";
     }

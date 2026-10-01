@@ -6117,7 +6117,9 @@ globalThis.__fmExecuteBranchBash = async (context) => {
   if (executed.status !== 0) {
     return { content: [{ type: "text", text: executed.stderr }], details: undefined, isError: true };
   }
-  appendFileSync(`${home}/state/viewer.status`, "working: no-mistakes started by the existing worker\n");
+  if (promptCount < 3) {
+    appendFileSync(`${home}/state/viewer.status`, "working: no-mistakes started by the existing worker\n");
+  }
   return { content: [{ type: "text", text: executed.stdout || "instruction durably queued" }], details: undefined };
 };
 let promptCount = 0;
@@ -6127,7 +6129,11 @@ let reportResult;
 let scopedRefusal;
 globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   promptCount += 1;
-  const expectedStep = promptCount === 1 ? fields.next_step : "Tell the existing viewer worker to continue the same no-mistakes run after its intermediate review";
+  const expectedStep = [
+    fields.next_step,
+    "Tell the existing viewer worker to continue the same no-mistakes run after its intermediate review",
+    "Arm the PR check for https://github.com/acme/viewer/pull/7",
+  ][promptCount - 1];
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
     throw new Error(`compact admission was incomplete or rich: ${text}`);
@@ -6147,11 +6153,14 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   if (!scopedRefusal.isError || !scopedRefusal.content[0].text.includes("outside this exact branch admission")) {
     throw new Error(`compact admission escaped its canonical task: ${JSON.stringify(scopedRefusal)}`);
   }
-  const sent = await bash.execute("send", { command:
-    `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'` });
+  const command = promptCount === 3
+    ? `${realRoot}/bin/fm-pr-check.sh viewer https://github.com/acme/viewer/pull/7`
+    : `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
+  const sent = await bash.execute("continue", { command });
   if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
   reportResult = await report.execute("report", { task: "viewer", verdict: "routine", silent: true,
-    summary: "The existing worker received the authorized no-mistakes continuation." });
+    summary: promptCount === 3 ? "The PR check was armed for the ready implementation." :
+      "The existing worker received the authorized no-mistakes continuation." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
 
@@ -6222,6 +6231,43 @@ const messages = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name
 if (messages.length !== 2) throw new Error(`intermediate continuation did not create one new inbox receipt: ${JSON.stringify(messages)}`);
 if (sentToMain.length !== beforeMain + 2) throw new Error("intermediate material continuation did not reach MAIN once");
 
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const prCheck = { ...intermediate,
+  current_state: "The implementation and focused validation are ready for PR monitoring",
+  remaining_gap: "The PR check has not been armed",
+  next_step: "Arm the PR check for https://github.com/acme/viewer/pull/7",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(prCheck)]);
+if (result.status !== 0) throw new Error(`MAIN PR-check progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+const statusBeforePrCheck = readFileSync(`${home}/state/viewer.status`, "utf8");
+const inboxBeforePrCheck = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort();
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 3 &&
+  routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length === 1 &&
+  sentToMain.length === beforeMain + 3,
+  "PR-check-only continuation");
+if (readFileSync(`${home}/state/viewer.status`, "utf8") !== statusBeforePrCheck ||
+    JSON.stringify(readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort()) !== JSON.stringify(inboxBeforePrCheck)) {
+  throw new Error("PR-check fixture unexpectedly changed status or inbox state");
+}
+if (!readFileSync(`${home}/state/viewer.meta`, "utf8").includes("pr=https://github.com/acme/viewer/pull/7") ||
+    !readFileSync(`${home}/state/viewer.pr-poll`, "utf8").includes("https://github.com/acme/viewer/pull/7") ||
+    !readFileSync(`${home}/state/viewer.pr-poll-registration`, "utf8").trim() ||
+    !readFileSync(`${home}/state/viewer.check.sh`, "utf8").trim()) {
+  throw new Error("PR-check owner did not publish its resumable task state");
+}
+if (sentToMain.length !== beforeMain + 3 ||
+    !sentToMain.at(-1)?.message?.content?.includes("PR check was armed for the ready implementation")) {
+  throw new Error(`metadata-only PR-check continuation did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+}
+if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
+  throw new Error("metadata-only PR-check continuation was retained only in the branch session");
+}
+
 // Only MAIN performs final semantic acceptance after the fixture's requested
 // outcome is satisfied. Empty gap/next step removes the task from monitoring.
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
@@ -6233,11 +6279,12 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 2 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 || sentToMain.length !== beforeMain + 2) {
+if (promptCount !== 3 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
+    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 || sentToMain.length !== beforeMain + 3) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact original-row admission routed same-worker continuation, delivered material resume state to MAIN, kept unchanged execution quiet, and stopped only after MAIN acceptance");
+console.log("compact continuation delivered inbox and metadata-only resume changes to MAIN, kept unchanged execution quiet, and stopped only after MAIN acceptance");
 process.exit(0);
 EOF
   status=$?
