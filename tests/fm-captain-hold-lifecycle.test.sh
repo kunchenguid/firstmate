@@ -4234,8 +4234,8 @@ test_complete_refuses_an_entry_held_for_another_origin() {
   pass "complete refuses an entry held for another origin and flags one with none recorded"
 }
 
-test_failed_holds_preserve_origin_associations() {
-  local home phase timing id shown origin until_args=()
+test_hold_origins_precede_backend_holds() {
+  local home phase timing failure id shown origin until_args=()
   for phase in new active released; do
     for timing in plain dated; do
       home=$(make_home "origin-failure-$phase-$timing")
@@ -4256,43 +4256,70 @@ test_failed_holds_preserve_origin_associations() {
       fi
       cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = hold ] && [ "${2:-}" != --help ] && [ -f "$FM_HOME/fail-hold" ]; then
-  : > "$FM_HOME/hold-refused"
-  exit 9
+if [ "${1:-}" = show ] && [ "${2:-}" = origin-b ] && [ -f "$FM_HOME/fail-lookup" ]; then
+  : > "$FM_HOME/lookup-refused"
+  printf 'error: origin read failed\ncode: READ_FAILED\n' >&2
+  exit 2
+fi
+if [ "${1:-}" = update ] && [ -f "$FM_HOME/fail-write" ]; then
+  previous=''
+  for arg in "$@"; do
+    if [ "$previous" = --body-file ] && grep -qx 'Captain hold origin: origin-b' "$arg"; then
+      : > "$FM_HOME/write-refused"
+      exit 9
+    fi
+    previous=$arg
+  done
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" != --help ]; then
+  "$REAL_TASKS_AXI" show "$2" --full > "$FM_HOME/before-backend-hold" || exit $?
 fi
 exec "$REAL_TASKS_AXI" "$@"
 SH
       chmod +x "$home/fakebin/tasks-axi"
-      : > "$home/fail-hold"
       until_args=()
       [ "$timing" != dated ] || until_args=(--until 2099-01-01)
-      if run_captain "$home" hold "$id" --title "Separate call" --reason "Choose for B" \
-        --origin origin-b ${until_args[@]+"${until_args[@]}"} > "$home/hold.out" 2> "$home/hold.err"; then
-        fail "$phase $timing hold succeeded despite a backend refusal"
-      fi
-      assert_present "$home/hold-refused" "the failure did not reach the backend hold"
-      shown=$(tasks_in "$home" show "$id" --full)
-      assert_not_contains "$shown" 'Captain hold origin: origin-b' \
-        "$phase $timing failure published the new association"
-      if [ "$phase" != new ]; then
-        assert_contains "$shown" 'Captain hold origin: origin-a' \
-          "$phase $timing failure lost the original association"
-      fi
-      if run_captain "$home" complete origin-b "$id" > "$home/complete.out" 2> "$home/complete.err"; then
-        fail "$phase $timing failed hold satisfied completion for B"
-      fi
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$id" >> "$home/state/origin-b.meta"
-      if run_captain "$home" verify origin-b > "$home/verify.out" 2> "$home/verify.err"; then
-        fail "$phase $timing failed hold verified an inventory for B"
-      fi
-      if [ "$phase" != new ]; then
-        run_captain "$home" complete origin-a "$id" >/dev/null \
-          || fail "$phase $timing failure invalidated the prior association"
-      fi
-      rm "$home/fail-hold"
+      for failure in lookup write; do
+        : > "$home/fail-$failure"
+        if run_captain "$home" hold "$id" --title "Separate call" --reason "Choose for B" \
+          --origin origin-b ${until_args[@]+"${until_args[@]}"} > "$home/hold.out" 2> "$home/hold.err"; then
+          fail "$phase $timing hold succeeded despite an origin $failure failure"
+        fi
+        assert_present "$home/$failure-refused" "the failure did not reach the origin $failure"
+        assert_absent "$home/before-backend-hold" "$phase $timing origin $failure failure reached the backend hold"
+        shown=$(tasks_in "$home" show "$id" --full)
+        assert_not_contains "$shown" 'Captain hold origin: origin-b' \
+          "$phase $timing origin $failure failure published the new association"
+        if [ "$phase" = active ]; then
+          assert_contains "$shown" 'held: yes' "an origin $failure failure lifted an existing hold"
+        else
+          assert_contains "$shown" 'held: no' "$phase $timing origin $failure failure left the task held"
+        fi
+        if [ "$phase" != new ]; then
+          assert_contains "$shown" 'Captain hold origin: origin-a' \
+            "$phase $timing origin $failure failure lost the original association"
+        fi
+        rm "$home/fail-$failure"
+        if [ "$phase" = new ] && run_captain "$home" complete origin-a "$id" \
+          > "$home/unrelated.out" 2> "$home/unrelated.err"; then
+          fail "$timing origin $failure failure satisfied an unrelated inventory"
+        fi
+        if run_captain "$home" complete origin-b "$id" > "$home/complete.out" 2> "$home/complete.err"; then
+          fail "$phase $timing origin $failure failure satisfied completion for B"
+        fi
+        printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$id" >> "$home/state/origin-b.meta"
+        if run_captain "$home" verify origin-b > "$home/verify.out" 2> "$home/verify.err"; then
+          fail "$phase $timing origin $failure failure verified an inventory for B"
+        fi
+      done
       run_captain "$home" hold "$id" --reason "Choose for B" --origin origin-b \
         ${until_args[@]+"${until_args[@]}"} >/dev/null || fail "$phase $timing successful retry failed"
+      assert_present "$home/before-backend-hold" "the successful retry did not reach the backend hold"
+      shown=$(cat "$home/before-backend-hold")
+      assert_contains "$shown" 'Captain hold origin: origin-b' "the backend hold ran before the new origin was recorded"
+      assert_not_contains "$shown" 'Captain hold origin: origin-a' "the backend hold ran with the old association"
       shown=$(tasks_in "$home" show "$id" --full)
+      assert_contains "$shown" 'held: yes' "the successful retry did not hold the task"
       assert_contains "$shown" 'Captain hold origin: origin-b' "a successful hold lost its association"
       assert_not_contains "$shown" 'Captain hold origin: origin-a' "a successful hold retained the old association"
       run_captain "$home" complete origin-b "$id" >/dev/null \
@@ -4303,7 +4330,7 @@ SH
       fi
     done
   done
-  pass "failed new, active, and released holds preserve associations with and without deferral"
+  pass "new, active, and released holds require the origin first with and without deferral"
 }
 
 test_historical_self_inventory_has_workable_repair() {
@@ -4552,7 +4579,7 @@ SH
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
-test_failed_holds_preserve_origin_associations
+test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry

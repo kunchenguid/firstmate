@@ -51,8 +51,9 @@ It works in this order:
 
 1. It uses an existing task, or creates one when nothing exists to hold.
 2. It records the task's UTC hold-set timestamp as the leading line of the task body.
-3. It invokes the underlying tasks-axi hold operation.
-4. It verifies both records.
+3. When `--origin` is supplied, it records the origin on the task, replacing any previous association.
+4. It invokes the underlying tasks-axi hold operation.
+5. It verifies the hold and timestamp.
 
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
 
@@ -62,7 +63,8 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
-- After the backend hold succeeds, `--origin` records the origin the call was held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
+- Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
+  If that write fails, the backend hold is not attempted.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   tasks-axi stores a reason on one parenthesised markdown line, so `hold` writes a version-marked base64 value and the readers that show it decode only that reason field (`bin/fm-hold-reason-lib.sh` owns the encoding).
   Public `bin/fm-tasks-axi.sh show` and `list` reads preserve the reason through quoted strings, while unmarked legacy reasons and other fields pass through unchanged.
