@@ -120,29 +120,6 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    # A real destination pane EXECUTES the OpenCode preflight command fm-spawn
-    # types into it and waits on, so a fake pane has to execute it too. This is
-    # the shared fake tmux every spawn suite uses, which is why it runs whenever
-    # the payload is a probe script: gating it behind an opt-in that only one
-    # suite sets left every other OpenCode spawn suite hanging on a probe that
-    # never wrote its `done` marker, and then failing on a timeout instead of on
-    # the behavior it meant to test. A suite opts OUT with
-    # FM_FAKE_EXEC_OPENCODE_PROBES=0 when it asserts the refusing path instead.
-    if [ "${FM_FAKE_EXEC_OPENCODE_PROBES:-1}" = 1 ]; then
-      for a in "$@"; do
-        case "$a" in
-          "/bin/sh '"*)
-            probe_script=${a#/bin/sh \'}
-            probe_script=${probe_script%\'}
-            case "$probe_script" in
-              */.fm-opencode-probe-*/run.sh)
-                (cd "${FM_FAKE_PANE_PATH:?}" && /bin/sh "$probe_script") || true
-                ;;
-            esac
-            ;;
-        esac
-      done
-    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -312,42 +289,6 @@ $intent
 ## Firstmate spec
 Exercise the spawn behavior under test.
 EOF
-}
-
-# fm_test_make_opencode_preflight_stub <fakebin>
-# Replaces a bare exit-0 `opencode` with one that answers the two commands
-# fm-spawn's OpenCode model preflight reads before it launches a worker:
-# `opencode models` (the catalog) and `opencode debug config` (the config-source
-# inventory). Every OpenCode launch verifies its model first, so a suite that
-# spawns OpenCode through the fake pane needs both answers or its spawn is
-# refused on the preflight rather than on the behavior it meant to test.
-# FM_FAKE_OPENCODE_PREFLIGHT_MODEL (default opencode-go/space-bunny-free) names
-# the model the inventory declares and the catalog lists; FM_TEST_OPENCODE_PREFLIGHT_MODELS
-# overrides the catalog when a case needs a different set.
-fm_test_make_opencode_preflight_stub() {
-  local fakebin=$1
-  cat > "$fakebin/opencode" <<'SH'
-#!/usr/bin/env bash
-model=${FM_FAKE_OPENCODE_PREFLIGHT_MODEL:-opencode-go/space-bunny-free}
-case "${1:-}" in
-models)
-  [ -n "${FM_FAKE_OPENCODE_PREFLIGHT_MODELS:-}" ] && printf '%b\n' "$FM_FAKE_OPENCODE_PREFLIGHT_MODELS"
-  printf '%s\n' "$model"
-  exit 0
-  ;;
-debug)
-  # A v2 source inventory: one document at the directory OpenCode reports it
-  # read, declaring the model as the object form the v2 debug output publishes.
-  if [ "${2:-}" = config ]; then
-    printf '[{"type":"document","path":"%s/opencode.json","info":{"model":{"providerID":"%s","model":"%s"}}}]\n' \
-      "$PWD" "${model%%/*}" "${model#*/}"
-    exit 0
-  fi
-  ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/opencode"
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
