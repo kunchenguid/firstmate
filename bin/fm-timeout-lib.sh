@@ -221,7 +221,17 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  # BASHPID is this frame's own pid that the owner note above relies on, but it
+  # exists only from Bash 4: a bare reference under `set -u` aborts on a stock
+  # macOS Bash 3.2, and in the spawn backlog transition that fires after the
+  # worker has already launched, orphaning it with its slot claim. BASH_SUBSHELL
+  # (since Bash 3.0) is the fork-free, dependency-free equivalent - 0 exactly
+  # when BASHPID equals $$ - so the same owner is chosen without the missing var.
+  if [ -n "${BASHPID:-}" ]; then
+    [ "$owner" != "$BASHPID" ] || owner=$PPID
+  elif [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
+    owner=$PPID
+  fi
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '

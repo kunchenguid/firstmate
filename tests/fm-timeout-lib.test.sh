@@ -5,7 +5,9 @@
 # refusal instead of an unbounded run when nothing on the host can enforce the
 # bound. Most cases pin the perl watchdog, the preferred mechanism and the only
 # one a stock macOS host has, under a PATH that holds no timeout variant; the
-# GNU fallback case runs only where a real timeout exists.
+# GNU fallback case runs only where a real timeout exists. One case re-runs the
+# bounded call on the system /bin/bash so the missing BASHPID of stock Bash 3.2
+# is exercised rather than the suite's own newer shell.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -230,6 +232,30 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
 }
 
+# Stock macOS ships Bash 3.2, which has no BASHPID. fm_exec_timed's owner
+# detection referenced it bare, so under `set -u` the call aborted with
+# "BASHPID: unbound variable" (status 127) before it could bound anything. In
+# the spawn backlog transition that abort fired after the worker had already
+# launched, orphaning the worker and its slot claim. Drive the call through the
+# system /bin/bash - not the suite's own shell - so the missing BASHPID is what
+# gets exercised wherever this runs.
+test_exec_timed_bounds_under_stock_system_bash() {
+  local out rc=0 version
+  [ -x /bin/bash ] || { pass "fm_exec_timed under stock system bash (skipped: no /bin/bash)"; return 0; }
+  version=$(/bin/bash -c 'printf "%s\n" "$BASH_VERSION"')
+  # shellcheck disable=SC2016 # the bounded call belongs to the system bash
+  out=$(/bin/bash -c '
+    . "$1/bin/fm-timeout-lib.sh"
+    ( PATH=$2 fm_exec_timed 5 1 bash -c "echo bounded-ok; exit 7" )
+  ' _ "$ROOT" "$PERL_ONLY" 2>&1) || rc=$?
+  case "$out" in
+    *unbound*) fail "fm_exec_timed hit an unbound variable on stock system bash $version: $out" ;;
+  esac
+  [ "$rc" -eq 7 ] || fail "fm_exec_timed did not pass the command status through on system bash $version (rc=$rc): $out"
+  assert_contains "$out" bounded-ok "the bounded command did not run on system bash $version"
+  pass "fm_exec_timed bounds a command on stock system Bash $version"
+}
+
 # perl is preferred whenever it exists, because only its watchdog can reap a
 # leftover descendant after replacing the caller.
 test_perl_is_preferred_over_timeout() {
@@ -327,6 +353,13 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
+# regression. The rest of this file expands BASHPID and is not a 3.2 suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
@@ -337,6 +370,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_exec_timed_bounds_under_stock_system_bash
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
