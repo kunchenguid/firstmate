@@ -56,9 +56,9 @@ wait_for_text() {
 # Pi 1.0.0 defaults its TUI to a fullscreen alternate-screen mode whose scrollable
 # transcript is application-owned: rows that leave the viewport stay reachable
 # through Pi's own scroll keys but never enter terminal scrollback, so
-# tmux capture-pane -S can no longer see them. Every pane assertion below reads
+# tmux capture-pane -S can no longer see them. Transcript assertions below need
 # real terminal scrollback, so each launch pins the regular TUI mode wherever the
-# flag exists; earlier Pi lines have no such flag and render regular-only anyway.
+# flag exists; versions without the flag retain their existing launch arguments.
 PI_TUI_MODE_ARGS=
 if pi --help 2>&1 | grep -q -- '--tui-mode'; then
   PI_TUI_MODE_ARGS='--tui-mode regular'
