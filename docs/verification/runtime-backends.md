@@ -762,6 +762,34 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-10-01 claude titled top composer rule through Herdr
+
+Verified on 2026-10-01 against a live remote secondmate's Claude Code pane in its Herdr `fm-remote` session; the Claude version was not readable from the capture, which showed a pending "Update installed · Restart to update" notice.
+With a session mode active, Claude writes the mode name into the composer's TOP rule (`──…── ultracode ─`) and leaves the bottom rule solid.
+The classifier read only solid rules as separators, so the solid bottom rule stood alone below the `❯` row, the cursorless selection refused, and `fm_backend_herdr_composer_content` failed.
+On a Claude pane the herdr submit core's payload proof needs that read before it types, so every doorbell to the pane returned `send-failed` without typing anything, and the sender printed only "doorbell did not reach".
+
+The capture is the remote control's read-only capture, fed to the shared extractor with the plain capability descriptor:
+
+```sh
+FM_HOME=<parent-home> bin/fm-on.sh <mate> fm-remote-secondmate-control.sh capture <mate> 60 > claude-titled-rule.txt
+bash -c '. bin/fm-composer-lib.sh
+  out=$(fm_composer_extract_selected_content "$(printf "styled=0\ncursor=0\nidentity=0")" "$(cat claude-titled-rule.txt)")
+  echo "rc=$? [$out]"'
+```
+
+Observed output before the fix, then after it:
+
+```text
+rc=1 []
+rc=0 []
+```
+
+The same capture with the label replaced by `─` read `rc=0 []` before the fix, which isolates the label as the cause.
+`_fm_composer_pi_separator_row` in `bin/fm-composer-lib.sh` now also accepts a titled rule: at least 8 `─`, one space-padded label containing no `─`, and a closing `─` run.
+`test_matrix_claude_titled_top_rule` in `tests/fm-composer-lib.test.sh` pins idle `empty` on every cursorless profile and typed text staying `pending` and extracted whole, and `test_send_text_submit_claude_titled_top_rule_still_types` in `tests/fm-backend-herdr.test.sh` pins the submit core typing and confirming under that shape (it returned `send-failed` before the fix).
+No live guard drives a Claude session mode yet, so this shape is a captured observation rather than a refreshed live result.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

@@ -76,7 +76,8 @@
 #                A separated pair that closes over a bare AGENT-GLYPH row is a
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
-#                pair carries the shape and no identity is needed.
+#                pair carries the shape and no identity is needed. Either rule
+#                may carry a title (_fm_composer_pi_separator_row).
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -752,9 +753,25 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
 # byte-exact in every locale.
+# A TITLED rule is the same separator: claude writes an active session mode
+# into its composer's top rule (`──…── ultracode ─`, captured live 2026-10-01),
+# so a rule of at least 8 `─`, one space-padded label holding no `─`, and a
+# closing `─` run still bounds the composer. Read as a non-rule, that label
+# left the solid bottom rule unpaired below the `❯` row and every read refused.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1
+  local row=$1 head rest tail label
   [ -n "$row" ] || return 1
+  case "$row" in
+    '────────'*' '*)
+      head=${row%%' '*}
+      rest=${row#"$head "}
+      tail=${rest##*' '}
+      label=${rest%' '*}
+      [ -z "${head//─/}" ] && [ -n "$tail" ] && [ -z "${tail//─/}" ] \
+        && [ -n "${label// /}" ] && [ "$label" = "${label//─/}" ]
+      return
+      ;;
+  esac
   [ -z "${row//─/}" ] || return 1
   case "$row" in
     *────────*) return 0 ;;
