@@ -125,7 +125,12 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
-import { successfulNotification } from "../../bin/fm-short-notification.mjs";
+import {
+  SHORT_RESULT_LOADED_EVENT,
+  successfulInlineNotification,
+  successfulNotification,
+  successfulResultSummary,
+} from "../../bin/fm-short-notification.mjs";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -736,13 +741,24 @@ export default function (pi: ExtensionAPI) {
   // queued for the captain's next prompt. The durable truth is the store's
   // processed marker; this only paces re-presentation and resets with the
   // session generation.
-  type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
+  type ProcessingState = {
+    sequences: string;
+    through: number;
+    triggered: number;
+    pending: boolean;
+    nextTurnQueued: boolean;
+    inlineSequences: number[];
+    authenticatedSequences: number[];
+    rows: Array<{ seq: number; task: string }>;
+  };
   let processing: ProcessingState | null = null;
   // Exact outcome contents are loaded once per main-session generation through
-  // fm_branch_outcomes. Identity-only processing retries can then stay small,
-  // while a reload/compaction boundary clears this witness set and requires a
-  // fresh durable read before acknowledgement.
+  // fm_branch_outcomes or the authenticated ShortTask result reader.
+  // Identity-only processing retries can then stay small.
+  // Reload clears every witness; compaction clears older tool reads but keeps
+  // the authenticated inline bodies carried by the still-pending request.
   const loadedOutcomeSequences = new Set<number>();
+  const loadedShortTaskResults = new Set<string>();
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1185,31 +1201,55 @@ export default function (pi: ExtensionAPI) {
   // failure direction applies: a request that cannot be typed is still
   // delivered as plain text, because an untyped request main can still act on
   // beats an outcome that is never processed.
-  async function processingRequestInput(rows: OutcomeRow[]): Promise<string> {
+  async function processingRequestInput(rows: OutcomeRow[]): Promise<{
+    content: string;
+    inlineSequences: number[];
+    authenticatedSequences: number[];
+  }> {
     const through = rows[rows.length - 1].seq;
     const direct = new Map<number, string>();
+    const references = new Map<number, string>();
+    const loadedReferences = new Set<number>();
     for (const row of rows) {
-      const result = successfulNotification(fmHome, row.task);
-      if (result === row.summary) {
-        direct.set(row.seq, result);
-        loadedOutcomeSequences.add(row.seq);
+      const inline = successfulInlineNotification(fmHome, row.task);
+      if (inline === row.summary) {
+        direct.set(row.seq, inline);
+        continue;
+      }
+      const reference = successfulNotification(fmHome, row.task);
+      if (reference === row.summary) {
+        references.set(row.seq, reference);
+        if (loadedShortTaskResults.has(row.task)) loadedReferences.add(row.seq);
       }
     }
-    const lookup = rows.filter((row) => !direct.has(row.seq));
-    const lookupInstruction = lookup.length
-      ? `Before acting on sequences ${lookup.map((row) => row.seq).join(",")}, call fm_branch_outcomes with exactly those sequences to load their trusted content; this remains required even when an anchor appears visible, because recovery or compaction may have omitted it from model context. `
-      : "The successful ShortTask results below were verified against their bound durable result and operation receipts and are already loaded; do not call fm_branch_outcomes for them. ";
+    const ordinaryLookup = rows.filter((row) => !direct.has(row.seq) && !references.has(row.seq));
+    const resultLookup = rows.filter((row) => references.has(row.seq) && !loadedReferences.has(row.seq));
+    const instructions = [];
+    if (ordinaryLookup.length) instructions.push(`Before acting on sequences ${ordinaryLookup.map((row) => row.seq).join(",")}, call fm_branch_outcomes with exactly those sequences to load their trusted content; this remains required even when an anchor appears visible, because recovery or compaction may have omitted it from model context.`);
+    if (resultLookup.length) instructions.push(`Before acting on the oversized ShortTask references for sequences ${resultLookup.map((row) => row.seq).join(",")}, call fm_short_task with action=result for each listed ShortTask identity; that single authenticated load supplies the complete unchanged result and acknowledgement evidence, so do not load the same body through fm_branch_outcomes.`);
+    if (!ordinaryLookup.length && !resultLookup.length) instructions.push("Every result below is already loaded through its authenticated inline body or a prior authenticated fm_short_task read; do not call fm_branch_outcomes for it.");
+    const lookupInstruction = `${instructions.join(" ")} `;
     const listed = rows.map((row) => {
       const result = direct.get(row.seq);
-      return result === undefined
+      if (result !== undefined) return `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result:\n${result}`;
+      const reference = references.get(row.seq);
+      return reference === undefined
         ? `[seq ${row.seq}] task=${row.task}`
-        : `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result:\n${result}`;
+        : `[seq ${row.seq}] task=${row.task}\nAuthenticated ShortTask result reference${loadedReferences.has(row.seq) ? " (complete result already loaded)" : ""}:\n${reference}`;
     }).join("\n\n");
     const body = `${PROCESSING_INSTRUCTION.replace("{N}", String(through))}\n${lookupInstruction}\n${listed}`;
     try {
-      return await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body);
+      return {
+        content: await encodeFirstmateOperationalInputWith(runCommandAsync, "branch-outcome", body),
+        inlineSequences: [...direct.keys()],
+        authenticatedSequences: [...direct.keys(), ...loadedReferences],
+      };
     } catch {
-      return body;
+      return {
+        content: body,
+        inlineSequences: [...direct.keys()],
+        authenticatedSequences: [...direct.keys(), ...loadedReferences],
+      };
     }
   }
 
@@ -1235,16 +1275,20 @@ export default function (pi: ExtensionAPI) {
     // main's own agent_start still runs during that await and clears
     // nextTurnQueued, and a decision recorded before the await could be acted
     // on after it.
-    const content = await processingRequestInput(rows);
+    const request = await processingRequestInput(rows);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
-      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false };
+      processing = { sequences, through, triggered: 0, pending: false, nextTurnQueued: false, inlineSequences: [], authenticatedSequences: [], rows: [] };
     }
+    processing.inlineSequences = request.inlineSequences;
+    processing.authenticatedSequences = request.authenticatedSequences;
+    processing.rows = rows.map(({ seq, task }) => ({ seq, task }));
+    for (const seq of request.authenticatedSequences) loadedOutcomeSequences.add(seq);
     // A presentation already sent is consumed by the run it joins or opens;
     // until that run settles, sending a widened or identical copy would hand
     // overlapping requests to the same run.
-    const message = { customType: PROCESSING_MESSAGE_TYPE, content, display: false };
+    const message = { customType: PROCESSING_MESSAGE_TYPE, content: request.content, display: false };
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
@@ -2195,6 +2239,7 @@ ${context.command}
     providerRecovery = null;
     reconcileRecovery = null;
     loadedOutcomeSequences.clear();
+    loadedShortTaskResults.clear();
     generation += 1;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
@@ -2218,8 +2263,23 @@ ${context.command}
     });
   });
 
+  pi.events.on(SHORT_RESULT_LOADED_EVENT, (value) => {
+    if (!value || typeof value !== "object") return;
+    const { id, summary } = value as { id?: unknown; summary?: unknown };
+    if (typeof id !== "string" || typeof summary !== "string" || successfulResultSummary(fmHome, id) !== summary) return;
+    loadedShortTaskResults.add(id);
+    for (const row of processing?.rows ?? []) if (row.task === id) loadedOutcomeSequences.add(row.seq);
+  });
+
   pi.on?.("session_compact", () => {
     loadedOutcomeSequences.clear();
+    loadedShortTaskResults.clear();
+    // A pending processing request is retained as Pi's current or queued
+    // custom-message input across compaction. Its authenticated inline bodies
+    // remain loaded for that exact request; older tool reads do not.
+    if (processing?.pending) {
+      for (const seq of processing.inlineSequences) loadedOutcomeSequences.add(seq);
+    }
   });
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is
@@ -2354,6 +2414,7 @@ ${context.command}
     generation += 1;
     processing = null;
     loadedOutcomeSequences.clear();
+    loadedShortTaskResults.clear();
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2795,7 +2856,12 @@ ${context.command}
             };
           }
           const selected = unique.map((seq) => bySequence.get(seq) as OutcomeRow);
-          for (const seq of unique) loadedOutcomeSequences.add(seq);
+          for (const row of selected) {
+            const reference = successfulNotification(fmHome, row.task);
+            if (reference !== row.summary || successfulInlineNotification(fmHome, row.task) !== null) {
+              loadedOutcomeSequences.add(row.seq);
+            }
+          }
           return {
             content: [{ type: "text", text: selected.map((row) => JSON.stringify(row)).join("\n") }],
             details: undefined,
@@ -2886,7 +2952,7 @@ ${context.command}
           .filter((seq) => seq <= through && !loadedOutcomeSequences.has(seq));
         if (missingEvidence.length > 0) {
           return {
-            content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first with fm_branch_outcomes sequences=${missingEvidence.join(",")}` }],
+            content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first for sequences=${missingEvidence.join(",")} using the retrieval method named in the active processing request` }],
             details: undefined,
             isError: true,
           };

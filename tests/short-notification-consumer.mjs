@@ -12,12 +12,13 @@ fs.writeFileSync(fixture+'/node_modules/typebox/package.json',JSON.stringify({ty
 fs.writeFileSync(fixture+'/node_modules/typebox/index.js','export const Type=Object.fromEntries(["Object","String","Integer","Optional","Array","Union","Literal"].map(n=>[n,(...args)=>({kind:n,args})]));');
 fs.copyFileSync(root+'/.pi/extensions/fm-short-agent.ts',fixture+'/.pi/extensions/fm-short-agent.ts');
 fs.copyFileSync(root+'/.pi/extensions/lib/fm-async-exec.ts',fixture+'/.pi/extensions/lib/fm-async-exec.ts');
+fs.copyFileSync(root+'/bin/fm-short-notification.mjs',fixture+'/bin/fm-short-notification.mjs');
 fs.writeFileSync(fixture+'/bin/fm-short-agent.mjs','export class ShortAgents { status(){throw Error("malformed operation settlement");} async reconcile(){throw Error("malformed operation settlement");} }');
 process.env.FM_HOME=home;process.env.FM_SHORT_AGENT_ENABLED='1';
-const handlers=new Map(),tools=new Map(),messages=[];
+const handlers=new Map(),tools=new Map(),messages=[],events=[];
 let ready;
 const waitReady=()=>new Promise((resolve,reject)=>{const deadline=setTimeout(()=>reject(Error('notification reconciliation did not return')),15000);ready=()=>{clearTimeout(deadline);resolve();};});
-const pi={on:(event,fn)=>handlers.set(event,fn),registerTool:t=>tools.set(t.name,t),sendMessage:m=>messages.push(m),events:{emit:()=>ready?.()}};
+const pi={on:(event,fn)=>handlers.set(event,fn),registerTool:t=>tools.set(t.name,t),sendMessage:m=>messages.push(m),events:{emit:(name,value)=>{events.push({name,value});ready?.();}}};
 const extension=(await import(pathToFileURL(fixture+'/.pi/extensions/fm-short-agent.ts'))).default;
 extension(pi);
 // Replace the installed owner while this extension stays loaded. Static ESM
@@ -29,6 +30,12 @@ const original=Object.fromEntries(names.map(n=>[n,fs.readFileSync(dir+'/'+n)]));
 const control=tools.get('fm_short_task');assert(control);
 const result=await control.execute('fixture',{id,action:'status'});
 assert.equal(result.details.state,'blocked');assert.deepEqual(result.details.operations,[{index:0,action:'cleanup',state:'completed'}]);
+assert.equal(events.some(event=>event.name==='firstmate:short-result-loaded'),false,'a blocked result was reported as loaded completion evidence');
+const completedId=`short-${'d'.repeat(64)}`,completedDir=`${home}/state/short-agents/${completedId}`;fs.mkdirSync(completedDir);
+fs.writeFileSync(`${completedDir}/request.json`,JSON.stringify({version:2,id:completedId,input:{key:'completed-notification-reader',goal:'fixture',acceptance:'fixture',provider:'fixture',model:'fixture',materials:[]},materials:[],acceptedAt:Date.now(),nonce:'completed-nonce',sdk:'/unused'})+'\n');
+fs.writeFileSync(`${completedDir}/result.json`,JSON.stringify({id:completedId,state:'completed',summary:'complete result body',finishedAt:Date.now(),evidence:completedDir})+'\n');
+const completed=await control.execute('fixture',{id:completedId,action:'result'});assert.equal(completed.details.summary,'complete result body');
+assert.deepEqual(events.find(event=>event.name==='firstmate:short-result-loaded'),{name:'firstmate:short-result-loaded',value:{id:completedId,summary:'complete result body'}},'authenticated result reader did not publish its exact loaded identity and body');
 const reconcileDone=waitReady();handlers.get('session_start')();
 try{
  await reconcileDone;
@@ -58,6 +65,7 @@ if(process.env.FM_SHORT_NOTIFICATION_PI_E2E==='1'){
  const sdk=await import(pathToFileURL(sdkEntry()));
  const real=fixture+'-real-pi';fs.mkdirSync(real+'/.pi/extensions/lib',{recursive:true});fs.mkdirSync(real+'/bin');fs.mkdirSync(real+'/node_modules');fs.symlinkSync(path.resolve(path.dirname(sdkEntry()),'../node_modules/typebox'),real+'/node_modules/typebox');
  for(const name of ['fm-short-agent.ts','lib/fm-async-exec.ts'])fs.copyFileSync(root+'/.pi/extensions/'+name,real+'/.pi/extensions/'+name);
+ fs.copyFileSync(root+'/bin/fm-short-notification.mjs',real+'/bin/fm-short-notification.mjs');
  // Real Pi resolves its extension dependencies. Only the old receipt owner is
  // doubled; the update and subsequent CLI read use the actual candidate.
  fs.writeFileSync(real+'/bin/fm-short-agent.mjs','export class ShortAgents { status(){throw Error("malformed operation settlement");} async reconcile(){throw Error("malformed operation settlement");} }');

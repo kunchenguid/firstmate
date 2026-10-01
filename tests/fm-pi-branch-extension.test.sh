@@ -6575,8 +6575,9 @@ test_short_task_success_reaches_main_with_authenticated_body() {
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home, bus, realRoot }; })()`);
-const { fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home, bus, realRoot } = globalThis.__t;
-import { mkdirSync, writeFileSync } from "node:fs";
+const { pi, fire, settle, sentToMain, mainEntries, mainTools, defaultSessionCtx, home, bus, realRoot } = globalThis.__t;
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 const { ShortAgents } = await import(pathToFileURL(join(realRoot, "bin/fm-short-agent.mjs")).href);
@@ -6608,8 +6609,9 @@ if (!request.message.content.includes("Authenticated ShortTask result:") || !req
 if (!request.message.content.includes("do not call fm_branch_outcomes")) throw new Error("direct ShortTask result still demanded a lookup");
 let visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === analysis.id);
 if (visible.length !== 1 || !visible[0].data.summary.includes("Measured 42 from m1; no caveats.")) throw new Error("read-only result was not visibly delivered exactly once");
+await fire("session_compact", { reason: "threshold", willRetry: false }, defaultSessionCtx);
 let ack = await acknowledge.execute("ack-analysis", { through: visible[0].data.seq }, undefined, undefined, {});
-if (ack.isError) throw new Error(`direct read-only result was not preloaded for acknowledgement: ${JSON.stringify(ack)}`);
+if (ack.isError) throw new Error(`authenticated inline result lost its acknowledgement evidence across compaction: ${JSON.stringify(ack)}`);
 
 const operations = { authority: "fixture", expiresAt: Date.now() + 60000, steps: [{ action: "sync", project: "/fixture" }] };
 const operation = seed("b", "Sync completed with the owner-confirmed postcondition. Caveat: cleanup was not granted.", operations, true);
@@ -6624,10 +6626,60 @@ if (visible.length !== 1) throw new Error("operation result visible delivery dup
 ack = await acknowledge.execute("ack-operation", { through: visible[0].data.seq }, undefined, undefined, {});
 if (ack.isError) throw new Error(`direct operation result was not preloaded for acknowledgement: ${JSON.stringify(ack)}`);
 
+const asciiEdge = seed("d", "a".repeat(4096));
+const unicodeEdge = seed("e", "😀".repeat(4096));
+const unicodeOver = seed("f", "🧭".repeat(4097), operations, true);
+const extremeMarker = "EXTREME_RESULT_BODY_MUST_STAY_OUT_OF_AUTOMATIC_DELIVERY";
+const extremeSummary = `${extremeMarker}${"z".repeat(200000)}`;
+const extreme = seed("1", extremeSummary);
+for (const item of [asciiEdge, unicodeEdge, unicodeOver, extreme]) await service.notify(item.id);
+// Simulate recovery after the notification receipt is lost. The outcome
+// store's task key must keep the large completion single and body-free.
+unlinkSync(join(unicodeOver.dir, "notified.json"));
+await service.notify(unicodeOver.id);
+bus.emit("firstmate:outcomes-ready", {});
+await settle(() => requests().length === 3, "bounded ShortTask result notifications");
+request = requests().at(-1);
+if (!request.message.content.includes("a".repeat(4096)) || !request.message.content.includes("😀".repeat(4096))) throw new Error("the inclusive Unicode threshold stopped ordinary results from remaining inline");
+if (!request.message.content.includes(`task=${unicodeOver.id}\nAuthenticated ShortTask result reference:`) ||
+    !request.message.content.includes(`task=${extreme.id}\nAuthenticated ShortTask result reference:`)) throw new Error(`oversized results did not retain authenticated references: ${request.message.content}`);
+if (request.message.content.includes(extremeMarker) || request.message.content.includes("🧭".repeat(32))) throw new Error("an oversized result body entered the hidden MAIN processing request");
+if (!request.message.content.includes("call fm_short_task with action=result") || request.message.content.includes("call fm_branch_outcomes with exactly those sequences")) throw new Error("reference-only results did not select their single authenticated on-demand load");
+const largeVisible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && [unicodeOver.id, extreme.id].includes(entry.data.task));
+if (largeVisible.length !== 2 || largeVisible.some((entry) => [...entry.data.summary].length > 1024)) throw new Error("oversized visible notices were missing or unbounded");
+if (largeVisible.some((entry) => entry.data.summary.includes(extremeMarker) || entry.data.summary.includes("🧭".repeat(32)))) throw new Error("an arbitrary oversized body became its own visible summary");
+if (!largeVisible.find((entry) => entry.data.task === unicodeOver.id)?.data.summary.includes("Verified operation receipts: 1")) throw new Error("the oversized operation notice lost its verified receipt distinction");
+if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === unicodeOver.id).length !== 1) throw new Error("notification retry duplicated an oversized visible outcome");
+const largeSeqs = largeVisible.map((entry) => entry.data.seq).sort((a, b) => a - b);
+const refusedLargeAck = await acknowledge.execute("ack-reference-before-load", { through: Math.max(...largeSeqs) }, undefined, undefined, {});
+if (!refusedLargeAck.isError || !refusedLargeAck.content[0].text.includes("using the retrieval method named in the active processing request") || refusedLargeAck.content[0].text.includes("with fm_branch_outcomes")) throw new Error("reference-only results bypassed the evidence-load acknowledgement gate or received impossible recovery guidance");
+await fire("agent_settled", {}, defaultSessionCtx);
+await settle(() => requests().length === 4, "reference-only ShortTask re-presentation");
+const repeatedReference = requests().at(-1).message.content;
+if (repeatedReference.includes(extremeMarker) || repeatedReference.includes("🧭".repeat(32)) || !repeatedReference.includes("Authenticated ShortTask result reference:")) throw new Error("reference-only re-presentation inserted a full result body or lost its authenticated reference");
+await fire("session_shutdown", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
+await settle(() => requests().length === 5, "reference-only ShortTask session recovery");
+const recoveredReference = requests().at(-1).message.content;
+if (recoveredReference.includes(extremeMarker) || recoveredReference.includes("🧭".repeat(32)) || !recoveredReference.includes("Authenticated ShortTask result reference:")) throw new Error("reference-only session recovery inserted a full result body or lost its authenticated reference");
+if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === unicodeOver.id).length !== 1) throw new Error("session recovery duplicated an oversized visible outcome");
+const loadedReferences = await outcomes.execute("load-large-references", { sequences: largeSeqs.join(",") }, undefined, undefined, {});
+if (loadedReferences.isError || loadedReferences.content[0].text.includes(extremeMarker) || !loadedReferences.content[0].text.includes("Durable result relative to FM_HOME")) throw new Error(`authenticated reference load failed or exposed the full body: ${JSON.stringify(loadedReferences)}`);
+pi.events.emit("firstmate:short-result-loaded", { id: extreme.id, summary: "spoofed result" });
+const refusedNoticeOnlyAck = await acknowledge.execute("ack-reference-notice-only", { through: Math.max(...largeSeqs) }, undefined, undefined, {});
+if (!refusedNoticeOnlyAck.isError || !refusedNoticeOnlyAck.content[0].text.includes("load exact durable outcome evidence first")) throw new Error("loading only the bounded notice satisfied a full-result acknowledgement");
+for (const [item, expected] of [[unicodeOver, "🧭".repeat(4097)], [extreme, extremeSummary]]) {
+  const loaded = JSON.parse(execFileSync(process.execPath, [join(realRoot, "bin/fm-short-agent.mjs"), "result", item.id], { env: { ...process.env, FM_HOME: home }, encoding: "utf8", maxBuffer: 1024 * 1024 }));
+  if (loaded.summary !== expected) throw new Error(`explicit result retrieval changed ${item.id}`);
+  pi.events.emit("firstmate:short-result-loaded", { id: item.id, summary: loaded.summary });
+}
+ack = await acknowledge.execute("ack-bounded-results", { through: Math.max(...largeSeqs) }, undefined, undefined, {});
+if (ack.isError) throw new Error(`loaded result references could not be acknowledged: ${JSON.stringify(ack)}`);
+
 const cancelled = seed("c", "authority revoked; active effects may be partial or uncertain", undefined, false, "cancelled");
 await service.notify(cancelled.id);
 bus.emit("firstmate:outcomes-ready", {});
-await settle(() => requests().length === 3, "cancelled ShortTask recovery result");
+await settle(() => requests().length === 6, "cancelled ShortTask recovery result");
 request = requests().at(-1);
 if (request.message.content.includes("Authenticated ShortTask result:")) throw new Error("a cancelled ShortTask was relabeled as direct success");
 if (!request.message.content.includes("call fm_branch_outcomes with exactly those sequences")) throw new Error("an unavailable success body lost the durable recovery path");
@@ -6639,8 +6691,8 @@ if (ack.isError) throw new Error(`recovered cancelled result could not be acknow
 
 bus.emit("firstmate:outcomes-ready", {});
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (requests().length !== 3 || mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 3) throw new Error("reconciliation duplicated an acknowledged ShortTask notification");
-console.log("read-only and operation ShortTask results reached MAIN directly; cancelled recovery and durable exact-once delivery stayed intact");
+if (requests().length !== 6 || mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 7) throw new Error("reconciliation duplicated an acknowledged ShortTask notification");
+console.log("short results stayed inline across compaction; Unicode-edge, oversized, repeated reference presentation, explicit retrieval, cancellation and durable exact-once delivery stayed intact");
 EOF
   )
   status=$?
