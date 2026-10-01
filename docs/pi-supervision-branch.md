@@ -114,8 +114,8 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   Pi's CLI owns process-wide proxy environment and HTTP dispatcher initialization; the branch retains that process setup and does not reconfigure it.
   Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
   The branch does not gate initialization on Pi or `pi-openai-codex-compat` version strings.
-  Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, `fm_task_continuation`, and `fm_branch_report` in that order.
-  If compatibility startup removes only `bash`, leaving exactly `read`, `fm_task_continuation`, and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
+  Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, `fm_task_continuation`, `fm_task_handoff`, and `fm_branch_report` in that order.
+  If compatibility startup removes only `bash`, leaving exactly `read`, `fm_task_continuation`, `fm_task_handoff`, and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
   The runtime state check independently prevents a compatibility package from widening the branch tools.
   The plugin's native runtime dependencies must load on the host; an incompatible tree-sitter prebuild needs a local source build using the package's supported build tooling before activation.
   [Runtime verification](verification/runtime-backends.md) records the current installed-runtime checks and refresh commands.
@@ -301,7 +301,7 @@ Live guards: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exerc
 Record dated current results in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
 
-## Delegated task continuation
+## Historical delegated task continuation
 
 The branch no longer receives a delegated lifecycle projection for ordinary task progress.
 It can still process eligible wake rows and perform already-authorized operations through their existing owners, but it cannot write the compact task progress block or make final semantic acceptance.
