@@ -39,6 +39,12 @@
 #                                        so a caller that knows the terminal's foreground
 #                                        process group can keep a backgrounded process out
 #                                        of the selection.
+#        fm-harness.sh family <harness>   print the harness FAMILY <harness>'s
+#                                        evidence can prove (pi-signed -> pi; the
+#                                        argument unchanged otherwise), so a finer
+#                                        recorded verdict and a coarser detected one
+#                                        compare on the same axis instead of reading
+#                                        as a disagreement.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -547,6 +553,7 @@ case "${1:-}" in
     [ "$#" -eq 0 ] || shift
     harness_ancestry_descent "$descent_pid" ${1+"$@"}
     ;;
+  family) shift; harness_family "${1:-}" ;;
   crew) resolve_crew ;;
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;

@@ -371,6 +371,47 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+
+# Spawn-record cross-check: detection above is one evidence layer and the
+# record fm-spawn wrote is the other, and nothing compared them when the
+# reported failure silently emitted another harness's supervision protocol
+# (issue #1641). A secondmate reaches its own record through its identity
+# marker - .fm-secondmate-home names its task id in the parent home and a
+# local .fm-secondmate-parent binding names that home, so the parent's
+# state/<id>.meta harness= is what this session was launched on; a ship or
+# scout pane reaches the same record through its FM_TASK_ID marker under this
+# home's own state dir. A family-level disagreement is the signature of a
+# leaked environment marker winning detection, so it warns loudly where the
+# protocol is emitted rather than being reconciled here - the record is a
+# launch claim, not a detection override. A remote route cannot reach the
+# record and any absent or unreadable piece leaves nothing to compare, so
+# each only skips the check instead of warning.
+SPAWN_RECORDED_HARNESS=
+if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+  && fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+  && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] \
+  && [ -n "$FM_SECONDMATE_PARENT_HOME" ]; then
+  SPAWN_RECORD_ID=$(cat "$FM_HOME/.fm-secondmate-home" 2>/dev/null || true)
+  case "$SPAWN_RECORD_ID" in
+    '' | *[!A-Za-z0-9_-]*) ;;
+    *)
+      SPAWN_RECORDED_HARNESS=$(fm_meta_get \
+        "$FM_SECONDMATE_PARENT_HOME/state/$SPAWN_RECORD_ID.meta" harness)
+      ;;
+  esac
+elif [ -n "${FM_TASK_ID:-}" ]; then
+  SPAWN_RECORDED_HARNESS=$(fm_meta_get "$STATE/$FM_TASK_ID.meta" harness)
+fi
+HARNESS_SPAWN_MISMATCH=
+if [ -n "$SPAWN_RECORDED_HARNESS" ]; then
+  spawn_record_family=$("$SCRIPT_DIR/fm-harness.sh" family \
+    "$SPAWN_RECORDED_HARNESS" 2>/dev/null || printf '%s' "$SPAWN_RECORDED_HARNESS")
+  primary_family=$("$SCRIPT_DIR/fm-harness.sh" family \
+    "$PRIMARY_HARNESS" 2>/dev/null || printf '%s' "$PRIMARY_HARNESS")
+  [ "$spawn_record_family" = "$primary_family" ] || HARNESS_SPAWN_MISMATCH=1
+fi
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -837,6 +878,10 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     || ! fm_pi_extension_loaded "$OMP_TURNEND_MARKER" "$OMP_TURNEND_VERSION" "$OMP_LOCK"; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
+fi
+if [ -n "$HARNESS_SPAWN_MISMATCH" ]; then
+  printf 'HARNESS_MISMATCH: the spawn record for this session says harness=%s but process evidence detects %s - the signature of a leaked environment marker outranking ancestry; the block below renders the DETECTED harness, so establish the real harness before trusting it or acting on its protocol\n' \
+    "$SPAWN_RECORDED_HARNESS" "$PRIMARY_HARNESS"
 fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \

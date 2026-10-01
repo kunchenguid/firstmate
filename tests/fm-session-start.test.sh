@@ -1302,6 +1302,91 @@ EOF
   pass "session start: a deferred relaunch is always reported, so the digest's stale endpoint record cannot stand"
 }
 
+# A secondmate's spawn record lives in the PARENT home: its own home's
+# .fm-secondmate-home marker names the task id and a local
+# .fm-secondmate-parent binding names the parent, so the parent's
+# state/<id>.meta harness= is what detection is compared against. A
+# family-level disagreement is the leaked-marker signature (issue #1641), so
+# the digest warns loudly where the supervision protocol is emitted; agreement
+# (or an unreachable record) stays silent.
+test_secondmate_spawn_record_cross_check() {
+  local rec root home fakebin mate log spawned out id=$SESSION_START_SECOND_MATE_ID
+  rec=$(prepare_session_start_secondmate secondmate-harness-record)
+  IFS='|' read -r root home fakebin mate log spawned <<EOF
+$rec
+EOF
+
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=local\n'
+    printf 'parent_home=%s\n' "$home"
+  } > "$mate/.fm-secondmate-parent"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=kimi\n'
+    printf 'home=%s\n' "$mate"
+  } > "$home/state/$id.meta"
+
+  out=$(run_named_harness_session_start claude "$mate" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'HARNESS_MISMATCH: the spawn record for this session says harness=kimi but process evidence detects claude' \
+    "a leaked-marker disagreement between spawn record and detection was not warned: $out"
+
+  out=$(run_named_harness_session_start kimi "$mate" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'HARNESS_MISMATCH' \
+    "an agreeing spawn record and detection warned anyway: $out"
+
+  # A finer recorded identity and a coarser detected one in the same family are
+  # agreement, not disagreement: pi-signed records as itself while ancestry can
+  # only prove pi.
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=pi-signed\n'
+    printf 'home=%s\n' "$mate"
+  } > "$home/state/$id.meta"
+  out=$(run_named_harness_session_start pi "$mate" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'HARNESS_MISMATCH' \
+    "a same-family record/detection pair warned anyway: $out"
+
+  # A remote route cannot reach the parent's record, so the check skips rather
+  # than warns; a home with no parent binding has nothing to compare either.
+  {
+    printf 'schema=fm-secondmate-parent.v1\n'
+    printf 'route=remote\n'
+    printf 'parent_host=example.invalid\n'
+  } > "$mate/.fm-secondmate-parent"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=kimi\n'
+    printf 'home=%s\n' "$mate"
+  } > "$home/state/$id.meta"
+  out=$(run_named_harness_session_start claude "$mate" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'HARNESS_MISMATCH' \
+    "an unreachable remote-parent record warned anyway: $out"
+
+  rm -f "$mate/.fm-secondmate-parent"
+  out=$(run_named_harness_session_start claude "$mate" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" 'HARNESS_MISMATCH' \
+    "a missing parent binding warned anyway: $out"
+
+  # A ship or scout pane carries no identity marker; it reaches the same
+  # record through its FM_TASK_ID marker under this home's own state dir.
+  rec=$(new_world secondmate-harness-record-taskid)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'window=firstmate:fm-ship1\nkind=ship\nharness=kimi\n' > "$home/state/ship1.meta"
+  out=$(FM_TASK_ID=ship1 run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'HARNESS_MISMATCH: the spawn record for this session says harness=kimi but process evidence detects claude' \
+    "an FM_TASK_ID session's spawn-record disagreement was not warned: $out"
+
+  pass "session start: a spawn-record/detection harness disagreement warns loudly; agreement and unreachable records stay silent"
+}
+
 test_session_start_preserves_ambiguous_pi_process() {
   local rec root home fakebin mate log spawned out
   rec=$(prepare_session_start_secondmate secondmate-ambiguous-pi)
@@ -3024,6 +3109,7 @@ test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
 test_deferred_relaunch_is_always_reported
+test_secondmate_spawn_record_cross_check
 test_inactive_reconcile_never_blocks_the_digest
 test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
