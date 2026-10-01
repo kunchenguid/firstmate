@@ -19,7 +19,7 @@ fm_hold_reason_encode() {
 
 # fm_hold_reason_decode_stream [toon|markdown|json]: decode marked reason fields.
 fm_hold_reason_decode_stream() {
-  perl -MJSON::PP -MMIME::Base64=decode_base64 -MEncode=decode,FB_CROAK -e '
+  perl -MJSON::PP -MMIME::Base64=encode_base64,decode_base64 -MEncode=decode,FB_CROAK -e '
     use strict;
     use warnings;
     binmode STDIN, ":encoding(UTF-8)";
@@ -28,8 +28,14 @@ fm_hold_reason_decode_stream() {
     my $json = JSON::PP->new->allow_nonref;
     sub decode_reason {
       my ($value) = @_;
-      return $value unless defined($value) && $value =~ s/^fm-hold-v1://;
-      return decode("UTF-8", decode_base64($value), FB_CROAK);
+      return $value unless defined($value) && $value =~ /^fm-hold-v1:(.*)\z/s;
+      my $payload = $1;
+      my $bytes = decode_base64($payload);
+      return $value unless encode_base64($bytes, "") eq $payload;
+      # Historical literals with valid base64 and UTF-8 remain indistinguishable
+      # from encoded reasons; malformed payloads retain their stored text.
+      my $decoded = eval { decode("UTF-8", $bytes, FB_CROAK) };
+      return $@ ? $value : $decoded;
     }
     sub decode_field {
       my ($raw) = @_;

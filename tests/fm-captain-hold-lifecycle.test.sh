@@ -4273,20 +4273,31 @@ if [ "${1:-}" = update ] && [ -f "$FM_HOME/fail-write" ]; then
 fi
 if [ "${1:-}" = hold ] && [ "${2:-}" != --help ]; then
   "$REAL_TASKS_AXI" show "$2" --full > "$FM_HOME/before-backend-hold" || exit $?
+  if [ -f "$FM_HOME/fail-hold" ]; then
+    : > "$FM_HOME/hold-refused"
+    exit 9
+  fi
 fi
 exec "$REAL_TASKS_AXI" "$@"
 SH
       chmod +x "$home/fakebin/tasks-axi"
       until_args=()
       [ "$timing" != dated ] || until_args=(--until 2099-01-01)
-      for failure in lookup write; do
+      for failure in lookup write hold; do
         : > "$home/fail-$failure"
         if run_captain "$home" hold "$id" --title "Separate call" --reason "Choose for B" \
           --origin origin-b ${until_args[@]+"${until_args[@]}"} > "$home/hold.out" 2> "$home/hold.err"; then
           fail "$phase $timing hold succeeded despite an origin $failure failure"
         fi
         assert_present "$home/$failure-refused" "the failure did not reach the origin $failure"
-        assert_absent "$home/before-backend-hold" "$phase $timing origin $failure failure reached the backend hold"
+        if [ "$failure" = hold ]; then
+          assert_present "$home/before-backend-hold" "$phase $timing failure never reached the backend hold"
+          assert_grep 'Captain hold origin: origin-b' "$home/before-backend-hold" \
+            "the failed backend hold did not see the new association"
+          rm "$home/before-backend-hold"
+        else
+          assert_absent "$home/before-backend-hold" "$phase $timing origin $failure failure reached the backend hold"
+        fi
         shown=$(tasks_in "$home" show "$id" --full)
         assert_not_contains "$shown" 'Captain hold origin: origin-b' \
           "$phase $timing origin $failure failure published the new association"
@@ -4310,6 +4321,12 @@ SH
         printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$id" >> "$home/state/origin-b.meta"
         if run_captain "$home" verify origin-b > "$home/verify.out" 2> "$home/verify.err"; then
           fail "$phase $timing origin $failure failure verified an inventory for B"
+        fi
+        if [ "$phase" != new ]; then
+          run_captain "$home" complete origin-a "$id" >/dev/null \
+            || fail "$phase $timing origin $failure failure invalidated completion for A"
+          run_captain "$home" verify origin-a >/dev/null \
+            || fail "$phase $timing origin $failure failure invalidated verification for A"
         fi
       done
       run_captain "$home" hold "$id" --reason "Choose for B" --origin origin-b \
@@ -4461,6 +4478,9 @@ SH
 test_hold_reason_round_trips_awkward_characters() {
   local home id reason stored json shown start verb fields out raw rc raw_rc mode
   local title legacy body quoted_reason quoted_title quoted_legacy expected_reason until_args=()
+  local malformed index=0 malformed_reasons=(
+    'fm-hold-v1:/w==' 'fm-hold-v1:bm9ydGg=$' 'fm-hold-v1:bm9ydGg' 'fm-hold-v1:Zh=='
+  )
   home=$(make_home reason-round-trip)
   title='Investigate literal %28, "fm-hold-v1:bm9ydGg="'
   legacy='Visit https://example.test/%28literal%29 and %0A; fm-hold-v1:bm9ydGg='
@@ -4474,6 +4494,22 @@ test_hold_reason_round_trips_awkward_characters() {
   printf '%s' "$body" > "$home/legacy-body.txt"
   tasks_in "$home" update sample-legacy-call --body-file "$home/legacy-body.txt" >/dev/null \
     || fail "could not write the legacy body"
+
+  # Historical literal reasons are persisted input, not encoder output.
+  for malformed in "${malformed_reasons[@]}"; do
+    id="sample-malformed-$index"
+    index=$((index + 1))
+    tasks_in "$home" add "$id" "Historical reason $index" --kind captain --repo sample >/dev/null \
+      || fail "could not create $id"
+    tasks_in "$home" hold "$id" --reason "$malformed" --kind captain >/dev/null \
+      || fail "could not store the historical literal reason"
+    for verb in show view; do
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" "$verb" "$id" --full) \
+        || fail "public $verb failed on historical literal $malformed"
+      raw=$(tasks_in "$home" "$verb" "$id" --full)
+      assert_equals "$raw" "$out" "public $verb changed historical literal $malformed"
+    done
+  done
 
   for id in sample-reason-call sample-dated-call; do
     until_args=()
@@ -4507,6 +4543,9 @@ test_hold_reason_round_trips_awkward_characters() {
       raw=$(tasks_in "$home" list --fields "$fields" | grep '^  sample-legacy-call,')
       shown=$(printf '%s\n' "$out" | grep '^  sample-legacy-call,')
       assert_equals "$raw" "$shown" "public list changed legacy or unrelated fields"
+      for malformed in "${malformed_reasons[@]}"; do
+        assert_contains "$out" "$malformed" "public list changed historical literal $malformed"
+      done
     done
     json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
       FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
@@ -4518,6 +4557,11 @@ test_hold_reason_round_trips_awkward_characters() {
       '.backlog.records[] | select(.id == "sample-legacy-call") |
        .hold_reason == $reason and .title == $title and .body_lines[0] == "fm-hold-v1:bm9ydGg="' >/dev/null \
       || fail "fleet changed legacy or unrelated fields"
+    for malformed in "${malformed_reasons[@]}"; do
+      printf '%s' "$json" | jq -e --arg reason "$malformed" \
+        'any(.backlog.records[]; .hold_reason == $reason)' >/dev/null \
+        || fail "fleet changed historical literal $malformed"
+    done
   done
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-tasks-axi.sh" show sample-legacy-call --full)
@@ -4564,6 +4608,9 @@ SH
     assert_contains "$start" 'Investigate literal %28' "startup $mode changed the title"
     assert_contains "$start" "$legacy" "startup $mode changed the legacy reason"
     assert_contains "$start" '"fm-hold-v1:bm9ydGg="' "startup $mode decoded a reason twice"
+    for malformed in "${malformed_reasons[@]}"; do
+      assert_contains "$start" "$malformed" "startup $mode changed historical literal $malformed"
+    done
     if [ "$mode" = fallback ]; then
       assert_contains "$start" 'read failed: literal %28 and fm-hold-v1:bm9ydGg=' \
         "startup changed unrelated error text"
@@ -4576,15 +4623,18 @@ SH
   assert_contains "$out" "$quoted_reason" "return brief changed the encoded reason"
   assert_contains "$out" "$quoted_title" "return brief changed the title"
   assert_contains "$out" "$quoted_legacy" "return brief changed the legacy reason"
+  for malformed in "${malformed_reasons[@]}"; do
+    assert_contains "$out" "$malformed" "return brief changed historical literal $malformed"
+  done
   pass "marked hold reasons round-trip through public reads, fleet, startup, and return without changing other fields"
 }
 
+test_hold_reason_round_trips_awkward_characters
 test_hold_origins_precede_backend_holds
 test_historical_self_inventory_has_workable_repair
 test_inventory_compares_backend_identities
 test_origin_is_never_its_own_inventory_entry
 test_complete_refuses_an_entry_held_for_another_origin
-test_hold_reason_round_trips_awkward_characters
 test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes

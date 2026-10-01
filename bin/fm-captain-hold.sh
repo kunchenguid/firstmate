@@ -821,9 +821,8 @@ task_identity() {
   printf '%s' "$id"
 }
 
-write_hold_origin() {  # <task-id> <shown-body> <origin>
+write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
   local id=$1 body=$2 origin=$3 stamp rest new_body tmp
-  origin=$(task_identity "$origin") || return $?
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
@@ -831,7 +830,10 @@ write_hold_origin() {  # <task-id> <shown-body> <origin>
     || fail "task $id lost its hold-set stamp before its origin was recorded"
   rest=$(printf '%s\n' "$body" | sed 1d | awk '!/^Captain hold origin: /' \
     | awk 'NF || started { started = 1; print }')
-  new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  new_body=$stamp
+  if [ -n "$origin" ]; then
+    new_body=$(printf '%s\nCaptain hold origin: %s' "$stamp" "$origin")
+  fi
   if [ -n "$rest" ]; then
     new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
   fi
@@ -900,7 +902,7 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
 
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 stored_reason previous_origin='' hold_status=0
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -979,14 +981,24 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
   if [ -n "$origin" ]; then
+    origin=$(task_identity "$origin") || exit $?
+    previous_origin=$(body_hold_origin "$(show_field_value "$show" body)")
     write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
   fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
-      || fail "could not hold task $id for the captain"
+      || hold_status=$?
   else
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain >/dev/null \
-      || fail "could not hold task $id for the captain"
+      || hold_status=$?
+  fi
+  if [ "$hold_status" -ne 0 ]; then
+    # A refused re-hold must not associate the previous hold or answer with a
+    # new origin. Restore the old line verbatim, without resolving it again.
+    if [ -n "$origin" ]; then
+      write_hold_origin "$id" "$(show_field "$show" body)" "$previous_origin" || exit $?
+    fi
+    fail "could not hold task $id for the captain"
   fi
   task_show "$id" || fail "task $id disappeared while holding it"
   show=$TASK_SHOW_OUTPUT
