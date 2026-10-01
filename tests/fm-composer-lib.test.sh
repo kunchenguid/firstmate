@@ -822,7 +822,6 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   rm -rf "$fakebin"
   pass 'pi codex banner adapter requires a pinned version: only the named Pi executable when the caller knows it, every installed one otherwise'
 }
-
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -1393,8 +1392,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status
-test_matrix_pi_codex_banner_requires_pinned_adapter_version
-test_matrix_opencode_leftbar_signals
+test_matrix_pi_codex_banner_requires_pinned_adapter_versiontest_matrix_opencode_leftbar_signals
 test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_opencode_leftbar_abs_cwd_furniture
 test_matrix_grok_titled_bottom_border

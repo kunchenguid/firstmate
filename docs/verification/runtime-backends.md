@@ -861,7 +861,6 @@ ok - pi (1.0.0): the banner over the same screen with the identity probe absent 
 ok - pi (1.0.0): banner screen classifies empty on the cursor-anchored tmux read
 ok - live pi banner guard verified 5 live surface(s)
 ```
-
 ### 2026-09-25 Pi Codex usage-limit banner over an empty separator pair
 
 Verified on 2026-09-25 on macOS arm64 (Darwin 25.5.0) against pi 0.85.1 with Herdr's Pi integration file at version 9, driving the installed Pi TUI in an isolated tmux server against a local stub Codex endpoint whose only answer is the `{"type":"error","message":"The usage limit has been reached"}` stream event, so no provider request leaves the machine and no model tokens are spent.
