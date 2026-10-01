@@ -400,6 +400,36 @@ fm_backlog_row_show() {  # <resolved-data-dir> <id> [flag...]
   return "$status"
 }
 
+# Print the task body carried by one `tasks-axi show <id> --full` output, as
+# raw bytes with no trailing newline added. tasks-axi has no JSON reader (its
+# --json flag exists on mutations only, so `show --json` prints a TOON error and
+# exits 2), and this is the single decoder for that TOON field. A quoted value
+# is a JSON-encoded string and decodes literally, so a body that is exactly `-`
+# survives; only an unquoted `-` is the empty marker. An output with no
+# `  body:` line, or one that will not decode, returns 1 and prints nothing:
+# callers that rewrite a body must treat that as a failed read, never as an
+# empty body, because composing on top of an empty read replaces the note.
+fm_backlog_show_body() {  # <show-output>
+  local shown
+  printf '%s\n' "$1" | grep -q '^  body: ' || return 1
+  shown=$(printf '%s\n' "$1" | sed -n 's/^  body: //p' | head -1)
+  # The decoder asks for allow_nonref because an older JSON::PP rejects a bare
+  # string otherwise, and it writes bytes, because printing decoded characters
+  # to a stream with no :raw layer emits a codepoint at or below U+00FF as one
+  # latin-1 byte and silently corrupts the body a caller rewrites.
+  printf '%s' "$shown" | LC_ALL=C perl -MJSON::PP -e '
+    local $/;
+    my $shown = <STDIN>;
+    $shown =~ s/\s+\z//;
+    exit 0 if $shown eq "" || $shown eq "-";
+    my $value = $shown =~ /\A"/
+      ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
+    binmode STDOUT, ":raw";
+    utf8::encode($value) if utf8::is_utf8($value);
+    print $value;
+  ' 2>/dev/null
+}
+
 fm_backlog_row_list() {  # <resolved-data-dir> [flag...]
   local data=$1 addressing_status
   shift
@@ -567,24 +597,7 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         || FM_BACKLOG_TRANSITION_ERROR="tasks-axi show $id failed with no output"
       return "$command_status"
     fi
-    # The leading quote selects a JSON-encoded bare string, which is exactly the
-    # value an older JSON::PP rejects unless allow_nonref is asked for, so the
-    # decoder below requests it rather than inheriting the local default. It then
-    # writes bytes, because printing the decoded characters to a stream with no
-    # :raw layer emits a codepoint at or below U+00FF as one latin-1 byte and
-    # silently corrupts the body this rewrites.
-    body=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
-      | LC_ALL=C perl -MJSON::PP -e '
-        local $/;
-        my $shown = <STDIN>;
-        $shown =~ s/\s+\z//;
-        exit 0 if $shown eq "" || $shown eq "-";
-        my $value = $shown =~ /\A"/
-          ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
-        binmode STDOUT, ":raw";
-        utf8::encode($value) if utf8::is_utf8($value);
-        print $value unless $value eq "-";
-      ') || {
+    body=$(fm_backlog_show_body "$out") || {
       FM_BACKLOG_TRANSITION_ERROR="could not decode the task body of $id"
       return 1
     }
