@@ -3017,6 +3017,63 @@ SH
   pass "an answer before cleanup replay preserves the retained report"
 }
 
+test_answer_before_cleanup_replay_notes_a_retained_gerrit_change() {
+  local home id repo wt rc show real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  home=$(make_home answer-before-replay-gerrit)
+  id=sample-answer-before-replay-gerrit
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" fm/answer-before-replay-gerrit
+  tasks_in "$home" add "$id" "Ship the held Gerrit change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held Gerrit answer fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$gerrit_url" "spawn_gen=fixture-$id"
+  printf 'done: change landed\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain must choose the follow-up" >/dev/null \
+    || fail "could not hold the landed Gerrit task for the captain"
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted cleanup lost its retained-artifact record"
+
+  printf 'Proceed with the landed change.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer a Gerrit task before cleanup replay"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered Gerrit row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the Gerrit row"
+  assert_contains "$show" "Gerrit change $gerrit_url" \
+    "the answer dropped the retained Gerrit change URL"
+  pass "an answer before cleanup replay notes the retained Gerrit change"
+}
+
 test_unusable_pending_close_record_names_its_reason() {
   local home id wt rc err marker
   home=$(make_home unusable-pending-close-reason)
@@ -3193,6 +3250,52 @@ EOF
   assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
   assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
   pass "cleanup retains captain calls in the configured backlog"
+}
+
+test_teardown_retains_a_gerrit_captain_call_with_its_change_url() {
+  local home id repo wt show real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  home=$(make_home teardown-held-gerrit)
+  id=sample-held-gerrit
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" fm/held-gerrit
+  tasks_in "$home" add "$id" "Ship the held Gerrit change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held Gerrit fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$gerrit_url" "spawn_gen=fixture-$id"
+  printf 'done: change landed\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain must choose the follow-up" >/dev/null \
+    || fail "could not hold the landed Gerrit task for the captain"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # GitHub pull request, so this case keeps reproducing whatever the installed
+  # release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$home/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of a captain-held Gerrit task failed: $(cat "$home/teardown.err")"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the captain-held Gerrit row is gone after cleanup"
+  assert_contains "$show" "state: queued" "the held Gerrit row still reads as worked on"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: Gerrit change $gerrit_url" \
+    "the Gerrit change URL was not recorded on the still-open row"
+  assert_absent "$home/state/$id.backlog-close" \
+    "successful cleanup left its pending transition record behind"
+  pass "cleanup keeps a captain-held Gerrit task open and records its change URL"
 }
 
 test_merge_approval_releases_before_zero_done_retention() {
@@ -4066,9 +4169,11 @@ test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
+test_answer_before_cleanup_replay_notes_a_retained_gerrit_change
 test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
+test_teardown_retains_a_gerrit_captain_call_with_its_change_url
 test_merge_approval_releases_before_zero_done_retention
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task

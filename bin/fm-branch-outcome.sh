@@ -57,6 +57,18 @@
 #     Main-actor drain calls processed-init under the outcome lock when that
 #     ready marker is absent or invalid, on every harness; only a genuine store
 #     fault keeps the lost-wake backstop skipped.
+#   - Tail copy: $STATE/.branch-outcomes-tail.jsonl holds the newest
+#     OUTCOME_TAIL_ROWS store lines verbatim, and only as many of the newest
+#     as fit in OUTCOME_TAIL_MAX_BYTES (1 MiB): older rows leave first, a row
+#     is never shortened, and a newest row larger than the budget leaves the
+#     copy empty. It is replaced atomically after each append. It is a
+#     read-only display source for readers that cannot read the
+#     unbounded store (the Claude Code Calm mod's supervision notes, whose file
+#     read rejects over 4 MiB); it is never authoritative, and a failed refresh
+#     leaves the stored outcome and its delivery untouched. seed-tail creates
+#     it from a bounded window of the store's newest complete rows when it is
+#     absent, so a home whose store predates it gains one at its next session
+#     start without scanning lifetime history.
 #   - Every mutation runs under $STATE/.branch-outcomes.lock so the branch
 #     extension and a concurrent session-start replay cannot interleave.
 #   - The store is written BEFORE the outcome is delivered to main
@@ -116,6 +128,12 @@
 #     acknowledge that row. Prints nothing when nothing replayable is unread.
 #     Run it only when the session holds the lock (fm-session-start.sh owns the
 #     call site).
+#   fm-branch-outcome.sh seed-tail
+#     Under the lock, when the store has rows and the display tail copy is
+#     absent, validate only the newest complete rows within the display-tail
+#     row and byte budget and write the copy from them; otherwise read and
+#     change nothing. fm-session-start.sh runs it at every locked session
+#     start, on every harness and away posture, before the drain.
 set -eu
 
 SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)"
@@ -132,6 +150,9 @@ MAX_SAFE_SEQ=9007199254740991
 OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
 OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
+OUTCOME_TAIL="$STATE/.branch-outcomes-tail.jsonl"
+OUTCOME_TAIL_ROWS=200
+OUTCOME_TAIL_MAX_BYTES=1048576
 # The "recordedAgo" field present and unprocessed add to captain rows (see the
 # usage above).
 # Callers pass --argjson now "$(date +%s)".
@@ -142,7 +163,7 @@ RECORDED_AGO_JQ='def recorded_ago: ([$now - .epoch, 0] | max) as $s
     else "\($s / 86400 | floor)d" end;'
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | present | processed-init [--held-lock] | list [--recent <n>] | lookup --seqs <n,...> | startup-replay | seed-tail" >&2
   exit 2
 }
 
@@ -209,9 +230,10 @@ read_processed() {
   printf '%s\n' "$value"
 }
 
-last_seq() {
-  [ -s "$STORE" ] || { printf '0\n'; return 0; }
-  jq -Rse '
+last_seq() { # [<file> [<first expected seq, or null for a bounded suffix>]]
+  local file=${1:-$STORE} start=${2:-1}
+  [ -s "$file" ] || { printf '0\n'; return 0; }
+  jq -Rse --argjson start "$start" '
     def valid:
       type == "object"
       and (
@@ -235,11 +257,11 @@ last_seq() {
     | map(fromjson)
     | . as $rows
     | if reduce range(0; length) as $i
-        (true; . and ($rows[$i] | valid and .seq == ($i + 1)))
+        (true; . and ($rows[$i] | valid and .seq == ($i + ($start // $rows[0].seq))))
       then .[-1].seq
       else error("malformed or non-sequential outcome store")
       end
-  ' "$STORE" 2>/dev/null
+  ' "$file" 2>/dev/null
 }
 
 record_seq() { # <jsonl-line>
@@ -329,6 +351,24 @@ rebuild_outcome_indexes() {
 $rows
 EOF
   publish_outcome_index_ready "$(last_seq)"
+}
+
+write_outcome_tail() { # [<bounded input file>] (append uses the store)
+  local tmp input=${1:-$STORE}
+  tmp=$(mktemp "$STATE/.branch-outcomes-tail.XXXXXX") || return 1
+  if ! { tail -n "$OUTCOME_TAIL_ROWS" "$input" | LC_ALL=C awk -v budget="$OUTCOME_TAIL_MAX_BYTES" '
+        { row[NR] = $0 }
+        END {
+          first = NR + 1
+          while (first > 1 && total + length(row[first - 1]) + 1 <= budget) {
+            first--
+            total += length(row[first]) + 1
+          }
+          for (i = first; i <= NR; i++) print row[i]
+        }' > "$tmp" && mv -f -- "$tmp" "$OUTCOME_TAIL"; }; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 print_unread() {
@@ -500,6 +540,7 @@ case "$CMD" in
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
       "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+    write_outcome_tail || echo "warning: outcome $SEQ was stored but its display tail copy could not be refreshed" >&2
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
@@ -729,6 +770,42 @@ case "$CMD" in
         exit 1
       fi
     fi
+    fm_lock_release "$LOCK"
+    ;;
+  seed-tail)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if [ -e "$OUTCOME_TAIL" ] || [ ! -s "$STORE" ]; then
+      fm_lock_release "$LOCK"
+      exit 0
+    fi
+    WINDOW=$(mktemp "$STATE/.branch-outcomes-window.XXXXXX") || { fm_lock_release "$LOCK"; exit 1; }
+    # One extra byte distinguishes a complete first row from a partial one.
+    # Discard the first line when the store exceeds this window: it may be
+    # partial (or empty when the boundary falls exactly on a newline).
+    START=1
+    STORE_SIZE=$(_fm_status_file_size "$STORE") || { rm -f -- "$WINDOW"; fm_lock_release "$LOCK"; exit 1; }
+    if [ "$STORE_SIZE" -gt "$((OUTCOME_TAIL_MAX_BYTES + 1))" ]; then
+      START=null
+      tail -c "$((OUTCOME_TAIL_MAX_BYTES + 1))" "$STORE" | awk 'NR > 1' | tail -n "$OUTCOME_TAIL_ROWS" > "$WINDOW"
+    else
+      tail -n "$OUTCOME_TAIL_ROWS" "$STORE" > "$WINDOW"
+      # Even a short store can have more rows than the display limit.
+      [ "$(wc -l < "$STORE")" -le "$OUTCOME_TAIL_ROWS" ] || START=null
+    fi
+    if ! last_seq "$WINDOW" "$START" >/dev/null; then
+      rm -f -- "$WINDOW"
+      fm_lock_release "$LOCK"
+      echo "error: refusing to seed the display tail copy because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if ! write_outcome_tail "$WINDOW"; then
+      rm -f -- "$WINDOW"
+      fm_lock_release "$LOCK"
+      echo "error: the display tail copy could not be seeded from the outcome store" >&2
+      exit 1
+    fi
+    rm -f -- "$WINDOW"
     fm_lock_release "$LOCK"
     ;;
   *) usage ;;

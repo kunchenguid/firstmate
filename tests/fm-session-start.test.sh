@@ -72,7 +72,7 @@ new_world() {
 make_fake_toolchain() {
   local fakebin=$1
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.80
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1474,7 +1474,11 @@ EOF
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
 
-  out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=2 run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  # The same fake hangs the side-band home summary before the endpoint section.
+  # Bound that unrelated refresh at 5s instead of paying its production 60s;
+  # the endpoint's own 2s bound and descendant-cleanup assertions stay real.
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=2 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a hung endpoint read must not fail the digest"
   assert_contains "$out" \
@@ -1506,7 +1510,10 @@ EOF
   printf 'window=sess:p-slow\nkind=ship\nbackend=herdr\n' > "$home/state/task-a-slow.meta"
   printf 'window=sess:p-live\nkind=ship\nbackend=herdr\n' > "$home/state/task-z-live.meta"
 
-  out=$(FM_SESSION_START_ENDPOINT_TIMEOUT=00 run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  # Only the unrelated summary gets a shorter fixture budget. The invalid
+  # endpoint value must still fall back to the real 10s production bound.
+  out=$(FM_HOME_SUMMARY_TIMEOUT=5 FM_SESSION_START_ENDPOINT_TIMEOUT=00 \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
 
   expect_code 0 "$status" "a padded-zero per-read bound must not fail the digest"
   assert_contains "$out" \
@@ -1696,6 +1703,9 @@ $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  # A Claude home runs the supervision host by default and then presents its
+  # outcomes; this case pins a home that does not run it.
+  : > "$home/config/supervision-host-off"
 
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-b --verdict captain --summary 'unread Pi branch outcome' >/dev/null \
@@ -1710,6 +1720,33 @@ EOF
   [ -e "$home/state/.lease-task-dead" ] || fail "non-Pi session swept a Pi branch lease"
   [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "non-Pi session marked a Pi branch outcome read"
   pass "non-Pi session start neither sweeps nor replays Pi branch state"
+}
+
+test_session_start_seeds_the_outcome_display_tail_while_away() {
+  local rec root home fakebin out store tail
+  rec=$(new_world outcome-tail-seed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  store="$home/state/branch-outcomes.jsonl"
+  tail="$home/state/.branch-outcomes-tail.jsonl"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict captain --summary 'decision still waiting' >/dev/null \
+    || fail "could not store the captain outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 || fail "could not mark the outcome read"
+  rm -f "$tail"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'away for the afternoon' >/dev/null \
+    || fail "could not record the away posture"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "away posture recorded" "the digest did not report the away posture"
+  [ -f "$tail" ] || fail "session start did not seed the display tail copy of an existing outcome store while away"
+  [ "$(cat "$tail")" = "$(cat "$store")" ] || fail "the seeded display tail is not the store's rows verbatim"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "seeding the display tail moved the read cursor"
+  [ ! -e "$home/state/.branch-outcomes-processed" ] || fail "seeding the display tail acknowledged the captain outcome"
+  pass "session start seeds an existing outcome store's absent display tail copy while away, moving no marker"
 }
 
 # --- deferred network stage -------------------------------------------------
@@ -2701,6 +2738,35 @@ EOF
   pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
 }
 
+# A restart under daemon-backed quiet mode must not read the quiet record as
+# hold-for-return: the captain is present and requested actions proceed, while
+# an away record keeps its hold-for-return line.
+test_quiet_record_digest_holds_nothing_for_a_return() {
+  local rec root home fakebin out
+  rec=$(new_world quiet-record-digest)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  FM_AFK_MODE=quiet FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null 2>&1 || fail "quiet entry failed"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "present - quiet mode recorded at" "AFK digest did not name the quiet record"
+  assert_contains "$out" "nothing is held for a return" "AFK digest did not say the quiet record holds nothing"
+  assert_contains "$out" "the quiet daemon owns the watcher" "AFK digest lost the quiet daemon line"
+  assert_not_contains "$out" "hold-for-return" "AFK digest read the quiet record as hold-for-return"
+
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" enter >/dev/null 2>&1 || fail "away entry over quiet failed"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "present - away posture recorded at" "AFK digest did not name the away record"
+  assert_contains "$out" "hold-for-return only" "AFK digest lost hold-for-return for an away record"
+
+  pass "the AFK digest reads a quiet record as a present captain holding nothing, and an away record as hold-for-return"
+}
+
 test_next_step_afk_legacy_empty_flag_defaults_away() {
   local rec root home fakebin out
   rec=$(new_world next-step-afk-legacy)
@@ -2980,6 +3046,7 @@ test_abnormal_digest_death_banners_and_exits_zero
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
+test_session_start_seeds_the_outcome_display_tail_while_away
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
@@ -2988,6 +3055,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
+test_quiet_record_digest_holds_nothing_for_a_return
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization

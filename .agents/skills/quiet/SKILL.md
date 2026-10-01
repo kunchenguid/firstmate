@@ -16,11 +16,8 @@ daemon tradeoff as `/afk`, made explicit for a captain who is staying,
 watching the session, and does not want to exit the mode just by chatting.
 
 Where a daemon runs, this skill is a thin wrapper.
-Every mechanism below - the daemon, its injection, its busy/composer guards,
-its classification policy, its reliability properties - is owned once by the
-`afk` skill and is IDENTICAL in quiet mode; nothing here restates it.
-The only things quiet mode changes are which mode the flag declares and what
-exits it.
+The `afk` skill owns the daemon's injection, busy/composer guards, and reliability properties; quiet mode uses that machinery while the captain remains present.
+For captain-held rechecks under quiet, see [architecture](../../../docs/architecture.md).
 
 ## What it does
 
@@ -36,19 +33,15 @@ exits it.
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
    does, with `FM_AFK_MODE=quiet` set first.**
    Follow the `afk` skill's record entry, daemon launch, and announcement steps,
-   except that on an opted-in host home its `/afk` no-daemon rule does not apply
+   except that on a home that runs the supervision host its `/afk` no-daemon rule does not apply
    after `quiet-check` exits 1. Never arm a separate `fm-watch.sh`. Export
    `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh enter`
    and `start` (or `start-native`), so the record notes quiet mode and
    `state/.afk`'s first line reads `quiet` instead of `away`.
-   On a home with `config/supervision-host`, launch the daemon on the path
+   On a home that runs the supervision host, launch the daemon on the path
    this harness uses without the host; `start` and `start-native` take quiet
    mode from the record `enter` wrote.
-   Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
-   daemon is also correct and does nothing wrong: `fm_afk_flag_write`
-   preserves the on-disk mode when no explicit mode is given, so a plain
-   `/afk`-shaped refresh call never resets quiet back to away underneath the
-   captain.
+   Keep `FM_AFK_MODE=quiet` on a quiet refresh: an `/afk` entry, even without new words, replaces a quiet record with an away record and starts hold-for-return.
 
 2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
    active; I will batch routine updates and surface only decisions, failures,
@@ -76,10 +69,12 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 ## Orthogonal to approval authority
 
-Identical to `/afk`: quiet mode changes how aggressively firstmate surfaces
-things, never who approves what.
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and
-a needs-decision finding keeps the `ask-user-authority` policy.
+Quiet mode changes how aggressively firstmate surfaces things, never who approves what.
+A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy.
+
+The captain is present, so quiet mode holds nothing for a return.
+The record a quiet entry writes carries quiet mode (`bin/fm-afk-contract.sh mode`), and its entry, read-back, and session-start lines say so.
+Every action the captain asks for or standing authority covers - landing local-only work, a merge, a dispatch - proceeds now exactly as it would without quiet mode; the `afk` skill's away holds never apply to a quiet record.
 
 ## Must not hide a decision or a failure
 
