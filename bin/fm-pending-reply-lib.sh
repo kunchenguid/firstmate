@@ -1546,6 +1546,12 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   for rec in ${selected[@]+"${selected[@]}"}; do
+    # A record whose host is unreachable costs this loop an ssh timeout, and the
+    # loop has no bound of its own, so report progress per selected record.
+    # Reported at the top so every path through the body - including each early
+    # continue - bounds the gap to one record. fm_classify_progress owns the
+    # contract.
+    fm_classify_progress
     corr=$(fm_pending_reply_get "$rec" corr_id)
     [ -n "$corr" ] || corr=$(basename "$rec")
     task_id=$(fm_pending_reply_get "$rec" task_id)

@@ -32,6 +32,9 @@
 #  17. Recovery and escalation grace are measured from the relevant turn's
 #      completion, never from delivery or send time, and each takes one fresh,
 #      uncached status read - accepting any verb - immediately before firing
+#  18. The tick reports progress once per selected record, including records
+#      that leave its loop early, so an unreachable host cannot age the
+#      watcher's beacon
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1478,6 +1481,58 @@ test_tick_leaves_settled_records_alone() {
   pass "the tick leaves settled records alone and still does the selected records' work"
 }
 
+# A record whose host is unreachable costs the tick an ssh timeout, and the
+# watcher judges its own liveness by elapsed time, so the tick must report
+# progress once per selected record rather than once per call. Three of the four
+# selected records here leave the loop body early through different continues -
+# resolved with an escalation still open, undelivered, and escalated with no
+# resolvable reply - and only the open one runs the whole body. A fifth, settled
+# record is left out by selection and must cost no report. An exact count of
+# four fails when the report is removed, when it is moved below any of those
+# continues, and when it is moved ahead of selection.
+test_tick_reports_progress_once_per_record() {
+  (
+    local home state progress_log open resolved settled undelivered escalated rec count
+    home=$(setup_parent tick-progress)
+    state="$home/state"
+    progress_log="$home/progress.log"
+    : > "$progress_log"
+    # This fixture clock is intentionally scoped to the isolated subshell.
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10100
+    open=$(fm_pending_reply_create "$home" "$state" hibit "open request")
+    fm_pending_reply_mark_delivered "$state" "$open"
+    resolved=$(fm_pending_reply_create "$home" "$state" resolved "resolved request")
+    fm_pending_reply_mark_delivered "$state" "$resolved"
+    printf 'done [corr=%s]: complete\n' "$resolved" > "$state/resolved.status"
+    fm_pending_reply_try_resolve "$state" "$resolved" || fail "resolved fixture should resolve"
+    fm_pending_reply_set "$(fm_pending_reply_path "$state" "$resolved")" escalated_epoch 10050 \
+      || fail "resolved fixture should carry an open escalation"
+    settled=$(fm_pending_reply_create "$home" "$state" settled "settled request")
+    fm_pending_reply_mark_delivered "$state" "$settled"
+    printf 'done [corr=%s]: complete\n' "$settled" > "$state/settled.status"
+    fm_pending_reply_try_resolve "$state" "$settled" || fail "settled fixture should resolve"
+    undelivered=$(fm_pending_reply_create "$home" "$state" undelivered "undelivered request")
+    escalated=$(fm_pending_reply_create "$home" "$state" escalated "escalated request")
+    fm_pending_reply_mark_delivered "$state" "$escalated"
+    rec=$(fm_pending_reply_path "$state" "$escalated")
+    fm_pending_reply_set "$rec" phase escalated || fail "escalated fixture should transition"
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    [ "$(phase_of "$state" "$resolved")" = resolved ] || fail "resolved fixture is not resolved"
+    [ -z "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$undelivered")" delivered_epoch)" ] \
+      || fail "undelivered fixture carries a delivery time"
+    # Runtime override called indirectly by the pending-reply tick.
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'busy'; }
+    FM_CLASSIFY_PROGRESS_HOOK="printf 'tick\n' >> $(printf '%q' "$progress_log")"
+    fm_pending_reply_tick "$state"
+    count=$(grep -c '^tick$' "$progress_log" || true)
+    [ "$count" -eq 4 ] \
+      || fail "the pending-reply tick reported progress $count times over four selected records, three of which leave the loop early, and one settled record; it must report once per selected record"
+  ) || fail "pending-reply per-record progress regression failed"
+  pass "the pending-reply tick reports progress once per selected record, including records that leave the loop early"
+}
+
 test_correlations_reuse_only_for_matching_open_task() {
   local dir fb log home state got corr1 corr2 corr3 rec
   dir="$TMP_ROOT/corr-reuse"; mkdir -p "$dir"
@@ -2028,6 +2083,7 @@ test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
 test_tick_leaves_settled_records_alone
+test_tick_reports_progress_once_per_record
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation
