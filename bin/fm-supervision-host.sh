@@ -54,8 +54,10 @@
 #     before the close is printed, so supervision continues when the session
 #     drops the handoff. It confirms no handling handoff, so the recovery
 #     marker still reads downtime and the re-arm owner delivers the close to
-#     main. The watcher singleton lock makes the session's next arm attach to
-#     that cycle instead of starting a second one;
+#     main. The host records that successor's arm, and the session's next
+#     park takes its cycle over (bin/fm-watch-arm.sh --take-over) instead of
+#     attaching to it, so the arm left behind for main's turn never outlives
+#     that turn as a second owner;
 #   - away (an away record exists): every close goes to the engine.
 # Every turn that starts attended meets that rule again at its start, so a
 # close accepted away whose turn starts attended (the captain returned in
@@ -132,7 +134,9 @@
 # left running (recorded with identities, never by name), including the
 # engine descendants its turn recorded, removes that turn's files, and
 # releases the branch actor's leases; it releases them again after every
-# engine turn.
+# engine turn. It also consumes the record of a successor a pass-through left
+# for main, and while that arm still runs under its recorded identity, the
+# first cycle takes its cycle over rather than attaching to it.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
@@ -141,7 +145,8 @@
 # report scope and the reports it recorded), .supervision-host-prompt and
 # .supervision-host-wake (the prompt and wake text of the current turn),
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
-# rendered),
+# rendered), .supervision-host-left (the pid and identity of the successor arm a
+# pass-through left running for main, until the next host takes it over),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
 # ledger of where every close went, with each engine turn's usage and
@@ -231,6 +236,7 @@ HOST_LOG="$STATE/.supervision-host.log"
 ENGINE_PID_FILE="$STATE/.supervision-host.engine-pid"
 HEALTH_FILE="$STATE/.supervision-host-health"
 MIRROR_FEED="$STATE/.supervision-host-mirror"
+LEFT_RECORD="$STATE/.supervision-host-left"
 
 HOST_PID=$$
 HOST_STARTED_SECONDS=$SECONDS
@@ -252,6 +258,9 @@ ENGINE_SUBSHELL=
 SUCCESSOR_PID=
 SUCCESSOR_OUT=
 ENGINE_RUNNING=0
+# The successor arm a predecessor's pass-through left for main, which the
+# first cycle takes over.
+LEFT_ARM=
 # The running turn's result and diagnostics files, removed by the cleanup when
 # the host is stopped mid-turn.
 TURN_RESULT=
@@ -362,6 +371,16 @@ activate() {
   done
   rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
     "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$TURN_FILE" "$MIRROR_FEED" 2>/dev/null || true
+  # The successor a pass-through left for main: the first cycle takes it over
+  # only while it still answers to its recorded identity.
+  if [ -f "$LEFT_RECORD" ]; then
+    pid='' identity=''
+    IFS="$(printf '\t')" read -r pid identity < "$LEFT_RECORD" || true
+    rm -f "$LEFT_RECORD"
+    if fm_pid_alive "$pid" && [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ]; then
+      LEFT_ARM=$pid
+    fi
+  fi
   printf 'host\t%s\t%s\n' "$HOST_PID" "$(identity_of "$HOST_PID")" > "$HOST_RECORD" || return 1
   release_branch_leases
 }
@@ -637,15 +656,16 @@ start_successor() {  # <predecessor-arm-pid>
   done
 }
 
-# Drop the successor from this host's cleanup without stopping it. The shell
-# signals background jobs when it exits, and this arm's handler would then
-# stop the watcher, so disown it first. The capture file stays tracked so the
-# EXIT trap unlinks it; the arm already holds that descriptor and keeps
-# waiting on the watcher.
+# Drop the successor from this host's cleanup without stopping it, and record
+# it for the next host to take over. The shell signals background jobs when it
+# exits, and this arm's handler would then stop the watcher, so disown it
+# first. The capture file stays tracked so the EXIT trap unlinks it; the arm
+# already holds that descriptor and keeps waiting on the watcher.
 detach_successor() {
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
   disown "$SUCCESSOR_PID" 2>/dev/null || true
   forget_process "$SUCCESSOR_PID"
+  printf '%s\t%s\n' "$SUCCESSOR_PID" "$(identity_of "$SUCCESSOR_PID")" > "$LEFT_RECORD" 2>/dev/null || true
   SUCCESSOR_PID=
 }
 
@@ -1008,6 +1028,9 @@ log_line "start	gen=$GEN	primary=$PRIMARY"
 # The first cycle.
 if [ "$FIRST_ARM_RESTART" -eq 1 ]; then
   start_arm "$OWNER_PREDECESSOR" --restart
+elif [ -n "$LEFT_ARM" ]; then
+  log_line "take-over	arm=$LEFT_ARM"
+  start_arm "$OWNER_PREDECESSOR" --take-over "$LEFT_ARM"
 else
   start_arm "$OWNER_PREDECESSOR"
 fi || { echo "watcher: FAILED - the supervision host could not start a watcher cycle"; exit 1; }

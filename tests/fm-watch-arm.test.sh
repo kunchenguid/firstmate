@@ -1111,6 +1111,88 @@ test_stop_ends_the_home_watcher_and_publishes_downtime() {
   pass "watch-arm: --stop ends only this home's watcher, publishes downtime, and reports when none runs"
 }
 
+# --take-over stops only a watcher that the named arm itself owns. The seed
+# watcher here is this shell's child, so naming any other process leaves it
+# running and the arm attaches to it exactly as a plain arm does.
+test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own() {
+  local dir state fakebin armout other status
+  dir=$(make_case take-over-not-owner)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  FM_HOME="$dir" start_seed_watcher "$state" "$fakebin" "$dir/watch.out"
+  sleep 60 &
+  other=$!
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --take-over 2>/dev/null
+  status=$?
+  expect_code 2 "$status" "--take-over without an arm pid must be refused"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_ARM_ATTACH_POLL=0.1 \
+    "$WATCH_ARM" --take-over "$other" > "$armout" &
+  ARM_PID=$!
+  wait_for_file_text "$armout" "watcher: attached pid=$SEED_PID" \
+    || fail "--take-over of a cycle the named arm does not own did not attach: $(cat "$armout")"
+  sleep 1
+  is_live_non_zombie "$SEED_PID" || fail "--take-over stopped a watcher the named arm does not own"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" = "$SEED_PID" ] || fail "--take-over moved a lock it does not own"
+  kill -TERM "$ARM_PID" "$SEED_PID" "$other" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+  wait_for_exit "$SEED_PID" 50 >/dev/null 2>&1 || true
+  wait "$other" 2>/dev/null || true
+  pass "watch-arm: --take-over attaches to a cycle the named arm does not own and leaves it running"
+}
+
+# --take-over of a cycle the named arm owns (the seed watcher is this shell's
+# child, as a successor left for main is its arm's child) stops that watcher
+# and owns a fresh cycle. The stop must not open a recovery over an episode
+# main already acknowledged, and must not hide work still queued.
+test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing() {
+  local dir state fakebin armout status
+  dir=$(make_case take-over-owner)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+
+  # Main acknowledged everything: the fresh cycle stays quiet.
+  FM_HOME="$dir" FM_WATCH_HANDLING_SUCCESSOR=1 start_seed_watcher "$state" "$fakebin" "$dir/watch.out" 1
+  append_wake "$state" signal take-over "signal: fixture handled by main"
+  ack_wakes "$state" >/dev/null || fail "fixture: main could not acknowledge the handled wake"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in acked:*) ;; *) fail "fixture: the episode was not acknowledged" ;; esac
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" --take-over "$$" > "$armout" &
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "--take-over did not own a fresh cycle: $(cat "$armout")"
+  wait_for_exit "$SEED_PID" 50 >/dev/null 2>&1 || true
+  ! is_live_non_zombie "$SEED_PID" || fail "--take-over left the watcher it took over running"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null)" != "$SEED_PID" ] || fail "--take-over did not take the lock"
+  sleep 3
+  is_live_non_zombie "$ARM_PID" || fail "the taken-over cycle closed with no new work: $(cat "$armout")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null)" in
+    acked:*) ;;
+    *) fail "the takeover opened a downtime episode: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  grep -q 'reason=taken-over	.*successor=started:' "$state/.watch-cycle-exits.log" \
+    || fail "the lifecycle ledger does not link the taken-over cycle to the one it started: $(cat "$state/.watch-cycle-exits.log")"
+  kill -TERM "$ARM_PID" 2>/dev/null || true
+  wait_for_exit "$ARM_PID" 50 >/dev/null 2>&1 || true
+
+  # A wake still queued for main resurfaces from the cycle the arm took over.
+  FM_HOME="$dir" FM_WATCH_HANDLING_SUCCESSOR=1 start_seed_watcher "$state" "$fakebin" "$dir/watch2.out" 1
+  append_wake "$state" signal take-over "signal: fixture still queued for main"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" "$WATCH_ARM" --take-over "$$" > "$armout" &
+  ARM_PID=$!
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS"
+  status=$?
+  expect_code 0 "$status" "a takeover that resurfaces queued work closes cleanly"
+  grep -q '^check: rearm-resurface' "$armout" \
+    || fail "work queued for main did not resurface after the takeover: $(cat "$armout")"
+  ! is_live_non_zombie "$SEED_PID" || fail "--take-over left the second watcher running"
+  pass "watch-arm: --take-over owns a fresh cycle without a recovery wake and still surfaces queued work"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -1342,3 +1424,5 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
+test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
+test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing

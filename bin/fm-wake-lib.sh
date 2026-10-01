@@ -971,9 +971,64 @@ _fm_recovery_marker_reopen_announced() {
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 }
 
+# The handover rule for a watcher stopped by bin/fm-watch-arm.sh --take-over
+# (docs/watcher-continuity.md "Generation reuse" owns it). The snapshot reads
+# the marker token and the queue's append sequence under both locks before the
+# stop; handover-restore puts an acknowledged token back only while that
+# sequence is unchanged and the marker reads the fresh pending downtime the
+# stopped watcher's own close published.
+FM_RECOVERY_HANDOVER_TOKEN=
+FM_RECOVERY_HANDOVER_SEQ=
+fm_recovery_marker_handover_snapshot() {  # <marker>
+  local marker=$1 lock
+  FM_RECOVERY_HANDOVER_TOKEN=
+  FM_RECOVERY_HANDOVER_SEQ=
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if ! fm_lock_acquire_wait "$lock"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  if fm_recovery_marker_read "$marker"; then
+    # shellcheck disable=SC2034 # Read by callers after this function returns.
+    FM_RECOVERY_HANDOVER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+  fi
+  # shellcheck disable=SC2034 # Read by callers after this function returns.
+  FM_RECOVERY_HANDOVER_SEQ=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
+  fm_lock_release "$lock"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+_fm_recovery_marker_handover_restore() {
+  local marker=$1 token=$2 seq=$3 lock status=0
+  case "$token" in acked:*) ;; *) return 0 ;; esac
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if ! fm_lock_acquire_wait "$lock"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  if [ "$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)" = "$seq" ] \
+    && fm_recovery_marker_read "$marker"; then
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*)
+        if [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "${token##*:}" ]; then
+          _fm_recovery_marker_restore_token_locked "$marker" "$token" || status=1
+        fi
+        ;;
+    esac
+  fi
+  fm_lock_release "$lock"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
 fm_recovery_transition() {
   local marker=$1 action=$2 target=${3:-} value=${4:-} bound=${5:-}
   case "$action" in
+    handover-restore)
+      _fm_recovery_marker_handover_restore "$marker" "$target" "$value"
+      ;;
     publish)
       _fm_recovery_marker_publish "$marker" "${target:-downtime}" "$bound"
       ;;
@@ -1033,6 +1088,10 @@ fm_recovery_marker_arm_check() {
 
 fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
+}
+
+fm_recovery_marker_handover_restore() {  # <marker> <snapshot-token> <snapshot-seq>
+  fm_recovery_transition "$1" handover-restore "$2" "$3"
 }
 
 # fm_lock_reap_dead_link <lockdir>
