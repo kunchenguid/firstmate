@@ -4,7 +4,7 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
+# A fake quota-axi serves the selected snapshot fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
 set -u
