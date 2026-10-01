@@ -162,6 +162,11 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "{\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"reviewDecision\":\"APPROVED\"}"
         exit 0
         ;;
+      *"--json headRefName"*)
+        [ "${FM_TEST_GH_HEADREF_FAIL:-0}" = 0 ] || exit 1
+        printf '%s\n' "${FM_TEST_GH_HEADREF:-fm/task-a}"
+        exit 0
+        ;;
     esac
     ;;
   "pr merge")
@@ -189,6 +194,9 @@ case " $* " in
     ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
+    ;;
+  *" api repos/"*"--jq .default_branch"*)
+    printf '%s\n' "${FM_TEST_GH_DEFAULT_BRANCH:-main}"
     ;;
   *" api repos/"*)
     printf '%s\n' '{"permissions":{"push":false}}'
@@ -805,7 +813,7 @@ test_valid_recording_and_merge_derivation() {
 
   dir=$(make_case lifecycle-compatible-id)
   write_task_meta "$dir" Task_A.1
-  run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
+  FM_TEST_GH_HEADREF=fm/Task_A.1 run_merge_entry "$dir" Task_A.1 https://github.com/o/r/pull/3 \
     > "$dir/stdout" 2> "$dir/stderr" \
     || fail "safe lifecycle-compatible task ID could not use the PR merge flow"
   fm_pr_poll_artifacts_valid "$dir/home/state" Task_A.1 "$POLL" \
@@ -854,7 +862,7 @@ SH
       --carry-count 0 --carry-ts 1700000000 --carry-platform x --carry-max 280 \
       > "$dir/x-link.out" 2> "$dir/x-link.err" \
       || fail "path-safe legacy task ID could not link an X request"
-    run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
+    FM_TEST_GH_HEADREF="fm/$id" run_merge_entry "$dir" "$id" https://github.com/o/r/pull/4 \
       > "$dir/merge.out" 2> "$dir/merge.err" \
       || fail "path-safe legacy task ID could not use the PR merge flow"
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
@@ -886,6 +894,66 @@ run_watcher_bounded() {
     "${FM_TEST_WATCH_BOUND_PAUSE:-}" env "${check_timeout_env[@]}" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
+}
+
+# A PR opened directly on the forge, outside this task's own worker, names a
+# branch other than the task's own - the PRs opened for #715/#716/#719/#720
+# landed this way, with no task at all, and one later adoption wrote pr=723
+# onto the unrelated task lloegrys-release-123 (retro 30/09). Recording such a
+# PR must refuse by default rather than silently bind the task to work it
+# never produced.
+test_foreign_branch_pr_refuses_without_adopt_external() {
+  local dir rc
+  dir=$(make_case foreign-branch-refuses)
+  write_task_meta "$dir"
+
+  set +e
+  FM_TEST_GH_HEADREF=someone-elses-branch \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/723 \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "foreign-branch-refuses: a PR on a foreign branch was recorded without --adopt-external"
+  assert_grep "task-a's own branch fm/task-a" "$dir/stderr" \
+    "foreign-branch-refuses: the refusal did not name the task's own branch"
+  assert_no_grep '^pr=' "$dir/home/state/task-a.meta" \
+    "foreign-branch-refuses: pr= was recorded despite the branch mismatch"
+  pass "fm-pr-check refuses to bind a task to a PR on another branch without --adopt-external"
+}
+
+# The same foreign-branch PR is accepted once the caller explicitly adopts it,
+# the one path meant for a PR opened outside the fleet.
+test_foreign_branch_pr_accepted_with_adopt_external() {
+  local dir
+  dir=$(make_case foreign-branch-adopted)
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEADREF=someone-elses-branch \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/723 --adopt-external \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "foreign-branch-adopted: --adopt-external did not record a confirmed foreign-branch PR: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://github.com/o/r/pull/723' "$dir/home/state/task-a.meta" \
+    || fail "foreign-branch-adopted: --adopt-external did not record pr="
+  pass "fm-pr-check accepts --adopt-external for a confirmed foreign-branch PR"
+}
+
+# A PR on the task's own branch (the ordinary case) is unaffected by the
+# branch guard, with or without --adopt-external even specified.
+test_own_branch_pr_is_unaffected_by_the_branch_guard() {
+  local dir
+  dir=$(make_case own-branch-unaffected)
+  write_task_meta "$dir"
+
+  FM_TEST_GH_HEADREF=fm/task-a \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/9 \
+    > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "own-branch-unaffected: a PR on the task's own branch was refused: $(cat "$dir/stderr")"
+
+  grep -qxF 'pr=https://github.com/o/r/pull/9' "$dir/home/state/task-a.meta" \
+    || fail "own-branch-unaffected: pr= was not recorded for a same-branch PR"
+  pass "fm-pr-check's branch guard never fires for a PR already on the task's own branch"
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
@@ -1047,7 +1115,7 @@ sleep 0.3
 SH
     chmod +x "$dir/fakebin/cp"
 
-    FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 FM_TEST_GH_HEADREF="fm/$id" \
       run_check_entry "$dir" "$id" https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
     direct_pid=$!
     i=0
@@ -3468,6 +3536,9 @@ test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
 test_unpushed_named_head_refuses_registration
 test_direct_pr_unpushed_commit_refuses_registration
+test_foreign_branch_pr_refuses_without_adopt_external
+test_foreign_branch_pr_accepted_with_adopt_external
+test_own_branch_pr_is_unaffected_by_the_branch_guard
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

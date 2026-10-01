@@ -1941,6 +1941,17 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
 # 0 when a status line is an informational `note:` or a reserved-key
 # pending-reply resolution. Those lines never fold into OPEN DECISIONS, so the
 # drain's unread-status surface is their only guaranteed presentation.
+# A needs-decision/blocked line whose stated "[key=...]" token fails the slug
+# charset is the same case: the fold rejects it outright (comment above
+# _fm_decision_key) rather than rewriting it into the shared default bucket,
+# so a captain call written with a malformed key - most commonly a worker
+# gluing its "[key=x]" to a time tag with no separating space, "[key=x
+# at=1700000000]", one bracket read as a single slug - would otherwise vanish
+# with no OPEN DECISIONS entry and, once a later routine line buries it, no
+# backstop either (retro 30/09). Surfacing the raw line here is a visible
+# warning in its place; firstmate still cannot answer it by key because the
+# fold never opened one, so the worker's status line is the whole fix: resend
+# with a well-formed "[key=<slug>]" (A-Za-z0-9._- only).
 status_line_is_unread_surface() {  # <status-line>
   local line=$1 verb key note resolve held prefix
   [ -n "$line" ] || return 1
@@ -1949,6 +1960,10 @@ status_line_is_unread_surface() {  # <status-line>
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   case "$verb" in
+    needs-decision|blocked)
+      _fm_decision_key "$line" >/dev/null 2>&1 && return 1
+      return 0
+      ;;
     "$resolve"|"$held") ;;
     *) return 1 ;;
   esac

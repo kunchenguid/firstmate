@@ -178,6 +178,35 @@ test_status_symlink_is_not_followed() {
   pass "the fleet-wide decision scan does not follow status symlinks"
 }
 
+# A worker that glues its stated key to a time tag with no separating space -
+# "[key=api-shape at=1700000000]", one bracket read as a single slug - fails
+# the slug charset the fold enforces (bin/fm-classify-lib.sh's
+# _fm_decision_slug_ok). That must never make the whole captain call vanish:
+# before this fix the fold silently skipped the line, so once a later routine
+# line buried it there was no OPEN DECISIONS entry and no outcome backstop
+# either (retro 30/09). It now surfaces as UNREAD STATUS instead, naming the
+# exact malformed line so a human can see the captain call exists and resend
+# it with a well-formed key.
+test_malformed_key_warns_instead_of_vanishing() {
+  local dir state out
+  dir=$(make_case malformed-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'needs-decision [key=api-shape at=1700000000]: pick REST or RPC\n' > "$state/task10.status"
+  printf 'working: continuing other stuff\n' >> "$state/task10.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a malformed decision key"
+
+  if grep -F 'OPEN DECISIONS' "$out" >/dev/null; then
+    fail "a malformed key must not open a durable decision under any bucket: $(cat "$out")"
+  fi
+  grep -F 'UNREAD STATUS' "$out" >/dev/null \
+    || fail "a malformed-key needs-decision produced no warning at all: $(cat "$out")"
+  grep -F 'task10' "$out" | grep -F 'pick REST or RPC' >/dev/null \
+    || fail "the warning did not name the buried malformed-key line: $(cat "$out")"
+  pass "a needs-decision with a malformed stated key warns instead of silently vanishing"
+}
+
 # The per-item cut now comes from bin/fm-line-cap-lib.sh, shared with the
 # session-start digest's status tails so one truncation marker means the same
 # thing wherever an agent meets it. This pins the drain's own end of that
@@ -224,3 +253,4 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+test_malformed_key_warns_instead_of_vanishing

@@ -232,6 +232,16 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/commits/"*"/check-runs"*|*" repos/"*"/rules/branches/"*|*" repos/"*"/branches/"*) ;;
+      *" repos/"*)
+        if [ -f "${FM_TEST_GH_REPO_FAIL:-}" ]; then
+          exit 1
+        fi
+        printf '%s\n' "${FM_TEST_GH_DEFAULT_BRANCH:-main}"
+        exit 0
+        ;;
+    esac
+    case " $* " in
       *" repos/"*"/commits/"*"/check-runs"*)
         case "$*" in
           *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
@@ -559,6 +569,88 @@ test_merge_failure_propagates_after_recording() {
   assert_grep 'pr=https://github.com/example/repo/pull/13' "$case_dir/state/task-x1.meta" \
     "merge-fails: pr= should already be recorded even though the merge itself failed"
   pass "fm-pr-merge propagates a real merge failure without silently succeeding"
+}
+
+# PR #716 stacked on #715 - its branch opened against #715's still-open
+# branch - was merged into that branch after #715 had already merged and its
+# branch stayed around; fm-pr-merge.sh never confirmed the live base was the
+# repository's default branch (retro 30/09). A base that is not the default
+# branch, and that the caller did not declare as a genuine stack, now refuses.
+test_github_non_default_base_refuses_without_declared_stack() {
+  local case_dir rc
+  case_dir=$(make_case github-stacked-base-refuses)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/github-view.json" <<'JSON'
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1010101010101010101010101010101010101010","baseRefName":"fm/fm-715-already-merged","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+JSON
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/716 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stacked-base-refuses: a non-default base with no declared stack should refuse"
+  assert_grep "not the repository's default branch main" "$case_dir/stderr" \
+    "github-stacked-base-refuses: the refusal did not name the live base and the repository default"
+  assert_no_grep 'verified: ' "$case_dir/stdout" \
+    "github-stacked-base-refuses: an undeclared stacked base was reported as verified"
+  if [ -f "$case_dir/gh.log" ] && grep -F 'pr merge' "$case_dir/gh.log" >/dev/null; then
+    fail "github-stacked-base-refuses: the forge merge command ran despite the base refusal"
+  fi
+  pass "fm-pr-merge refuses a merge whose base is not the default branch and was not declared a stack"
+}
+
+# The same stacked base is accepted once the caller names it explicitly with
+# --stack-base, the way firstmate merges a declared PR stack bottom to top.
+test_github_declared_stack_base_is_accepted() {
+  local case_dir rc
+  case_dir=$(make_case github-stacked-base-declared)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/github-view.json" <<'JSON'
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1010101010101010101010101010101010101010","baseRefName":"fm/fm-715-still-open","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+JSON
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/716 \
+    --stack-base fm/fm-715-still-open \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "github-stacked-base-declared: a declared stack base should merge"
+  assert_grep 'verified: https://github.com/example/repo/pull/716 is merged' \
+    "$case_dir/stdout" "github-stacked-base-declared: a declared stack base was not accepted"
+  pass "fm-pr-merge accepts a non-default base when the caller declares it with --stack-base"
+}
+
+# A mismatched --stack-base - naming a different branch than the PR's live
+# base - must not become a blanket bypass of the default-branch check.
+test_github_declared_stack_base_must_match_live_base() {
+  local case_dir rc
+  case_dir=$(make_case github-stacked-base-mismatch)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 1010101010101010101010101010101010101010
+  : > "$case_dir/gh-axi.log"
+  cat > "$case_dir/github-view.json" <<'JSON'
+{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1010101010101010101010101010101010101010","baseRefName":"fm/fm-715-still-open","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}
+JSON
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/716 \
+    --stack-base fm/fm-999-wrong \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-stacked-base-mismatch: a declared base that does not match the live base should still refuse"
+  assert_grep "not the repository's default branch main" "$case_dir/stderr" \
+    "github-stacked-base-mismatch: a mismatched --stack-base silently bypassed the check"
+  pass "fm-pr-merge's --stack-base only accepts the exact live base it names"
 }
 
 test_github_merged_outcome_is_verified() {
@@ -2242,6 +2334,9 @@ test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
 test_github_without_gh_failed_read_keeps_bookkeeping
+test_github_non_default_base_refuses_without_declared_stack
+test_github_declared_stack_base_is_accepted
+test_github_declared_stack_base_must_match_live_base
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording
 test_github_queued_outcome_is_verified

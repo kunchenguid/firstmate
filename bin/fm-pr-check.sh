@@ -17,7 +17,12 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
-# Usage: fm-pr-check.sh <task-id> <pr-url>
+# Usage: fm-pr-check.sh <task-id> <pr-url> [--adopt-external]
+# --adopt-external binds a task to a PR whose live branch differs from the
+# task's own recorded branch, after confirming that branch disagreement from
+# the forge; without it, a branch mismatch refuses rather than silently binding
+# the task to a PR it did not open (retro 30/09: PRs opened directly by gh
+# outside any task, later bound to the wrong task's pr=).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,10 +39,15 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 
-if [ "$#" -ne 2 ]; then
-  echo "error: invalid PR check request" >&2
-  exit 2
-fi
+ADOPT_EXTERNAL=0
+case "${3:-}" in
+  --adopt-external)
+    [ "$#" -eq 3 ] || { echo "error: invalid PR check request" >&2; exit 2; }
+    ADOPT_EXTERNAL=1
+    ;;
+  '') [ "$#" -eq 2 ] || { echo "error: invalid PR check request" >&2; exit 2; } ;;
+  *) echo "error: invalid PR check request" >&2; exit 2 ;;
+esac
 ID=$1
 RAW_URL=$2
 if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
@@ -130,6 +140,35 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
+  fi
+fi
+
+# A PR opened directly on the forge (gh pr create, outside this task's own
+# worker) names some other task's branch nowhere, so nothing before this
+# point refused it, and the next step would bind this task's own pr= to a
+# change this task never produced - the PRs opened for #715/#716/#719/#720
+# landed by direct gh merge with no task at all, and one adoption later wrote
+# pr=723 onto the unrelated task lloegrys-release-123 (retro 30/09). Refuse an
+# existing recorded task whose own branch disagrees with the PR's branch,
+# unless the caller explicitly adopts it with --adopt-external - the one
+# path meant for exactly this case, which still requires the live PR's
+# headRefName to equal this task's own recorded branch (default fm/<id> when
+# none was recorded), so --adopt-external cannot bind a task to a stranger's
+# branch either.
+RECORDED_BRANCH=$(grep '^branch=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$RECORDED_BRANCH" ] || RECORDED_BRANCH="fm/$ID"
+if [ "$PROVIDER" = github ] && command -v gh >/dev/null 2>&1; then
+  if PR_HEAD_REF=$(gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) \
+    && [ -n "$PR_HEAD_REF" ]; then
+    if [ "$PR_HEAD_REF" != "$RECORDED_BRANCH" ]; then
+      if [ "$ADOPT_EXTERNAL" != 1 ]; then
+        echo "error: $URL's branch is $PR_HEAD_REF, not $ID's own branch $RECORDED_BRANCH; this looks like a PR opened outside this task - pass --adopt-external to bind $ID to it anyway only if $PR_HEAD_REF really is this task's work" >&2
+        exit 1
+      fi
+    fi
+  elif [ "$ADOPT_EXTERNAL" = 1 ]; then
+    echo "error: --adopt-external requires reading $URL's branch from the forge to confirm it against $ID's own branch $RECORDED_BRANCH, and that read failed" >&2
+    exit 1
   fi
 fi
 

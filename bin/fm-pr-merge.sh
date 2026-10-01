@@ -186,6 +186,7 @@ shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
 ALLOW_MISSING=()
+STACK_BASE=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -216,6 +217,16 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-missing requires a separate check name argument" >&2
       exit 2
       ;;
+    --stack-base)
+      [ -n "${2:-}" ] || { echo "error: --stack-base requires the exact base branch name" >&2; exit 2; }
+      [ -z "$STACK_BASE" ] || { echo "error: --stack-base may be specified only once" >&2; exit 2; }
+      STACK_BASE=$2
+      shift 2
+      ;;
+    --stack-base=*)
+      echo "error: --stack-base requires a separate branch name argument" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -226,6 +237,10 @@ if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
 fi
 if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ -n "$STACK_BASE" ] && [ "$PROVIDER" = gitlab ]; then
+  echo "error: --stack-base does not apply to GitLab, where the base-branch guard below is GitHub-only" >&2
   exit 2
 fi
 
@@ -709,7 +724,7 @@ github_required_checks_missing() {
 github_verify_mergeable() {
   local json fields line red name covered missing unreported producers runs
   local total=0 named=0 refusals=''
-  local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local state='' draft='' mergeable='' merge_state='' live_head='' base='' default_branch=''
 
   if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
@@ -746,6 +761,28 @@ FIELDS
   if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
+  fi
+
+  # A pull request stacked on another PR's still-open branch inherits that
+  # branch as its base; once the lower PR merges and its branch is deleted,
+  # a merge here would land this PR's commits onto a ref that no longer
+  # carries the default branch's history, as a now-integrated base branch
+  # that happened to still exist did for PR #716 stacked on #715 (retro
+  # 30/09). Refuse unless the live base is the repository's current default
+  # branch, or the caller declared this exact base through --stack-base for
+  # a genuine still-open stack.
+  if [ "$base" = "$STACK_BASE" ]; then
+    : # declared stack: this exact base was named explicitly, so it is accepted
+      # without reading the default branch at all.
+  else
+    if ! default_branch=$(gh api "repos/$PR_OWNER/$PR_REPO" --jq '.default_branch' 2>/dev/null) \
+      || [ -z "$default_branch" ]; then
+      refusals="$refusals  - the repository's default branch could not be read, so base branch $base cannot be confirmed as it or as a declared stack
+"
+    elif [ "$base" != "$default_branch" ]; then
+      refusals="$refusals  - base branch is $base, not the repository's default branch $default_branch, and no --stack-base $base declared this as a genuine stack
+"
+    fi
   fi
 
   draft=$(fm_pr_json_draft_state "$json")
