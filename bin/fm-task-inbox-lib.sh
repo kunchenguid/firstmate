@@ -34,6 +34,7 @@
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
+#   execution_generation=<id> present when the writer has a bound executor
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #   handoff=<id>               present only for an idempotent cross-task handoff
 #   --
@@ -144,14 +145,17 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-id]
-  local dir=$1 text=$2 delivery_mode=${3:-} handoff_id=${4:-} seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-id] [execution-generation]
+  local dir=$1 text=$2 delivery_mode=${3:-} handoff_id=${4:-} execution_generation=${5:-} seq tmp rec status=0
+  case "$execution_generation" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#execution_generation}" -le 160 ] || return 1
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ -z "$execution_generation" ] || printf 'execution_generation=%s\n' "$execution_generation"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     [ -z "$handoff_id" ] || printf 'handoff=%s\n' "$handoff_id"
     printf -- '--\n'
@@ -196,8 +200,8 @@ _fm_task_inbox_find_handoff_locked() {  # <inbox-dir> <handoff-id>
 # A retry after lease ownership changes, sender restart, or completion loss
 # returns the original unhandled or handled record. Reusing an identity with a
 # different body is refused rather than silently collapsing distinct work.
-fm_task_inbox_write_handoff() {  # <state-dir> <task-id> <text> <handoff-id>
-  local state=$1 task=$2 text=$3 handoff_id=$4 dir lock rec want have status=0
+fm_task_inbox_write_handoff() {  # <state-dir> <task-id> <text> <handoff-id> [execution-generation]
+  local state=$1 task=$2 text=$3 handoff_id=$4 execution_generation=${5:-} dir lock rec want have status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -215,7 +219,7 @@ fm_task_inbox_write_handoff() {  # <state-dir> <task-id> <text> <handoff-id>
     fi
     rm -f "${want:-}" "${have:-}" 2>/dev/null || true
   else
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" '' "$handoff_id") || status=1
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" '' "$handoff_id" "$execution_generation") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return "$status"
@@ -224,13 +228,13 @@ fm_task_inbox_write_handoff() {  # <state-dir> <task-id> <text> <handoff-id>
 
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
-fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock rec status=0
+fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode] [execution-generation]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} dir lock rec status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
-  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" '' "$execution_generation") || status=1
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
   printf '%s' "$rec"
@@ -245,8 +249,8 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 # worker would act on twice. The local plane keeps plain fm_task_inbox_write:
 # its outcome is synchronous, so a repeated identical local steer is a
 # deliberate new instruction.
-fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
+fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [execution-generation]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} dir lock want have f rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -291,7 +295,7 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
     status=1
   fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" '' "$execution_generation") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1

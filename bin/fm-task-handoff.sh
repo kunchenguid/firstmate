@@ -359,10 +359,22 @@ _handoff_deliver_locked() {  # <id>
   # A delivered retry above is readback only, never another enqueue.
   # shellcheck source=bin/fm-task-lifecycle-lib.sh
   . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  local binding bound_effect
+  local binding bound_effect effect_rc
   binding=$(handoff_record_field "$record" lifecycle 2>/dev/null || true)
   if [ -n "$binding" ]; then
-    if ! fm_task_lifecycle_execution_guard "$target" || ! bound_effect=$(fm_task_lifecycle handoff-effect "$source" --target "$target" --record "$record"); then
+    if ! fm_task_lifecycle_execution_guard "$target"; then
+      handoff_release_meta "$meta_lock"
+      handoff_retryable_locked "$id" "bound handoff requires identity/authority reconciliation or effect readback"
+      return $?
+    fi
+    effect_rc=0
+    bound_effect=$(fm_task_lifecycle handoff-effect "$source" --target "$target" --record "$record") || effect_rc=$?
+    if [ "$effect_rc" -eq 7 ]; then
+      handoff_release_meta "$meta_lock"
+      handoff_reject_locked "$id" "its exact bound source is terminal; no delivery occurred and the retained instruction must not be retried"
+      return $?
+    fi
+    if [ "$effect_rc" -ne 0 ]; then
       handoff_release_meta "$meta_lock"
       handoff_retryable_locked "$id" "bound handoff requires identity/authority reconciliation or effect readback"
       return $?
@@ -383,7 +395,7 @@ _handoff_deliver_locked() {  # <id>
     handoff_retryable_locked "$id" "semantic stop or uncertain effect requires main reconciliation"
     return $?
   fi
-  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id") || write_rc=$?
+  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$(fm_meta_get "$meta" spawn_gen)") || write_rc=$?
   handoff_release_meta "$meta_lock"
   if [ "$write_rc" -eq 2 ]; then
     handoff_reject_locked "$id" "target inbox already contains handoff id '$id' with a different instruction"

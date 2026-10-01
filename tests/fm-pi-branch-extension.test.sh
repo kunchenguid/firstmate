@@ -105,7 +105,7 @@ TS
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
 JSON
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/index.js" <<'JS'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const VERSION = globalThis.__fmPiVersion ?? "0.87.1";
@@ -271,6 +271,13 @@ export class SessionManager {
   }
   getEntries() {
     return this.entries;
+  }
+  appendCustomEntry(customType, data) {
+    const entry = { type: "custom", id: `branch-entry-${this.entries.length}`, parentId: this.entries.at(-1)?.id ?? null,
+      timestamp: new Date().toISOString(), customType, data };
+    this.entries.push(entry);
+    appendFileSync(this.file, `${JSON.stringify(entry)}\n`);
+    return entry.id;
   }
   buildSessionContext() {
     const model = globalThis.__fmRecordedModels?.get(this.file) ?? null;
@@ -855,7 +862,7 @@ if (mainUserMessages.length !== 0) throw new Error("accepted wake leaked to main
 // generator-produced system prompt, no project resources, and the branch bash
 // carries the deterministic actor identity.
 const session = globalThis.__fmSessions[0];
-if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_branch_report"])) {
+if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
   throw new Error(`unexpected tool order: ${JSON.stringify(session.options.tools)}`);
 }
 const loader = globalThis.__fmLoaders[0];
@@ -3057,7 +3064,7 @@ const globalSettings = {
 writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, JSON.stringify(globalSettings));
 // The same observed startup state must restore the guarded bash independent
 // of release strings, while a package retaining it needs no adaptation.
-if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
+if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
 
 registryModels.push(
   { provider: "anthropic", id: "main-model", api: "anthropic-messages" },
@@ -3101,7 +3108,7 @@ const lifecycle = globalThis.__fmLifecycle ?? [];
 if (lifecycle.indexOf("compat-session-start") < 0 || lifecycle.indexOf("compat-session-start") > lifecycle.indexOf("prompt")) {
   throw new Error(`the branch prompted before compatibility initialization: ${JSON.stringify(lifecycle)}`);
 }
-if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_branch_report"])) {
+if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
   throw new Error(`compatibility startup escaped the branch tool allowlist: ${JSON.stringify(session.getActiveToolNames())}`);
 }
 if (JSON.stringify(globalThis.__fmPackageLookups) !== JSON.stringify([
@@ -3212,9 +3219,9 @@ if (mode.startsWith("wrong-")) {
     { metadata: { source: "npm:pi-openai-codex-compat", scope: "user", origin: "package",
       [mode.slice(6)]: "untrusted" } };
 }
-if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_branch_report", "exec_command"];
+if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report", "exec_command"];
 if (mode === "unrestorable-bash") {
-  globalThis.__fmCompatActiveTools = ["read", "fm_branch_report"];
+  globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
   globalThis.__fmRefuseToolRestore = true;
 }
 if (mode === "resolve") globalThis.__fmCompatResolveError = "synthetic resolver failure";
@@ -5983,6 +5990,7 @@ await offer.settlement.then(() => null, () => null);
 if (!reportResult?.isError || !reportResult.content[0].text.includes("invalidated this branch result")) {
   throw new Error(`expired delegation report was not refused: ${JSON.stringify(reportResult)}`);
 }
+
 if (outcomeScript(["list", "--recent", "50"]) !== "") {
   throw new Error("expired delegation report reached the durable outcome store");
 }
@@ -5992,6 +6000,58 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "an expired delegation must refuse its bound branch report: $out"
   pass "expired delegation refuses a bound branch report before storage"
+}
+
+test_branch_native_continuation_is_scoped_compact_and_material_only() {
+  local repo home out status
+  repo="$TMP_ROOT/native-continuation-root"; home="$TMP_ROOT/native-continuation-home"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
+const { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
+const { createHash } = await import("node:crypto");
+const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
+const { spawnSync } = await import("node:child_process");
+const entries=[], mainFile=`${home}/main.jsonl`;
+writeFileSync(mainFile,JSON.stringify({type:"session",version:3,id:"native-continuation"})+'\n');
+Object.assign(defaultSessionCtx,{isIdle:()=>true,hasPendingMessages:()=>false,hasUI:false,ui:{getEditorText:()=>""}});
+Object.assign(defaultSessionCtx.sessionManager,{getSessionId:()=>"native-continuation",getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries});
+pi.appendEntry=(customType,data)=>{const entry={type:"custom",id:`entry-${entries.length}`,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString(),customType,data};entries.push(entry);appendFileSync(mainFile,JSON.stringify(entry)+'\n');return entry.id;};
+(await import(`${realRoot}/.pi/extensions/fm-periodic-stow.ts`)).default(pi);
+const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});
+writeFileSync(`${home}/data/${task}/brief.md`,"Retain the unchanged goal and report only material evidence.\n");
+writeFileSync(`${home}/state/${task}.meta`,"spawn_gen=g1\nkind=ship\nexecutor=local-agent\n");
+writeFileSync(`${home}/data/policy-authority.md`,"Standing routine branch authority for this isolated fixture.\n");
+const sha=path=>createHash("sha256").update(readFileSync(path)).digest("hex");
+const run=args=>spawnSync(`${realRoot}/bin/fm-task-state.sh`,args,{encoding:"utf8",env:{...process.env,FM_HOME:home,FM_STATE_OVERRIDE:`${home}/state`,FM_DATA_OVERRIDE:`${home}/data`,FM_CONFIG_OVERRIDE:`${home}/config`,FM_SUPERVISION_ACTOR:"main"}});
+let result=run(["enroll",task]);if(result.status!==0)throw Error(result.stderr);
+const policy={schema:"fm-task-continuation-policy.v1",revision:0,issuer:"main",enabled:true,authority_ref:"data/policy-authority.md",authority_sha256:sha(`${home}/data/policy-authority.md`),allowed:["inspect","precheck","steer-same-intent","observe-receipt"],expires_at:"2099-01-01T00:00:00Z"};
+writeFileSync(`${home}/data/policy.json`,JSON.stringify(policy),{mode:0o600});result=run(["continuation-policy","--expected-revision","0","--record",`${home}/data/policy.json`]);if(result.status!==0)throw Error(result.stderr);
+let nativeCalls=0,compactNoChanges=0,material;
+globalThis.__fmOnBranchPrompt=async({session,text})=>{
+ const native=session.options.customTools.find(tool=>tool.name==="fm_task_continuation"),report=session.options.customTools.find(tool=>tool.name==="fm_branch_report");
+ if(!native||!report)throw Error("branch-native tools absent");const admitted=JSON.parse(text.slice(text.lastIndexOf("\n{")+1));
+ const wrong=await native.execute("wrong",{action:"observe",task:"other"});if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
+ for(let i=0;i<5;i++){const observed=await native.execute(`same-${i}`,{action:"observe",task});nativeCalls++;const body=JSON.parse(observed.content[0].text);if(observed.isError||body.change!=="none"||body.assessment||body.delegation)throw Error(`noncompact ${JSON.stringify(observed)}`);compactNoChanges++;}
+ const patch={delegation_revision:admitted.delegation.revision,precheck:{delegation_revision:admitted.delegation.revision,basis_key:admitted.observation.basis_key,conclusion:"needs-evidence",checks:[{criterion:"brief: verified milestone",result:"missing",evidence:[]}],summary:"No verified milestone yet; retain the unchanged gap without another action."}};
+ material=await native.execute("material",{action:"patch",task,expected_revision:admitted.revision,patch_json:JSON.stringify(patch)});nativeCalls++;
+ if(material.isError)throw Error(`material refused ${JSON.stringify(material)}`);const changed=JSON.parse(material.content[0].text);if(changed.change!=="material"||changed.precheck?.conclusion!=="needs-evidence")throw Error(`lost delta ${JSON.stringify(material)}`);
+ const reported=await report.execute("report",{task,verdict:"routine",summary:"Routine evidence unchanged; retained the existing gap without MAIN bookkeeping."});if(reported.isError)throw Error(JSON.stringify(reported));
+};
+await fire("session_start",{},defaultSessionCtx);pi.appendEntry("fixture-seed",{});const before=sentToMain.length;
+await fire("agent_before_settle",{},defaultSessionCtx);
+try { await settle(()=>outcomeScript(["list","--recent","10"]).includes("Routine evidence unchanged"),"native report"); }
+catch (error) { throw Error(`${error}; outcomes=${outcomeScript(["list","--recent","10"])} nativeCalls=${nativeCalls} sessions=${globalThis.__fmSessions?.length}`); }
+if(sentToMain.length!==before)throw Error("routine work opened MAIN");
+if(nativeCalls!==6||compactNoChanges!==5||!material)throw Error("tool counts changed");
+const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck?.conclusion!=="needs-evidence")throw Error("material delta missing");
+console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,no_change_native_tools:compactNoChanges,material_native_tools:1,branch_reports:1}));
+process.exit(0);
+EOF
+  status=$?; out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "branch-native continuation scope/delta boundary: $out"
+  pass "$out"
 }
 
 test_extension_registered_provider_resolves_in_the_branch() {
@@ -6753,6 +6813,7 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_expired_delegation_refuses_bound_branch_report
+test_branch_native_continuation_is_scoped_compact_and_material_only
 
 test_native_semantic_lifecycle_with_installed_session_manager
 test_continuation_defers_reserved_admission_at_ui_boundary

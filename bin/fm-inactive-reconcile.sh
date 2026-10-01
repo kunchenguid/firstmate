@@ -307,12 +307,14 @@ reconcile_direct_child_locked() { # <id> <meta> <timeout>
   [ "$kind" = secondmate ] && return 0
   # Lifecycle obligations share this scan's cursor, deadline, durable queue
   # and post-handling acknowledgement. They never execute actions here.
-  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired reconciliation_key
+  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired reconciliation_key lifecycle_evidence_key lifecycle_generation outcome_seq_floor
   lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
   if [ "$lifecycle_mode" != legacy ]; then
     lifecycle_due=$(fm_task_lifecycle due "$id" 2>/dev/null) || lifecycle_due='{"due":true,"record":null}'
     [ "$(printf '%s' "$lifecycle_due" | jq -r '.due')" = true ] || return 0
     lifecycle_revision=$(printf '%s' "$lifecycle_due" | jq -r '.record.revision // "unknown"')
+    lifecycle_evidence_key=$(printf '%s' "$lifecycle_due" | jq -r '.record.assessment.evidence_key // empty')
+    lifecycle_generation=$(printf '%s' "$lifecycle_due" | jq -r '.record.execution_generation // empty')
     lifecycle_expired=$(printf '%s' "$lifecycle_due" | jq -r '.expired // false')
     if [ -f "$meta" ]; then incarnation=$(meta_incarnation "$meta"); else incarnation=unassigned; fi
     reconciliation_key=$(printf '%s' "$lifecycle_due" | jq -r '.reconciliation_key // empty')
@@ -326,6 +328,12 @@ reconcile_direct_child_locked() { # <id> <meta> <timeout>
     [ -n "$RECORD_PENDING" ] || return 0
     if [ -z "$(record_value "$RECORD_PENDING" lifecycle_revision)" ]; then
       record_field_set "$RECORD_PENDING" lifecycle_revision "$lifecycle_revision" || return 1
+    fi
+    [ -z "$lifecycle_evidence_key" ] || record_field_set "$RECORD_PENDING" lifecycle_evidence_key "$lifecycle_evidence_key" || return 1
+    [ -z "$lifecycle_generation" ] || record_field_set "$RECORD_PENDING" lifecycle_generation "$lifecycle_generation" || return 1
+    if [ -z "$(record_value "$RECORD_PENDING" outcome_seq_floor)" ]; then
+      outcome_seq_floor=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1 | jq -sr 'last.seq // 0') || return 1
+      record_field_set "$RECORD_PENDING" outcome_seq_floor "$outcome_seq_floor" || return 1
     fi
     [ -z "$reconciliation_key" ] || record_field_set "$RECORD_PENDING" reconciliation_key "$reconciliation_key" || return 1
     record_phase_set "$RECORD_PENDING" presentation || return 1
@@ -456,7 +464,7 @@ scan() {
 }
 
 acknowledge() { # <fingerprint>
-  local fingerprint=$1 pending presented phase observed current task key readback
+  local fingerprint=$1 pending presented phase observed current task key readback evidence_key generation outcome_seq_floor
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
   pending=$(record_path "$fingerprint" pending)
@@ -490,6 +498,17 @@ acknowledge() { # <fingerprint>
       fi
       current=$(fm_task_lifecycle read "$task" 2>/dev/null | jq -r '.revision // 0') || return 1
       if [ "$current" -le "$observed" ]; then
+        evidence_key=$(record_value "$pending" lifecycle_evidence_key)
+        generation=$(record_value "$pending" lifecycle_generation)
+        outcome_seq_floor=$(record_value "$pending" outcome_seq_floor)
+        if [ "$current" = "$observed" ] && [ -n "$evidence_key" ] && [ -n "$generation" ] \
+          && [ -n "$outcome_seq_floor" ] \
+          && "$SCRIPT_DIR/fm-branch-outcome.sh" covers-lifecycle --task "$task" \
+            --task-generation "$generation" --lifecycle-revision "$observed" \
+            --evidence-key "$evidence_key" --after-seq "$outcome_seq_floor"; then
+          mv -f "$pending" "$presented"
+          return $?
+        fi
         printf 'REFUSED: reconcile task %s revision %s before acknowledging its goal wake\n' "$task" "$observed" >&2
         return 1
       fi

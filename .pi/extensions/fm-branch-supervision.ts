@@ -156,7 +156,7 @@ const CODEX_COMPAT_SOURCE = `npm:${CODEX_COMPAT_PACKAGE}`;
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
 // the branch actor identity deterministically into every shell command.
-const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
+const BRANCH_TOOL_NAMES = ["read", "bash", "fm_task_continuation", "fm_branch_report"] as const;
 
 // One shared prompt_cache_key per home for ALL branch sessions, derived only
 // from the home path so it survives restarts; main keeps its own session key.
@@ -690,9 +690,16 @@ export default function (pi: ExtensionAPI) {
   let continuationToolsRemaining: number | null = null;
   let recordContinuationReceipt: (() => void) | null = null;
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
+  let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
+  let branchTaskAdmissionRevisions: Record<string, number> = {};
+  let branchTaskAdmissionSnapshots: Record<string, string> = {};
   function taskBinding(record: any) {
     return { goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
       execution_generation: record.execution_generation, delegation_revision: record.delegation?.revision };
+  }
+  function taskContinuationSnapshot(record: any): string {
+    const { revision: _revision, coordination: _coordination, ...taskState } = record || {};
+    return JSON.stringify(taskState);
   }
   // Accepted wake turns that have not settled yet. A newly offered iDA result
   // must fall back to main while the branch is busy unless the current live
@@ -1469,6 +1476,155 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  function createTaskContinuationTool(toolGeneration: number): ToolDefinition {
+    const taskAtom = (value: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(value);
+    const continuationEnv = () => ({
+      ...scriptEnv,
+      FM_SUPERVISION_ACTOR: "branch",
+      FM_BRANCH_GENERATION: String(toolGeneration),
+      FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
+      FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : []),
+      FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
+      FM_LEASE_HOLDER_PID: ownedLockPid,
+    });
+    const run = async (args: string[]) => runCommandAsync(
+      "bash", [join(fmRoot, "bin/fm-task-state.sh"), ...args],
+      { cwd: fmRoot, env: continuationEnv(), maxBuffer: 1024 * 1024 },
+    );
+    return {
+      name: "fm_task_continuation",
+      label: "Task continuation",
+      description:
+        "Operate only the exact delegated task admitted to this supervision-branch turn. " +
+        "inspect binds evidence, refresh/observe maintain current evidence, patch performs the canonical CAS for a precheck or already-authorized next action, " +
+        "readback checks an uncertain existing effect, and observe_receipt confirms an identical pre-existing handled steer. " +
+        "The admission already contains a refreshed observation: do not call this after every action or for an unchanged healthy wait. Automatic effect owners retain receipts without a follow-up call. " +
+        "This tool cannot enroll, assess, accept, archive, change policy or authority, launch, relaunch, interrupt, merge, or clean up.",
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal("inspect"), Type.Literal("refresh"), Type.Literal("observe"),
+          Type.Literal("patch"), Type.Literal("readback"), Type.Literal("observe_receipt"),
+        ]),
+        task: Type.String(),
+        evidence: Type.Optional(Type.Array(Type.String())),
+        expected_revision: Type.Optional(Type.Number()),
+        patch_json: Type.Optional(Type.String({
+          description: "For patch only: JSON object containing delegation_revision and only precheck and/or next_action",
+        })),
+        action_id: Type.Optional(Type.String()),
+        receipt_ref: Type.Optional(Type.String()),
+      }),
+      execute: async (_toolCallId, params) => {
+        const task = String((params as { task?: unknown }).task || "").trim();
+        try {
+          if (!taskAtom(task) || !wakeTaskScope?.tasks.has(task) || !branchTaskBindings[task]) {
+            throw new Error("continuation task is outside this exact branch admission");
+          }
+          if (!(await actingAsOwner(toolGeneration))) {
+            throw new Error("supervision session was replaced or lost lock ownership");
+          }
+          const binding = branchTaskBindings[task];
+          const current = await run(["lifecycle", task]);
+          const record = current.status === 0 ? JSON.parse(current.stdout) : null;
+          if (!record || record.disposition !== "open" ||
+              JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) ||
+              record.delegation?.revoked || Date.parse(record.delegation?.expires_at || "") <= Date.now()) {
+            throw new Error("task intent, execution, or delegation changed after branch admission");
+          }
+          // observe is the canonical delegated-authority read: it validates
+          // authority bytes, policy revision/digest/expiry, branch generation,
+          // and the exact task binding without granting a new effect.
+          const authority = await run(["observe", task]);
+          const observation = authority.status === 0 ? JSON.parse(authority.stdout) : null;
+          if (!observation?.delegated) {
+            throw new Error(authority.stderr.trim() || "current continuation authority does not permit branch maintenance");
+          }
+
+          const action = String((params as { action?: unknown }).action || "");
+          let args: string[];
+          let patchFile = "";
+          if (action === "inspect") {
+            const evidence = (params as { evidence?: unknown }).evidence;
+            if (evidence !== undefined && (!Array.isArray(evidence) || evidence.some((ref) => typeof ref !== "string"))) {
+              throw new Error("inspect evidence must be an array of paths");
+            }
+            args = ["inspect", task, ...((evidence as string[] | undefined) || []).flatMap((ref) => ["--evidence", ref])];
+          } else if (action === "refresh" || action === "observe" || action === "readback") {
+            args = [action, task];
+          } else if (action === "observe_receipt") {
+            const actionId = String((params as { action_id?: unknown }).action_id || "");
+            const receiptRef = String((params as { receipt_ref?: unknown }).receipt_ref || "");
+            if (!actionId || !receiptRef) throw new Error("observe_receipt requires action_id and receipt_ref");
+            args = ["observe-receipt", task, "--action-id", actionId, "--receipt-ref", receiptRef];
+          } else if (action === "patch") {
+            const revision = (params as { expected_revision?: unknown }).expected_revision;
+            const patchJson = (params as { patch_json?: unknown }).patch_json;
+            if (!Number.isSafeInteger(revision) || Number(revision) < 1 || typeof patchJson !== "string") {
+              throw new Error("patch requires expected_revision and patch_json");
+            }
+            const patch = JSON.parse(patchJson);
+            if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
+                Object.keys(patch).some((key) => !["delegation_revision", "precheck", "next_action"].includes(key)) ||
+                !Object.hasOwn(patch, "delegation_revision")) {
+              throw new Error("patch_json contains fields outside the branch patch contract");
+            }
+            let effectiveRevision = Number(revision);
+            if (effectiveRevision !== record.revision) {
+              if (effectiveRevision !== branchTaskAdmissionRevisions[task] ||
+                  taskContinuationSnapshot(record) !== branchTaskAdmissionSnapshots[task]) {
+                throw new Error("task continuation changed after branch admission");
+              }
+              // The persistent coordination owner can append the admission
+              // receipt while this turn is deliberating. That bookkeeping is
+              // outside semantic task state, so rebase this one CAS onto the
+              // freshly read revision only when every other lifecycle byte is
+              // still identical to admission.
+              effectiveRevision = record.revision;
+            }
+            patchFile = join(state, `.branch-continuation-${randomUUID()}.json`);
+            writeFileSync(patchFile, `${JSON.stringify(patch)}\n`, { mode: 0o600, flag: "wx" });
+            args = ["branch-patch", task, "--expected-revision", String(effectiveRevision), "--record", patchFile];
+          } else {
+            throw new Error("unsupported branch continuation action");
+          }
+          try {
+            const result = await run(args);
+            if (result.status !== 0) throw new Error(result.stderr.trim() || "continuation operation refused");
+            if (!(await generationOwnsLock(toolGeneration))) {
+              throw new Error("continuation effect may have completed while branch ownership changed; read back without replay");
+            }
+            const parsed = JSON.parse(result.stdout);
+            let compact: unknown = parsed;
+            if (action === "observe" || action === "refresh") {
+              let value = action === "observe" ? parsed : null;
+              if (!value) {
+                const readback = await run(["observe", task]);
+                if (readback.status !== 0) throw new Error(readback.stderr.trim() || "post-refresh observation refused");
+                value = JSON.parse(readback.stdout);
+              }
+              const baseline = branchTaskObservations[task];
+              compact = { task_id: task, change: baseline?.key === value.key ? "none" : "material",
+                state: value.state, reason: value.reason, key: value.key, revision: value.revision };
+              branchTaskObservations[task] = { key: value.key, state: value.state, reason: value.reason };
+            } else if (action !== "inspect") {
+              compact = { task_id: parsed.task_id, change: parsed.revision === record.revision ? "none" : "material", revision: parsed.revision,
+                disposition: parsed.disposition,
+                next_action: parsed.next_action && { id: parsed.next_action.id, kind: parsed.next_action.kind,
+                  phase: parsed.next_action.phase, attempts: parsed.next_action.attempts },
+                precheck: parsed.precheck && { conclusion: parsed.precheck.conclusion,
+                  summary: parsed.precheck.summary, basis_key: parsed.precheck.basis_key } };
+            }
+            return { content: [{ type: "text", text: JSON.stringify(compact) }], details: undefined };
+          } finally {
+            if (patchFile) rmSync(patchFile, { force: true });
+          }
+        } catch (error) {
+          return { content: [{ type: "text", text: String(error) }], details: undefined, isError: true };
+        }
+      },
+    };
+  }
+
   async function createBranch(
     branchGeneration: number,
     selectionRevision: number,
@@ -1622,6 +1778,7 @@ ${context.command}
       tools: [...BRANCH_TOOL_NAMES],
       customTools: [
         bashTool as unknown as ToolDefinition,
+        createTaskContinuationTool(branchGeneration),
         createReportTool(branchGeneration),
       ],
       ...(pinned ? { model: pinned.model, modelRuntime: pinned.modelRuntime } : {}),
@@ -1651,7 +1808,7 @@ ${context.command}
       // removed, restore our registered guarded override, then verify the exact
       // active set again. This depends on runtime state, not release metadata.
       if (
-        activeTools.length === 2 && activeTools[0] === "read" && activeTools[1] === "fm_branch_report"
+        activeTools.length === 3 && activeTools[0] === "read" && activeTools[1] === "fm_task_continuation" && activeTools[2] === "fm_branch_report"
       ) {
         created.session.setActiveToolsByName([...BRANCH_TOOL_NAMES]);
         activeTools = created.session.getActiveToolNames();
@@ -1836,11 +1993,18 @@ ${context.command}
         // Retain exact task obligations before granting branch acknowledgement.
         await continuation.preserve([...admittedTasks]);
         branchTaskBindings = {};
+        branchTaskObservations = {};
+        branchTaskAdmissionRevisions = {};
+        branchTaskAdmissionSnapshots = {};
         for (const task of admittedTasks) {
           const file = join(process.env.FM_DATA_OVERRIDE || join(fmHome, "data"), task, "lifecycle.json");
           if (existsSync(file)) {
             const record = JSON.parse(readFileSync(file, "utf8"));
-            if (record.schema === "fm-task-lifecycle.v2") branchTaskBindings[task] = taskBinding(record);
+            if (record.schema === "fm-task-lifecycle.v2") {
+              branchTaskBindings[task] = taskBinding(record);
+              branchTaskAdmissionRevisions[task] = record.revision;
+              branchTaskAdmissionSnapshots[task] = taskContinuationSnapshot(record);
+            }
           }
         }
         const grant = await writeEligibleRowsSnapshot(
@@ -1868,6 +2032,9 @@ ${context.command}
         } finally {
           wakeTaskScope = null;
           branchTaskBindings = {};
+          branchTaskObservations = {};
+          branchTaskAdmissionRevisions = {};
+          branchTaskAdmissionSnapshots = {};
         }
         const providerError = settledPromptProviderError(sessionManager, entryOffset);
         if (providerError) {
@@ -1957,25 +2124,31 @@ ${context.command}
       const entryOffset = sessionManager.getEntries().length;
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchTaskBindings = { [offer.task]: taskBinding(record) };
+      branchTaskObservations = { [offer.task]: { key: offer.observation.key,
+        state: offer.observation.state, reason: offer.observation.reason } };
+      branchTaskAdmissionRevisions = { [offer.task]: record.revision };
+      branchTaskAdmissionSnapshots = { [offer.task]: taskContinuationSnapshot(record) };
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
       trace("prompt", "started");
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is not a queue wake: do not drain/ack queue rows.\n` +
-          `Read the current lifecycle, durable brief, exact inbox/current state and bounded evidence. ` +
-          `Only the MAIN-issued delegation permits routine actions. Use branch-patch CAS for precheck or a prepared next_action, ` +
+          `The admission below already contains the canonical refresh/observation. Do not repeat inspect, refresh or observe for no-change bookkeeping, after every action, for an already handled instruction, or for an unchanged healthy wait. ` +
+          `Read only the durable brief, exact inbox/current state or bounded evidence needed to decide a material delta. ` +
+          `Only the MAIN-issued delegation permits routine actions. Use fm_task_continuation patch for a material precheck or changed already-authorized next_action, ` +
           `fm-send --action-id for its exact body, and existing stable handoff identities for explicit dependency edges. ` +
-          `Read back attempted/uncertain effects; never replay. New input blocks new effects until MAIN routes it. ` +
+          `Existing send/handoff owners persist exact effect receipts automatically; do not call fm_task_continuation merely to record them. Read back attempted/uncertain effects only when the receipt is unresolved; never replay. ` +
+          `Use observe_receipt only for an identical instruction that was already handled before its prepared action, and retain any later remaining gap. New input blocks new effects until MAIN routes it. ` +
           `Do not enroll, spawn, change authority, accept, archive, merge or add a reviewer. ` +
           `Stop after at most eight tool calls; retain remaining responsibility. ` +
           `Finish with fm_branch_report: routine for healthy progress, captain only for a candidate, real decision, exhausted blocker or failure.\n` +
           JSON.stringify({ task: offer.task, goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
-            execution_generation: record.execution_generation, delegation: record.delegation,
+            execution_generation: record.execution_generation, revision: record.revision, delegation: record.delegation,
             observation: offer.observation }));
         recordContinuationReceipt();
         if (!receipted) throw new Error("branch admission has no durable receipt");
-      } finally { clearTimeout(timeout); continuationToolsRemaining = null; recordContinuationReceipt = null; branchTaskBindings = {}; wakeTaskScope = null; }
+      } finally { clearTimeout(timeout); continuationToolsRemaining = null; recordContinuationReceipt = null; branchTaskBindings = {}; branchTaskObservations = {}; branchTaskAdmissionRevisions = {}; branchTaskAdmissionSnapshots = {}; wakeTaskScope = null; }
       const error = settledPromptProviderError(sessionManager, entryOffset);
       if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
       recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);

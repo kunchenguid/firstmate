@@ -532,12 +532,12 @@ else
         fm_lock_release "$INBOX_META_LOCK"
         exit 0
       fi
-      INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID") || inbox_write_rc=$?
+      INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID" "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then
         fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
       fi
     else
-      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE") || inbox_write_rc=$?
+      INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
     fi
     if [ "${inbox_write_rc:-0}" -ne 0 ]; then
       fm_lock_release "$INBOX_META_LOCK"

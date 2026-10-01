@@ -195,6 +195,76 @@ test_terminal_refusal_is_durable() {
   pass "task-handoff: a terminal target refusal keeps the exact body and concrete blocker"
 }
 
+test_bound_terminal_source_is_permanently_rejected() {
+  ROOT="$ROOT" CASE_DIR="$TMP_ROOT/terminal-source" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/terminal-source")" python3 - <<'PY'
+import hashlib, json, os, pathlib, shutil, subprocess
+root=pathlib.Path(os.environ['ROOT']);home=pathlib.Path(os.environ['CASE_DIR'])/'home'
+for name in ('state','data'): (home/name).mkdir(parents=True)
+(home/'state/.lock').write_text(str(os.getpid())+'\n')
+bin=home/'bin';shutil.copytree(root/'bin',bin)
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: terminal-source-fixture\\n"\n')
+(bin/'fm-crew-state.sh').chmod(0o755)
+session=home/'main.jsonl';session.write_text('{"type":"session","id":"terminal-source"}\n')
+env=dict(os.environ,FM_HOME=str(home),FM_STATE_OVERRIDE=str(home/'state'),FM_DATA_OVERRIDE=str(home/'data'),
+         FM_LEASE_HOLDER_PID=str(os.getpid()),FM_BRANCH_GENERATION='1',FM_BRANCH_MAIN_SESSION_FILE=str(session),
+         FM_BRANCH_TASK_SCOPE='["source","target"]',PATH=os.environ['FM_FIXTURE_BACKEND']+':'+os.environ['PATH'])
+def run(owner,*args,actor='main',ok=True,bindings=None):
+    e=dict(env,FM_SUPERVISION_ACTOR=actor)
+    if bindings is not None:e['FM_BRANCH_TASK_BINDINGS']=json.dumps(bindings)
+    p=subprocess.run([str(bin/owner),*args],env=e,text=True,capture_output=True,timeout=20)
+    assert (p.returncode==0)==ok,(args,p.returncode,p.stdout,p.stderr)
+    return p
+def state(*args,**kwargs):
+    p=run('fm-task-state.sh',*args,**kwargs)
+    return json.loads(p.stdout) if p.returncode==0 and p.stdout.strip() else p
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+for task in ('source','target'):
+    d=home/'data'/task;d.mkdir();(d/'brief.md').write_text('Continue the exact existing goal.\n')
+    (home/'state'/f'{task}.meta').write_text(f'window=fixture:w1:p-{task}\nbackend=herdr\nharness=pi\nkind=ship\nexecutor=local-agent\nspawn_gen=g1\n')
+    state('enroll',task)
+source=state('lifecycle','source');target=state('lifecycle','target')
+source['schema']='fm-task-lifecycle.v2';source['precheck']=None
+source['delegation']=dict(revision=1,issuer='main',authority_ref='data/source/brief.md',authority_sha256=sha(home/'data/source/brief.md'),
+    allowed=['inspect','precheck','steer-same-intent','observe-receipt','handoff'],
+    edges=[dict(target='target',goal_revision=target['goal_revision'],execution_generation='g1',authority_ref='data/source/brief.md',authority_sha256=sha(home/'data/source/brief.md'),scope='Exact existing prerequisite')],
+    expires_at='2099-01-01T00:00:00Z',revoked=False)
+payload=home/'data/source/payload';payload.write_text('Deliver the exact existing prerequisite.')
+source['next_action']=dict(id='source.g1.a1',kind='steer',phase='prepared',expected_execution_generation='g1',attempts=0,attempt_limit=1,
+    recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref=str(payload),payload_sha256=sha(payload),receipt_ref=None)
+source['next_action_seq']=2
+proposal=home/'data/source/proposal.json';proposal.write_text(json.dumps(source));proposal.chmod(0o600)
+source=state('reconcile','source','--expected-revision',str(source['revision']),'--record',str(proposal))
+bindings={'source':dict(goal_revision=source['goal_revision'],brief_sha256=source['brief_sha256'],execution_generation='g1',delegation_revision=1),
+          'target':dict(goal_revision=target['goal_revision'],brief_sha256=target['brief_sha256'],execution_generation='g1',delegation_revision=0)}
+run('fm-wake-grant.sh','activate',str(os.getpid()),'1')
+run('fm-lease.sh','claim','target','--actor','main')
+p=run('fm-task-handoff.sh','send','source','target','--id','terminal-source-edge','--action-id','source.g1.a1','Deliver the exact existing prerequisite.',actor='branch',ok=False,bindings=bindings)
+assert p.returncode==6,(p.returncode,p.stdout,p.stderr)
+# Fixture-only owner disappearance avoids the release command's automatic retry;
+# the next public retry must classify the now-terminal source before any effect.
+(home/'state/.lease-target').unlink()
+record=home/'state/task-handoffs/records/terminal-source-edge.msg'
+assert record.exists() and not (home/'state/target.inbox').exists()
+# MAIN accepts the source while the exact immutable handoff is still pending.
+refusal=home/'data/source/handoff-refusal.md';refusal.write_text('The source goal reached final acceptance before handoff delivery.\n')
+state('action','source','--action-id','source.g1.a1','--phase','refused','--receipt-ref',str(refusal))
+source=state('lifecycle','source');source['disposition']='accepted';source['assessment']['outcome']='Accepted source result';source['assessment']['remaining_gap']=''
+source['precheck']=None
+proposal.write_text(json.dumps(source));proposal.chmod(0o600)
+source=state('reconcile','source','--expected-revision',str(source['revision']),'--record',str(proposal))
+bindings['source']['delegation_revision']=source['delegation']['revision']
+p=run('fm-task-handoff.sh','retry','terminal-source-edge',actor='branch',ok=False,bindings=bindings)
+assert p.returncode==7,(p.returncode,p.stdout,p.stderr)
+assert 'exact bound source is terminal' in p.stderr
+inspect=run('fm-task-handoff.sh','inspect','terminal-source-edge').stdout
+assert 'state=rejected' in inspect and 'Deliver the exact existing prerequisite.' in inspect
+assert not (home/'state/target.inbox').exists()
+p=run('fm-task-handoff.sh','retry','terminal-source-edge',actor='branch',ok=False,bindings=bindings)
+assert p.returncode==7 and 'terminally rejected' in p.stderr
+print('ok - task-handoff: an exact pending handoff becomes a durable non-retryable refusal when its bound source is terminal')
+PY
+}
+
 
 test_same_task_send_and_reminder_contract_stay_ordinary() {
   local dir home fakebin record handoff_record action
@@ -349,6 +419,10 @@ assert call('fm-task-state.sh','observe','target')['state']=='pending'
 before=(home/'data/target/lifecycle.json').read_bytes()
 assert call('fm-task-state.sh','observe','target')['state']=='running', 'ordinary published launch lost its brief receipt'
 assert (home/'data/target/lifecycle.json').read_bytes()==before, 'readback changed semantic authority'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: run-step · validating (running)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='running', 'active validation run-step was not accepted as actual start proof'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: status-log · validating (running)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='pending', 'status history became actual start proof'
 m=home/'state/target.meta';original=m.read_text()
 for phase in ('prepared','unconfirmed'):
     m.write_text(original.replace('launch_state=confirmed','launch_state='+phase))
@@ -530,11 +604,99 @@ print('ok - delegated lifecycle: semantic ownership, CAS/no-op, intake/body fenc
 PY
 }
 
+test_routine_continuation_policy_and_exact_handled_receipt() {
+  ROOT="$ROOT" CASE_DIR="$TMP_ROOT/routine-policy" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/routine-policy")" python3 - <<'PY'
+import hashlib, json, os, pathlib, shutil, subprocess
+root=pathlib.Path(os.environ['ROOT']);home=pathlib.Path(os.environ['CASE_DIR'])
+for name in ('state','data','config'): (home/name).mkdir(parents=True)
+(home/'state/.lock').write_text(str(os.getpid())+'\n')
+bin=home/'bin';shutil.copytree(root/'bin',bin)
+provider_state=home/'provider-state';provider_state.write_text('working')
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: %s · source: policy-fixture\\n" "$(cat "$FM_HOME/provider-state")"\n')
+(bin/'fm-crew-state.sh').chmod(0o755)
+session=home/'main.jsonl';session.write_text('{"type":"session","id":"policy"}\n')
+env=dict(os.environ,FM_HOME=str(home),FM_STATE_OVERRIDE=str(home/'state'),FM_DATA_OVERRIDE=str(home/'data'),
+         FM_CONFIG_OVERRIDE=str(home/'config'),FM_LEASE_HOLDER_PID=str(os.getpid()),FM_BRANCH_GENERATION='1',
+         FM_BRANCH_MAIN_SESSION_FILE=str(session),FM_BRANCH_TASK_SCOPE='["routine"]',
+         PATH=os.environ['FM_FIXTURE_BACKEND']+':'+os.environ['PATH'])
+def call(*args,actor='main',ok=True,bindings=None):
+    e=dict(env,FM_SUPERVISION_ACTOR=actor)
+    if bindings is not None:e['FM_BRANCH_TASK_BINDINGS']=json.dumps(bindings)
+    p=subprocess.run([str(bin/'fm-task-state.sh'),*args],env=e,text=True,capture_output=True,timeout=20)
+    assert (p.returncode==0)==ok,(args,p.returncode,p.stdout,p.stderr)
+    return json.loads(p.stdout) if ok and p.stdout.strip() else p.stdout+p.stderr
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+def write_json(path,value):path.write_text(json.dumps(value));path.chmod(0o600);return str(path)
+task='routine';directory=home/'data'/task;directory.mkdir();(directory/'brief.md').write_text('Continue the unchanged goal and retain verified evidence.\n')
+(home/'state'/f'{task}.meta').write_text('window=fixture:w1:p-routine\nbackend=herdr\nharness=pi\nkind=ship\nexecutor=local-agent\nspawn_gen=g1\n')
+call('enroll',task)
+authority=home/'data/policy-authority.md';authority.write_text('Routine continuation ownership authorized for eligible current and future tasks.\n')
+policy=dict(schema='fm-task-continuation-policy.v1',revision=0,issuer='main',enabled=True,
+            authority_ref='data/policy-authority.md',authority_sha256=sha(authority),
+            allowed=['inspect','precheck','steer-same-intent','observe-receipt'],expires_at='2099-01-01T00:00:00Z')
+policy_file=home/'data/policy.json';write_json(policy_file,policy)
+assert call('continuation-policy','--expected-revision','0','--record',str(policy_file))['revision']==1
+r=call('refresh',task);r=call('lifecycle',task)
+assert r['schema']=='fm-task-lifecycle.v2' and r['delegation']['policy_revision']==1
+binding={task:dict(goal_revision=r['goal_revision'],brief_sha256=r['brief_sha256'],execution_generation=r['execution_generation'],delegation_revision=r['delegation']['revision'])}
+subprocess.run([str(bin/'fm-wake-grant.sh'),'activate',str(os.getpid()),'1'],env=env,check=True,capture_output=True,text=True)
+call('observe',task,actor='branch',bindings=binding)
+assert call('inspect',task,actor='branch',bindings=binding)['execution_generation']=='g1'
+assert call('refresh',task,actor='branch',bindings=binding)['execution_generation']=='g1'
+call('continuation-policy','--expected-revision','1','--record',str(policy_file),actor='branch',ok=False)
+
+body=b'Collect the already-authorized validation evidence.\n'
+payload=directory/'payload';payload.write_bytes(body)
+handled_dir=home/'state'/f'{task}.inbox/handled';handled_dir.mkdir(parents=True)
+legacy_receipt=handled_dir/'001.msg';legacy_receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\n--\n'+body)
+stale_receipt=handled_dir/'002.msg';stale_receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\nexecution_generation=g0\n--\n'+body)
+receipt=handled_dir/'003.msg';receipt.write_bytes(b'schema=fm-task-inbox.v1\nat=2026-10-01T00:00:00Z\nexecution_generation=g1\n--\n'+body)
+action=dict(id='routine.g1.a1',kind='steer',phase='prepared',expected_execution_generation='g1',attempts=0,attempt_limit=1,
+            recheck_at='2026-01-01T00:00:00Z',deadline='2099-01-01T00:00:00Z',payload_ref=str(payload),payload_sha256=sha(payload),receipt_ref=None)
+patch=dict(delegation_revision=r['delegation']['revision'],next_action=action)
+patch_file=home/'data/patch.json';write_json(patch_file,patch)
+r=call('branch-patch',task,'--expected-revision',str(r['revision']),'--record',str(patch_file),actor='branch',bindings=binding)
+binding[task]['delegation_revision']=r['delegation']['revision']
+call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(legacy_receipt),actor='branch',bindings=binding,ok=False)
+call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(stale_receipt),actor='branch',bindings=binding,ok=False)
+assert call('lifecycle',task)['next_action']['phase']=='prepared'
+r=call('observe-receipt',task,'--action-id',action['id'],'--receipt-ref',str(receipt),actor='branch',bindings=binding)
+assert r['next_action']['phase']=='confirmed' and r['next_action']['attempts']==0
+assert r['next_action']['continuation']['inbox_id']=='003'
+
+# Revocation fences the previously materialized grant immediately. Re-enable
+# produces a new policy revision and a new exact task grant only after the
+# earlier action is safely terminal.
+disabled=dict(policy,revision=1,enabled=False);write_json(policy_file,disabled)
+assert call('continuation-policy','--expected-revision','1','--record',str(policy_file))['revision']==2
+assert call('observe',task,actor='branch',bindings=binding)['delegated'] is False
+call('refresh',task,actor='branch',bindings=binding,ok=False)
+enabled=dict(policy,revision=2,enabled=True);write_json(policy_file,enabled)
+assert call('continuation-policy','--expected-revision','2','--record',str(policy_file))['revision']==3
+r=call('refresh',task);r=call('lifecycle',task)
+assert r['delegation']['policy_revision']==3 and r['delegation']['revision']==2
+new_binding={task:dict(goal_revision=r['goal_revision'],brief_sha256=r['brief_sha256'],execution_generation=r['execution_generation'],delegation_revision=2)}
+assert call('observe',task,actor='branch',bindings=binding)['delegated'] is False
+assert call('observe',task,actor='branch',bindings=new_binding)['delegated'] is True
+
+# A deliberately paused executor remains inspectable but cannot acquire a new
+# same-intent effect through the standing policy.
+provider_state.write_text('paused')
+next_payload=directory/'payload-2';next_payload.write_text('Do not resume a deliberately paused executor.\n')
+next_action=dict(action,id='routine.g1.a2',payload_ref=str(next_payload),payload_sha256=sha(next_payload))
+write_json(patch_file,dict(delegation_revision=2,next_action=next_action))
+call('branch-patch',task,'--expected-revision',str(r['revision']),'--record',str(patch_file),actor='branch',bindings=new_binding,ok=False)
+assert call('lifecycle',task)['next_action']['id']=='routine.g1.a1'
+print('ok - routine policy: automatic exact grants, branch-only bounded operations, revocation/renewal, handled receipt dedupe and paused-effect fencing')
+PY
+}
+
 test_conflict_preserves_then_delivers_exactly_once
 test_restart_sweep_recovers_pending_handoff
 test_sweep_without_handoffs_is_a_noop
 test_local_runtime_backend_matrix_uses_one_durable_plane
 test_terminal_refusal_is_durable
+test_bound_terminal_source_is_permanently_rejected
 test_same_task_send_and_reminder_contract_stay_ordinary
 
 test_continuation_assessment_and_observed_executor || fail "lifecycle behavior regression failed"
@@ -542,4 +704,5 @@ test_continuation_assessment_and_observed_executor || fail "lifecycle behavior r
 ROOT="$ROOT" CASE_DIR="$TMP_ROOT/semantic" FM_FIXTURE_BACKEND="$(make_fake_backend "$TMP_ROOT/semantic")" \
   python3 "$ROOT/tests/lifecycle-semantic.py" || fail "semantic lifecycle regression failed"
 test_delegated_lifecycle_effect_boundaries || fail "delegated lifecycle regression failed"
+test_routine_continuation_policy_and_exact_handled_receipt || fail "routine continuation policy regression failed"
 printf 'All task-handoff tests passed.\n'

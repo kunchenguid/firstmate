@@ -14,7 +14,7 @@ fm_task_lifecycle() { # <read|reconcile|action|init|mode|due> <task> [arguments.
   fi
   local lifecycle_home=${FM_HOME:?}
   case "${FM_SUPERVISION_ACTOR:-main}:$1" in
-    branch:branch-patch|branch:effect|branch:bind-inbox|branch:handoff-binding|branch:handoff-effect|branch:readback|branch:action)
+    branch:inspect|branch:refresh|branch:branch-patch|branch:effect|branch:bind-inbox|branch:observe-receipt|branch:handoff-binding|branch:handoff-effect|branch:readback|branch:action)
       # Reuse the branch generation owner without claiming any queue row.
       # shellcheck source=bin/fm-wake-lib.sh
       . "$FM_TASK_LIFECYCLE_BIN/fm-wake-lib.sh"
@@ -39,7 +39,7 @@ fm_task_lifecycle_mutate() (
   . "$FM_TASK_LIFECYCLE_BIN/fm-lease-lib.sh"
   fm_lease_valid_id "$id" || exit 2
   case "$(fm_lease_actor):$operation" in
-    main:*|branch:branch-patch|branch:action|branch:readback) ;;
+    main:*|branch:inspect|branch:refresh|branch:branch-patch|branch:action|branch:observe-receipt|branch:readback) ;;
     *) echo "REFUSED: lifecycle assessment belongs to main" >&2; exit 6 ;;
   esac
   fm_lease_guard "$id" "goal reconciliation" || exit $?

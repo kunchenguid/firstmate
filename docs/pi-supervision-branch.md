@@ -65,6 +65,11 @@ Attempted and uncertain effects remain readback work; the continuation observer 
 The Pi extension checks existing task obligations before logical-run settlement and uses the existing heartbeat coordinator's tick for bounded rechecks.
 Chat remains native transcript evidence; only an explicit task intent update stages a recoverable append transaction, with no independent message goal or answer bookkeeping.
 Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly archived goals stay quiet.
+The canonical refresh and observation that admit a delegated branch turn are already sufficient for its no-change decision.
+The branch does not repeat model-driven `inspect`, `refresh`, `observe`, or assessment calls after every action, for an already handled instruction, or for an unchanged healthy wait.
+Existing send, handoff and lifecycle owners persist exact receipts automatically; only a material evidence fingerprint, changed next authorized action, unresolved effect, candidate, blocker or decision needs a native continuation call.
+Every admitted turn still finishes with `fm_branch_report`, including a no-change result.
+The [task lifecycle](task-lifecycle.md#intake-and-evidence-reconciliation) owns the narrow unchanged-open-goal acknowledgement exception; branch reporting does not manufacture lifecycle progress.
 Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
 The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
 The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
@@ -109,8 +114,8 @@ This safeguard applies while Pi is alive; it introduces no process-exit recovery
   Pi's CLI owns process-wide proxy environment and HTTP dispatcher initialization; the branch retains that process setup and does not reconfigure it.
   Before an `openai-codex` branch can prompt, it resolves the installed user package `npm:pi-openai-codex-compat` through Pi's package manager, validates package identity and the readable manifest, loads exactly its declared in-package extension entry from the installed user-package provenance, and binds the extension so its `session_start` provider override and native compaction hooks are active.
   The branch does not gate initialization on Pi or `pi-openai-codex-compat` version strings.
-  Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, and `fm_branch_report` in that order.
-  If compatibility startup removes only `bash`, leaving exactly `read` and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
+  Every other resource-discovery class remains disabled, and the post-start active-tool check must still equal `read`, guarded `bash`, `fm_task_continuation`, and `fm_branch_report` in that order.
+  If compatibility startup removes only `bash`, leaving exactly `read`, `fm_task_continuation`, and `fm_branch_report`, the branch restores the registered guarded override and verifies the full active-tool set again.
   The runtime state check independently prevents a compatibility package from widening the branch tools.
   The plugin's native runtime dependencies must load on the host; an incompatible tree-sitter prebuild needs a local source build using the package's supported build tooling before activation.
   [Runtime verification](verification/runtime-backends.md) records the current installed-runtime checks and refresh commands.
@@ -294,8 +299,9 @@ The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension a
 
 ## Delegated task continuation
 
-MAIN can explicitly upgrade an enrolled task to lifecycle v2 and issue a bounded delegation through the existing `fm-task-state.sh reconcile` owner.
-The schema, CAS rules, action bindings and exact command forms belong to [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py).
+MAIN can issue an explicit task-local lifecycle v2 delegation through the existing `fm-task-state.sh reconcile` owner.
+The [routine continuation configuration](configuration.md#routine-continuation-policy-configtask-continuation-policyjson) owns the home policy's operator-facing schema, activation and rollback contract.
+The [task lifecycle](task-lifecycle.md#routine-branch-ownership) owns task-local grant materialization, renewal, revocation and receipt semantics; `fm-task-lifecycle.py` owns exact data validation and command mechanics.
 A v1 record keeps its existing MAIN continuation path; reads never enroll historical tasks or reopen accepted or archived goals.
 
 The branch receives delegated continuation admissions on its existing serial execution chain, independently of wake queue sequences.
@@ -306,6 +312,9 @@ An admission or report proves neither worker receipt nor goal completion.
 
 For a delegated task, branch may compare bounded artifacts with the existing brief, record a provisional precheck, request missing evidence from the same worker, and transfer information along explicitly authorized dependency edges.
 It must use the existing action, inbox, handoff and receipt owners, preserving the selected delivery path without adding a reviewer.
+Its isolated session exposes a restricted native `fm_task_continuation` tool for inspect, refresh/observation, task-local CAS patch, uncertain-effect readback and exact handled-receipt observation.
+The tool is scoped to the current admission and generation and cannot enroll, assess, accept, archive, mutate policy or authority, or perform lifecycle control, merge or cleanup.
+No-change responses are fingerprinted and compact; material mutations return only the revision and affected precheck/action projection.
 MAIN alone classifies new user input, decides scope and authority, dispatches new work, issues operation grants, accepts the final result and communicates with the user.
 Candidate, conflict and blocked prechecks return to MAIN for judgment; routine progress and healthy executor readback do not open a MAIN model turn.
 The initial delegation contract does not permit spawn or executor replacement, interrupt/exit/relaunch, lifecycle control, merge, archival, operation or short grants, or independent short-result routing.
@@ -315,7 +324,9 @@ MAIN revokes the old delegation before changing a brief or goal, then issues a n
 Status questions read the named task and its evidence without enrolling or sweeping historical work.
 Expired, revoked, stale-generation and mismatched task bindings refuse at the actual mutation boundary.
 An attempted or uncertain effect is read back by stable action identity, never replayed because a receipt is missing.
+Exact pre-existing handled-receipt recovery follows the [task lifecycle contract](task-lifecycle.md#routine-branch-ownership) and never accepts the goal.
 
-Rollout is task-local opt-in and requires no migration or production activation.
-Rollback revokes delegations and leaves v2 records, effects and budgets intact for MAIN reconciliation; older binaries must refuse v2 rather than rewrite it as v1.
-Public-owner regression coverage is in `tests/fm-task-handoff.test.sh`, with SDK and concurrent notification coverage in the Pi extension tests.
+Routine-policy rollout requires one explicit home policy activation after code reload; explicit task-local delegation remains available without that policy.
+Policy activation does not migrate historical absent records or activate parked, paused, stopped, accepted or archived work.
+Rollback disables the policy and leaves v2 records, effects and budgets intact for MAIN reconciliation; older binaries must refuse v2 rather than rewrite it as v1.
+Public-owner regression coverage is in `tests/fm-task-lifecycle.test.sh` and `tests/fm-task-handoff.test.sh`, with SDK and concurrent notification coverage in the Pi extension tests.
