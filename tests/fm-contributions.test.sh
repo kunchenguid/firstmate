@@ -1048,10 +1048,14 @@ test_cross_repo_checks_use_head_repo() {
     || fail 'check-runs must be read from the PR head repository, not the base repository'
   grep -qF "repos/fork/r/commits/$HEAD_A/statuses?" "$home/forge/calls" \
     || fail 'statuses must be read from the PR head repository, not the base repository'
-  grep -qF "repos/o/r/commits/$HEAD_A/check-runs?" "$home/forge/calls" \
-    && fail 'check-runs must not also be read from the base repository when the head repository is known'
-  grep -qF "repos/o/r/commits/$HEAD_A/statuses?" "$home/forge/calls" \
-    && fail 'statuses must not also be read from the base repository when the head repository is known'
+  # Negative checks: the fixture accepts statuses/check-runs for ANY repo path,
+  # so a base-repo call would be logged. Assert both base endpoints stay quiet.
+  if grep -qF "repos/o/r/commits/$HEAD_A/check-runs?" "$home/forge/calls"; then
+    fail "check-runs must not also be read from the base repository when the head repository is known: $(cat "$home/forge/calls")"
+  fi
+  if grep -qF "repos/o/r/commits/$HEAD_A/statuses?" "$home/forge/calls"; then
+    fail "statuses must not also be read from the base repository when the head repository is known: $(cat "$home/forge/calls")"
+  fi
   pass 'check-runs and statuses are read from the PR head repository when it differs from the base'
 }
 
