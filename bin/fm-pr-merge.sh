@@ -24,13 +24,9 @@
 # A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
 # required set from classic branch protection and active rulesets, supplemented
-# by home-local config/required-checks (FM_CONFIG_OVERRIDE selects its directory).
-# docs/configuration.md "Required checks" owns the declaration schema. Declared
-# contexts match by name with no app binding, are checked even when forge rules
-# are empty or plan-unavailable, and use the same attended waivers below. An
-# absent file preserves existing behavior; an unreadable or malformed file
-# refuses and cannot be waived. Check-run requirements retain their producer
-# app binding: a same-named check run from another app cannot
+# by local declarations; docs/configuration.md "Required checks" owns their
+# configuration contract. Check-run requirements retain their producer app
+# binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
 # Unbound requirements match by name. A bound requirement reported as a check
 # run also needs a matching producer in the check-runs read at the verified
