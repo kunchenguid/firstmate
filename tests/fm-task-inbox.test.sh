@@ -33,6 +33,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-marker-lib.sh
+. "$ROOT/bin/fm-marker-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-inbox)
@@ -453,6 +455,10 @@ case "${1:-}" in
     case "$*" in *cursor_y*) printf '1\n'; exit 0 ;; esac
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
+    if [ -f "${FM_FAKE_CAPTURE_FAILURE:-}" ] && [ "$(cat "$FM_FAKE_CAPTURE_FAILURE")" = "$view" ]; then
+      rm -f "$FM_FAKE_CAPTURE_FAILURE"
+      exit 1
+    fi
     case "$view" in
       main) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } { print }' "$caps/main-tmux.txt" ;;
       subagent|pill) cat "$caps/subagent-tmux.txt" ;;
@@ -466,6 +472,8 @@ esac
 exit 0
 SH
   chmod +x "$1/fakebin/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1/fakebin/sleep"
+  chmod +x "$1/fakebin/sleep"
 }
 
 # Issue #6131: a doorbell rung while Claude's agent selector shows a subagent
@@ -511,6 +519,104 @@ test_ring_returns_claude_selector_to_main() {
     || fail "the walk must send Escape at most once:"$'\n'"$(cat "$log")"
   ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a stuck list was typed into:"$'\n'"$(cat "$log")"
   pass "inbox: the ring walks a Claude agent selector back to main before ringing, and refuses when it cannot"
+}
+
+test_selector_capture_failure_leaves_ring_undelivered() {
+  local dir state rec log composer viewf failure rc fail_view
+  dir="$TMP_ROOT/ring-selector-capture-failure"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"; failure="$dir/capture-failure"
+  ring_capture_failure() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURE_FAILURE="$failure" \
+      FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+  for fail_view in subagent pill; do
+    : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
+    printf '%s\n' "$fail_view" > "$failure"
+    rc=0; ring_capture_failure || rc=$?
+    expect_code 2 "$rc" "an unreadable $fail_view capture should report an undelivered ring"
+    [ ! -e "$failure" ] || fail "the $fail_view capture failure was not exercised"
+    [ ! -s "$composer" ] || fail "a capture failure left typed text"
+    ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a capture failure allowed delivery: $(cat "$log")"
+    [ -f "$rec" ] || fail "a capture failure lost the durable steer"
+    if [ "$fail_view" = subagent ]; then
+      [ ! -s "$log" ] || fail "a failed initial capture should not send keys"
+    fi
+    ring_capture_failure || fail "a later ring should recover after the transient capture failure"
+    [ "$(cat "$viewf")" = main ] || fail "the retry did not return to main"
+    grep -q '^SUBMIT: ' "$log" || fail "the retry did not submit the doorbell"
+    ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" || fail "the retry misfired: $(cat "$log")"
+  done
+  pass "inbox: initial and later selector capture failures refuse the ring until a readable retry"
+}
+
+test_typed_send_returns_claude_selector_to_main() {
+  local dir state log composer viewf err target message start failure rc submitted corr pending
+  dir="$TMP_ROOT/typed-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  fm_write_secondmate_meta "$state/domain.meta" "$dir" sess:fm-domain alpha claude
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"; err="$dir/send.err"
+  typed_send() {
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" FM_FAKE_VIEW="$viewf" \
+      FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" FM_SEND_SETTLE=0 \
+      bash "$ROOT/bin/fm-send.sh" "$target" "$message" > "$dir/send.out" 2> "$err"
+  }
+  for target in sess:fm-t1 sess:unrecorded t1 domain; do
+    case "$target" in
+      *:*) message='please continue' ;;
+      *) message='/help' ;;
+    esac
+    for start in subagent list-other list-main list-main-viewed main; do
+      : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+      typed_send || fail "typed send to $target from $start failed: $(cat "$err")"
+      [ "$(cat "$viewf")" = main ] || fail "typed send to $target from $start did not return to main"
+      [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "typed send should submit exactly once: $(cat "$log")"
+      submitted=$(sed -n 's/^SUBMIT: //p' "$log")
+      if [ "$target" = domain ]; then
+        corr=$(printf '%s\n' "$submitted" | sed -n 's/.*corr=\([a-f0-9]\{16\}\).*/\1/p')
+        [ -n "$corr" ] || fail "a secondmate slash send lost its correlation"
+        [ "$submitted" = "${FM_FROMFIRST_MARK}corr=$corr $message" ] || fail "a secondmate slash send changed its marker or message"
+        grep -q '^delivered_epoch=[0-9]' "$state/pending-replies/$corr" || fail "a confirmed typed send was not marked delivered"
+        rm -f "$state/pending-replies/$corr"
+      else
+        [ "$submitted" = "$message" ] || fail "typed send to $target changed the message: $submitted"
+      fi
+      [ ! -s "$composer" ] || fail "typed send left pending composer text"
+      ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" || fail "typed send misfired: $(cat "$log")"
+    done
+    for failure in frozen initial-capture later-capture; do
+      : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
+      rc=0
+      if [ "$failure" = frozen ]; then
+        FM_FAKE_FROZEN=1 typed_send || rc=$?
+      else
+        case "$failure" in initial-capture) printf 'subagent\n' ;; later-capture) printf 'pill\n' ;; esac > "$dir/capture-failure"
+        FM_FAKE_CAPTURE_FAILURE="$dir/capture-failure" typed_send || rc=$?
+        [ ! -e "$dir/capture-failure" ] || fail "the $failure failure was not exercised"
+      fi
+      expect_code 1 "$rc" "a $failure preflight should refuse typed delivery to $target"
+      assert_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "typed refusal should identify the failed preflight"
+      [ ! -s "$composer" ] || fail "a refused typed send left pending text"
+      ! grep -qE '^(TO-SUBAGENT|SUBMIT|INTERRUPT|LEFT)' "$log" || fail "a refused typed send misfired: $(cat "$log")"
+      if [ "$failure" = initial-capture ]; then
+        [ ! -s "$log" ] || fail "a failed initial capture should not send keys"
+      fi
+      for pending in "$state/pending-replies/"[a-f0-9]*; do
+        [ ! -f "$pending" ] || fail "a refused typed send left a pending-reply expectation"
+      done
+    done
+  done
+  [ ! -d "$state/t1.inbox" ] && [ ! -d "$state/domain.inbox" ] || fail "typed delivery was rerouted to an inbox"
+  pass "fm-send: explicit targets and local slash invocations preflight the Claude selector before typing"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -1080,6 +1186,8 @@ test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
 test_ring_returns_claude_selector_to_main
+test_selector_capture_failure_leaves_ring_undelivered
+test_typed_send_returns_claude_selector_to_main
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

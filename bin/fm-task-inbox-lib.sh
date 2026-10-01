@@ -368,11 +368,10 @@ fm_task_inbox_agent_view() {  # <backend> <target> [expected-label]
 # to leave a focused list with main viewed. Escape is sent at most once, since
 # a second one on main's composer would interrupt a busy turn. Left is never
 # sent: from main's composer it opens a dialog whose default stops every
-# background task. An unreadable first view keeps the ring's previous
-# behavior. Fails when the walk cannot prove main within the step budget.
+# background task. Fails when the walk cannot prove main within the step budget.
 fm_task_inbox_focus_main() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 label=${3:-} view next key steps=0 polls escaped=0
-  view=$(fm_task_inbox_agent_view "$backend" "$target" "$label") || return 0
+  view=$(fm_task_inbox_agent_view "$backend" "$target" "$label") || return 1
   while :; do
     case "$view" in
       none|main) return 0 ;;
