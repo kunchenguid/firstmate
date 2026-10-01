@@ -10,7 +10,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 Verified on 2026-10-01 with Gemini CLI 0.62.0, Node v26.7.0, and macOS 26.5.2 (arm64).
 The canonical Darwin launch's `GEMINI_PTY_INFO=child_process` override reaches Gemini's real `getPty()` selector even when interactive shell execution is requested.
-The token-free guard executes the generated launch with an isolated driver that imports the installed Gemini core, proves the native backend is available with the override removed, and runs six successful commands with the override present.
+The token-free guard executes the generated launch with an isolated driver that resolves the unambiguous core exports reachable through the installed executable’s static and literal dynamic imports without evaluating CLI main, proves the native backend is available with the override removed, and runs six successful commands with the override present.
 It uses no model, credential, real fleet endpoint, or operator configuration.
 Run:
 
@@ -21,6 +21,7 @@ bin/fm-test-run.sh tests/fm-gemini-shell-live-e2e.test.sh
 Observed assertion output:
 
 ```text
+ok - Gemini 0.62.0: CLI graph resolved core exports
 ok - Gemini 0.62.0: launch override wins; 6 child_process commands; ptmx 0->0
 ```
 

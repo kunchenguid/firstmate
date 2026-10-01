@@ -30,20 +30,47 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import assert from 'node:assert/strict';
-const timer = setTimeout(() => { console.error('not ok - installed Gemini shell guard timed out'); process.exit(1); }, 20000);
+import {SourceTextModule} from 'node:vm';
+const timer = setTimeout(() => { console.error(`not ok - Gemini ${version}: installed shell guard timed out`); process.exit(1); }, 20000);
 let version = 'unknown';
 try {
-  const bundle = path.dirname(fs.realpathSync(process.argv[2]));
+  const entry = fs.realpathSync(process.argv[2]);
+  const bundle = path.dirname(entry);
   version = JSON.parse(fs.readFileSync(path.join(bundle, '..', 'package.json'), 'utf8')).version;
-  // Gemini publishes the library exports in hashed bundle chunks. Discover
-  // exports by loading modules, never by asserting vendor implementation text.
-  let core;
-  for (const name of fs.readdirSync(bundle).sort()) {
-    if (!/^core-.*\.js$/.test(name)) continue;
-    const module = await import(pathToFileURL(path.join(bundle, name)));
-    if (module.ShellExecutionService && module.Config && module.getPty) { core = module; break; }
+  const required = ['ShellExecutionService', 'Config', 'getPty'];
+  const pending = [entry];
+  const visited = new Set();
+  const candidates = [];
+  while (pending.length) {
+    const filename = fs.realpathSync(pending.pop());
+    if (visited.has(filename)) continue;
+    visited.add(filename);
+    assert(path.dirname(filename) === bundle, `dependency escapes installed bundle: ${filename}`);
+    const source = fs.readFileSync(filename, 'utf8');
+    const imports = [...new SourceTextModule(source).dependencySpecifiers];
+    const tokens = /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\bimport\s*\(\s*['"](?<dynamic>[^'"]+)['"]\s*\)/g;
+    for (const token of source.matchAll(tokens)) {
+      if (token.groups.dynamic) imports.push(token.groups.dynamic);
+    }
+    for (const specifier of imports) {
+      if (specifier.startsWith('.')) pending.push(path.resolve(path.dirname(filename), specifier));
+    }
+    const exports = [...source.matchAll(/^export\s*\{([^}]+)\}\s*;/gm)]
+      .flatMap(([, names]) => names.split(',').map(name => name.trim().split(/\s+as\s+/).pop()));
+    if (required.every(name => exports.includes(name))) candidates.push(filename);
   }
-  assert(core, 'installed bundle must export shell service, Config, and getPty');
+  assert(candidates.length, 'CLI dependency graph must resolve core exports');
+  let core;
+  for (const filename of candidates) {
+    assert.notEqual(filename, entry, 'must not evaluate the CLI entry point');
+    const module = await import(pathToFileURL(filename));
+    for (const name of required) {
+      assert.equal(typeof module[name], 'function', `installed core export ${name}`);
+      if (core) assert.equal(module[name], core[name], `ambiguous CLI core export ${name}`);
+    }
+    core ??= module;
+  }
+  console.log(`ok - Gemini ${version}: CLI graph resolved core exports`);
   assert.equal(process.env.GEMINI_PTY_INFO, 'child_process', 'generated launch environment');
   assert.equal(await core.getPty(), null, 'real Gemini PTY selector must honor launch override');
   delete process.env.GEMINI_PTY_INFO;
@@ -78,7 +105,7 @@ try {
 JS
 cat >"$fakebin/gemini" <<'SH'
 #!/usr/bin/env bash
-exec node "$FM_GEMINI_SHELL_DRIVER" "$FM_GEMINI_SHELL_BINARY" "$FM_GEMINI_SHELL_WORKTREE"
+exec node --experimental-vm-modules --disable-warning=ExperimentalWarning "$FM_GEMINI_SHELL_DRIVER" "$FM_GEMINI_SHELL_BINARY" "$FM_GEMINI_SHELL_WORKTREE"
 SH
 chmod +x "$fakebin/gemini"
 HOME="$home/user-home" GEMINI_CLI_HOME="$home/user-home" \
