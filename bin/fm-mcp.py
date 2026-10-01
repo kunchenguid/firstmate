@@ -169,8 +169,8 @@ def status():
         stale = json.loads(ready)["lock"]["state"] == "stale"
     except (ValueError, KeyError, TypeError):
         stale = False
-    # A stale lock only means the recorded owner process is gone (for example a
-    # resumed session that has not re-taken it), not that firstmate is down.
+    # A stale lock only means the recorded owner process is gone (firstmate
+    # exited, or a resumed session has not re-taken it), so liveness is unproven.
     return run("fm-inbox.sh", "status") + "\n--- firstmate readiness ---\n" + ready + (STALE_LOCK + "\n" if stale else "")
 
 
