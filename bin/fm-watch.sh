@@ -1586,8 +1586,9 @@ declared_wait_identity() {  # <status-file> <declared-line>
 # is its first surface, so its first sight is absorbed), and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The age is recorded once per declaration,
-# so unrelated status appends and a churny idle pane cannot restart the cadence.
+# cheap: it NEVER re-reads crew state. The age is anchored once per declaration
+# on the status file's mtime when that declaration is first recorded, so unrelated
+# later status appends and a churny idle pane cannot restart the cadence.
 # The bounded re-surface itself is the shared resurface_absorbed above, throttled
 # by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
@@ -1612,6 +1613,7 @@ handle_paused_stale() {  # <window> <task> <hash> [absorb-first-sight]
   since_file="$STATE/.paused-since-$key"
   if [ "$(cat "$since_file" 2>/dev/null || true)" != "$declaration" ]; then
     printf '%s' "$declaration" > "$since_file"
+    touch -r "$statusf" "$since_file" 2>/dev/null || true
   fi
   age=$(age_of "$since_file")
   if status_is_captain_held "$last"; then

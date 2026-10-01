@@ -6729,10 +6729,6 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence() {
   local dir state
   dir=$(paused_until_fixture until-wrong-year "$(( $(date +%s) + 31536000 ))" 300); state="$dir/state"
   until_watch "$dir" 240
-  # The first stale sight seeds the declaration anchor; age it past the cadence.
-  wait_poll_cycle "$state" "$UNTIL_PID" \
-    || { reap "$UNTIL_PID"; fail "a wrong-year declared time was rechecked before its anchor aged: $(cat "$dir/watch.out")"; }
-  set_mtime "$(( $(date +%s) - 300 ))" "$state/.paused-since-test_fm-until"
   wait_for_exit "$UNTIL_PID" 100 \
     || { reap "$UNTIL_PID"; fail "a wrong-year declared time silenced the wait beyond the recheck cadence"; }
   grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null \
