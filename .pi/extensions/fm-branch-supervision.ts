@@ -842,8 +842,7 @@ export default function (pi: ExtensionAPI) {
         handoffNames.sort();
       }
       if (handoffOverflow) {
-        handoffNames = [];
-        handoffEntries.push(["task-handoffs", task, "overflow"]);
+        return "";
       }
       for (const name of handoffNames) {
         const id = name.slice(0, -4);

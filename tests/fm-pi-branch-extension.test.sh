@@ -6145,7 +6145,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     "Arm the future decision recheck for the existing task",
     "Send the approved handoff to the existing other worker",
     "Recheck after unrelated target inbox activity",
-    "Recheck the unchanged task with oversized handoff history",
+    "Deliver the approved handoff with oversized handoff history",
   ][promptCount - 1];
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
@@ -6174,7 +6174,9 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
       : promptCount === 5
         ? `PATH=${home}/handoff-fail-bin:"$PATH" ${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r1`
-        : promptCount >= 6 ? "" :
+        : promptCount === 7
+          ? `${realRoot}/bin/fm-task-handoff.sh retry viewer-to-other-r2`
+          : promptCount === 6 ? "" :
         `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
@@ -6201,7 +6203,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       ? "The future decision recheck was armed while captain approval remains pending."
       : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
-      : promptCount === 7 ? "The task remains unchanged with oversized handoff history."
+      : promptCount === 7 ? "The second approved handoff reached the existing worker despite oversized history."
       : "The existing worker received the authorized no-mistakes continuation." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
@@ -6415,12 +6417,17 @@ for (let index = 0; index < 257; index += 1) {
   writeFileSync(`${home}/state/task-handoffs/records/${id}.msg`,
     `schema=fm-task-handoff.v1\nid=${id}\nfrom=archive-source\ntarget=archive-target\n--\nhistorical handoff\n`);
 }
+writeFileSync(`${home}/state/.lease-other`, `branch\t${process.ppid}\t${Math.floor(Date.now() / 1000)}\n`);
+const overflowHandoff = run("fm-task-handoff.sh", ["send", "viewer", "other", "--id", "viewer-to-other-r2",
+  "Continue the second approved dependent step."]);
+if (overflowHandoff.status !== 6) throw new Error(`overflow handoff fixture was not retained: ${overflowHandoff.stderr}`);
+rmSync(`${home}/state/.lease-other`);
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const quiet = { ...unrelatedInbox,
-  current_state: "The task is healthy and unchanged",
-  remaining_gap: "The next scheduled readback is not due",
-  next_step: "Recheck the unchanged task with oversized handoff history",
+  current_state: "The second approved handoff is pending in oversized history",
+  remaining_gap: "The second dependent worker instruction has not been delivered",
+  next_step: "Deliver the approved handoff with oversized handoff history",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(quiet)]);
@@ -6428,14 +6435,17 @@ if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update fa
 record = JSON.parse(result.stdout);
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 7 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
-  "oversized handoff history isolation");
-if (sentToMain.length !== beforeMain + 5) throw new Error("an unrelated dotted task interrupted MAIN");
-if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
-  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
-  throw new Error("unchanged continuation was not retained quietly in the branch");
+await settle(() => promptCount === 7 && sentToMain.length === beforeMain + 6,
+  "oversized handoff material delivery");
+if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`, "utf8").includes("state=delivered") ||
+    !sentToMain.at(-1)?.message?.content?.includes("second approved handoff reached the existing worker")) {
+  throw new Error(`oversized handoff progress did not reach MAIN: ${JSON.stringify(sentToMain)}`);
 }
-if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
+  throw new Error("oversized material handoff was retained only in the branch");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
   throw new Error("the earlier handoff effect was replayed after its failing shell result");
 }
 
@@ -6454,11 +6464,12 @@ if (promptCount !== 7 || routed.filter((item) => item.command.includes("fm-send.
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r1")).length !== 1 ||
-    sentToMain.length !== beforeMain + 5) {
+    routed.filter((item) => item.command.includes("fm-task-handoff.sh retry viewer-to-other-r2")).length !== 1 ||
+    sentToMain.length !== beforeMain + 6) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation attributed exact handoff receipts and kept oversized unchanged owner state quiet");
+console.log("compact continuation attributed exact receipts and surfaced material handoffs after bounded overflow");
 process.exit(0);
 EOF
   status=$?
