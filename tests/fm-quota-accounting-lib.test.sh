@@ -5,6 +5,8 @@
 # succeeds and records why a reading is unavailable, the atomic key-replace
 # meta writer, and the plain-English summary. Drives the library through its
 # documented sourced interface with a PATH-faked quota-axi.
+# shellcheck disable=SC1091 # the sourced test lib and bin libraries resolve at runtime
+# shellcheck disable=SC2030,SC2031 # each case deliberately scopes PATH and the fake's env knobs inside one command-substitution subshell
 set -u
 
 # shellcheck source=tests/lib.sh
