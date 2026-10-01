@@ -879,6 +879,13 @@ test_no_mistakes_pushed_unmerged_refuses() {
     || fail "nm-pushed-unmerged: teardown removed the task record"
   [ "$(backlog_row_state "$case_dir")" = in_flight ] \
     || fail "nm-pushed-unmerged: teardown closed the backlog item"
+  # Explicit retention of the isolated copy and its unmerged commit (not only
+  # the durable record): a teardown that deleted the worktree would strand the
+  # ship even when the meta file survived.
+  [ -d "$case_dir/wt" ] \
+    || fail "nm-pushed-unmerged: refusal removed the isolated worktree"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD 2>/dev/null)" = "$head" ] \
+    || fail "nm-pushed-unmerged: refusal moved or deleted the unmerged commit"
   assert_refusal_retained_task_state "$case_dir" nm-pushed-unmerged "$head"
   pass "no-mistakes worktree with pushed but unmerged work is refused"
 }
