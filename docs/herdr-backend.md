@@ -304,7 +304,7 @@ Cleanup closes only the exact recorded task pane and never calls `workspace clos
 For a leased task copy, cleanup confirms that exact pane is gone before it reaps worktree processes or returns the copy.
 If the pane remains or its absence is ambiguous, cleanup retains the task records and copy for a retry.
 When Herdr leaves the exact projected tab empty after that pane disappears, locked session-start cleanup may close that exact empty tab, but never an ambiguous or non-empty tab.
-Closing the last empty tab may make Herdr remove its now-empty workspace as a side effect; cleanup never grants itself workspace-close authority.
+Closing the last empty tab also removes that workspace in current Herdr: the product deletes a workspace that no longer has any tab. Cleanup never calls `workspace close` itself and never closes a workspace that still has another tab.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
