@@ -1431,6 +1431,35 @@ test_mechanical_helper_writes_parent_channel() {
   pass "mechanical helper writes the parent channel from verb, corr, and note"
 }
 
+# PR #27 Astra shape review: a payload-free receipt (fm-secondmate-report.sh
+# --receipt) never carries a corr= token by construction, so it must never be
+# mistaken for - and must never resolve - an outstanding correlated pending
+# reply, even when both land on the parent channel for the same task.
+test_receipt_never_resolves_a_pending_reply() {
+  local home state sm_home corr rc
+  home=$(setup_parent receipt-no-resolve)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" mate)
+  export FM_PENDING_REPLY_NOW=11300
+  corr=$(fm_pending_reply_create "$home" "$state" mate "status of the audit")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  FM_HOME="$sm_home" "$REPORT" --receipt aaaa1111bbbb2222 \
+    || fail "the --receipt helper should succeed from a seeded mate home"
+  grep -Fqx 'receipt: delivery=aaaa1111bbbb2222' "$state/mate.status" \
+    || fail "the receipt helper must append the exact fixed record to the parent channel"
+  if fm_pending_reply_try_resolve "$state" "$corr"; then
+    fail "a receipt with no corr= token wrongly resolved an outstanding pending reply"
+  fi
+  [ "$(phase_of "$state" "$corr")" != resolved ] || fail "the pending reply's phase became resolved from a receipt alone"
+  rc=0
+  FM_HOME="$sm_home" "$REPORT" --receipt "not-hex-not-16-chars" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "the --receipt helper must reject a malformed delivery id"
+  rc=0
+  FM_HOME="$sm_home" "$REPORT" --receipt aaaa1111bbbb2222 "extra note" 2>/dev/null || rc=$?
+  [ "$rc" -ne 0 ] || fail "the --receipt helper must reject a trailing note argument"
+  pass "a payload-free receipt never resolves a pending reply, and the helper rejects malformed or note-bearing --receipt calls"
+}
+
 test_remote_parent_replies_is_not_wrong_home() {
   local home state sm_home corr rec hits
   home=$(setup_parent remote-parent-replies)
@@ -1713,6 +1742,7 @@ test_same_basename_self_home_corr_resolves_on_tick
 test_same_basename_reply_resolves_after_recovery_failure
 test_child_status_wrong_home_is_not_copied
 test_mechanical_helper_writes_parent_channel
+test_receipt_never_resolves_a_pending_reply
 test_remote_parent_replies_is_not_wrong_home
 test_local_parent_replies_is_wrong_home_evidence
 test_escalated_undelivered_correlation_stays_retryable

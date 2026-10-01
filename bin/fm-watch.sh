@@ -1685,6 +1685,13 @@ run_check_capture() {
 # route those - and only those - signal rows as main-only
 # (docs/pi-supervision-branch.md). Stale and heartbeat rows retain their existing
 # eligibility rules.
+# A `receipt:` span is already non-actionable through the ordinary,
+# kind-agnostic classification above with NO override needed here: `receipt`
+# is not a recognized captain-relevant verb (fm-classify-lib.sh's
+# status_is_captain_relevant), so there is no `done` verb to downgrade and
+# nothing that can leak onto an ordinary ship/scout's classification (PR #27
+# Astra shape review, replacing the earlier [confirmation]-tag downgrade this
+# function used to perform).
 signal_files_actionable() {  # <status-file> ...
   local f task record rest endpoint ident needs_decision rc found=1
   FM_SIGNAL_SURFACE_ENDPOINTS=''
@@ -1716,6 +1723,46 @@ signal_files_actionable() {  # <status-file> ...
     fi
   done
   return "$found"
+}
+
+# Space-separated subset of the given status-file batch that
+# signal_crew_provably_working's secondmate always-surface rule may safely
+# skip: a kind=secondmate .status file whose entire unseen span - from its
+# .seen-* offset up through the EXACT endpoint signal_files_actionable just
+# fixed in FM_SIGNAL_SURFACE_ENDPOINTS, never a freshly re-read "current EOF" -
+# is nothing but the payload-free receipt grammar
+# (status_span_is_all_receipts, fm-classify-lib.sh). Binding to that
+# already-fixed endpoint, rather than independently re-deriving one, is what
+# stops this from validating a later, larger span than the one that actually
+# gets committed as seen (PR #27 Astra shape review). Every other secondmate
+# .status file - any span carrying a working:, paused:, note:, resolved:,
+# captain-held:, done:, or anything at all besides exact receipt records - is
+# deliberately excluded, so that task keeps forcing a surface exactly as
+# before (docs/secondmate-parent-channel.md: nobody reads a mate's chat, so an
+# unrecognized append must still reach the parent). Call only after
+# signal_files_actionable has already ruled the whole batch non-actionable and
+# populated FM_SIGNAL_SURFACE_ENDPOINTS; a captain-relevant span always
+# surfaces regardless of this list (issue #18).
+signal_secondmate_receipt_files() {  # <status-file> ...
+  local f meta kind endpoint start line_f line_endpoint line_ident
+  for f in "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    meta="${f%.status}.meta"
+    kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
+    [ "$kind" = secondmate ] || continue
+    endpoint=''
+    # shellcheck disable=SC2034 # line_ident completes the read; only the endpoint is needed here.
+    while IFS=$(printf '\t') read -r line_f line_endpoint line_ident; do
+      [ "$line_f" = "$f" ] || continue
+      endpoint=$line_endpoint
+      break
+    done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+    [ -n "$endpoint" ] || continue
+    start=$(fm_wake_signal_seen_size "$STATE" "$f")
+    status_span_is_all_receipts "$f" "$start" "$endpoint" && printf '%s ' "$f"
+  done
 }
 
 # Surfaced-marker bookkeeping for the heartbeat backstop is owned by
@@ -2333,9 +2380,31 @@ EOF
     # fm-primary-pi-watch.ts), and the away daemon, whose handle_durable_wakes
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
+    # remaining_files drops any secondmate .status file whose whole unseen span
+    # is a payload-free receipt (signal_secondmate_receipt_files, issue #18)
+    # before the provably-working/churn evidence below ever sees it, so that
+    # file's task can never force a surface on its own; if every file in the
+    # batch drops out this way, remaining_files is empty and the batch absorbs
+    # outright. Skipped whenever a short-circuited branch already decided the
+    # outcome, matching the existing cost-ordering comment above.
+    remaining_files=$files
+    if ! afk_present && [ "$signal_actionable" -ne 0 ]; then
+      # shellcheck disable=SC2086  # same space-separated status-path list
+      receipt_files=$(signal_secondmate_receipt_files $files)
+      if [ -n "$receipt_files" ]; then
+        remaining_files=''
+        for f in $files; do
+          case " $receipt_files " in
+            *" $f "*) ;;
+            *) remaining_files="$remaining_files $f" ;;
+          esac
+        done
+      fi
+    fi
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { [ -n "$remaining_files" ] \
+        && { ! signal_crew_provably_working $remaining_files && ! signal_turnend_panes_churned $remaining_files; }; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"

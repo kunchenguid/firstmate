@@ -166,7 +166,7 @@ _fm_status_event_scan() {
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
     case "$verb" in
-      working|needs-decision|blocked|done|failed|note|\
+      working|needs-decision|blocked|done|failed|note|receipt|\
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
@@ -204,7 +204,12 @@ status_is_terminal_verb() {
 # Verb-aware by default: terminal verbs always match; nonterminal progress verbs
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
-# legacy bare lines such as "merged" or "PR ready".
+# legacy bare lines such as "merged" or "PR ready". A `receipt:` line (see
+# status_span_is_all_receipts below) is not a recognized verb here either, so
+# it falls through to that same free-text check and is captain-relevant only
+# if a home's own FM_CAPTAIN_RE happens to say so - deliberately unmodified for
+# that case (PR #27 Astra shape review: a receipt has no `done` verb to
+# special-case, so there is nothing here to downgrade).
 status_is_captain_relevant() {
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -1918,6 +1923,44 @@ status_span_has_actionable() {  # <status-file> <start-offset>
   status_span_first_actionable_record "$1" "${2:-0}" > /dev/null
 }
 
+# 0 when the exact byte span [<start-offset>, <end-offset>) of <status-file> is
+# nonempty and consists of nothing but the fixed record
+# "receipt: delivery=<16 lowercase hex>\n" repeated one or more times, with
+# NOTHING else - no note, recipient, path, bracket token, corr=, key, blank
+# line, extra or missing trailing LF, CR, tab, NUL, or non-ASCII byte, and no
+# byte anywhere outside that grammar (PR #27 Astra shape review: replaces the
+# free-text "[confirmation]"-tagged done: blocklist, which independent review
+# showed could not distinguish open-ended outcome prose - "landed change",
+# "shipped the fix", "closed #18", "review found two high severity defects" -
+# from a genuine receipt). 1 for an empty, unreadable, symlinked, or missing
+# file, a malformed offset pair, or any content outside the exact grammar.
+# Matched against the RAW bytes via a single anchored regex read directly from
+# the file, never through a shell variable capture: command substitution
+# strips a trailing newline and cannot hold an embedded NUL, either of which
+# would silently defeat exactly the boundary check this exists to enforce.
+# <end-offset> is a REQUIRED, CALLER-SUPPLIED boundary, not "current EOF": the
+# caller must pass the same endpoint it captured earlier (from
+# status_span_first_actionable_record, in bin/fm-watch.sh's
+# signal_files_actionable) and will commit as the new classified position, so
+# this never validates a later, larger span than the one being marked seen.
+status_span_is_all_receipts() {  # <status-file> <start-offset> <end-offset>
+  local f=$1 start=${2:-} end=${3:-} length
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  case "$start" in ''|*[!0-9]*) return 1 ;; esac
+  case "$end" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$start" -lt "$end" ] || return 1
+  length=$((end - start))
+  perl -e '
+    my ($path, $start, $length) = @ARGV;
+    open(my $fh, "<:raw", $path) or exit 1;
+    seek($fh, $start, 0) or exit 1;
+    my $data = "";
+    my $got = read($fh, $data, $length);
+    (defined $got && $got == $length) or exit 1;
+    exit(($data =~ /\A(?:receipt: delivery=[0-9a-f]{16}\n)+\z/) ? 0 : 1);
+  ' "$f" "$start" "$length"
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -2063,12 +2106,17 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
 # Files are mapped to task ids by stripping the .status / .turn-ended suffix;
 # a no-verb wake with nothing
 # provably working must surface, so an empty/unresolvable list returns 1.
-# A kind=secondmate task's .status signal is never absorbable here regardless of
+# A kind=secondmate task's .status signal is never absorbable HERE regardless of
 # busy evidence: that stream is the mate's routed-reply channel, so every append
 # is parent-directed content the supervisor must read (a routed reply, a newly
 # raised decision, a mirrored remote line), and a busy mate agent makes its note
 # more current, not less deliverable. Scoped to .status files - a mate's bare
-# turn-ended ping still uses the ordinary provably-working absorb.
+# turn-ended ping still uses the ordinary provably-working absorb. The ONE
+# exception lives one layer up, in the caller: bin/fm-watch.sh's
+# signal_secondmate_receipt_files filters a secondmate .status file out of the
+# batch THIS function sees when its whole unseen span is exact payload-free
+# receipts (status_span_is_all_receipts), so it never reaches this
+# always-surface rule at all (issue #18, PR #27 Astra shape review).
 signal_crew_provably_working() {  # <file> ...
   local f base dir task seen=""
   for f in "$@"; do

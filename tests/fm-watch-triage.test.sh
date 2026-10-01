@@ -207,6 +207,75 @@ test_status_span_actionable_classifier() {
   pass "status_span_has_actionable: benign absorbed, captain events surfaced, classified events not re-fired"
 }
 
+# status_span_is_all_receipts (issue #18, PR #27 Astra shape review): 0 only
+# when the EXACT byte span [start,end) is nonempty and consists of nothing but
+# "receipt: delivery=<16 lowercase hex>\n" records, one or more, with NOTHING
+# else - the free-text "[confirmation]"-tagged done: blocklist this replaces
+# could not distinguish open-ended outcome prose from a receipt; an exact byte
+# grammar structurally cannot accept any such prose at all.
+test_status_span_is_all_receipts_classifier() {
+  local dir state size
+  dir=$(make_case classify-receipt-span); state="$dir/state"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/only.status"
+  size=$(size_of "$state/only.status")
+  status_span_is_all_receipts "$state/only.status" 0 "$size" \
+    || fail "a span of one exact receipt was not all-receipts"
+  printf 'receipt: delivery=aaaa1111bbbb2222\nreceipt: delivery=cccc3333dddd4444\n' > "$state/multi.status"
+  size=$(size_of "$state/multi.status")
+  status_span_is_all_receipts "$state/multi.status" 0 "$size" \
+    || fail "a span of two consecutive exact receipts was not all-receipts"
+  printf 'working: en route\nreceipt: delivery=aaaa1111bbbb2222\n' > "$state/mixed.status"
+  size=$(size_of "$state/mixed.status")
+  status_span_is_all_receipts "$state/mixed.status" 0 "$size" \
+    && fail "a span mixing a working: line with a receipt was wrongly all-receipts"
+  : > "$state/empty.status"
+  status_span_is_all_receipts "$state/empty.status" 0 0 \
+    && fail "an empty span was wrongly all-receipts"
+  status_span_is_all_receipts "$state/missing.status" 0 10 \
+    && fail "a missing status file was wrongly all-receipts"
+  status_span_is_all_receipts "$state/only.status" 5 3 \
+    && fail "a start offset not before the end offset was wrongly all-receipts"
+  # Every byte-grammar violation Sol's and Astra's reviews specifically named
+  # must surface: uppercase hex, a missing final LF, an extra blank line, a
+  # trailing note or path glued onto the record, and an outcome sentence that
+  # is not led by any recognized verb at all.
+  printf 'receipt: delivery=AAAA1111BBBB2222\n' > "$state/uppercase.status"
+  size=$(size_of "$state/uppercase.status")
+  status_span_is_all_receipts "$state/uppercase.status" 0 "$size" \
+    && fail "uppercase hex in the identifier was wrongly all-receipts"
+  printf 'receipt: delivery=aaaa1111bbbb2222' > "$state/no-lf.status"
+  size=$(size_of "$state/no-lf.status")
+  status_span_is_all_receipts "$state/no-lf.status" 0 "$size" \
+    && fail "a receipt missing its final LF was wrongly all-receipts"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n\n' > "$state/blank-line.status"
+  size=$(size_of "$state/blank-line.status")
+  status_span_is_all_receipts "$state/blank-line.status" 0 "$size" \
+    && fail "a trailing blank line after a receipt was wrongly all-receipts"
+  printf 'receipt: delivery=aaaa1111bbbb2222 relayed to Surfaces\n' > "$state/trailing-note.status"
+  size=$(size_of "$state/trailing-note.status")
+  status_span_is_all_receipts "$state/trailing-note.status" 0 "$size" \
+    && fail "a note glued onto a receipt record was wrongly all-receipts"
+  printf 'done [confirmation]: landed change 19ba9dc\n' > "$state/legacy-tag.status"
+  size=$(size_of "$state/legacy-tag.status")
+  status_span_is_all_receipts "$state/legacy-tag.status" 0 "$size" \
+    && fail "an old free-text [confirmation]-tagged done: line was wrongly all-receipts"
+  # A control byte (NUL) embedded in the identifier must break the match: this
+  # is checked against the RAW bytes, not a shell variable capture (which
+  # cannot even hold a NUL), so this proves the perl-side read sees it.
+  printf 'receipt: delivery=aaaa1111bbbb\0002222\n' > "$state/nul-byte.status"
+  size=$(size_of "$state/nul-byte.status")
+  status_span_is_all_receipts "$state/nul-byte.status" 0 "$size" \
+    && fail "an embedded NUL byte in the identifier was wrongly all-receipts"
+  # The end offset is a REQUIRED caller-fixed boundary, never re-derived as
+  # "current EOF": a later append past the requested end must not be read.
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/later.status"
+  size=$(size_of "$state/later.status")
+  printf 'needs-decision: pick one\n' >> "$state/later.status"
+  status_span_is_all_receipts "$state/later.status" 0 "$size" \
+    || fail "a needs-decision: line appended AFTER the fixed end offset was wrongly read into the span"
+  pass "status_span_is_all_receipts: absorbable only for the exact fixed-boundary receipt-only byte grammar"
+}
+
 # The reported bug, at the classifier: an actionable event followed by a ROUTINE
 # append must stay actionable, and must be reported as ITSELF rather than as the
 # routine line that happens to sit last.
@@ -340,6 +409,28 @@ test_classifier_primitives() {
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
   status_is_captain_relevant "PR ready https://x/pull/2" \
     || fail "legacy bare PR ready free-text not captain-relevant"
+  # issue #18, shaped per the PR #27 Astra review: a payload-free "receipt:"
+  # line is a recognized status EVENT (tracked by _fm_status_event_scan) but
+  # not a captain-relevant one, through the ORDINARY kind-agnostic path -
+  # `receipt` is simply not one of the recognized captain-relevant verbs, so
+  # there is no `done` verb to special-case and nothing here to leak onto an
+  # ordinary crewmate (contrast the deleted [confirmation]-tag downgrade this
+  # replaced, PR #27 review finding P2). The kind=secondmate gating lives
+  # entirely in bin/fm-watch.sh's signal_files_actionable/
+  # signal_secondmate_receipt_files, never here.
+  status_is_captain_relevant "receipt: delivery=aaaa1111bbbb2222" \
+    && fail "a payload-free receipt line was wrongly captain-relevant by default"
+  status_is_terminal_verb "receipt: delivery=aaaa1111bbbb2222" \
+    && fail "a receipt line was wrongly classed as a terminal verb"
+  printf 'working: en route\nreceipt: delivery=aaaa1111bbbb2222\n' > "$state/receipt-event.status"
+  [ "$(last_status_line "$state/receipt-event.status")" = "receipt: delivery=aaaa1111bbbb2222" ] \
+    || fail "a receipt line was not tracked as the latest recognized status event"
+  # A home's own custom FM_CAPTAIN_RE MAY choose to treat receipts as
+  # actionable; that extra wake is accepted, never overridden back to silence
+  # (PR #27 Astra shape review: "do not override that actionable verdict to
+  # recover the optimization").
+  FM_CAPTAIN_RE='receipt:' status_is_captain_relevant "receipt: delivery=aaaa1111bbbb2222" \
+    || fail "a custom FM_CAPTAIN_RE naming receipt: was not honored"
   [ "$(window_to_task "sess:fm-fix-login-k3")" = "fix-login-k3" ] || fail "window_to_task did not strip session+fm- prefix"
   fm_write_meta "$state/herdr-task.meta" "window=default:w1:p2" "backend=herdr"
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
@@ -692,6 +783,168 @@ test_secondmate_status_signal_never_absorbed_classifier() {
     || fail "the secondmate rule leaked onto an ordinary crewmate status"
   unset FM_FAKE_CREW_STATE_sm FM_FAKE_CREW_STATE_crew
   pass "a secondmate's status signal is never absorbed as provably working; crewmates are unaffected"
+}
+
+# issue #18: a real watcher poll absorbs a secondmate's .status append when its
+# whole new span is an exact payload-free receipt - even though the mate is
+# NOT provably working, proving this carve-out is independent of the
+# busy-evidence proof the classifier test above shows it can never use.
+test_secondmate_receipt_signal_absorbed() {
+  local dir state fakebin out pid
+  dir=$(make_case secondmate-receipt-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/sm.status"
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a secondmate's receipt-only signal (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a secondmate receipt-only signal printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a secondmate receipt-only signal enqueued a durable wake record"
+  grep -qFx 'receipt: delivery=aaaa1111bbbb2222' "$state/sm.status" \
+    || fail "the receipt line did not remain readable in the status log"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_sm
+  pass "a secondmate's exact-receipt status signal is absorbed regardless of busy evidence, and stays in the log"
+}
+
+# A mixed span - a receipt alongside a real decision the parent must answer -
+# must still surface in full: the receipt grammar never lets an unrelated
+# needs-decision: line in the same append go unnoticed.
+test_secondmate_receipt_mixed_with_decision_surfaces() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case secondmate-receipt-mixed); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'receipt: delivery=aaaa1111bbbb2222\nneeds-decision: which vendor?\n' > "$state/sm.status"
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a secondmate span mixing a receipt with a real decision"
+  grep -F "signal: $state/sm.status" "$out" >/dev/null || fail "watcher did not print the surfaced mixed-span signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced mixed span failed"
+  grep -F "$state/sm.status" "$drain_out" >/dev/null || fail "surfaced mixed span was not queued"
+  unset FM_FAKE_CREW_STATE_sm
+  pass "a secondmate span mixing a receipt with a real decision still surfaces in full"
+}
+
+# The same mixed-span guarantee in the opposite order: a real decision
+# appended BEFORE the receipt must surface just as reliably as one appended
+# after it (PR #27 Astra shape review's "both orders" validation requirement).
+test_secondmate_decision_then_receipt_surfaces() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case secondmate-decision-then-receipt); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'needs-decision: which vendor?\nreceipt: delivery=aaaa1111bbbb2222\n' > "$state/sm.status"
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "watcher did not surface a secondmate span with a real decision appended BEFORE a receipt"
+  grep -F "signal: $state/sm.status" "$out" >/dev/null || fail "watcher did not print the surfaced signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain failed"
+  grep -F "$state/sm.status" "$drain_out" >/dev/null || fail "surfaced span was not queued"
+  unset FM_FAKE_CREW_STATE_sm
+  pass "a real decision followed by a receipt in the same span still surfaces in full"
+}
+
+# PR #27 Sol re-review (rev27-sol2): every one of the swallowed-outcome
+# examples that broke the old free-text blocklist is not even syntactically a
+# receipt, so the exact-grammar replacement rejects it structurally; confirm
+# several representative shapes still surface at full watcher level.
+test_secondmate_free_text_outcome_lines_still_surface() {
+  local dir state fakebin out drain_out pid line
+  for line in \
+    'done: landed change 19ba9dc' \
+    'done: closed #18' \
+    'done: review found two high severity defects' \
+    'done [confirmation]: vendor chosen' \
+    'receipt: delivery=aaaa1111bbbb2222 vendor chosen'; do
+    dir=$(make_case "secondmate-outcome-$(printf '%s' "$line" | LC_ALL=C tr -cd 'a-zA-Z0-9' | cut -c1-24)")
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+    printf 'kind=secondmate\n' > "$state/sm.meta"
+    printf '%s\n' "$line" > "$state/sm.status"
+    export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "watcher did not surface real-world outcome line: $line"
+    grep -F "signal: $state/sm.status" "$out" >/dev/null || fail "watcher did not print the surfaced signal for: $line"
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain failed for: $line"
+    grep -F "$state/sm.status" "$drain_out" >/dev/null || fail "surfaced line was not queued for: $line"
+    unset FM_FAKE_CREW_STATE_sm
+  done
+  pass "every free-text outcome shape from the Sol re-review, and any non-exact receipt line, still surfaces"
+}
+
+# The receipt exemption must never leak onto an ordinary (kind=ship)
+# crewmate: a receipt-shaped line for an ordinary worker gets no special
+# treatment at all, so with no busy evidence it surfaces exactly like any
+# other unrecognized no-verb append (the pre-existing swallowed-finish guard,
+# not a new carve-out).
+test_ordinary_crew_receipt_shaped_line_still_surfaces() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case ship-receipt-shape); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'kind=ship\n' > "$state/crew.meta"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/crew.status"
+  export FM_FAKE_CREW_STATE_crew='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "watcher did not surface an ordinary crewmate's receipt-shaped line with no busy evidence"
+  grep -F "signal: $state/crew.status" "$out" >/dev/null || fail "watcher did not print the surfaced ordinary-crew signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the surfaced ordinary-crew line failed"
+  grep -F "$state/crew.status" "$drain_out" >/dev/null || fail "surfaced ordinary-crew receipt-shaped line was not queued"
+  unset FM_FAKE_CREW_STATE_crew
+  pass "a receipt-shaped line for an ordinary crewmate gets no special treatment and still surfaces without busy evidence"
+}
+
+# PR #27 Astra shape review: the same-poll turn-end behavior is a deliberate,
+# documented decision, not an oversight - a receipt bundled with that task's
+# own bare turn-end still surfaces, preserving the swallowed-finish guard.
+test_secondmate_receipt_with_turn_end_still_surfaces() {
+  local dir state fakebin out pid
+  dir=$(make_case secondmate-receipt-turnend); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/sm.status"
+  : > "$state/sm.turn-ended"
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || fail "watcher did not surface a receipt bundled with that task's own bare turn-end"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_sm
+  pass "a receipt bundled with the same task's bare turn-end still surfaces (documented conservative choice)"
+}
+
+# An absorbed receipt is delayed to the next wake's annotation, never dropped:
+# a receipt-only status append is absorbed with no queue entry, then a later
+# routine working: append on the SAME task surfaces normally and the receipt
+# line is still visible in the drain's queued-signal annotation.
+test_absorbed_receipt_visible_at_next_drain() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case secondmate-receipt-next-drain); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf 'receipt: delivery=aaaa1111bbbb2222\n' > "$state/sm.status"
+  export FM_FAKE_CREW_STATE_sm='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for the receipt-only signal it should absorb before the follow-up append"
+  fi
+  [ ! -s "$out" ] || fail "the receipt-only signal printed a wake reason before the follow-up append"
+  printf 'working: phase two started\n' >> "$state/sm.status"
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the follow-up working: append"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the follow-up surface failed"
+  grep -F 'receipt: delivery=aaaa1111bbbb2222' "$drain_out" >/dev/null \
+    || fail "the earlier absorbed receipt line never became visible at the next drain"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE_sm
+  pass "an absorbed receipt is delayed to the next wake's annotation, never dropped"
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
@@ -5084,6 +5337,7 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 test_status_span_actionable_classifier
+test_status_span_is_all_receipts_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
 test_malformed_seen_signature_reads_the_whole_log
@@ -5098,6 +5352,13 @@ test_empty_write_prune_from_the_environment_widens_the_probe
 test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
+test_secondmate_receipt_signal_absorbed
+test_secondmate_receipt_mixed_with_decision_surfaces
+test_secondmate_decision_then_receipt_surfaces
+test_secondmate_free_text_outcome_lines_still_surface
+test_ordinary_crew_receipt_shaped_line_still_surfaces
+test_secondmate_receipt_with_turn_end_still_surfaces
+test_absorbed_receipt_visible_at_next_drain
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced

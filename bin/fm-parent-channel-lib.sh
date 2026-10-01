@@ -24,8 +24,9 @@
 #   - bin/fm-merge-outcome-lib.sh    a merged PR
 #   - bin/fm-teardown.sh             the child's final ledger line, refusing to
 #                                    remove the child while it is undelivered
-#   - bin/fm-secondmate-report.sh     a marked request's correlated answer,
-#                                    with this resolver choosing its destination
+#   - bin/fm-secondmate-report.sh     a marked request's correlated answer, or a
+#                                    payload-free delivery receipt, with this
+#                                    resolver choosing its destination
 # The mate's own appends are reserved for judgement (bin/fm-brief.sh charter).
 # docs/secondmate-parent-channel.md records the design and its coverage.
 #
@@ -156,7 +157,7 @@ fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
   fi
   fm_repo_scope_marker_parse "$home" || return 2
   case "$class" in
-    correlated|captain-hold|project-summary|project-decision|project-blocker|project-milestone)
+    correlated|captain-hold|project-summary|project-decision|project-blocker|project-milestone|receipt)
       return 1
       ;;
     worker-outcome)
@@ -189,6 +190,17 @@ fm_parent_channel_report() {  # <home> <state> <line>
 # Only these named publishers may carry typed summaries across a project hop.
 fm_parent_channel_report_correlated() {  # <home> <state> <line>
   _fm_parent_channel_report_typed correlated "$1" "$2" "$3"
+}
+
+# A payload-free delivery receipt (bin/fm-secondmate-report.sh --receipt): the
+# same project-hop treatment as a correlated reply - it reaches the direct
+# parent unconditionally, never absorbed into a project home's
+# project-outcomes.log - since a receipt is mate-to-parent acknowledgement,
+# not a child worker's outcome. fm-classify-lib.sh's status_span_is_all_receipts
+# is what keeps the LINE this publishes to the exact fixed grammar; this
+# function only chooses where it lands.
+fm_parent_channel_report_receipt() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed receipt "$1" "$2" "$3"
 }
 
 fm_parent_channel_report_captain_hold() {  # <home> <state> <line>

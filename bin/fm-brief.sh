@@ -279,6 +279,7 @@ When a message carries that marker, do the work, then respond via the STATUS/ESC
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
 Optional helper: \`bin/fm-secondmate-report.sh <verb> <corr_id> <note>\` appends that correlated line to the parent channel itself - do not pass a status path, and do not write a hand path under this home.
 A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
+A fire-and-forget instruction instead carries a \`delivery=<id>\` token in place of \`corr=<id>\` and expects no reply at all; see the payload-free receipt below for the one thing you may optionally send back for it.
 For a terse result, a status line is the whole answer.
 For a detailed answer (an investigation, a plan, an audit), write it to a doc under your home's \`data/\` and append a status line that points to that doc - the scout-report pattern - so the main firstmate is woken and can read it.
 Before treating an investigation or visual review as complete, load \`captain-hold-lifecycle\` from this home's \`.agents/skills/\` and pass its shared completion gate.
@@ -295,8 +296,11 @@ States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
+A fire-and-forget instruction (marked with \`delivery=<id>\` instead of \`corr=<id>\`) expects no reply, but you may optionally confirm you carried it out with a payload-free receipt: \`bin/fm-secondmate-report.sh --receipt <id>\` (or a plain \`echo \"receipt: delivery=<id>\" >> $STATUS_FILE\`), using the exact \`delivery=<id>\` value from that message.
+A receipt is EXACTLY that one line and nothing else - no note, no recipient, no path, no key, no corr, no extra clause of any kind - because only that exact fixed shape is what lets the watcher absorb it without waking the parent.
+Never write a receipt for anything that needs an answer, and never let a receipt stand in for reporting a merge, a PR, a finding, a decision, a blocker, or a failure - those always go through the ordinary \`done:\`/\`needs-decision:\`/\`blocked:\`/\`failed:\` path so the parent is never left to discover them later.
 This is also how you return the answer to a marked from-firstmate request above.
-A marked request requires one correlated answer after the work; it does not require a separate receipt or start acknowledgement.
+A marked request requires one correlated answer after the work; it does not require a separate acknowledgement that you started, and a \`corr=<id>\` request is never answered with a payload-free receipt.
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.

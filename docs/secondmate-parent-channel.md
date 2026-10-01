@@ -47,6 +47,21 @@ The pending-reply guard may restate only the correlated line from a local mate's
 Other correlated mate-home status lines remain wrong-home evidence, while a remote home's routed `state/parent-replies.status` is already the parent channel and is not classified as wrong-home.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 
+## Payload-free delivery receipts
+
+The channel above is deliberately every append: today every line a mate writes to `state/<id>.status` wakes the parent, because the watcher cannot otherwise tell a routed reply or a newly raised decision from routine chatter (`bin/fm-classify-lib.sh`'s `signal_crew_provably_working`).
+During the ButterTrip Home campaign roughly half of the parent's wake-handling turns were a mate confirming it had carried out a fire-and-forget instruction the parent had just sent - "relayed to Surfaces", "dispatched ..." - with nothing left for the parent to act on, each still costing a full drain, reconcile, and acknowledge cycle (issue #18).
+An earlier shape of this fix tagged the mate's own `done:` line (`done [confirmation]: ...`) and rejected outcome content with a blocklist; independent review (PR #27) showed a finite blocklist cannot distinguish open-ended outcome prose - "landed change ...", "shipped the fix ...", "closed #18", "review found two high severity defects" - from a genuine receipt, so that shape was replaced rather than patched further.
+The shipped design instead uses a **payload-free receipt**: a separate, nonterminal record whose entire physical line is exactly `receipt: delivery=<16 lowercase hex>` plus one trailing LF, and nothing else - no note, recipient, path, bracket token, `corr=`, key, extra whitespace, or second clause.
+A mate acknowledges a fire-and-forget `delivery=<id>` instruction (`bin/fm-send.sh`) by appending that exact record, using `bin/fm-secondmate-report.sh --receipt <id>` or a plain `echo` (`bin/fm-brief.sh`'s charter text owns the exact wording a mate is told); an outcome, an answer, or anything else always takes the ordinary `done:`/`needs-decision:`/`blocked:`/`failed:` path and is never written as a receipt.
+`bin/fm-classify-lib.sh`'s `status_span_is_all_receipts` validates the exact byte grammar directly against the file's raw bytes (never through a shell variable capture, which would silently strip a missing trailing newline or choke on an embedded NUL) and is bounded to a caller-fixed end offset rather than a freshly re-read "current EOF", so it never validates a span larger than the one actually being committed as seen.
+`receipt` is deliberately NOT a recognized captain-relevant verb in the shared, kind-agnostic `status_is_captain_relevant`: there is no `done` verb to special-case and therefore nothing that can leak onto an ordinary ship or scout crewmate's classification, unlike the earlier tag-based shape (PR #27 review).
+The absorb happens entirely in `bin/fm-watch.sh`, and only for a verified `kind=secondmate` status file whose entire unseen span is exact receipts (`signal_files_actionable` and `signal_secondmate_receipt_files`, both built on the same per-file check).
+Every other verb, any content that is not byte-for-byte the receipt grammar, and a span mixing a receipt with real content are unaffected and keep surfacing exactly as before.
+The line still lands in `state/<id>.status` and reads back in the fleet-state digest tail; only the immediate wake is skipped.
+A receipt bundled into the same poll as that task's own bare turn-end still surfaces: the turn-end keeps its ordinary provably-working proof requirement, on the same conservative footing as any other no-verb turn-end, so a receipt appended right at the end of a mate's turn does not by itself exempt that turn-end from the swallowed-finish guard (a deliberate decision, not an oversight).
+A receipt never resolves a pending reply, closes a decision key, or asserts that the requested work succeeded - it is linkage to an already-delivered instruction, not an outcome or an answer.
+
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
@@ -62,6 +77,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 `tests/fm-brief.test.sh` pins the charter's channel rule.
 `tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
+`tests/fm-watch-triage.test.sh` covers the payload-free receipt grammar: the exact byte-level acceptance and rejection cases (uppercase hex, a missing final LF, a trailing blank line, a note or old `[confirmation]`-tagged line glued onto the record, a caller-fixed end offset that a later append cannot extend past); `receipt:` staying non-captain-relevant by default while still honoring a custom `FM_CAPTAIN_RE`; a real watcher poll absorbing a receipt-only secondmate status append even while NOT provably working; every free-text outcome shape from the Sol re-review (landed/closed/review-found, plus an old `[confirmation]`-tagged line and a receipt with trailing text) still surfacing; a receipt-shaped line for an ordinary crewmate getting no special treatment; a receipt bundled with that task's own bare turn-end still surfacing; a mixed receipt-plus-decision span surfacing in full; and an absorbed receipt staying visible at the next drain.
 
 ## Live verification
 

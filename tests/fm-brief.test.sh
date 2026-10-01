@@ -506,8 +506,8 @@ test_secondmate_marked_request_reporting_contract() {
 
   assert_grep 'A marked request requires one correlated answer after the work' "$brief" \
     "secondmate charter did not require the correlated answer after the work"
-  assert_grep 'does not require a separate receipt or start acknowledgement' "$brief" \
-    "secondmate charter did not reject a separate receipt/start acknowledgement"
+  assert_grep 'it does not require a separate acknowledgement that you started' "$brief" \
+    "secondmate charter did not reject a separate start acknowledgement"
   assert_grep "Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started." "$brief" \
     "secondmate charter did not forbid a generic working acknowledgement"
   assert_no_grep "Give every routed-work phase a stable key: open it with \`working" "$brief" \
@@ -541,6 +541,18 @@ test_secondmate_marked_request_reporting_contract() {
     "secondmate charter did not name a landed merge as a reporting trigger"
   assert_grep 'States: working, needs-decision, blocked, paused, done, failed.' "$brief" \
     "secondmate charter changed the preserved status vocabulary"
+  # issue #18, shaped per the PR #27 Astra review: the charter must tell a mate
+  # how to send a payload-free delivery receipt for a fire-and-forget
+  # instruction, and that a receipt never carries or substitutes for an
+  # outcome.
+  assert_grep 'bin/fm-secondmate-report.sh --receipt <id>' "$brief" \
+    "secondmate charter lost the payload-free receipt helper invocation"
+  assert_grep 'A receipt is EXACTLY that one line and nothing else' "$brief" \
+    "secondmate charter did not state the receipt's fixed, payload-free shape"
+  assert_grep 'never let a receipt stand in for reporting a merge, a PR, a finding, a decision, a blocker, or a failure' "$brief" \
+    "secondmate charter did not prohibit outcome content standing in as a receipt"
+  assert_grep 'is never answered with a payload-free receipt' "$brief" \
+    "secondmate charter did not forbid answering a corr-marked request with a receipt"
   pass "fm-brief.sh: marked requests avoid generic acknowledgements and preserve material reporting"
 }
 
