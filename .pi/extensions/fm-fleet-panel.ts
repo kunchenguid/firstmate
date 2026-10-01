@@ -187,7 +187,7 @@ export default function fleetPanelExtension(pi: ExtensionAPI): void {
       active.setText(text);
     } catch {
       if (panel !== active) return;
-      active.setText("## Fleet\nSnapshot refresh failed; showing last good read.");
+      ui.notify("Fleet panel: snapshot refresh failed; showing last good read.", "warning");
     } finally {
       fetching = false;
     }
