@@ -2018,6 +2018,21 @@ case "${1:-} ${2:-}" in
         : > "$D/herdr-agent-live" ;;
     esac
     exit 0 ;;
+  'session list')
+    # fm_backend_herdr_presentation_session_socket_path resolves the home
+    # binding's socket from this when no ambient HERDR_SOCKET_PATH is set -
+    # exactly rl73's seat, which reclaims with no ambient herdr identity at
+    # all. fm_backend_herdr_cli always appends "--session <name>", so report
+    # that exact session back as running with a stable fake socket path.
+    ses=fmlab
+    prev=
+    for a in "$@"; do
+      [ "$prev" = --session ] && ses=$a
+      prev=$a
+    done
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s/fake-session-%s.sock"}]}\n' \
+      "$ses" "$D" "$ses"
+    exit 0 ;;
   'workspace list')
     printf '{"result":{"workspaces":[]}}\n'
     exit 0 ;;

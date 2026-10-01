@@ -1934,6 +1934,12 @@ fm_backend_herdr_home_binding_write() { # <session> <workspace> [<anchor-tab>] [
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$f"
 }
+# Returns 0 when the binding is live and its workspace is present, 2 when the
+# binding's own identity (home/session/socket/expected workspace) checks out
+# but the bound workspace is CONFIRMED dead (not merely unreadable or
+# ambiguous) - safe for the caller to recreate - and 1 for every other
+# failure: a corrupt snapshot, a home/session/socket/workspace mismatch, or a
+# presence read that came back "unknown" rather than a confirmed "dead".
 fm_backend_herdr_home_binding_validate_live() { # <session> [<workspace>]
   local session=$1 expected=${2:-} f home socket presence
   f=$(fm_backend_herdr_home_binding_path); fm_backend_herdr_home_binding_snapshot "$f" || return 1
@@ -1944,7 +1950,9 @@ fm_backend_herdr_home_binding_validate_live() { # <session> [<workspace>]
     && [ "$FM_BACKEND_HERDR_BINDING_SOCKET" = "$socket" ] \
     && { [ -z "$expected" ] || [ "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" = "$expected" ]; } || return 1
   presence=$(fm_backend_herdr_workspace_presence_state "$session" "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID")
-  [ "$presence" = present ]
+  [ "$presence" = present ] && return 0
+  [ "$presence" = dead ] && return 2
+  return 1
 }
 fm_backend_herdr_task_binding_validate() { # <meta> <session> <workspace>
   local meta=$1 session=$2 workspace=$3 home version socket binding presence
@@ -2025,29 +2033,38 @@ fm_backend_herdr_task_binding_validate() { # <meta> <session> <workspace>
 # Returns 0 on success, 3 for a refusal whose exact reason is already on
 # stderr, and 1 for a failed or unparseable herdr call.
 fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship>]
-  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status binding
+  local session=$1 cwd=$2 relationship=${3:-launcher-home} wsid out label matches count status binding validate_status
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   binding=$(fm_backend_herdr_home_binding_path)
   if [ -e "$binding" ] || [ -L "$binding" ]; then
-    fm_backend_herdr_home_binding_validate_live "$session" || {
+    fm_backend_herdr_home_binding_validate_live "$session" && validate_status=0 || validate_status=$?
+    if [ "$validate_status" -eq 1 ]; then
       echo "error: authoritative Herdr workspace binding for $FM_HOME is missing, stale, or contradictory; refusing placement" >&2
       return 3
-    }
-    if [ "$relationship" = launcher-home ]; then
-      fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
-      case "$status" in
-        0) [ "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" = "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" ] || {
-          echo "error: launcher workspace contradicts the authoritative Herdr home binding; refusing placement" >&2
-          return 3
-        } ;;
-        2) ;;
-        *) return 3 ;;
-      esac
     fi
-    FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID
-    printf '%s' "$FM_BACKEND_HERDR_WS_ID"
-    return 0
+    if [ "$validate_status" -eq 0 ]; then
+      if [ "$relationship" = launcher-home ]; then
+        fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
+        case "$status" in
+          0) [ "$FM_BACKEND_HERDR_LAUNCHER_WORKSPACE_ID" = "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" ] || {
+            echo "error: launcher workspace contradicts the authoritative Herdr home binding; refusing placement" >&2
+            return 3
+          } ;;
+          2) ;;
+          *) return 3 ;;
+        esac
+      fi
+      FM_BACKEND_HERDR_WS_ID=$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID
+      printf '%s' "$FM_BACKEND_HERDR_WS_ID"
+      return 0
+    fi
+    # validate_status == 2: the binding's own identity (home/session/socket)
+    # checks out, but its bound workspace is CONFIRMED dead, not ambiguous -
+    # docs/herdr-backend.md: "Closing its last tab can remove the workspace,
+    # and the next spawn recreates it." Fall through to the same
+    # discover-or-create path a home with no binding yet uses below, which
+    # re-resolves and re-journals a fresh binding rather than refusing.
   fi
   if [ "$relationship" = launcher-home ]; then
     fm_backend_herdr_launcher_identity "$session" && status=0 || status=$?
