@@ -676,6 +676,7 @@ test_matrix_opencode_leftbar_signals() {
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
   local screen typed dim_screen captured_idle captured_pending out
+  local hint_q captured_2x_idle captured_2x_plain captured_2x_typed
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
@@ -702,6 +703,46 @@ test_matrix_opencode_leftbar_signals() {
   assert_screen "opencode placeholder-like input on plain backends" unknown "$CAPS_PLAIN" "$typed"
   typed=$'┃  refactor the parser please\n┃\n┃  Build · GPT-5.5 Fast OpenAI · high'
   assert_screen "opencode multiline draft above blank cursor row" pending "$CAPS_TMUX" "$typed" 1
+  # opencode 2.x (verified live, 2.0.16): the hint takes U+2026 and a quoted
+  # rotating suggestion, the footer inserts an autonomy token before the
+  # separator (`Build auto · …`), and a status row (`…/proj:main  shift+tab
+  # agents  ctrl+p commands`) is drawn below the half-block floor. The status
+  # row below the floor is the one that made cursorless selection refuse
+  # (`unknown`) before the status-row furniture rule landed, and the
+  # `Build auto · ` spelling is the one the anchored footer rule could not read.
+  # Each styled row is composed from explicit segments so the SGR bytes and the
+  # real glyphs stay readable; printf -v keeps the assembly locale-independent.
+  hint_q='Ask anything… "What is the tech stack of this project?"'
+  printf -v captured_2x_idle '%s\n%s\n%s\n%s\n%s\n%s' \
+    '┃' \
+    "┃  ${ESC}[38;2;128;128;128m${hint_q}${ESC}[38;2;255;255;255m" \
+    '┃' \
+    "┃  ${ESC}[38;2;92;156;245mBuild${ESC}[38;2;255;255;255m auto ${ESC}[38;2;128;128;128m·${ESC}[38;2;255;255;255m LongCat 2.5 Preview Free OpenCode Zen" \
+    "${ESC}[38;2;92;156;245m╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀${ESC}[38;2;255;255;255m" \
+    '/…/proj:main  shift+tab agents  ctrl+p commands'
+  assert_screen "opencode 2.0.16 idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$captured_2x_idle" 2
+  assert_screen "opencode 2.0.16 idle on tmux (cursor on blank row above hint)" empty "$CAPS_TMUX" "$captured_2x_idle" 1
+  assert_screen "opencode 2.0.16 idle on herdr" empty "$CAPS_STYLED" "$captured_2x_idle"
+  assert_screen "opencode 2.0.16 idle on zellij" empty "$CAPS_STYLED_NOID" "$captured_2x_idle"
+  printf -v captured_2x_plain '%s\n%s\n%s\n%s\n%s\n%s' \
+    '┃' \
+    "┃  ${hint_q}" \
+    '┃' \
+    '┃  Build auto · LongCat 2.5 Preview Free OpenCode Zen' \
+    '╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' \
+    '/…/proj:main  shift+tab agents  ctrl+p commands'
+  assert_screen "opencode 2.0.16 idle on cmux/orca" empty "$CAPS_PLAIN" "$captured_2x_plain"
+  # A typed draft in the 2.x composer is still pending, and the status row below
+  # the floor must not let that draft read empty.
+  printf -v captured_2x_typed '%s\n%s\n%s\n%s\n%s\n%s' \
+    '┃' \
+    "┃  ${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m" \
+    '┃' \
+    '┃  Build auto · LongCat 2.5 Preview Free OpenCode Zen' \
+    '╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀' \
+    '/…/proj:main  shift+tab agents  ctrl+p commands'
+  assert_screen "opencode 2.0.16 typed draft on tmux" pending "$CAPS_TMUX" "$captured_2x_typed" 2
+  assert_screen "opencode 2.0.16 typed draft on herdr" pending "$CAPS_STYLED" "$captured_2x_typed"
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 

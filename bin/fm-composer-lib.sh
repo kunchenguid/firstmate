@@ -460,21 +460,35 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
-# bordered placeholder and opencode's left-bar hint (which uses either three
-# ASCII periods or U+2026 and continues with a rotating quoted suggestion,
-# hence the unanchored tail). cursor-agent renders
-# two, both anchored: `Plan, search, build anything` in a fresh session and
-# `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
-# fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
+# bordered placeholder and opencode's left-bar hint both end the pattern at the
+# leading phrase, so whatever rotating suggestion follows is not part of the
+# match: opencode 1.x renders `Ask anything... "<suggestion>"` and opencode 2.x
+# renders `Ask anything… "<suggestion>"`, and the plain `Ask anything…` form
+# with no suggestion also matches. cursor-agent renders two, both anchored:
+# `Plan, search, build anything` in a fresh session and `Add a follow-up` once
+# a turn has completed (verified live on cursor-agent 2026.08.11-e8db854).
+# Devin renders the anchored `Ask Devin to build features, fix bugs, or work on
+# your code` as dim text after its `❭` glyph (verified live, devin 3000.11.1).
+# FM_COMPOSER_IDLE_RE overrides for an unverified harness; matching is
+# case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
 
-# Opencode draws a mode/model footer line INSIDE its left-bar composer
-# ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
-# text, and only the run's LAST row is ever matched against it.
-FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
+# Opencode draws a mode/model footer line INSIDE its left-bar composer: opencode
+# 1.x writes `Build · GPT-5.5 Fast OpenAI · high`, while opencode 2.x inserts an
+# autonomy token before the separator (`Build auto · LongCat 2.5 Preview Free
+# OpenCode Zen`, `Plan auto · …`; verified live, opencode 2.0.16). The mode word
+# is the first token, the separator and model follow; the optional middle token
+# is what the earlier `Build · ` -only form did not allow, so the middle segment
+# is `.*` and only the run's LAST row is ever matched against it.
+FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)([[:space:]]+[^·[:space:]]+)?[[:space:]]+·[[:space:]]+'
+# Opencode 2.x draws a status row directly BELOW the left bar's half-block
+# floor: the directory:branch cell followed by its keybinding hints
+# (`…/proj:main  shift+tab agents  ctrl+p commands`; verified live, opencode
+# 2.0.16). It is composer furniture, not transcript content, and a left bar's
+# staleness probe must bound at it exactly as it bounds at the floor row.
+# The hints are matched as a conjunction of opencode's own tokens so an
+# arbitrary non-blank row still reads as the live lower shape and refuses.
+FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT='shift\+tab[[:space:]]+agents.*ctrl\+p[[:space:]]+commands'
 # Claude draws its permission-mode hint on its own row directly below the
 # composer (` ⏵⏵ bypass permissions on (shift+tab to cycle)`, ` ⏵⏵ accept edits
 # on`, ` ⏸ plan mode on`; verified live through Herdr on claude 2.1.236). The
@@ -1209,6 +1223,14 @@ _fm_composer_row_is_pi_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "$FM_COMPOSER_PI_STATUS_RE_DEFAULT" sensitive
 }
 
+# _fm_composer_row_is_opencode_status: 0 when the trimmed row is opencode 2.x's
+# status line (FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT above) - composer
+# furniture drawn below the left bar's half-block floor, which must bound a
+# left-bar composer's staleness probe exactly as the floor row does.
+_fm_composer_row_is_opencode_status() {  # <trimmed-row>
+  fm_composer_idle_matches "$1" "${FM_COMPOSER_OPENCODE_STATUS_RE:-$FM_COMPOSER_OPENCODE_STATUS_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1300,6 +1322,8 @@ _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>
   while [ "$row" -le "$last" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
+    # The left bar opens with `┃` and has NO closing side border, so the shared
+    # pair-strip in _fm_composer_row_content cannot remove it; strip it here.
     case "$content" in
       '┃'*) content=${content#┃} ;;
     esac
@@ -1515,6 +1539,17 @@ _fm_composer_select_cursorless() {
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
       if _fm_composer_leftbar_floor_row "$trimmed"; then
+        boundary=$next
+      fi
+      # opencode 2.x draws a status row (directory:branch + keybinding hints)
+      # directly below the floor. It is the left bar's own furniture, not a
+      # lower live shape, so the staleness probe resumes past it too; without
+      # this an idle 2.x pane reads `unknown` on every cursorless backend.
+      next=$((boundary + 1))
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      if _fm_composer_row_is_opencode_status "$trimmed"; then
         boundary=$next
       fi
     fi

@@ -985,6 +985,55 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
+test_opencode_idle_leftbar_allows_exit() {
+  # The lifecycle verb that was permanently unusable for the primary harness:
+  # a real opencode 2.x composer read `unknown` (neither `empty` nor `pending`),
+  # so `exit` refused before typing anything. Its hint takes U+2026 and a quoted
+  # suggestion, its footer inserts an autonomy token (`Build auto · …`), and a
+  # status row (`…:main  shift+tab agents  ctrl+p commands`) sits below the
+  # half-block floor. All three had to be taught before the composer read empty.
+  local dir out rc
+  dir=$(new_case oc-idle)
+  add_task "$dir" t1 opencode
+  alive_as "$dir" opencode
+  printf '%s\n' \
+    '┃' \
+    '┃  Ask anything… "Fix a TODO in the codebase"' \
+    '┃' \
+    '┃  Build auto · LongCat 2.5 Preview Free OpenCode Zen' \
+    '╹▀▀▀▀▀▀▀▀' \
+    '/…/proj:main  shift+tab agents  ctrl+p commands' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "an idle opencode composer should let exit proceed"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=opencode" "exit should report the stop"
+  [ "$(literals "$dir")" = "/exit" ] \
+    || fail "the opencode exit command should be typed, got: $(literals "$dir")"
+  pass "fm-control exit: an idle opencode left-bar composer proves empty and the exit command lands"
+}
+
+test_opencode_pending_leftbar_refuses_exit() {
+  # The safety rule survives the fix: a composer visibly holding pending text
+  # still refuses before the exit command is typed, so a draft is never
+  # concatenated with the lifecycle command.
+  local dir out rc
+  dir=$(new_case oc-pending)
+  add_task "$dir" t1 opencode
+  alive_as "$dir" opencode
+  printf '%s\n' \
+    '┃' \
+    '┃  refactor the parser please' \
+    '┃' \
+    '┃  Build auto · LongCat 2.5 Preview Free OpenCode Zen' \
+    '╹▀▀▀▀▀▀▀▀' \
+    '/…/proj:main  shift+tab agents  ctrl+p commands' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a pending opencode composer should refuse exit"
+  assert_contains "$out" "visibly holds pending text" \
+    "the refusal should name the pending composer"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed into a composer holding text"
+  pass "fm-control exit: a pending opencode composer still refuses before the exit command"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -1107,5 +1156,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_opencode_idle_leftbar_allows_exit
+test_opencode_pending_leftbar_refuses_exit
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

@@ -712,6 +712,30 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+### 2026-09-30 opencode 2.0.16 left-bar composer in a live tmux pane
+
+Verified on 2026-09-30 on macOS arm64 against opencode 2.0.16 running idle in an isolated default-socket tmux session (tmux 3.7c), read through the tmux capability descriptor (`styled=1`, `cursor=1`, `identity=1`, `rows=0`).
+Three vendor-rendered changes from the 1.14.46 capture above made the real idle composer classify `pending` (cursor-anchored) or `unknown` (cursorless), so `bin/fm-control.sh <id> exit` refused before typing anything and the documented lifecycle verb was permanently unusable for the primary harness:
+- the idle hint takes U+2026 and a quoted rotating suggestion (`Ask anything… "Fix a TODO in the codebase"`), which the fleet-wide `^Ask anything(\.\.\.|…)` alt already matched by prefix; the hint row still counted as typed content until the two following changes stopped the earlier rows from clearing the idle path;
+- the footer inserts an autonomy token before the separator (`Build auto · LongCat 2.5 Preview Free OpenCode Zen`), which the previous `^(Build|Plan)[[:space:]]+·[[:space:]]+` footer rule could not match, so the last row counted as typed content;
+- a status row (`…/proj:main  shift+tab agents  ctrl+p commands`) is drawn directly below the left bar's half-block floor, which the left-bar staleness probe read as a lower live shape and refused cursorless selection.
+
+The exact live capture, read with `tmux capture-pane -e`:
+
+```text
+┃
+┃  Ask anything… "Fix a TODO in the codebase"
+┃
+┃  Build auto · LongCat 2.5 Preview Free OpenCode Zen
+╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+/…/proj:main  shift+tab agents  ctrl+p commands
+```
+
+Observed verdicts before the fix (`pending` on tmux, `unknown` cursorless) and after it (`empty` on tmux, herdr, zellij, and the plain cmux/orca profile), with a typed draft (`Reply with OK.`) still `pending` on every profile.
+`bin/fm-control.sh <id> exit` then read the composer `empty`, submitted `/exit`, observed the pane drop to `zsh`, and reported `stopped` with the endpoint preserved.
+The portable regression is `test_matrix_opencode_leftbar_signals` in `tests/fm-composer-lib.test.sh` (the byte-capture fixture and the cursorless profiles), and the exit path is pinned by `test_opencode_idle_leftbar_allows_exit` and `test_opencode_pending_leftbar_refuses_exit` in `tests/fm-control.test.sh`.
+The composer-matrix live guard's `opencode` arm remains the refresh command after an opencode upgrade.
+
 ### 2026-09-20 claude 2.1.236 statusLine footer through Herdr
 
 Verified on 2026-09-20 on macOS arm64 (Darwin 25.6.0) against Claude Code 2.1.236 running as Firstmate workers in Herdr 0.8.0 panes, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
