@@ -12,7 +12,7 @@ Every note it queues starts with the first line `[via firstmate MCP from <client
 Claude Desktop identifies itself as `claude-ai` and Claude Code under its own name, so the two are distinguishable, but Desktop's chat, Cowork, and Code tabs share one client identity.
 Each reply names the note id it answers, so a session that passes its own note id to `firstmate_note_replies` sees only the answer to its own note.
 Every other tool is a read of status, readiness, receipts, the home summary, the backlog, a crew's current state, or a crew's report.
-When firstmate's session lock is stale, for example after a resumed session that has not re-taken it, `firstmate_status` says liveness cannot be proven rather than that firstmate is down, because notes still queue and wake firstmate.
+When firstmate's session lock is stale, for example after a resumed session that has not re-taken it, `firstmate_status` says, rather than that firstmate is down: "firstmate liveness cannot be proven right now; notes are still saved and queued, and firstmate picks them up the next time its session runs".
 A home file is never read through a symlink or from outside `FM_HOME`, so a symlinked `data/<id>/report.md` is refused.
 The script header lists each tool and the command or file it wraps.
 

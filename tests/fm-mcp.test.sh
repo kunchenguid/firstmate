@@ -222,7 +222,7 @@ pass "missing files are errors"
 # A lock left by a process that is gone (a resumed session that has not re-taken
 # it) reads as unproven liveness, never as firstmate being down. A free lock
 # gets no such line.
-stale_line="firstmate's liveness cannot be proven right now; notes still queue and wake firstmate."
+stale_line="firstmate liveness cannot be proven right now; notes are still saved and queued, and firstmate picks them up the next time its session runs."
 assert_not_contains "$(ok_text "status" "$(call firstmate_status)")" "$stale_line" "a free lock is not reported as stale"
 bash -c 'exit 0' & dead=$!
 wait "$dead"

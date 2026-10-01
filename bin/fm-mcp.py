@@ -160,7 +160,7 @@ def newest_page_cursor():
     return "%012d" % (seq - REPLIES) if seq > REPLIES else None
 
 
-STALE_LOCK = "firstmate's liveness cannot be proven right now; notes still queue and wake firstmate."
+STALE_LOCK = "firstmate liveness cannot be proven right now; notes are still saved and queued, and firstmate picks them up the next time its session runs."
 
 
 def status():
@@ -251,8 +251,7 @@ TOOLS = {
         status,
         "What is happening now: notes waiting, in-flight backlog items, each crew's last event"
         " (fm-inbox.sh status), and whether firstmate itself is live to receive notes (fm-inbox.sh ready)."
-        " A stale lock is reported as liveness that cannot be proven, not as firstmate being down:"
-        " notes still queue and wake firstmate."
+        " When the session lock is stale, it says: firstmate liveness cannot be proven right now; notes are still saved and queued, and firstmate picks them up the next time its session runs."
         " Sends no wake and never interrupts firstmate." + NOTE_ONLY,
         {}, [], None,
     ),
