@@ -766,7 +766,7 @@ The Herdr captures above are therefore this entry's live evidence, and the guard
 
 Verified on 2026-10-01 against a live remote secondmate's Claude Code pane in its Herdr `fm-remote` session; the Claude version was not readable from the capture, which showed a pending "Update installed · Restart to update" notice.
 With a session mode active, Claude writes the mode name into the composer's TOP rule (`──…── ultracode ─`) and leaves the bottom rule solid.
-The classifier read only solid rules as separators, so the solid bottom rule stood alone below the `❯` row, the cursorless selection refused, and `fm_backend_herdr_composer_content` failed.
+The shared scan reads only solid `─` rules as separators, so the solid bottom rule stood alone below the `❯` row, the cursorless selection refused, and `fm_backend_herdr_composer_content` failed.
 On a Claude pane the herdr submit core's payload proof needs that read before it types, so every doorbell to the pane returned `send-failed` without typing anything, and the sender printed only "doorbell did not reach".
 
 The capture is the remote control's read-only capture, fed to the shared extractor with the plain capability descriptor:
@@ -786,9 +786,17 @@ rc=0 []
 ```
 
 The same capture with the label replaced by `─` read `rc=0 []` before the fix, which isolates the label as the cause.
-`_fm_composer_pi_separator_row` in `bin/fm-composer-lib.sh` now also accepts a titled rule: at least 8 `─`, one space-padded label containing no `─`, and a closing `─` run.
-`test_matrix_claude_titled_top_rule` in `tests/fm-composer-lib.test.sh` pins idle `empty` on every cursorless profile and typed text staying `pending` and extracted whole, and `test_send_text_submit_claude_titled_top_rule_still_types` in `tests/fm-backend-herdr.test.sh` pins the submit core typing and confirming under that shape (it returned `send-failed` before the fix).
-No live guard drives a Claude session mode yet, so this shape is a captured observation rather than a refreshed live result.
+
+The fix is a quarantined Claude reading, not a change to the shared separator contract (VISION.md "The fleet outlives any vendor").
+`FM_COMPOSER_CLAUDE_RULE_TITLES` in `bin/fm-composer-lib.sh` pins the one observed title, and `_fm_composer_claude_untitle_rules` rewrites a rule of exactly the observed shape to a solid rule only when the very next row opens with Claude's `❯`.
+Any other title, or the same title over another harness's prompt glyph, is left as-is and still refuses.
+`test_matrix_claude_titled_top_rule` in `tests/fm-composer-lib.test.sh` pins idle `empty` on every cursorless profile, typed text staying `pending` and extracted whole, and both of those refusals; `test_send_text_submit_claude_titled_top_rule_still_types` in `tests/fm-backend-herdr.test.sh` pins the submit core typing and confirming under that shape.
+Both returned `unknown` and `send-failed` respectively before the fix.
+
+This reading is a standing debt.
+It is pinned to a capture whose Claude version is unknown, and it is expected to break on a Claude release that changes the label or its position.
+A live render is owed and is not token-free: on 2026-10-01, Claude Code 2.1.286 launched idle in an isolated tmux server drew solid rules, typing `ultracode` without submitting showed only a `Dynamic workflow requested for this turn` banner, and `/config` exposes only an `Ultracode keyword trigger` setting, so the titled rule appears only after a prompt carrying the keyword is submitted, which starts a dynamic workflow.
+No guard in the composer-matrix family exercises it yet.
 
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 

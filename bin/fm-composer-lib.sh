@@ -76,8 +76,7 @@
 #                A separated pair that closes over a bare AGENT-GLYPH row is a
 #                different, self-proving thing: real claude 2.x draws exactly
 #                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
-#                pair carries the shape and no identity is needed. Either rule
-#                may carry a title (_fm_composer_pi_separator_row).
+#                pair carries the shape and no identity is needed.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -567,6 +566,18 @@ FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 # different overhang or scales it with title/model-name length.
 FM_COMPOSER_GROK_TITLE_OVERHANG=3
 
+# Quarantined Claude reading: the titled composer top rule. With a session mode
+# active, Claude writes the mode name into the rule above its `❯` row
+# (`──…── ultracode ─`), captured live 2026-10-01 from a Claude Code pane whose
+# version the capture did not show; the parent host had 2.1.286 running and
+# 2.1.287 installed (see docs/verification/runtime-backends.md). The shared
+# separator contract stays solid-only: this reading rewrites a row of exactly
+# that shape - at least 8 `─`, one space, a title from this pinned list, one
+# space, one `─` - to a solid rule, and only when the very next row opens with
+# Claude's `❯`. Any other title or shape is left as-is and refuses as before.
+# Expect it to break on a Claude release that changes the label or its place.
+FM_COMPOSER_CLAUDE_RULE_TITLES='ultracode'
+
 # 0 when <content> is exactly one glyph drawn from <glyph-list>.
 _fm_composer_is_prompt_glyph() {  # <content> <glyph-list>
   local content=$1 glyph
@@ -750,28 +761,64 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
+# _fm_composer_claude_titled_rule_var: when <row> is a Claude titled composer
+# rule (FM_COMPOSER_CLAUDE_RULE_TITLES), set <out-varname> to <row> with its
+# title replaced by `─` of the same width. Fails, leaving it empty, otherwise.
+_fm_composer_claude_titled_rule_var() {  # <out-varname> <row>
+  local __fmct_out=$1 __fmct_row=$2 __fmct_trim __fmct_title __fmct_head __fmct_fill
+  printf -v "$__fmct_out" '%s' ''
+  __fmct_trim=$__fmct_row
+  fm_composer_normalize_trim_var __fmct_trim
+  for __fmct_title in $FM_COMPOSER_CLAUDE_RULE_TITLES; do
+    case "$__fmct_trim" in
+      '────────'*" $__fmct_title ─") ;;
+      *) continue ;;
+    esac
+    __fmct_head=${__fmct_trim%" $__fmct_title ─"}
+    [ -z "${__fmct_head//─/}" ] || continue
+    __fmct_fill=$(printf '%*s' "$(( ${#__fmct_title} + 3 ))" '')
+    printf -v "$__fmct_out" '%s' "${__fmct_row/" $__fmct_title ─"/${__fmct_fill// /─}}"
+    return 0
+  done
+  return 1
+}
+
+# _fm_composer_claude_untitle_rules: <plain-screen> with every Claude titled
+# composer rule that sits directly above a `❯` row rewritten to the solid rule
+# the shared scan reads (see FM_COMPOSER_CLAUDE_RULE_TITLES). Row count and
+# every other row are unchanged, so row indexes still address <screen>.
+_fm_composer_claude_untitle_rules() {  # <plain-screen>
+  local screen=$1 title found=0 line prev='' have_prev=0 next solid
+  for title in $FM_COMPOSER_CLAUDE_RULE_TITLES; do
+    case "$screen" in *" $title ─"*) found=1 ;; esac
+  done
+  if [ "$found" = 0 ]; then
+    printf '%s\n' "$screen"
+    return 0
+  fi
+  while IFS= read -r line; do
+    if [ "$have_prev" = 1 ]; then
+      next=$line
+      fm_composer_normalize_trim_var next
+      case "$next" in
+        '❯'*) _fm_composer_claude_titled_rule_var solid "$prev" && prev=$solid ;;
+      esac
+      printf '%s\n' "$prev"
+    fi
+    prev=$line
+    have_prev=1
+  done <<EOF
+$screen
+EOF
+  [ "$have_prev" = 0 ] || printf '%s\n' "$prev"
+}
+
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
 # byte-exact in every locale.
-# A TITLED rule is the same separator: claude writes an active session mode
-# into its composer's top rule (`──…── ultracode ─`, captured live 2026-10-01),
-# so a rule of at least 8 `─`, one space-padded label holding no `─`, and a
-# closing `─` run still bounds the composer. Read as a non-rule, that label
-# left the solid bottom rule unpaired below the `❯` row and every read refused.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
-  local row=$1 head rest tail label
+  local row=$1
   [ -n "$row" ] || return 1
-  case "$row" in
-    '────────'*' '*)
-      head=${row%%' '*}
-      rest=${row#"$head "}
-      tail=${rest##*' '}
-      label=${rest%' '*}
-      [ -z "${head//─/}" ] && [ -n "$tail" ] && [ -z "${tail//─/}" ] \
-        && [ -n "${label// /}" ] && [ "$label" = "${label//─/}" ]
-      return
-      ;;
-  esac
   [ -z "${row//─/}" ] || return 1
   case "$row" in
     *────────*) return 0 ;;
@@ -1563,6 +1610,7 @@ fm_composer_extract_selected_content() {  # <caps> <screen>
 $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  plain=$(_fm_composer_claude_untitle_rules "$plain")
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
@@ -1646,6 +1694,7 @@ EOF
     case "$cy" in *[!0-9]*) printf 'unknown'; return 0 ;; esac
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  plain=$(_fm_composer_claude_untitle_rules "$plain")
   _fm_composer_scan_screen "$plain" "$cy"
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.

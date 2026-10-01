@@ -243,6 +243,15 @@ test_matrix_claude_titled_top_rule() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed") \
     || fail "a typed titled-rule composer should be extractable"
   [ "$out" = 'fix the login bug' ] || fail "titled-rule composer extracted '$out', not the typed text"
+  # The reading is quarantined to that exact Claude shape: the same titled rule
+  # over another harness's prompt glyph, or an unpinned title over `❯`, keeps
+  # refusing rather than proving an empty composer.
+  screen="transcript line"$'\n'"$rule ultracode ─"$'\n'"›$NBSP"$'\n'"$rule"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$(printf 'codex\tidle')")
+  [ "$out" != empty ] || fail "a titled rule over a non-claude glyph must not read empty"
+  screen="transcript line"$'\n'"$rule plan ─"$'\n'"❯$NBSP"$'\n'"$rule"
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$claude_idle")
+  [ "$out" != empty ] || fail "an unpinned rule title must not read empty"
   pass "matrix: claude's titled top composer rule bounds its composer like a solid rule"
 }
 
