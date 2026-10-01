@@ -24,6 +24,10 @@ make_spawn_case() {  # <name> <harness> <id>
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  # The OpenCode cases here spawn without a model, so fm-spawn resolves and
+  # validates the effective model before launch. A bare exit-0 opencode cannot
+  # answer that preflight, so give it a catalog and a config inventory.
+  fm_test_make_opencode_preflight_stub "$fakebin"
   fm_test_spawn_home "$home" "$harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"

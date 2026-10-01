@@ -1232,6 +1232,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+OPENCODE_PROBE_DIR=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1272,6 +1273,9 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ -n "${OPENCODE_PROBE_DIR:-}" ] && [ -f "$OPENCODE_PROBE_DIR/done" ]; then
+    opencode_probe_cleanup || true
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1704,6 +1708,8 @@ PROJ=
 ARG3=
 FIRSTMATE_HOME=
 RAW_LAUNCH=0
+RAW_OPENCODE=0
+OPENCODE_BIN=
 
 # --relaunch adoption: every identity axis comes from the task's own validated
 # durable record, never from the command line, so a relaunch can only ever
@@ -1980,10 +1986,352 @@ agy_model_validate() {  # <agy-bin> <model>
   return 1
 }
 
+# Build the same destination-pane environment expression used by the launch.
+spawn_build_launch_env_prefix() { # <include-trace: 0|1>
+  local include_trace=${1:-0} prefix env_name env_arg
+  [ "$LAUNCH_ENV_ENABLED" = 1 ] || return 0
+  prefix='/usr/bin/env -i'
+  for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
+    TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
+    HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
+    CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
+    FM_TASK_ID COMPACT_ADVISER_DISABLE \
+    $LAUNCH_ENV_NAMES; do
+    # Only validated names enter shell syntax. Values expand once, quoted, in
+    # the pane shell and never become source text or spawn-process snapshots.
+    # shellcheck disable=SC2016  # single quotes are deliberate: ${...} expands in the pane shell, not here
+    printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
+    prefix="$prefix $env_arg"
+  done
+  prefix="$prefix COMPACT_ADVISER_DISABLE=1"
+  if [ "$include_trace" = 1 ] && [ -n "${SPAWN_TRACEPARENT:-}" ]; then
+    # shellcheck disable=SC2016  # single quotes are deliberate: ${...} expands in the pane shell, not here
+    prefix="$prefix "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
+  fi
+  printf '%s' "$prefix"
+}
+
+# Probe in the destination pane so the binary, worktree, allowlisted credentials,
+# config variables, and OpenCode server route are the same ones the worker gets.
+opencode_worker_probe() { # <binary> <worktree> <resolve-config:0|1>
+  local bin=$1 dir=$2 resolve_config=$3 bound=${FM_OPENCODE_MODELS_TIMEOUT:-30}
+  local q_dir q_output q_helper q_bin q_config q_id env_prefix script command max_checks i
+  case "$bound" in ''|*[!0-9]*|0*) bound=30 ;; esac
+  case "$resolve_config" in 0|1) ;; *) return 1 ;; esac
+  OPENCODE_PROBE_DIR="$dir/.fm-opencode-probe-$ID-${BASHPID:-$$}-$RANDOM"
+  if ! (umask 077 && mkdir "$OPENCODE_PROBE_DIR"); then
+    echo "error: could not create a private OpenCode probe directory in $dir" >&2
+OPENCODE_PROBE_DIR=
+    return 1
+  fi
+  q_dir=$(shell_quote "$dir")
+  q_output=$(shell_quote "$OPENCODE_PROBE_DIR")
+  q_helper=$(shell_quote "$SCRIPT_DIR/fm-opencode-probe.sh")
+  q_bin=$(shell_quote "$bin")
+  q_config=$(shell_quote '{"permission":{"*":"allow"}}')
+  q_id=$(shell_quote "$ID")
+  env_prefix=$(spawn_build_launch_env_prefix 0)
+  script="$OPENCODE_PROBE_DIR/run.sh"
+  {
+    printf '#!/bin/sh\ncd -- %s || exit 1\n' "$q_dir"
+    [ -z "$env_prefix" ] || printf '%s ' "$env_prefix"
+    printf 'COMPACT_ADVISER_DISABLE=1 '
+    [ "$KIND" = secondmate ] || printf 'FM_TASK_ID=%s ' "$q_id"
+    printf 'OPENCODE_CONFIG_CONTENT=%s /bin/bash %s %s %s %s %s %s\n' \
+      "$q_config" "$q_helper" "$q_bin" "$q_dir" "$q_output" "$bound" "$resolve_config"
+  } > "$script" || return 1
+  chmod 700 "$script" || return 1
+  command="/bin/sh $(shell_quote "$script")"
+  spawn_send_text_line "$WT_TARGET" "$command" || {
+    echo "error: could not run OpenCode model discovery in the destination pane for $dir" >&2
+    return 1
+  }
+  max_checks=$((bound * 20 + 100))
+  i=0
+  while [ "$i" -lt "$max_checks" ] && [ ! -f "$OPENCODE_PROBE_DIR/done" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if [ ! -f "$OPENCODE_PROBE_DIR/done" ]; then
+    echo "error: OpenCode model discovery did not return from the destination pane within $((bound * 2 + 10))s; refusing to launch" >&2
+    return 1
+  fi
+  return 0
+}
+
+opencode_probe_cleanup() {
+  local dir=${OPENCODE_PROBE_DIR:-}
+  [ -n "$dir" ] && [ -f "$dir/done" ] || return 1
+  rm -f "$dir/run.sh" "$dir/config.json" "$dir/config.status" \
+    "$dir/config.reason" "$dir/models.txt" "$dir/models.status" \
+    "$dir/effective-variants.json" "$dir/done" || return 1
+  rmdir "$dir" || return 1
+  OPENCODE_PROBE_DIR=
+}
+
+opencode_model_validate() { # <probe-dir> <model>
+  local result_dir=$1 model=$2 base variant provider id metadata models_status
+  case "$model" in
+  *'#'*)
+    base=${model%%#*}
+    variant=${model#*#}
+    case "$variant" in
+    '' | *'#'*)
+      echo "error: OpenCode model '$model' has an unsupported variant form; use at most one nonempty #variant" >&2
+      return 1
+      ;;
+    esac
+    ;;
+  *)
+    base=$model
+    variant=
+    ;;
+  esac
+  models_status=$(cat "$result_dir/models.status" 2>/dev/null || true)
+  if [ "$models_status" != 0 ] || [ ! -f "$result_dir/models.txt" ]; then
+    echo "error: could not verify OpenCode model '$model' because 'opencode models' failed in the destination pane (exit ${models_status:-unknown}); choose a model listed there" >&2
+    return 1
+  fi
+  if ! grep -F -x -- "$base" "$result_dir/models.txt" >/dev/null; then
+    echo "error: OpenCode model '$model' is not available from 'opencode models' in the destination pane; choose an id listed by that command" >&2
+    return 1
+  fi
+  # `opencode models` prints only base ids, so it cannot confirm a variant. The
+  # declaring source is the provider metadata in the resolved config, so an
+  # available base does NOT carry an arbitrary variant: require the exact
+  # "base#variant" the destination config SELECTS.
+  if [ -n "$variant" ]; then
+    if [ ! -s "$result_dir/config.json" ]; then
+      echo "error: could not verify OpenCode model '$model' because the destination pane returned no OpenCode config to declare its variants; pass the base model without #variant" >&2
+      return 1
+    fi
+    # The effective variant list is precedence-resolved across every config
+    # source, so this checks what the worker can actually select rather than
+    # what any single document mentions. A variant only a lower-precedence
+    # source declares, or one a higher-precedence source disables, is absent
+    # here and refused.
+    if ! jq -e --arg base "$base" --arg variant "$variant" \
+      '.effective_variants[$base] | index($variant) != null' \
+      "$result_dir/effective-variants.json" >/dev/null 2>&1; then
+      echo "error: OpenCode model '$model' is not available in the destination pane; no config source there selects the '#$variant' variant of '$base'" >&2
+      return 1
+    fi
+  fi
+  provider=${base%%/*}
+  id=${base#*/}
+  if [ "$provider" = "$base" ] || [ -z "$id" ] \
+    || ! metadata=$(curl --fail --silent --show-error --location --max-time 10 https://models.dev/api.json); then
+    echo "error: could not verify OpenCode model '$model' free pricing metadata; refusing dispatch" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$metadata" | jq -e --arg provider "$provider" --arg model "$id" '
+    .[$provider].models[$model].cost as $cost
+    | ($cost | type == "object")
+      and ($cost.input == 0)
+      and ($cost.output == 0)
+      and ([$cost[]] | all(. == 0))
+  ' >/dev/null; then
+    echo "error: OpenCode model '$model' is not classified as free by models.dev; choose a zero-cost model" >&2
+    return 1
+  fi
+  return 0
+}
+
+# OpenCode picks its own model when the launch carries none, so a launch without
+# an explicit --model still has an EFFECTIVE model that must clear the same gate.
+# `opencode debug config` is a resolved object on v1 and a source inventory on
+# v2. The v1 object already reflects the worker's effective config; for v2 this
+# reads each listed document and applies the documented precedence itself
+# (https://opencode.ai/v2/docs/config):
+# the global config is lowest, direct opencode.json(c) files merge from the
+# farthest ancestor to the worker directory, and every discovered .opencode
+# config overrides every direct config. The root `model` is the default for new
+# work; primary-agent selection does not change a session's model, so this
+# resolver pins the root model into the canonical launch's --model flag
+# (https://opencode.ai/v2/docs/models and https://opencode.ai/v2/docs/agents).
+#
+# Everything else fails closed rather than guessing: a source this resolver
+# cannot rank, a second source disagreeing inside one precedence step, or no
+# root model at all. The resolution runs in the worker's own directory with the
+# credential and configuration environment the launch itself gets, so a project
+# or global config the worker would read is a source this sees too.
+#
+# The ranked result is the single owner of BOTH answers this gate needs, so they
+# can never be computed from different views of the same config: the effective
+# root model (`.root`) and the effective selectable variants
+# (`effective-variants.json`, which the variant gate reads). Ranking runs even
+# when the model was explicit, because an explicit model can still carry a
+# "#variant" that has to clear the same precedence.
+#
+# <probe-dir> <worker-dir> <need-root:0|1>: prints the ranked object on stdout.
+opencode_resolve_effective_model() { # <probe-dir> <worker-dir> <need-root:0|1>
+  local probe_dir=$1 dir=$2 need_root=${3:-1} inventory global_config ancestors merged unranked resolved config_status config_reason
+  command -v jq >/dev/null 2>&1 || {
+    echo "error: jq is required to resolve the effective OpenCode model; install jq or pass an explicit --model" >&2
+    return 1
+  }
+  config_status=$(cat "$probe_dir/config.status" 2>/dev/null || true)
+  config_reason=$(cat "$probe_dir/config.reason" 2>/dev/null || true)
+  if [ "$config_reason" = config-location-override ]; then
+    echo "error: OPENCODE_CONFIG or OPENCODE_CONFIG_DIR is set in the worker environment, but dispatch cannot resolve that custom config location safely; unset the override or pass an explicit --model" >&2
+    return 1
+  fi
+  if [ "$config_status" != 0 ] || [ ! -s "$probe_dir/config.json" ]; then
+    echo "error: could not verify the effective OpenCode model because 'opencode debug config' failed or returned an unsupported shape in the destination pane (exit ${config_status:-unknown}); supported forms are a v1 resolved object and a v2 source array" >&2
+    return 1
+  fi
+  global_config=$(jq -r '.global // empty' "$probe_dir/config.json" 2>/dev/null) || global_config=
+  inventory=$(jq -c '.docs // empty' "$probe_dir/config.json" 2>/dev/null) || inventory=
+  if [ -z "$global_config" ] || [ -z "$inventory" ] || ! printf '%s' "$inventory" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "error: 'opencode debug config' did not provide a supported v1 resolved object or v2 config-source list in $dir" >&2
+    return 1
+  fi
+  # Farthest ancestor first, so the worker's own directory is the last direct
+  # config and therefore the highest-precedence one of that step. The upward walk
+  # is emitted nearest-first and reversed by the jq below, which both orders the
+  # list and serializes it for --argjson. tac would do the reversal in one step
+  # but is not a stock macOS command, and jq is already a hard requirement here.
+  ancestors=$(
+    walk=$dir
+    while :; do
+      printf '%s\n' "$walk"
+      [ "$walk" = / ] && break
+      walk=${walk%/*}
+      [ -n "$walk" ] || walk=/
+    done
+  )
+  if ! ancestors_json=$(printf '%s\n' "$ancestors" | jq -Rsc 'split("\n") | map(select(length > 0)) | reverse'); then
+    echo "error: could not rank OpenCode's config sources in $dir; refusing to launch an OpenCode worker whose effective model cannot be established" >&2
+    return 1
+  fi
+  if ! merged=$(printf '%s' "$inventory" | jq -c --argjson ancestors "$ancestors_json" --arg global "$global_config" '
+    # The probe already normalized every model into one canonical
+    # "provider/model#variant" string, so this ranks and compares those strings
+    # directly rather than decoding the shape a second time.
+    def rootid: select(type == "string" and length > 0);
+    def place($path):
+      if ($path == ($global + "/opencode.json") or $path == ($global + "/opencode.jsonc")) then {tier: 0, step: 0}
+      else ([$ancestors | to_entries[]
+          | select($path == (.value + "/opencode.json") or $path == (.value + "/opencode.jsonc")) | .key] | first) as $direct
+        | if $direct != null then {tier: 1, step: $direct}
+          else ([$ancestors | to_entries[]
+              | select($path == (.value + "/.opencode/opencode.json") or $path == (.value + "/.opencode/opencode.jsonc")) | .key] | first) as $dot
+            | if $dot != null then {tier: 2, step: $dot} else null end
+          end
+      end;
+    [.[] | select(.type == "document")
+      | {path: .path, info: (.info // {}), variants: (.variants // {}), rank: place(.path)}] as $docs
+    | ($docs | map(select(.rank != null)) | sort_by([.rank.tier, .rank.step])) as $ranked
+    # Sources sharing one tier and step are one precedence step, so different
+    # root models there are unresolvable. Agent model preferences do not select
+    # the primary session model; the canonical launch pins the root default.
+    | ($ranked | group_by([.rank.tier, .rank.step])) as $steps
+    | {unranked: [$docs[] | select(.rank == null) | .path],
+       root_conflict: (([$steps[]
+           | [.[] | .info.model | rootid] | unique | length] | max) > 1),
+       root: ([$ranked[].info.model | rootid] | last // null),
+       # The ranked documents themselves, grouped by precedence step and already
+       # in ascending precedence order, so the caller resolves selectable
+       # variants through the same order without re-deriving the ranking.
+       steps: [$steps[]]}
+  ' 2>/dev/null) || ! printf '%s' "$merged" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    echo "error: could not rank OpenCode's config sources in $dir; refusing to launch an OpenCode worker whose effective model cannot be established" >&2
+    return 1
+  fi
+  unranked=$(printf '%s' "$merged" | jq -r '.unranked | join(", ")')
+  if [ -n "$unranked" ]; then
+    echo "error: OpenCode reports config source(s) '$unranked' that fall outside the documented precedence this resolver applies, so the effective model in $dir cannot be established; pass an explicit --model" >&2
+    return 1
+  fi
+  # Variants resolve through the SAME ranked order as the root model, so a
+  # higher-precedence source that DISABLES a variant is what decides it: the
+  # last document that mentions a base id wins for that id, and a document whose
+  # selectable set is empty therefore clears that id entirely. Two documents in
+  # ONE precedence step that declare different variant sets for the same base are
+  # unresolvable, exactly like a root-model disagreement in one step.
+  if ! printf '%s' "$merged" | jq -S '
+    # `.steps` holds the ranked documents grouped by precedence step, in
+    # ASCENDING precedence order (group_by keeps equal-rank documents adjacent
+    # and in order). Two rules, because the two situations mean different things:
+    #
+    #   WITHIN one step the documents are simultaneous alternatives, so their
+    #     selectable sets UNION: two sources of equal precedence are both read, so
+    #     a variant either one selects is selectable.
+    #   ACROSS steps a later step REPLACES the earlier one, INCLUDING with an
+    #     empty selectable set. That empty set is how a higher-precedence document
+    #     that disables every variant of a model clears it, so unioning across
+    #     steps would resurrect exactly what the disable removed.
+    def union_variants($group):
+      reduce $group[] as $doc ({};
+        reduce (($doc.variants // {}) | to_entries[]) as $kv
+          (.; .[$kv.key] = (((.[$kv.key] // []) + ($kv.value.selectable // [])) | unique)));
+    def effective($steps):
+      reduce $steps[] as $group ({};
+        ($group | union_variants($group)) as $step
+        | reduce ($step | to_entries[]) as $kv (.; .[$kv.key] = $kv.value));
+    # Two documents in ONE precedence step must AGREE about a base model, and
+    # "agree" has to be checked on the SELECTABLE set, not only on the declared
+    # one. Comparing `declared` alone misses the case that matters: both
+    # documents declare `low`, one enables it and the other disables it. Their
+    # declared sets are identical, so that comparison passes, while
+    # union_variants then hands back the enabled variant as selectable even
+    # though the effective state is genuinely ambiguous. Requiring identical
+    # selectable sets refuses that instead.
+    def step_conflicts($steps):
+      [ $steps[] as $group
+        | ( [ $group[] | (.variants // {}) | keys[] ] | unique ) as $keys
+        | $keys[] as $k
+        | select( ([ $group[]
+                     | (.variants // {})[$k].selectable // [] ] | unique | length) > 1 )
+        | $k ];
+    (.steps) as $steps
+    | {effective_variants: effective($steps),
+       variant_conflict: ((step_conflicts($steps) | length) > 0),
+       variant_conflict_base: (step_conflicts($steps) | first)}
+  ' > "$probe_dir/effective-variants.json" 2>/dev/null; then
+    echo "error: could not resolve OpenCode's effective model variants in $dir; refusing to launch an OpenCode worker whose selected variant cannot be established" >&2
+    return 1
+  fi
+  if jq -e '.variant_conflict' "$probe_dir/effective-variants.json" >/dev/null 2>&1; then
+    echo "error: two OpenCode config sources of equal precedence declare different variants of '$(jq -r '.variant_conflict_base // "a model"' "$probe_dir/effective-variants.json")' in $dir, so the selectable variants are ambiguous; remove one or pass an explicit --model" >&2
+    return 1
+  fi
+  # The root-model answer only matters when dispatch must pick the model itself.
+  # An explicit model that carries a variant still ranks above for the variant
+  # gate, but a disagreement between two equal-precedence sources about which
+  # model to USE is irrelevant to a model the captain already chose.
+  if [ "$need_root" = 1 ]; then
+    if printf '%s' "$merged" | jq -e '.root_conflict' >/dev/null; then
+      echo "error: two OpenCode config sources of equal precedence disagree in $dir, so the effective model is ambiguous; remove one or pass an explicit --model" >&2
+      return 1
+    fi
+    resolved=$(printf '%s' "$merged" | jq -r '.root // empty')
+    if [ -z "$resolved" ]; then
+      echo "error: no OpenCode root 'model' could be resolved in $dir, so OpenCode would choose an unchecked default; set a root model in its config or pass an explicit --model" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$merged"
+}
+
+# Resolve OpenCode once so the probe and eventual launch use the same executable.
+resolve_opencode_binary() {
+  local candidate dir
+  candidate=$(command -v opencode 2>/dev/null) || return 1
+  [ -x "$candidate" ] || return 1
+  case "$candidate" in
+  /*) printf '%s\n' "$candidate" ;;
+  *)
+    dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s\n' "$dir" "$(basename "$candidate")"
+    ;;
+  esac
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
-  local harness=$1 kind=${2:-ship}
+  local harness=$1 kind=${2:-ship} opencode_bin
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
   # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
@@ -2072,11 +2420,13 @@ launch_template() {
     fi
     ;;
   opencode)
-    mini_help=$(opencode mini --help 2>&1 || :)
+    opencode_bin=$(resolve_opencode_binary) || return 1
+    OPENCODE_BIN=$opencode_bin
+    mini_help=$("$opencode_bin" mini --help 2>&1 || :)
     if printf '%s\n' "$mini_help" | grep -Eiq '^[[:space:]]*usage:[[:space:]]*opencode mini([[:space:]]|$)'; then
-      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode mini __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' __OPENCODEBIN__ mini __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   pi | pi-signed)
@@ -2258,14 +2608,194 @@ case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
   LAUNCH=$ARG3
+  # Resolve the EXECUTABLE a raw command actually runs, never arbitrary
+  # argument text: the structure is leading NAME=value assignments, then
+  # optionally an `env` wrapper with its own options, then the executable.
+  # Matching the whole command string instead classified
+  # `claude --prompt 'review opencode'` as OpenCode and refused an unrelated
+  # command over prompt text, while stopping at `env` would let
+  # `env -u FOO opencode ...` skip model validation entirely.
   HARNESS=""
-  for word in $LAUNCH; do
-    case "$word" in [A-Za-z_]*=*) continue ;; *)
-      HARNESS=$(basename "$word")
+  raw_ambiguous=0
+  raw_quoted=0
+  raw_expanded=0
+  raw_shell_script=0
+  raw_expect_value=0
+  raw_in_env=0
+  raw_wrapper=
+  # A shell interpreter is unresolvable by construction: `sh -c opencode ...`
+  # names a real executable and then runs a different command from its
+  # arguments. The one legitimate form is running a SCRIPT PATH, where the
+  # interpreter's argument is a file to read rather than a command string, so
+  # the script's own contents decide what runs. Detect that here, on the raw
+  # text, because by the time the walk reaches an executable word the
+  # interpreter's arguments have not been examined. Note this matches the
+  # ABSOLUTE interpreter paths the repo's own fixtures use; a bare `sh -c ...`
+  # carries no absolute path, so it stays refused.
+  case "$LAUNCH" in
+  */bin/sh\ * | */bin/bash\ * | */bin/zsh\ * | */bin/dash\ *)
+    # A shell whose first argument is an absolute script path.
+    raw_shell_script=1
+    ;;
+  esac
+  for raw_word in $LAUNCH; do
+    if [ "$raw_expect_value" = 1 ]; then
+      raw_expect_value=0
+      continue
+    fi
+    if [ "$raw_in_env" = 1 ]; then
+      case "$raw_word" in
+      # Only value-taking options consume the following word. The no-argument
+      # flags below consume nothing, so `env -i opencode ...` still reaches the
+      # executable instead of swallowing it.
+      -u | --unset | -C | --chdir | -S | --split-string | -n | -p | -g | \
+      --nadjust | --adjustment | --priority | -t | --signal | -k | --kill-after)
+        raw_expect_value=1
+        continue
+        ;;
+      -i | -0 | --ignore-environment | --null | -- | -v | --verbose | -f | \
+      --foreground | -a | --all | --preserve-status | --foreground-only | \
+      --kill-when-unfinished | --kill-when-initiated)
+        continue ;;
+      # `timeout` is the one wrapper on the list whose DURATION is a bare
+      # positional rather than an option value, so consume it here. Consuming it
+      # generically would eat the executable of every other wrapper.
+      [0-9]*)
+        if [ "${raw_wrapper:-}" = timeout ]; then
+          continue
+        fi
+        ;;
+      [A-Za-z_]*=*) continue ;;
+      -*)
+        # An option this resolver does not know how to consume. Whether the next
+        # word is a flag VALUE or the executable decides the whole answer, so it
+        # refuses rather than guessing.
+        raw_ambiguous=1
+        break
+        ;;
+      esac
+      raw_in_env=0
+    fi
+    case "$raw_word" in
+    [A-Za-z_]*=*) continue ;;
+    env | /usr/bin/env | /bin/env | command | exec | nohup | nice | ionice | \
+    stdbuf | timeout | setsid | time | sudo | su | xargs | watch | open | caffeinate)
+      # A wrapper that runs ANOTHER command is transparent here: walk through it
+      # to the executable it would run. Without this, `command opencode ...` and
+      # `exec opencode ...` classified as the WRAPPER, walked past every
+      # `if [ "$HARNESS" = opencode ]` guard, and launched OpenCode unchecked.
+      # This is a named list on purpose: it is the set of commands whose whole
+      # job is to run some other command. Each takes its options, and only
+      # `timeout` also takes a BARE positional (its duration), which is why that
+      # one is consumed below rather than by a general rule: `timeout 30
+      # opencode` is a wrapper plus a value plus the executable, while `nice
+      # opencode` is a wrapper plus the executable, so a general "wrapper takes
+      # one bare positional" rule would swallow the executable of every other
+      # wrapper on the list.
+      raw_wrapper=$(basename "$raw_word")
+      raw_in_env=1
+      continue
+      ;;
+    \'* | \"*)
+      # This walk splits on whitespace, so a QUOTED executable arrives here with
+      # its quotes still attached: basename would return `'opencode'`, which
+      # matches no harness, and the command would run OpenCode anyway behind an
+      # unrelated-harness classification with every model guard skipped. The real
+      # spelling is a shell expansion this walk cannot see, so it is
+      # unclassifiable rather than merely unquoted.
+      raw_quoted=1
       break
       ;;
     esac
+    HARNESS=$(basename "$raw_word")
+    break
   done
+  # The walk resolves ONE executable, but a compound command can run others:
+  # `echo x | opencode ...` and `sh -c opencode` both name an executable this
+  # walk resolves happily (echo, sh) while running OpenCode anyway. Refusing
+  # every compound command would break the legitimate forms this escape hatch
+  # exists for (`cd <dir> && ./probe`), so the check is narrower and more
+  # precise: if OpenCode appears as an executable ANYWHERE in the command, the
+  # command is refused, because then the resolved harness cannot be the whole
+  # story and the model guard below would apply to the wrong command. A command
+  # that never mentions OpenCode keeps whatever structure the captain asked for.
+  # A word only ever RUNS as an executable; inside quotes it is inert text. So the
+  # question is whether the name `opencode` appears as a BARE word anywhere in
+  # the command, which means removing every quoted span first and then looking at
+  # what remains:
+  #
+  #   claude --prompt 'review opencode'   -> quotes removed, no bare name, accepted
+  #   echo x | opencode --prompt          -> bare name after a pipe, refused
+  #   $(which opencode) --prompt          -> bare name inside a substitution, refused
+  #   cd /tmp && ./probe                  -> no name at all, accepted
+  #
+  # This is what keeps an unrelated launch that merely MENTIONS OpenCode working
+  # while refusing every form that could actually execute it.
+  #
+  # shellcheck disable=SC1003  # the quoted-span delimiters are matched as
+  # literal characters here; this strips text, it does not emit quoting.
+  raw_scan_bare=$(printf '%s\n' "$LAUNCH" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g')
+  for raw_scan_word in $raw_scan_bare; do
+    # Reduce to a command NAME: drop any directory prefix, then strip the
+    # characters a name cannot contain that word splitting leaves attached, so
+    # `opencode)` inside `$(which opencode)` still compares equal. Stated as a
+    # positive test for what may remain rather than a list of punctuation to
+    # strip, which also avoids a single-quote case pattern (a ShellCheck SC1003
+    # hazard).
+    raw_scan_base=${raw_scan_word##*/}
+    while [ -n "$raw_scan_base" ]; do
+      case "${raw_scan_base: -1}" in
+      [A-Za-z0-9._+-]) break ;;
+      *) raw_scan_base=${raw_scan_base%?} ;;
+      esac
+    done
+    if [ "$raw_scan_base" = opencode ]; then
+      # The resolved executable ITSELF is the ordinary case, handled by
+      # RAW_OPENCODE below with a more specific refusal. This scan is about
+      # OpenCode appearing somewhere the walk did not resolve as the executable,
+      # which is what makes the resolved harness an incomplete description of
+      # what runs.
+      [ "$HARNESS" = opencode ] || raw_expanded=1
+      break
+    fi
+  done
+  # A shell INTERPRETER is the same problem with no special character to detect:
+  # `sh -c opencode --prompt hi` carries a plain executable word, so the walk
+  # resolves `sh` and stops, while the shell it names runs OpenCode from the very
+  # next argument. There is no way to read what a shell will do with its
+  # arguments, so a shell in executable position is unresolvable by construction
+  # rather than by accident.
+  raw_shell=0
+  case "$HARNESS" in
+  sh | bash | zsh | dash | ksh | mksh | pdksh | ash | fish | csh | tcsh | busybox)
+    [ "$raw_shell_script" = 1 ] || raw_shell=1
+    ;;
+  esac
+  if [ "$raw_quoted" = 1 ]; then
+    echo "error: raw launch '$LAUNCH' quotes or expands its executable, so dispatch cannot tell which harness and model it runs; use the canonical --harness launch" >&2
+    exit 1
+  fi
+  if [ "$raw_ambiguous" = 1 ] || { [ -z "$HARNESS" ] && [ "$raw_in_env" = 1 ]; }; then
+    # Checked BEFORE the composed-executable refusal so the diagnostic names the
+    # more specific cause: an unconsumable wrapper option means the executable is
+    # unknown, which is a narrower and more actionable statement than "this
+    # command composes something".
+    #
+    # Refuse here rather than downstream: every OpenCode model guard lives under
+    # `if [ "$HARNESS" = opencode ]`, so leaving an unresolved wrapped command
+    # on the unrelated-harness path would walk straight past all of it. An
+    # executable this walk cannot name could be OpenCode, so it fails closed
+    # instead of being waved through as unrelated.
+    echo "error: raw launch '$LAUNCH' wraps its executable in a form dispatch cannot resolve, so its harness and model cannot be verified; use the canonical --harness launch" >&2
+    exit 1
+  fi
+  if [ "$raw_expanded" = 1 ] || [ "$raw_shell" = 1 ]; then
+    echo "error: raw launch '$LAUNCH' builds or composes its executable, so dispatch cannot tell which harness and model it runs; use the canonical --harness launch" >&2
+    exit 1
+  fi
+  if [ "$HARNESS" = opencode ]; then
+    RAW_OPENCODE=1
+  fi
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -2414,37 +2944,13 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
   fi
 fi
 if [ "$HARNESS" = opencode ]; then
-  OPENCODE_BIN=$(command -v opencode) || {
+  OPENCODE_BIN=${OPENCODE_BIN:-$(resolve_opencode_binary)} || {
     echo "error: opencode executable not found on PATH; install it or select a different verified harness" >&2
     exit 1
   }
-  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
-    if ! OPENCODE_MODELS=$("$OPENCODE_BIN" models); then
-      echo "error: could not verify OpenCode model '$MODEL' because '$OPENCODE_BIN models' failed; rerun 'opencode models' and choose a listed id" >&2
-      exit 1
-    fi
-    if ! printf '%s\n' "$OPENCODE_MODELS" | grep -F -x -- "$MODEL" >/dev/null; then
-      echo "error: OpenCode model '$MODEL' is not available from 'opencode models'; choose an id listed by that command or omit --model" >&2
-      exit 1
-    fi
-    OPENCODE_MODEL_PROVIDER=${MODEL%%/*}
-    OPENCODE_MODEL_ID=${MODEL#*/}
-    if [ "$OPENCODE_MODEL_PROVIDER" = "$MODEL" ] || [ -z "$OPENCODE_MODEL_ID" ] \
-      || ! OPENCODE_MODEL_METADATA=$(curl --fail --silent --show-error --location --max-time 10 https://models.dev/api.json); then
-      echo "error: could not verify OpenCode model '$MODEL' free pricing metadata; refusing dispatch" >&2
-      exit 1
-    fi
-    if ! printf '%s\n' "$OPENCODE_MODEL_METADATA" | jq -e --arg provider "$OPENCODE_MODEL_PROVIDER" --arg model "$OPENCODE_MODEL_ID" '
-      .[$provider].models[$model].cost as $cost
-      | ($cost | type == "object")
-        and ($cost.input == 0)
-        and ($cost.output == 0)
-        and ([$cost[]] | all(. == 0))
-    ' >/dev/null; then
-      echo "error: OpenCode model '$MODEL' is not classified as free by models.dev; choose a zero-cost model" >&2
-      exit 1
-    fi
-  fi
+  # Model resolution and validation both run below, once the worker directory
+  # has settled: that directory, not this one, is the config and provider scope
+  # the launched worker actually gets.
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
@@ -4429,12 +4935,58 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" "$BASE_BRANCH" || exit 1
 fi
 
-# Re-assert the durable task copy after either treehouse acquisition or endpoint
-# adoption. This also updates Herdr's restored pane shell before any harness is
-# started, so a later host restart inherits the task worktree rather than the
-# tab's original project directory.
-spawn_enter_recorded_worktree
-spawn_assert_agent_worktree
+# Every OpenCode launch runs on one effective model, and OpenCode decides it
+# from the configuration and providers it reads in the directory the worker
+# starts in. That directory is known only now, so this is the earliest point
+# where the model can be resolved in the same scope the worker will use, and the
+# last chance to refuse before any per-task state is created. BOTH paths run
+# here, because `opencode models` is itself project-scoped: a model available
+# only through a provider the worktree config declares is listed in this
+# directory and not in the launcher's, so validating an explicit --model
+# anywhere else would refuse a model the worker can actually run.
+if [ "$HARNESS" = opencode ]; then
+  # The config inventory is needed to resolve an omitted/default model AND to
+  # resolve the SELECTABLE variant set a selected "#variant" is checked against.
+  # A plain explicit base model needs neither, so it skips both.
+  # A raw OpenCode command is refused before any probe: fm-spawn cannot inject
+  # the model it validated into an arbitrary raw command string, so the worker
+  # would run whatever model that command names. Refusing here rather than after
+  # resolution keeps the cause the actual one, instead of reporting an unrelated
+  # missing project model for a launch that is refused either way.
+  if [ "$RAW_LAUNCH" = 1 ] || [ "$RAW_OPENCODE" = 1 ]; then
+    echo "error: a raw OpenCode launch cannot be pinned to the model validated for this task; use the canonical --harness opencode launch so the checked model is passed to the worker" >&2
+    exit 1
+  fi
+  # The effective-variant gate needs the ranked config pass for an EXPLICIT
+  # "#variant" too, not only for an omitted model: the variant has to clear the
+  # same precedence resolution. A plain explicit base model needs neither the
+  # ranked pass nor the extra read, so it skips them.
+  OPENCODE_RESOLVE_CONFIG=0
+  case "$MODEL" in
+  '' | default | *'#'*) OPENCODE_RESOLVE_CONFIG=1 ;;
+  esac
+  opencode_worker_probe "$OPENCODE_BIN" "$WT" "$OPENCODE_RESOLVE_CONFIG" || exit 1
+  if [ "$OPENCODE_RESOLVE_CONFIG" = 1 ]; then
+    # Ranked once: this writes the effective variant list that
+    # opencode_model_validate reads for a selected variant, and publishes the
+    # effective root model the omitted path then pins. An explicit model that
+    # carries a variant still needs this, so it passes need-root=0 and is not
+    # refused for an absent root model it does not depend on.
+    OPENCODE_NEED_ROOT=0
+    if [ -z "$MODEL" ] || [ "$MODEL" = default ]; then
+      OPENCODE_NEED_ROOT=1
+    fi
+    OPENCODE_RANKED=$(opencode_resolve_effective_model "$OPENCODE_PROBE_DIR" "$WT" "$OPENCODE_NEED_ROOT") || exit 1
+    if [ "$OPENCODE_NEED_ROOT" = 1 ]; then
+      MODEL=$(printf '%s' "$OPENCODE_RANKED" | jq -r '.root')
+    fi
+  fi
+  opencode_model_validate "$OPENCODE_PROBE_DIR" "$MODEL" || exit 1
+  opencode_probe_cleanup || {
+    echo "error: could not retire the completed private OpenCode preflight in $WT" >&2
+    exit 1
+  }
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -5192,6 +5744,10 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+if [ "$HARNESS" = opencode ] && [ "$RAW_LAUNCH" = 0 ]; then
+  sq_opencode_bin=$(shell_quote "$OPENCODE_BIN")
+  LAUNCH=${LAUNCH//__OPENCODEBIN__/$sq_opencode_bin}
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
@@ -5425,36 +5981,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-  LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
-  # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
-  # authoritative setter.
-  for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
-    TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
-    HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
-    CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
-    $LAUNCH_ENV_NAMES; do
-    # Only validated names enter shell syntax. Values expand once, quoted, in
-    # the pane shell and never become source text or spawn-process snapshots.
-    # shellcheck disable=SC2016
-    printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
-  done
-  # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
-  # whatever the pane export set, and then pinned here to the one value Firstmate
-  # launches on. The literal assignment comes last deliberately: `env` applies
-  # assignments left to right, so this one wins over a forwarded pane value, and
-  # it still delivers the switch on a pane whose export never landed. Unlike the
-  # trace carrier below it carries no gate, so it is appended unconditionally.
-  # Setting it here rather than relying on the assignment already carried by
-  # $LAUNCH is what gives the wrapping `/bin/sh` itself the switch, not only the
-  # agent command it runs.
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
-  if [ -n "$SPAWN_TRACEPARENT" ]; then
-    # shellcheck disable=SC2016
-    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
-  fi
+  LAUNCH_ENV_PREFIX=$(spawn_build_launch_env_prefix 1)
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
