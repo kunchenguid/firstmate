@@ -101,8 +101,8 @@ home="$LAB/home"
 task="selector"
 mkdir -p "$home/state"
 printf 'window=%s\nkind=ship\nharness=claude\n' "$T" > "$home/state/$task.meta"
-tmux -L "$SOCKET" new-session -d -s "$SESSION" -n "$WIN" -x 160 -y 50 -c "$home" \
-  -- bash -lc "export FM_HOME=$(printf '%q' "$home") FM_ROOT_OVERRIDE=$(printf '%q' "$home") FM_TASK_INBOX=$(printf '%q' "$home/state/$task.inbox"); CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 $(printf '%q' "$CLAUDE_BIN") --dangerously-skip-permissions --setting-sources '' --settings '{\"feedbackDrafts\":\"off\",\"disableAllHooks\":true}'" \
+tmux -L "$SOCKET" new-session -d -s "$SESSION" -n "$WIN" -x 160 -y 50 -c "$ROOT" \
+  -- bash -lc "export FM_TASK_INBOX=$(printf '%q' "$home/state/$task.inbox"); CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 $(printf '%q' "$CLAUDE_BIN") --dangerously-skip-permissions --setting-sources user --settings '{\"feedbackDrafts\":\"off\"}'" \
   || die "could not launch in the isolated tmux server"
 
 i=0
