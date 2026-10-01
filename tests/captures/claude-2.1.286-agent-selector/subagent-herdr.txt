@@ -1,0 +1,9 @@
+──────────────────────────────────────────────────────────────────────────── Run sleep 600 ─
+❯ Message @general-purpose…
+────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with …
+
+  ⏵⏵ bypass permissions on · 1 shell
+
+  ◯ main
+  ⏺ general-purpose  Run sleep 600                                    10s · ↓ 48.8k tokens

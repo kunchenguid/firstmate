@@ -1,0 +1,8 @@
+────────────────────────────────────────────────────────────────────────────────────────────────── Sleep in background ─
+❯ Message @general-purpose…
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏵⏵ bypass permissions on · 1 shell · ← for agents
+
+  ◯ main
+  ⏺ general-purpose  Waiting on sleep command                                                  1m 26s · ↓ 50.6k tokens

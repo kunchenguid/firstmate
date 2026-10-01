@@ -1,0 +1,9 @@
+─────────────────────────────────────────────────────────────────────────────────────────────────────── Run sleep 600 ─
+❯ Message @general-purpose…
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with CLAUDE_CODE_FORCE_SESSION_P…
+
+  ↑/↓ to select
+
+  ◯ main
+❯ ⏺ general-purpose  Run sleep 600                                                               10s · ↓ 48.8k tokens

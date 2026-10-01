@@ -844,6 +844,25 @@ ok - opencode (1.18.33): the doorbell reached a real worker, which acted and ack
 OpenCode needed `FM_SEND_INBOX_LIVE_TIMEOUT=560` because its configured model was still mid-turn at the default 240 seconds.
 Pi 0.87.1 was installed but not verified: its configured model returned an account error (`The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account`) before it read the inbox.
 
+### Claude agent selector
+
+A doorbell rung while Claude's agent selector shows a background subagent now reaches main, verified on 2026-10-01 with Claude Code 2.1.286 on tmux 3.6a and Herdr 0.9.1, macOS arm64.
+The guard launches Claude in an isolated tmux server, starts one background subagent, enters its view, and steers through the real `bin/fm-send.sh`:
+
+```sh
+FM_SEND_INBOX_SELECTOR_LIVE_E2E=1 tests/fm-send-inbox-claude-selector-live-e2e.test.sh
+```
+
+```text
+# claude (2.1.286 (Claude Code)): the agent selector shows the subagent before the steer
+ok - claude (2.1.286 (Claude Code)): a steer rung while the agent selector showed a subagent reached main, which acted and acked
+```
+
+With `fm_task_inbox_focus_main` removed from the ring, the same guard reported `not ok - claude (2.1.286 (Claude Code)): the steer left the selector on subagent instead of main`.
+Before the walk, the same subagent view lost the doorbell on tmux, where the ring returned 0 and Claude queued the line to the subagent (`1 queued`); on Herdr, the ring returned 2 on every attempt with nothing to bring main back.
+The screens behind `fm_composer_claude_agent_view` are the captures in `tests/captures/claude-2.1.286-agent-selector`, taken from both backends.
+On this release Escape does not leave a subagent's view, the first Down from a composer can focus a footer pill before the list, and Left from main's composer opens a "Background this session?" dialog whose default stops every background task.
+
 ## Waiting-worker command ceilings
 
 The `# Waiting` section of the ship and scout briefs (`bin/fm-brief.sh`) has a worker hold every external wait inside one blocking shell command, bounded by what its harness lets one command run.

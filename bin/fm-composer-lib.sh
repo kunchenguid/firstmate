@@ -1766,6 +1766,101 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# fm_composer_claude_agent_view: where Claude Code's background-agent selector
+# points the composer, read from a PLAIN screen (issue #6131). While a Claude
+# worker has background agents it draws an agent list as the bottom block of
+# the screen, after a blank row: `main` first, then one row per agent, each
+# `<marker> <name>`, where `⏺` marks the agent the composer is talking to and
+# `◯` an agent it is not. A focused list adds a `❯ ` cursor in front of one
+# row. While a subagent is viewed, the composer placeholder reads
+# `Message @<name>`, and text submitted there goes to that subagent, never to
+# main. Two independent signals carry the verdict: the list's markers and
+# cursor, and that placeholder. Prints exactly one of:
+#   none              no agent list and no subagent composer
+#   main              the list shows main viewed and unfocused
+#   subagent          a subagent is viewed and the list is unfocused
+#   list-main         the list cursor is on main, which is not viewed
+#   list-main-viewed  the list cursor is on main, which is viewed
+#   list-other        the list cursor is on another agent
+#   unknown           a subagent composer the list cannot explain
+# Captured on Claude Code 2.1.286 in tests/captures/claude-2.1.286-agent-selector.
+fm_composer_claude_agent_view() {  # <plain-screen>
+  local screen=$1 row trimmed body marker rest name n top i cursor='' main_mark='' message_at=0
+  local -a rows=()
+  while IFS= read -r row; do
+    row=${row%$'\r'}
+    fm_composer_normalize_spaces_var row
+    rows+=("$row")
+  done <<EOF
+$screen
+EOF
+  n=${#rows[@]}
+  while [ "$n" -gt 0 ]; do
+    trimmed=${rows[n-1]}
+    fm_composer_normalize_trim_var trimmed
+    [ -z "$trimmed" ] || break
+    n=$((n - 1))
+  done
+  top=$n
+  while [ "$top" -gt 0 ]; do
+    row=${rows[top-1]}
+    case "$row" in
+      '❯ '*) body=${row#'❯ '} ;;
+      '  '*) body=${row#'  '} ;;
+      *) break ;;
+    esac
+    marker=${body%% *}
+    rest=${body#"$marker"}
+    rest=${rest# }
+    name=${rest%% *}
+    case "$marker" in ''|*[[:alnum:]]*) break ;; esac
+    [ -n "$name" ] || break
+    top=$((top - 1))
+  done
+  for ((i = 0; i < top; i++)); do
+    trimmed=${rows[i]}
+    fm_composer_normalize_trim_var trimmed
+    case "$trimmed" in '❯ Message @'?*) message_at=1 ;; esac
+  done
+  trimmed=x
+  if [ "$top" -gt 0 ]; then
+    trimmed=${rows[top-1]}
+    fm_composer_normalize_trim_var trimmed
+  fi
+  if [ -n "$trimmed" ] || [ $((n - top)) -lt 2 ]; then
+    [ "$message_at" = 1 ] && printf 'unknown' || printf 'none'
+    return 0
+  fi
+  case "${rows[top]}" in
+    '❯ ⏺ main'|'  ⏺ main'|'❯ ⏺ main '*|'  ⏺ main '*) main_mark=viewed ;;
+    '❯ ◯ main'|'  ◯ main'|'❯ ◯ main '*|'  ◯ main '*) main_mark=other ;;
+    *) [ "$message_at" = 1 ] && printf 'unknown' || printf 'none'; return 0 ;;
+  esac
+  for ((i = top; i < n; i++)); do
+    case "${rows[i]}" in
+      '❯ '*)
+        [ -z "$cursor" ] || { printf 'unknown'; return 0; }
+        cursor=$i
+        ;;
+    esac
+  done
+  if [ -n "$cursor" ]; then
+    if [ "$cursor" -ne "$top" ]; then
+      printf 'list-other'
+    elif [ "$main_mark" = viewed ]; then
+      printf 'list-main-viewed'
+    else
+      printf 'list-main'
+    fi
+  elif [ "$main_mark" = other ]; then
+    printf 'subagent'
+  elif [ "$message_at" = 1 ]; then
+    printf 'unknown'
+  else
+    printf 'main'
+  fi
+}
+
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))

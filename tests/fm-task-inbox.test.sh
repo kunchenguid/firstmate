@@ -394,6 +394,125 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
+# A fake tmux whose pane is a Claude worker with one background agent. The
+# view in FM_FAKE_VIEW renders as the matching screen captured live on Claude
+# Code 2.1.286, and each key moves it the way that release was observed to:
+# Down from a viewed subagent first focuses a footer pill that reads the same,
+# then the list with its cursor on main; Up from the subagent row reaches main;
+# Enter on main views main; Escape leaves a focused list. Typing while a
+# subagent is viewed delivers to that subagent (TO-SUBAGENT), Escape on main's
+# composer would interrupt main (INTERRUPT), and Left opens the dialog that
+# stops background tasks (LEFT). FM_FAKE_FROZEN ignores every key.
+make_selector_stub() {  # <dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+caps="$FM_FAKE_CAPTURES"
+view=$(cat "$FM_FAKE_VIEW")
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      if [ "$view" = main ]; then
+        printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+      else
+        printf 'TO-SUBAGENT: %s\n' "$1" >> "$FM_SEND_LOG"
+      fi
+      exit 0
+    fi
+    printf 'KEY %s\n' "$1" >> "$FM_SEND_LOG"
+    [ -z "${FM_FAKE_FROZEN:-}" ] || exit 0
+    next=$view
+    case "$view:$1" in
+      subagent:Down) next=pill ;;
+      pill:Down) next=list-main ;;
+      list-other:Up) next=list-main ;;
+      list-main:Enter) next=list-main-viewed ;;
+      list-main-viewed:Escape) next=main ;;
+      main:Escape) printf 'INTERRUPT\n' >> "$FM_SEND_LOG" ;;
+      *:Left) printf 'LEFT\n' >> "$FM_SEND_LOG" ;;
+      main:Enter)
+        if [ -s "$FM_FAKE_COMPOSER" ]; then
+          printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+          : > "$FM_FAKE_COMPOSER"
+        fi
+        ;;
+    esac
+    printf '%s\n' "$next" > "$FM_FAKE_VIEW"
+    exit 0 ;;
+  display-message)
+    case "$*" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    case "$view" in
+      main) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } { print }' "$caps/main-tmux.txt" ;;
+      subagent|pill) cat "$caps/subagent-tmux.txt" ;;
+      list-main) cat "$caps/list-main-herdr.txt" ;;
+      list-main-viewed) cat "$caps/list-main-viewed-tmux.txt" ;;
+      list-other) cat "$caps/list-other-tmux.txt" ;;
+    esac
+    exit 0 ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/tmux"
+}
+
+# Issue #6131: a doorbell rung while Claude's agent selector shows a subagent
+# reached that subagent and reported success. The ring now walks every
+# selector view back to main and submits there; a pane whose walk cannot prove
+# main is refused with nothing typed, after at most one Escape and no Left.
+test_ring_returns_claude_selector_to_main() {
+  local dir state rec doorbell log composer viewf start rc
+  dir="$TMP_ROOT/ring-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1
+  }
+
+  for start in subagent list-other list-main list-main-viewed main; do
+    : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+    rc=0; ring || rc=$?
+    [ "$rc" = 0 ] || fail "a ring from the $start view should reach main, got rc $rc:"$'\n'"$(cat "$log")"
+    [ "$(cat "$viewf")" = main ] || fail "a ring from the $start view left the selector on $(cat "$viewf")"
+    grep -qxF "SUBMIT: $doorbell" "$log" \
+      || fail "a ring from the $start view did not submit the doorbell to main:"$'\n'"$(cat "$log")"
+    ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" \
+      || fail "a ring from the $start view misfired:"$'\n'"$(cat "$log")"
+  done
+
+  : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
+  rc=0; FM_FAKE_FROZEN=1 ring || rc=$?
+  [ "$rc" = 2 ] || fail "a selector that never returns to main should report undelivered, got rc $rc"
+  ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a stuck selector was typed into:"$'\n'"$(cat "$log")"
+  [ "$(grep -c '^KEY' "$log")" -le 12 ] || fail "a stuck selector walk was not bounded:"$'\n'"$(cat "$log")"
+
+  : > "$log"; : > "$composer"; printf 'list-main-viewed\n' > "$viewf"
+  rc=0; FM_FAKE_FROZEN=1 ring || rc=$?
+  [ "$rc" = 2 ] || fail "a list that ignores Escape should report undelivered, got rc $rc"
+  [ "$(grep -c '^KEY Escape' "$log")" = 1 ] \
+    || fail "the walk must send Escape at most once:"$'\n'"$(cat "$log")"
+  ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a stuck list was typed into:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring walks a Claude agent selector back to main before ringing, and refuses when it cannot"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -960,6 +1079,7 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_returns_claude_selector_to_main
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

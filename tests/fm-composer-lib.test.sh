@@ -1026,3 +1026,47 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# --- Claude agent selector (issue #6131) ------------------------------------
+
+SELECTOR_CAPS="$ROOT/tests/captures/claude-2.1.286-agent-selector"
+
+agent_view_is() {  # <want> <label> <screen>
+  local want=$1 label=$2 out
+  out=$(fm_composer_claude_agent_view "$3")
+  [ "$out" = "$want" ] || fail "$label: expected $want, got '$out'"
+  out=$(LC_ALL=C fm_composer_claude_agent_view "$3")
+  [ "$out" = "$want" ] || fail "$label under LC_ALL=C: expected $want, got '$out'"
+}
+
+test_claude_agent_view_reads_live_captures() {
+  local f want
+  for f in "$SELECTOR_CAPS"/*.txt; do
+    want=${f##*/}
+    want=${want%-*.txt}
+    agent_view_is "$want" "${f##*/}" "$(cat "$f")"
+  done
+  agent_view_is none "a composer with no agent list" "$(printf '─────\n❯ \n─────\n\n  ? for shortcuts\n')"
+  agent_view_is none "transcript rows naming main above a live composer" \
+    "$(printf '\n  ⏺ main\n  ◯ general-purpose\n─────\n❯ \n─────\n  ? for shortcuts\n')"
+  agent_view_is none "agent-shaped rows not set off by a blank row" \
+    "$(printf '─────\n❯ \n─────\n  ◯ main\n  ⏺ general-purpose\n')"
+  pass "fm_composer_claude_agent_view: every live Claude 2.1.286 selector capture reads its own view"
+}
+
+# The list markers and the Message @ composer are independent signals: losing
+# either one must not turn a subagent view into main.
+test_claude_agent_view_survives_one_lost_signal() {
+  local screen no_placeholder no_list
+  screen=$(cat "$SELECTOR_CAPS/subagent-tmux.txt")
+  no_placeholder=${screen/'Message @general-purpose…'/'a draft for the subagent'}
+  no_list=$(printf '%s\n' "$screen" | sed '/main$/,$d')
+  [ "$no_placeholder" != "$screen" ] || fail "the placeholder-free variant did not change the capture"
+  [ "$no_list" != "$screen" ] || fail "the list-free variant did not change the capture"
+  agent_view_is subagent "a subagent view whose composer holds a draft" "$no_placeholder"
+  agent_view_is unknown "a subagent composer with its agent list scrolled away" "$no_list"
+  pass "fm_composer_claude_agent_view: a subagent view is still recognized when one signal is lost"
+}
+
+test_claude_agent_view_reads_live_captures
+test_claude_agent_view_survives_one_lost_signal
