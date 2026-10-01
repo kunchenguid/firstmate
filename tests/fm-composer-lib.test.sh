@@ -21,6 +21,10 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
+# Pin the Pi banner adapter to a verified release for portable fixtures.
+# The live guard supplies the installed `pi --version` instead.
+FM_COMPOSER_PI_ADAPTER_VERSION=${FM_COMPOSER_PI_ADAPTER_VERSION:-0.85.1}
+
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
@@ -746,6 +750,25 @@ test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
   pass "matrix: pi's Codex usage-limit banner over an empty pair settles a stale status; probe-absent, foreign, near-miss, displaced, running, and typed shapes keep refusing"
 }
 
+test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
+  # Outside the pin set the named adapter must refuse the banner-as-empty
+  # verdict so an unpinned Pi rendering cannot prove emptiness.
+  local banner screen id out
+  banner='Error: Codex error: The usage limit has been reached'
+  screen=$' hello there\n\n '"$banner"$'
+\n────────────────────────\n\n────────────────────────\n/path\n0.0%'
+  id=$(printf 'pi\tworking')
+  FM_COMPOSER_PI_ADAPTER_VERSION=0.0.0
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  [ "$out" = unknown ] \
+    || fail "unpinned adapter version must not settle a stale status via the banner, got '$out'"
+  FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  [ "$out" = empty ] \
+    || fail "pinned adapter version must still settle the banner, got '$out'"
+  pass 'pi codex banner adapter requires a pinned version'
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -1110,6 +1133,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status
+test_matrix_pi_codex_banner_requires_pinned_adapter_version
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
