@@ -199,6 +199,10 @@ promote_cleanup() {
       mv -f -- "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null || true
     fi
   fi
+  if [ "$PROMOTE_PROJECT_LOCK_HELD" = 1 ]; then
+    PROMOTE_PROJECT_LOCK_HELD=0
+    fm_lock_release "$PROMOTE_PROJECT_LOCK" || true
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     META_LOCK_HELD=0
     fm_lock_release "$META_LOCK" || true
@@ -206,10 +210,6 @@ promote_cleanup() {
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
-  fi
-  if [ "$PROMOTE_PROJECT_LOCK_HELD" = 1 ]; then
-    PROMOTE_PROJECT_LOCK_HELD=0
-    fm_lock_release "$PROMOTE_PROJECT_LOCK" || true
   fi
   return "$status"
 }

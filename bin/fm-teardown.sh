@@ -414,33 +414,11 @@ fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
 META="$STATE/$ID.meta"
+CONTROL_LOCK="$STATE/.control-$ID.lock"
+CONTROL_LOCK_HELD=0
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0
-if [ -f "$META" ] && [ ! -L "$META" ]; then
-  TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
-  [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
-  TEARDOWN_LOCK_BACKEND=$(fm_meta_get "$META" backend)
-  [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
-  TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
-  TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
-  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
-     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
-     && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
-    TREEHOUSE_SLOT_LOCK_REQUIRED=1
-    TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
-      echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
-      exit 1
-    }
-    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
-      echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
-      exit 1
-    }
-    TREEHOUSE_PROJECT_LOCK_HELD=1
-  fi
-fi
-CONTROL_LOCK="$STATE/.control-$ID.lock"
-CONTROL_LOCK_HELD=0
 SM_LIVENESS_LOCK=
 META_LOCK=
 META_LOCK_HELD=0
@@ -479,13 +457,13 @@ teardown_release_locks() {
     fm_lock_release "$SM_LIVENESS_LOCK" || true
     SM_LIVENESS_LOCK=
   fi
-  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$CONTROL_LOCK" || true
-    CONTROL_LOCK_HELD=0
-  fi
   if [ "$TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     fm_lock_release "$TREEHOUSE_PROJECT_LOCK" || true
     TREEHOUSE_PROJECT_LOCK_HELD=0
+  fi
+  if [ "$CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CONTROL_LOCK" || true
+    CONTROL_LOCK_HELD=0
   fi
   fm_lease_guard_release || true
   return "$status"
@@ -499,6 +477,28 @@ CONTROL_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
+  [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
+  TEARDOWN_LOCK_BACKEND=$(fm_meta_get "$META" backend)
+  [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
+  TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
+  TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
+  if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+     && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
+    TREEHOUSE_SLOT_LOCK_REQUIRED=1
+    TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
+      echo "REFUSED: cannot resolve the shared Treehouse project lock for ${TEARDOWN_LOCK_PROJECT:-<missing>}; nothing was changed" >&2
+      exit 1
+    }
+    fm_lock_try_acquire "$TREEHOUSE_PROJECT_LOCK" || {
+      echo "REFUSED: another Treehouse slot allocation or return is in progress for $TEARDOWN_LOCK_PROJECT; nothing was changed" >&2
+      exit 1
+    }
+    TREEHOUSE_PROJECT_LOCK_HELD=1
+  fi
+fi
 FM_LOCK_LOG_PREFIX=teardown
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {
