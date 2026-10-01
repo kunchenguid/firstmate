@@ -3424,6 +3424,30 @@ cat > "$READ" <<'EOF'
 session:
   file: /review.html
   status: feedback
+prompts[2]:
+  - uid: "3"
+    prompt: ""
+    selector: div#a
+    tag: div
+    text: Element A
+  - uid: "4"
+    prompt: Cut off before its text
+    selector: div#b
+    tag: div
+EOF
+out=$(read_out) || fail "read failed on an expanded-list capture with a truncated item"
+assert_contains "$out" "declared_items: 2" "a truncated expanded-list capture lost its declared count"
+assert_contains "$out" "presented_items: 1" "an expanded-list item missing its text was presented"
+assert_contains "$out" "malformed_items: 1" "an expanded-list item missing its text was not malformed"
+assert_contains "$out" "complete: no" "an expanded-list item missing its text was certified as complete"
+assert_contains "$out" $'element_uid: 3\nelement_selector: div#a\ntag: div\ntext:\n| Element A\nEND ANNOTATIONS' \
+  "an explicitly empty expanded-list field was treated as missing"
+pass "read never certifies an expanded-list item missing a declared field"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
   session_ended: true
   ended_by: user
 prompts[1]{uid,prompt,selector,tag,text}:

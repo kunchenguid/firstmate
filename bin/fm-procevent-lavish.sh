@@ -725,7 +725,9 @@ cmd_read() {
         if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
           ($shape, $want, @fields) = ("table", $1, split /,/, $2);
         } elsif ($line =~ /^(?:prompts|feedback)\[(\d+)\]:\s*$/) {
-          ($shape, $want) = ("list", $1);
+          # A list header declares no fields; its items carry the ones the
+          # tabular header declares, so an item missing any is malformed.
+          ($shape, $want, @fields) = ("list", $1, qw(uid prompt selector tag text));
         }
         next;
       }
@@ -776,7 +778,7 @@ cmd_read() {
           $ok = 0;
         }
       }
-      if (!$ok || !%f) {
+      if (!$ok || grep { !exists $f{$_} } @fields) {
         $malformed++;
         next;
       }
