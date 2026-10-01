@@ -588,6 +588,10 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
   Kept the office change.
   local office <!-- fm-local-landing -->
+- [x] done-retained-note - Done Retained Note (repo: delta, done 2026-07-11) (kind: ship)
+  Deliverable of the finished work: local office <!-- fm-local-landing -->
+- [x] done-retained-report-note - Done Retained Report Note (repo: delta, done 2026-07-11) (kind: ship)
+  Deliverable of the finished work: report data/done-retained-report-note/report.md; local office <!-- fm-local-landing -->
 - [x] done-prose-local - Done Prose Local (repo: delta, done 2026-07-11) (kind: ship)
   local office
   The office sentence is ordinary prose.
@@ -714,6 +718,14 @@ EOF
       and .local_note == "local office"
       and .body_excerpt == "Kept the office change. local office"
   ' >/dev/null || fail "a local landing note beside other body text was dropped"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-retained-note")
+    | .local_note == "local office"
+  ' >/dev/null || fail "a retained marked local landing note was dropped"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-retained-report-note")
+    | .local_note == "local office"
+  ' >/dev/null || fail "a retained marked local landing note beside a report was dropped"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "done-prose-local")
     | .title == "Done Prose Local"
