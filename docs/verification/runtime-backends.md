@@ -1258,6 +1258,15 @@ Wrong task/home/job/index/nonce/generation, changed intent/candidate/authority/e
 The portable fixture also refuses replay of a pending current close while the endpoint remains present; only independently verified absence permits bookkeeping convergence.
 The lab helper's teardown verifies unchanged default fleet state. No original operational home is mutated or used as a test fixture.
 
+On 2026-10-01 the archived/pruned bookkeeping fixture passed the same public `settle-cleanup --current-judgment` interface on Herdr 0.8.0 / protocol 20 in a named non-default lab.
+The exact live command was `FM_SHORT_HERDR_E2E=1 FM_SHORT_HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh FM_SHORT_HERDR_LAB_LABEL=fix-pruned-backlog-cleanup-settlement-20261001 bash tests/fm-short-operations-herdr.test.sh`.
+It printed `PASS live: archived/pruned bookkeeping settles once with distinct evidence, exact reservation release, retained copy/history/originals and no endpoint or copy effects`, followed by the helper tripwire result `true` and the suite result `ok - short cleanup closes completed windows, releases landed copies and retains unsafe copies and unrelated resources`.
+The portable command `bin/fm-test-run.sh tests/fm-short-operations.test.sh` printed the corresponding `PASS portable` line and completed with `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`.
+The fixture starts with a unique checked configured Done-history row, archived lifecycle authority, a pruned active row, absent task metadata/cleanup receipt/pending-close marker, an absent endpoint, a surviving dirty operation-bound copy, an intact reservation and the original blocked ShortTask files.
+Settlement publishes only a distinct archived-retention proof and operation receipt with `originalAttempt: uncertain`, then releases the exact reservation; it does not call teardown or change the copy, backlog, archive, lifecycle or original failed bytes.
+Changed or missing job/task/nonce/generation/evidence/authority/reservation identity, a live runner or child, a present or newly claimed endpoint, changed directory/Git ownership and concurrent recovery all refuse before that receipt.
+The named-lab helper verified identical default fleet state after teardown, and no original operational-home cleanup was issued.
+
 The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns current endpoint routing and copy preservation.
 Earlier `fm-teardown-lifecycle-herdr-e2e.test.sh` results tested the former journal/process/focus admission rules and do not establish those rules for the current completed path.
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
