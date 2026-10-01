@@ -1721,6 +1721,29 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 `tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
+### Task-bound recovery of an unknown registration
+
+Verified 2026-10-01 on Linux x86_64 with Herdr 0.9.1, protocol 22, and Codex CLI 0.159.2.
+Captured stopped-endpoint responses without a native harness label reproduce `shell` at process level and `unreadable` at generic recovery level; changing only native status to `idle` produces `dead`.
+The task-aware recovery read now produces `dead` for those captured responses with validated, unchanged task metadata and matching runtime ownership.
+The existing generic pane/husk classifier still refuses that registration.
+The executable proof and refusal conditions belong to `fm_backend_herdr_unknown_task_state` in `bin/backends/herdr.sh`.
+
+Refresh the normalized captured-response regression and its negative cases with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
+```
+
+```text
+ok - unknown registration: stable task-bound processes recover; identity, generation, process and transport failures refuse
+```
+
+A private native Herdr lab additionally exercised `pane report-agent --state unknown` over a real nested Bash shell, followed by normal `fm-control.sh probe relaunch --harness codex --note 'Private preserving relaunch validation. Do not change files.'`.
+It confirmed the real Codex process in the same endpoint and worktree with dirty and untracked bytes preserved, and successful lab teardown verified the unchanged default-session tripwire.
+This controlled native registration is adjacent integration evidence, not a reproduction of the natural Codex-exit status transition.
+Durable metadata stability does not attest a runtime `spawn_gen`.
+
 ### Stale agent registration
 
 Measured 2026-09-10 on macOS aarch64 against Herdr 0.9.0 (protocol 22) and Pi 0.85.1 in an isolated `fm-lab-` session (upstream issue #4115, duplicates #3639, #3487, #2908, #3545).

@@ -1783,7 +1783,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # owns that vocabulary). The proof itself lives in one place for the whole
   # control plane - fm_control_endpoint_absence_verdict - so `exit` and
   # `relaunch` cannot reach two different answers about one endpoint.
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET" "$RELAUNCH_META" "$ID")
   if [ "$RELAUNCH_STATE" = missing ]; then
     RELAUNCH_ABSENCE=$(fm_control_endpoint_absence_verdict "$BACKEND" "$RELAUNCH_TARGET")
     case "${RELAUNCH_ABSENCE%%$'\t'*}" in
