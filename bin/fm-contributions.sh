@@ -354,9 +354,10 @@ poll() {
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task.
+  # One line per distinct URL: the URL, then every owning task. A Gerrit change
+  # is known but never observed, so it stays unmeasured without a forge read.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0])
+    known($input[0];$saved[0]) | map(select(.url | gerrit_change | not))
     | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
     | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   : > "$TMP/live.tsv"
