@@ -973,9 +973,11 @@ PI_OTHER_ROOT="$TMP_ROOT/pi-other-account"
 PI_ALIAS="$TMP_ROOT/pi home alias"
 SCHEMA6_PI_HOME="$TMP_ROOT/schema6-pi-home.json"
 SCHEMA6_PI_HOME_TOON="$TMP_ROOT/schema6-pi-home.toon"
+SCHEMA6_HOME_DEFAULT="$TMP_ROOT/schema6-home-default.json"
 mkdir -p "$PI_ORDINARY_ROOT" "$PI_OTHER_ROOT"
 ln -s "$PI_ORDINARY_ROOT" "$PI_ALIAS"
 jq '.providers |= map(if .provider == "codex" then .provider = "pi" else . end)' "$SCHEMA6_HOME" > "$SCHEMA6_PI_HOME"
+jq '.providers += [(.providers[] | select(.accountKey == "openai-codex-work") | .accountKey = "default")]' "$SCHEMA6_HOME" > "$SCHEMA6_HOME_DEFAULT"
 cat > "$SCHEMA6_PI_HOME_TOON" <<'TOON'
 bin: quota-axi
 generatedAt: "2030-01-01T00:00:00Z"
@@ -987,7 +989,7 @@ attention[0]:
 TOON
 for harness in pi pi-signed; do
   jq --arg harness "$harness" '.rules[0].use[0].harness = $harness' "$HOME_RULES" > "$RULES"
-  for account_case in ambient-home ordinary absolute alias alternate ambient-alternate; do
+  for account_case in ambient-home ordinary multiple-providers other-provider similar-provider absolute alias alternate ambient-alternate; do
     rm -f "$PI_PIN"
     ambient_root=$PI_OTHER_ROOT
     expected_helper="$harness openai-codex/gpt-5.6-sol"
@@ -995,6 +997,14 @@ for harness in pi pi-signed; do
     case "$account_case" in
       ambient-home) ambient_root=$PI_ORDINARY_ROOT; expected_helper=none; expected_code=1 ;;
       ordinary) printf 'ordinary\nopenai-codex\n' > "$PI_PIN" ;;
+      multiple-providers) printf 'ordinary\nanthropic openai-codex openai-codex-work\n' > "$PI_PIN" ;;
+      other-provider|similar-provider)
+        providers=anthropic
+        [ "$account_case" != similar-provider ] || providers='anthropic openai-codex-work'
+        printf 'ordinary\n%s\n' "$providers" > "$PI_PIN"
+        expected_helper=none
+        expected_code=1
+        ;;
       absolute) printf '%s\nopenai-codex\n' "$PI_ORDINARY_ROOT" > "$PI_PIN" ;;
       alias) printf '%s\nopenai-codex\n' "$PI_ALIAS" > "$PI_PIN" ;;
       alternate)
@@ -1024,17 +1034,26 @@ for harness in pi pi-signed; do
     done
   done
 
-  printf '%s\nopenai-codex\n' "$PI_OTHER_ROOT" > "$PI_PIN"
-  for snapshot in "$SCHEMA6_BOTH" "$SCHEMA6_DEFAULT_ONLY" "$SCHEMA5_HOME"; do
-    reset_log
-    HOME="$PI_ACCOUNT_HOME" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$snapshot" run code out err "$BRIEF"
-    expect_code 0 "$code" "$harness alternate account boundary snapshot exits 0"
-    case "$snapshot" in
-      "$SCHEMA6_BOTH") evidence='scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' ;;
-      "$SCHEMA6_DEFAULT_ONLY") evidence='-> eligible, unranked:' ;;
-      "$SCHEMA5_HOME") evidence='scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' ;;
-    esac
-    assert_contains "$out" "candidate: $harness:openai-codex/gpt-5.6-sol  provider=codex  $evidence" "$harness pin preserves exact-row precedence, no default fallback, and schema 5"
+  for account_root in ordinary "$PI_OTHER_ROOT"; do
+    printf '%s\nopenai-codex openai-codex-work codex-native\n' "$account_root" > "$PI_PIN"
+    for snapshot in "$SCHEMA6_HOME_DEFAULT" "$SCHEMA6_BOTH" "$SCHEMA6_DEFAULT_ONLY" "$SCHEMA5_HOME"; do
+      reset_log
+      HOME="$PI_ACCOUNT_HOME" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$snapshot" run code out err "$BRIEF"
+      expect_code 0 "$code" "$harness $account_root boundary snapshot exits 0"
+      case "$snapshot" in
+        "$SCHEMA6_HOME_DEFAULT")
+          if [ "$account_root" = ordinary ]; then
+            evidence='scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible'
+          else
+            evidence='-> eligible, unranked:'
+          fi
+          ;;
+        "$SCHEMA6_BOTH") evidence='scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' ;;
+        "$SCHEMA6_DEFAULT_ONLY") evidence='-> eligible, unranked:' ;;
+        "$SCHEMA5_HOME") evidence='scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' ;;
+      esac
+      assert_contains "$out" "candidate: $harness:openai-codex/gpt-5.6-sol  provider=codex  $evidence" "$harness $account_root pin preserves home preference, exact-row precedence, no default fallback, and schema 5"
+    done
   done
   jq --arg harness "$harness" '.rules[0].use[0] = {harness: $harness, model: "codex-native/gpt-6-astra", provider: "codex", effort: "ultra"}' "$HOME_RULES" > "$RULES"
   reset_log
