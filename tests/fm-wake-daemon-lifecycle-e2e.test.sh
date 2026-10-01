@@ -167,5 +167,110 @@ test_stale_pane_transient_persistent_resume() {
   pass "lifecycle: stale pane transient self-handles, persistent escalates once and clears, resumed clears quietly"
 }
 
+# --- Phase 3: a real daemon process ends with away mode or with its lock ------
+# These run the executed daemon through its production entry (bin/fm-afk-start.sh)
+# against the shimmed tmux pane, so its main loop, not its sourced functions, is
+# what must notice that it is no longer needed.
+DAEMON_PIDS=""
+reap_daemons() {
+  local pid
+  for pid in $DAEMON_PIDS; do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap reap_daemons EXIT
+
+DAEMON_PID=
+start_away_daemon() {  # <dir>
+  local dir=$1 state="$1/state" i watcher
+  date '+%s' > "$state/.afk"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_SUPERVISOR_TARGET=fakepane FM_SUPERVISOR_BACKEND=tmux FM_DAEMON_PRIMARY_HARNESS=unknown \
+    FM_AFK_STATE_PREPARED=1 FM_POLL=1 FM_SIGNAL_GRACE=1 FM_HEARTBEAT=999999 \
+    FM_CHECK_INTERVAL=999999 FM_HOUSEKEEPING_TICK=1 FM_ESCALATE_BATCH_SECS=999 \
+    FM_STALE_ESCALATE_SECS=999999 FM_MAX_DEFER_SECS=0 \
+    "$ROOT/bin/fm-afk-start.sh" > "$dir/daemon.out" 2>&1 &
+  DAEMON_PID=$!
+  DAEMON_PIDS="$DAEMON_PIDS $DAEMON_PID"
+  i=0
+  while [ "$i" -lt 100 ]; do
+    watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+    if [ -n "$watcher" ] && [ "$(ps -o ppid= -p "$watcher" 2>/dev/null | tr -d ' ')" = "$DAEMON_PID" ]; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "the away daemon never started its watcher: $(cat "$dir/daemon.out")"
+}
+
+daemon_gone_within() {  # <pid> <tenths>
+  local i=0
+  while [ "$i" -lt "$2" ] && is_live_non_zombie "$1"; do sleep 0.1; i=$((i + 1)); done
+  ! is_live_non_zombie "$1"
+}
+
+test_daemon_exits_when_away_mode_ends_and_worker_events_reach_the_attended_drain() {
+  local dir state armout drain_out arm_pid
+  dir=$(make_supercase wd-afk-ends)
+  state="$dir/state"
+  armout="$dir/arm.out"
+  drain_out="$dir/drain.out"
+  start_away_daemon "$dir"
+
+  # Away mode ends without the daemon being signalled - the lost-lock return.
+  rm -f "$state/.afk"
+  daemon_gone_within "$DAEMON_PID" 100 \
+    || fail "the away daemon kept running after away mode ended"
+  [ ! -e "$state/.supervise-daemon.pid" ] || fail "the exited daemon left its pid file"
+  [ -z "$(ls -A "$state/.supervise-daemon.instances" 2>/dev/null)" ] \
+    || fail "the exited daemon left its instance record"
+
+  # A worker's done handoff, then the attended firstmate's own arm and drain.
+  printf 'done [at=%s]: PR https://example.test/pr/77 checks green\n' "$(date +%s)" >> "$state/task-w7.status"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_CONFIRM_TIMEOUT=30 \
+    "$ROOT/bin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  arm_pid=$!
+  wait_for_exit "$arm_pid" 400 >/dev/null 2>&1 || true
+  grep -Eq '^(signal:|check:)' "$armout" || fail "the attended arm reported no wake: $(cat "$armout")"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+    || fail "the attended drain failed"
+  grep -q 'task-w7' "$drain_out" || fail "the attended drain does not show the done handoff: $(cat "$drain_out")"
+  ! grep -qF 'pr/77' "$state/.subsuper-escalations" 2>/dev/null \
+    || fail "the done handoff went to the away daemon's buffer instead of the attended firstmate"
+  pass "lifecycle: an away daemon exits on its own when away mode ends, and worker events reach the attended drain"
+}
+
+test_daemon_exits_when_it_loses_its_lock() {
+  local dir state lock holder
+  dir=$(make_supercase wd-lock-lost)
+  state="$dir/state"
+  lock="$state/.supervise-daemon.lock"
+  start_away_daemon "$dir"
+
+  # Another daemon takes the singleton: the lock and the pid file now name it.
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_lock_remove_path "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    printf "%s\n" "$(cat "$2/pid")" > "$3"
+    exec sleep 60
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$state/.supervise-daemon.pid" &
+  holder=$!
+  DAEMON_PIDS="$DAEMON_PIDS $holder"
+  daemon_gone_within "$DAEMON_PID" 100 \
+    || fail "the away daemon kept running after another process took its lock"
+  [ "$(cat "$lock/pid" 2>/dev/null)" = "$holder" ] || fail "the exiting daemon disturbed its successor's lock"
+  [ "$(cat "$state/.supervise-daemon.pid" 2>/dev/null)" = "$holder" ] \
+    || fail "the exiting daemon removed its successor's pid file"
+  [ -e "$state/.afk" ] || fail "the exiting daemon cleared away mode"
+  kill -TERM "$holder" 2>/dev/null || true
+  pass "lifecycle: an away daemon that no longer holds its lock exits without touching its successor"
+}
+
 test_routine_then_terminal_after_restart
 test_stale_pane_transient_persistent_resume
+test_daemon_exits_when_away_mode_ends_and_worker_events_reach_the_attended_drain
+test_daemon_exits_when_it_loses_its_lock

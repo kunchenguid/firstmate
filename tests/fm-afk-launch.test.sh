@@ -1525,6 +1525,138 @@ unit_stop_confirms_daemon_exit() {
   rm -rf "$st"
 }
 
+# A stand-in away daemon: a live process whose command line runs a script named
+# fm-supervise-daemon.sh, so a lock identity that no longer matches cannot be
+# mistaken for a reused pid. It exits on TERM, as the real daemon does, and
+# stops itself after a bound so an escaped copy cannot outlive the suite.
+make_daemon_standin() {  # <dir>
+  mkdir -p "$1"
+  cat > "$1/fm-supervise-daemon.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'exit 0' TERM
+end=$(( $(date +%s) + 120 ))
+while [ "$(date +%s)" -lt "$end" ]; do sleep 0.2; done
+SH
+  chmod +x "$1/fm-supervise-daemon.sh"
+  printf '%s\n' "$1/fm-supervise-daemon.sh"
+}
+
+# Start a stand-in and wait until its exec chain settles, so an identity the
+# fixture records matches the one the stand-in keeps; the real daemon records
+# its own identity once it runs. Sets STANDIN_PID in this shell.
+STANDIN_PID=
+start_daemon_standin() {  # <script>
+  local i=0
+  bash "$1" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  STANDIN_PID=$!
+  while [ "$i" -lt 50 ]; do
+    [ "$(ps -o command= -p "$STANDIN_PID" 2>/dev/null)" = "bash $1" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  fail "daemon stand-in did not start: $(ps -o command= -p "$STANDIN_PID" 2>/dev/null)"
+}
+
+# The macOS process identity renders the start time in the local time zone, so
+# a host whose time zone changes sees a different identity for the same live
+# process. Two fixed POSIX zones drive that drift without tzdata, and an empty
+# proc root forces the same ps rendering on a Linux runner.
+TZ_BEFORE=AAA8
+TZ_AFTER=BBB7
+identity_under() {  # <tz> <pid>
+  FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$1 bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+wait_pid_gone() {  # <pid>
+  local i=0
+  while [ "$i" -lt 50 ] && kill -0 "$1" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+  ! kill -0 "$1" 2>/dev/null
+}
+
+unit_start_keeps_a_live_daemon_lock_across_a_time_zone_shift() {
+  local st standin daemon_pid lock out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-start.XXXXXX")
+  mkdir -p "$st/state"
+  standin=$(make_daemon_standin "$st/bin")
+  start_daemon_standin "$standin"
+  daemon_pid=$STANDIN_PID
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  identity_under "$TZ_BEFORE" "$daemon_pid" > "$lock/pid-identity"
+  if [ "$(identity_under "$TZ_BEFORE" "$daemon_pid")" = "$(identity_under "$TZ_AFTER" "$daemon_pid")" ]; then
+    fail "time-zone start: the fixture could not shift the recorded identity"
+  fi
+  out=$(FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_AFTER FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
+  if [ "$(cat "$lock/pid" 2>/dev/null)" = "$daemon_pid" ] \
+    && printf '%s\n' "$out" | grep -Fq "afk: daemon already running pid=$daemon_pid"; then
+    pass "time-zone start: a live daemon whose identity drifted keeps its lock, and no second daemon starts"
+  else
+    fail "time-zone start: the live daemon's lock was taken over (output: $out)"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_reaches_a_daemon_across_a_time_zone_shift() {
+  local st standin daemon_pid lock
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-stop.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  standin=$(make_daemon_standin "$st/bin")
+  start_daemon_standin "$standin"
+  daemon_pid=$STANDIN_PID
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$daemon_pid" > "$lock/pid"
+  identity_under "$TZ_BEFORE" "$daemon_pid" > "$lock/pid-identity"
+  FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_BEFORE FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"; . "$2"; fm_afk_daemon_record_write "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-afk-daemon-lib.sh" "$st/state" "$daemon_pid" \
+    || fail "time-zone stop: could not record the daemon instance"
+  FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_AFTER FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    "$LAUNCH" stop >/dev/null 2>&1
+  if wait_pid_gone "$daemon_pid" && [ ! -e "$st/state/.afk" ]; then
+    pass "time-zone stop: the return stops a daemon whose lock identity drifted, through its instance record"
+  else
+    fail "time-zone stop: the daemon outlived away mode after the time zone changed"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+unit_stop_finds_a_lockless_daemon_by_its_record() {
+  local st standin daemon_pid record_dir
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lockless.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  standin=$(make_daemon_standin "$st/bin")
+  start_daemon_standin "$standin"
+  daemon_pid=$STANDIN_PID
+  FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"; . "$2"; fm_afk_daemon_record_write "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-afk-daemon-lib.sh" "$st/state" "$daemon_pid" \
+    || fail "lockless stop: could not record the daemon instance"
+  record_dir="$st/state/.supervise-daemon.instances"
+  [ ! -e "$st/state/.supervise-daemon.lock" ] || fail "lockless stop: fixture unexpectedly has a lock"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  if wait_pid_gone "$daemon_pid" && [ ! -e "$st/state/.afk" ] \
+    && [ -z "$(ls -A "$record_dir" 2>/dev/null)" ]; then
+    pass "lockless stop: the return stops a live daemon that lost its lock and drops its record"
+  else
+    fail "lockless stop: a live daemon without its lock outlived the return"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_refresh_validates_record() {
   local st daemon_pid
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-refresh-record.XXXXXX")
@@ -1769,6 +1901,9 @@ unit_stop_validates_before_signal
 unit_lock_requires_complete_metadata
 unit_stop_surfaces_afk_removal_failure
 unit_stop_confirms_daemon_exit
+unit_start_keeps_a_live_daemon_lock_across_a_time_zone_shift
+unit_stop_reaches_a_daemon_across_a_time_zone_shift
+unit_stop_finds_a_lockless_daemon_by_its_record
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds

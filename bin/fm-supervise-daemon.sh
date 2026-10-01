@@ -14,14 +14,16 @@
 # or omits anything it names a state/.subsuper-digests/ file holding every
 # buffered event verbatim.
 #
-# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
-# injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
-# When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
-# Any buffered daemon escalations that remain while afk is off survive in
-# state/.subsuper-escalations and are flushed on the next "while you were out"
-# catch-up or when afk is re-entered.
+# PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine and
+# lives only while the durable away-mode flag state/.afk is present: it injects
+# only then. Invoking the /afk skill sets that flag and starts this daemon; any
+# real (unmarked) user message clears it and firstmate resumes full
+# responsiveness. Once the flag is gone, or once this daemon no longer holds its
+# singleton lock, it exits on its own before it drains another wake, so the
+# attended firstmate's own watcher receives every wake again; a daemon left
+# running would drain and acknowledge each one into a buffer nothing delivers.
+# Escalations it could not deliver survive in state/.subsuper-escalations as
+# evidence for the return catch-up.
 #
 # IN-BAND OPERATIONAL INPUT. bin/fm-operational-input.sh constructs every
 # current daemon injection as the typed away-supervisor kind after the stable
@@ -155,7 +157,9 @@
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
-#          instance via portable lock on state/.supervise-daemon.lock. Trapped
+#          instance via portable lock on state/.supervise-daemon.lock, plus an
+#          instance record that lets a return stop it without that lock
+#          (bin/fm-afk-daemon-lib.sh). Trapped
 #          SIGTERM/SIGINT shut down within ~1s, flush escalations, release the
 #          lock. A crashing fm-watch.sh is logged and restarted, never killing
 #          the daemon; a tight crash-restart spin is detected and backed off.
@@ -201,6 +205,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # (fm_busy_classify).
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
+
+# The instance record this daemon leaves so a return can stop it without its
+# lock (fm_afk_daemon_record_write and fm_afk_daemon_record_remove).
+# shellcheck source=bin/fm-afk-daemon-lib.sh
+. "$FM_DAEMON_DIR/fm-afk-daemon-lib.sh"
 
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
@@ -1420,8 +1429,9 @@ inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
-  # daemon self-handles and stays quiet; firstmate drives the normal always-on
-  # watcher triage. Escalations buffer and survive for the next catch-up flush.
+  # daemon is about to exit (PRESENCE-GATING above) and firstmate drives the
+  # normal always-on watcher triage; escalations stay buffered for the return
+  # catch-up.
   INJECT_LAST_FAILURE=
   INJECT_SUBMIT_ATTEMPTED=0
   afk_active "$state" || { INJECT_LAST_FAILURE="deferred: afk inactive"; log "inject $INJECT_LAST_FAILURE"; return 1; }
@@ -1775,6 +1785,7 @@ fm_super_main() {
     fi
     exit 1
   fi
+  local LOCK_OWNER=${FM_LOCK_OWNER_DIR:-}
   echo "$$" > "$PIDFILE"
   # The recorded identity is what proves this daemon still owns supervision after
   # its watcher child exits (fm_afk_daemon_owns_supervision, read by the turn-end
@@ -1785,6 +1796,34 @@ fm_super_main() {
     rm -f "$LOCK/pid-identity" 2>/dev/null || true
     log "warn: could not record this daemon's process identity; the turn-end guard cannot recognize away-mode supervision"
   fi
+  if ! fm_afk_daemon_record_write "$STATE" "$$"; then
+    log "warn: could not record this daemon instance; a return that finds no lock cannot stop it, so it relies on its own exit when away mode ends"
+  fi
+
+  # Release only what this instance owns: the lock and pid file may already
+  # name a successor daemon.
+  release_instance() {
+    fm_lock_release "$LOCK" 2>/dev/null || true
+    [ "$(cat "$PIDFILE" 2>/dev/null || true)" != "$$" ] || rm -f "$PIDFILE" 2>/dev/null || true
+    fm_afk_daemon_record_remove "$STATE" "$$"
+  }
+
+  # The daemon exists only for away or quiet mode (state/.afk) and only while it
+  # holds the singleton lock. Without either it would keep draining and
+  # acknowledging every wake into a buffer that nothing delivers, so it exits.
+  holds_lock() {
+    [ "$(cat "$LOCK/pid" 2>/dev/null || true)" = "$$" ] || return 1
+    [ -z "$LOCK_OWNER" ] || fm_lock_points_to_owner "$LOCK" "$LOCK_OWNER"
+  }
+  exit_reason() {
+    if ! afk_active "$STATE"; then
+      printf 'away and quiet mode are no longer active'
+    elif ! holds_lock; then
+      printf 'this daemon no longer holds %s' "$LOCK"
+    else
+      return 1
+    fi
+  }
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1
@@ -1817,8 +1856,7 @@ fm_super_main() {
   if ! fm_backend_list_contains "$FM_SUPERVISOR_SUPPORTED_BACKENDS" "$BACKEND"; then
     echo "error: away-mode daemon does not support supervisor backend '$BACKEND' yet (supported: $FM_SUPERVISOR_SUPPORTED_BACKENDS); set FM_SUPERVISOR_BACKEND=tmux|herdr and FM_SUPERVISOR_TARGET to run firstmate's own pane under a supported backend" >&2
     log "startup failed: unsupported supervisor backend '$BACKEND' (source=$backend_source)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    release_instance
     exit 1
   fi
 
@@ -1855,8 +1893,7 @@ fm_super_main() {
   if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    release_instance
     exit 1
   fi
 
@@ -1878,8 +1915,7 @@ fm_super_main() {
     if [ -n "${CUR_TMP:-}" ]; then
       rm -f "$CUR_TMP" 2>/dev/null || true
     fi
-    fm_lock_release "$LOCK" 2>/dev/null || true
-    rm -f "$PIDFILE" 2>/dev/null || true
+    release_instance
     log "daemon shutting down"
     exit 0
   }
@@ -1911,8 +1947,16 @@ fm_super_main() {
     WATCHER_PID=$!
   }
 
-  local rc reason
+  local rc reason why
   while true; do
+    # --- presence-gated exit -------------------------------------------------
+    # Checked before anything below can drain or acknowledge a wake, so the
+    # attended firstmate receives every wake once away mode has ended.
+    if why=$(exit_reason); then
+      log "exiting: $why"
+      cleanup
+    fi
+
     # --- pane-gone guard (preserved) ---------------------------------------
     # With the #29 watcher's enqueue-before-suppress, a wake is no longer
     # swallowed by running the watcher with no injection target. We still back
@@ -1956,6 +2000,12 @@ fm_super_main() {
           WATCHER_PID=""
           sleep "${HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}"
           continue
+        fi
+        if why=$(exit_reason); then
+          # The child is reaped; never signal its pid again.
+          WATCHER_PID=""
+          log "exiting before handling wake '$reason' (it stays queued): $why"
+          cleanup
         fi
         log "wake: $reason"
         if ! handle_durable_wakes "$reason" "$STATE"; then

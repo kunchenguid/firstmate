@@ -82,9 +82,11 @@
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
-#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
-#                              cleanup flushes WHILE state/.afk is still present,
-#                              wait for it, close a recorded non-native terminal
+#   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM every live daemon of
+#                              this home, including one that lost its lock
+#                              (bin/fm-afk-daemon-lib.sh), so its cleanup flushes
+#                              WHILE state/.afk is still present, wait for each,
+#                              close a recorded non-native terminal
 #                              by exact id, clear state/.afk, then archive the
 #                              record last. A Pi or native entry that never
 #                              launched a daemon reports that none was running.
@@ -813,41 +815,31 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
+  local pid survivors result=0 read_result archived closed_daemon_terminal=0
+  local -a daemon_pids=()
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
     return 1
   fi
-  # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
-  # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
-  # first would make that flush a no-op via inject_msg's presence gate).
-  pid=""
-  pid_identity=""
+  # (1) SIGTERM every live daemon of this home so each cleanup trap flushes
+  # buffered escalations WHILE state/.afk is still present (the exit-ordering
+  # fix: clearing .afk first would make that flush a no-op via inject_msg's
+  # presence gate). bin/fm-afk-daemon-lib.sh owns which proofs name a daemon,
+  # including one that lost its lock.
+  while IFS= read -r pid; do
+    [ -n "$pid" ] && daemon_pids+=("$pid")
+  done <<EOF
+$(fm_afk_daemon_live_pids "$FM_AFK_LAUNCH_STATE" "$FM_AFK_LAUNCH_DIR/fm-watch.sh" "$FM_HOME")
+EOF
+  if [ "${#daemon_pids[@]}" -gt 0 ] && ! survivors=$(fm_afk_daemon_stop "${daemon_pids[@]}"); then
+    fm_afk_launch_log "away-mode daemon pid=${survivors//$'\n'/,} did not exit after SIGTERM; preserving lifecycle state"
+    return 1
+  fi
+  fm_afk_daemon_records_prune "$FM_AFK_LAUNCH_STATE"
   if daemon_lock_held_by_live_daemon; then
-    pid=$(daemon_lock_pid 2>/dev/null) || return 1
-    pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  fi
-  if [ -n "$pid" ]; then
-    if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
-      result=1
-    fi
-    for _ in $(seq 1 40); do
-      fm_pid_alive "$pid" || break
-      sleep 0.25
-    done
-  fi
-  if [ -n "$pid" ] && fm_pid_alive "$pid"; then
-    current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
-      fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
-      return 1
-    }
-    if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
-      return 1
-    fi
+    fm_afk_launch_log "a live away daemon pid=$(daemon_lock_pid) still holds the lock, but nothing proves it is this home's, so it was not signalled; the attended arm stops it once it runs this home's watcher"
   fi
   # (2) Close the daemon's own terminal by exact id. A native/none record or
   # an absent record means no terminal existed for this entry (Pi never

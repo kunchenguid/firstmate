@@ -41,6 +41,8 @@ FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$FM_AFK_START_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-afk-daemon-lib.sh
+. "$FM_AFK_START_DIR/fm-afk-daemon-lib.sh"
 
 fm_afk_start_usage() {
   sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -67,48 +69,14 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
         "$state/.subsuper-unknown-acked" 2>/dev/null
 }
 
-daemon_lock_owner() {
-  local owner
-  if [ -L "$FM_AFK_LOCK" ]; then
-    owner=$(readlink "$FM_AFK_LOCK" 2>/dev/null) || return 1
-    [ -n "$owner" ] || return 1
-    case "$owner" in
-      /*) printf '%s\n' "$owner" ;;
-      *) printf '%s/%s\n' "$(dirname "$FM_AFK_LOCK")" "$owner" ;;
-    esac
-    return 0
-  fi
-  [ -d "$FM_AFK_LOCK" ] || return 1
-  printf '%s\n' "$FM_AFK_LOCK"
-}
-
-daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
-  identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
-}
-
 daemon_lock_pid() {
-  local owner
-  owner=$(daemon_lock_owner) || return 1
-  cat "$owner/pid" 2>/dev/null || true
+  fm_afk_daemon_lock_pid "$FM_AFK_STATE"
 }
 
+# A live daemon holds the lock (bin/fm-afk-daemon-lib.sh's lock or command
+# proof): keep the lock and start no second daemon.
 daemon_lock_held_by_live_daemon() {
-  local owner pid
-  owner=$(daemon_lock_owner) || return 1
-  pid=$(cat "$owner/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" || return 1
-  daemon_pid_matches "$pid" "$owner"
+  fm_afk_daemon_lock_holder_live "$FM_AFK_STATE"
 }
 
 fm_afk_flag_write() {  # <state-dir> [mode]
@@ -164,6 +132,7 @@ fm_afk_start_main() {
     return 0
   fi
 
+  # A live lock pid that is not a daemon was reused, so the lock is stale.
   if fm_pid_alive "$pid" && [ -n "$pid" ]; then
     fm_lock_remove_path "$FM_AFK_LOCK" 2>/dev/null || true
   fi
