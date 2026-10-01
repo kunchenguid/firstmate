@@ -154,7 +154,14 @@ fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token>
   FM_HERDR_CLEANUP_TAB=${record%%$'\t'*}
   FM_HERDR_CLEANUP_PANE=${record#*$'\t'}
   [ -n "$FM_HERDR_CLEANUP_TAB" ] || return 1
-  [ -n "$FM_HERDR_CLEANUP_PANE" ] || FM_HERDR_CLEANUP_EMPTY_TAB=1
+  if [ -z "$FM_HERDR_CLEANUP_PANE" ]; then
+    # Empty-tab cleanup needs an exact workspace+tab binding. A version-1
+    # journal has none, and a failed binding publish can leave a version-2
+    # journal without them; either way, matching by title/token alone could
+    # close another empty tab in the same workspace.
+    [ -n "$bound_workspace" ] && [ -n "$bound_tab" ] || return 1
+    FM_HERDR_CLEANUP_EMPTY_TAB=1
+  fi
 }
 
 fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <token> <home-real> <journal> <task-id> <version> <bound-workspace> <bound-tab> <bound-pane>
