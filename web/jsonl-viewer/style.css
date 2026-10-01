@@ -6,6 +6,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #173258 0, #08111f 38rem); }
 button, input, select { font: inherit; }
 button, select, input { border: 1px solid #304965; border-radius: 0.55rem; background: #0d1a2b; color: #dce8f7; padding: 0.6rem 0.75rem; }
@@ -32,6 +33,7 @@ aside input, aside select { width: 100%; }
 .status { margin: 0.25rem 0 0; color: #8fa7c1; font-size: 0.82rem; }
 .status.error { color: #ef8c94; }
 .actions { display: flex; align-items: center; gap: 0.7rem; margin: 1rem 0; }
+.actions > span { display: flex; gap: 0.7rem; }
 .actions label { color: #a9bdd3; font-size: 0.85rem; }
 .notice { padding: 0.75rem 0.9rem; margin-bottom: 0.8rem; border: 1px solid #765e28; border-radius: 0.55rem; background: #2b2514; color: #f4d88a; }
 .events { display: grid; gap: 0.75rem; }
@@ -50,6 +52,25 @@ summary { cursor: pointer; color: #9ec7ef; }
 pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45rem; background: #050b14; color: #c8d7e8; white-space: pre-wrap; overflow-wrap: anywhere; }
 .boundary { padding: 0.7rem; border: 1px dashed #745b25; border-radius: 0.55rem; color: #f2d17b; background: rgba(61, 48, 20, 0.72); }
 .empty { color: #8fa7c1; padding: 2rem 0; text-align: center; }
+.report { max-width: 64rem; padding: 1.5rem 1.7rem; border: 1px solid #263e5b; border-radius: 0.65rem; background: rgba(12, 25, 43, 0.92); }
+.markdown-body { color: #dce8f7; line-height: 1.65; overflow-wrap: anywhere; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { margin: 1.4em 0 0.55em; color: #f2f7fd; line-height: 1.25; }
+.markdown-body h1, .markdown-body h2 { padding-bottom: 0.35rem; border-bottom: 1px solid #304965; }
+.markdown-body p, .markdown-body ul, .markdown-body ol, .markdown-body blockquote, .markdown-body table, .markdown-body pre { margin: 0.8rem 0; }
+.markdown-body blockquote { padding: 0.15rem 1rem; border-left: 4px solid #4f88bd; color: #b7c9dc; background: #0a1626; }
+.markdown-body blockquote p { white-space: pre-wrap; }
+.markdown-body code { padding: 0.1rem 0.3rem; border-radius: 0.3rem; background: #050b14; color: #d9e9fa; }
+.markdown-body pre code { padding: 0; background: transparent; white-space: pre; }
+.markdown-body table { display: block; width: max-content; max-width: 100%; overflow: auto; border-collapse: collapse; }
+.markdown-body th, .markdown-body td { min-width: 7rem; padding: 0.5rem 0.7rem; border: 1px solid #36516f; text-align: left; }
+.markdown-body th { background: #132740; color: #f2f7fd; }
+.markdown-body a { color: #76c0ff; }
+.blocked-link { color: #ef9ca3; }
+.omitted-image { color: #a9bdd3; font-style: italic; }
+.report-source { margin-top: 1.6rem; padding-top: 0.9rem; border-top: 1px solid #304965; }
+.report-source pre { max-height: 45rem; white-space: pre; }
 
 @media (max-width: 850px) {
   header, .toolbar { align-items: stretch; flex-direction: column; }

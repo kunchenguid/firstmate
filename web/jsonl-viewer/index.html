@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Firstmate JSONL Viewer</title>
+    <title>Firstmate Agent Viewer</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
     <header>
       <div>
         <p class="eyebrow">FIRSTMATE</p>
-        <h1>Agent journal viewer</h1>
+        <h1>Agent journals and reports</h1>
       </div>
       <div class="connection">
         <label for="token">Access token</label>
@@ -20,14 +20,15 @@
     </header>
     <main>
       <aside>
-        <label for="source">Journal kind</label>
+        <label for="source">View</label>
         <select id="source">
           <option value="all">All</option>
           <option value="short">Short agents</option>
           <option value="supervisor">Supervisor sessions</option>
+          <option value="report">Task reports</option>
         </select>
-        <label for="session-search">Find session</label>
-        <input id="session-search" type="search" placeholder="ID or date">
+        <label for="session-search">Find item</label>
+        <input id="session-search" type="search" placeholder="Task, session, or date">
         <div id="sessions" class="sessions" aria-live="polite"></div>
       </aside>
       <section class="journal">
@@ -36,19 +37,28 @@
             <p id="session-title" class="session-title">Enter the access token to begin.</p>
             <p id="status" class="status" role="status"></p>
           </div>
-          <div class="filters">
+          <div id="journal-filters" class="filters">
             <input id="event-search" type="search" placeholder="Search visible events">
             <select id="role-filter" aria-label="Filter by role"><option value="all">All roles</option></select>
             <select id="type-filter" aria-label="Filter by type"><option value="all">All types</option></select>
           </div>
         </div>
         <div class="actions">
-          <button id="from-start" type="button" disabled>Load from start</button>
-          <button id="load-more" type="button" disabled>Load more</button>
-          <label><input id="follow" type="checkbox" checked> Follow appended events</label>
+          <span id="journal-actions">
+            <button id="from-start" type="button" disabled>Load from start</button>
+            <button id="load-more" type="button" disabled>Load more</button>
+          </span>
+          <label><input id="follow" type="checkbox" checked> Follow changes</label>
         </div>
         <div id="notice" class="notice" hidden></div>
         <div id="events" class="events" aria-live="polite"></div>
+        <article id="report" class="report" aria-live="polite" hidden>
+          <div id="report-rendered" class="markdown-body"></div>
+          <details class="report-source">
+            <summary>Plain source</summary>
+            <pre></pre>
+          </details>
+        </article>
       </section>
     </main>
     <template id="event-template">

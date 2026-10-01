@@ -28,12 +28,44 @@ FIRST_SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_ID=short-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 FIRST_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$FIRST_SHORT_ID"
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
+FIRST_REPORT_ID=report-one
+REPORT_ID=report-two
+FIRST_REPORT_DIR="$HOME_FIXTURE/data/$FIRST_REPORT_ID"
+REPORT_DIR="$HOME_FIXTURE/data/$REPORT_ID"
 TOKEN=browser-fixture-token-value
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session"
+mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR"
 cat > "$FIRST_SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"delayed first session"}]}}
 JSONL
+cat > "$FIRST_REPORT_DIR/report.md" <<'MARKDOWN'
+# Delayed report
+
+stale delayed report body
+MARKDOWN
+cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
+# Rendered report
+
+Readable paragraph with `inline code` and [safe link](https://example.com).
+
+- first item
+- second item
+
+> quoted evidence
+
+| Check | Result |
+| --- | --- |
+| Browser | Passed |
+
+```js
+const literal = "<img id=code-unsafe src=x>";
+```
+
+<script id="report-script">globalThis.reportExecuted = true</script>
+<img id="report-event" src=x onerror="globalThis.eventExecuted = true">
+[unsafe link](javascript:globalThis.linkExecuted=true)
+![remote image](https://example.invalid/should-not-load.png)
+MARKDOWN
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
 JSONL
@@ -58,7 +90,8 @@ done
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
   NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   PLAYWRIGHT_ROOT="$PLAYWRIGHT_ROOT" CDP_URL="$CDP_URL" VIEWER_URL="http://127.0.0.1:$PORT" \
-  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_TOKEN="$TOKEN" \
+  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" \
+  VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_TOKEN="$TOKEN" \
   node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -82,11 +115,30 @@ await page.route("**/api/events?*", async route => {
   }
   await route.continue();
 });
+let delayFirstReport = false;
+let releaseDelayedReport = () => {};
+let markFirstReportRequestStarted;
+const firstReportRequestStarted = new Promise(resolve => { markFirstReportRequestStarted = resolve; });
+const delayedReportRelease = new Promise(resolve => { releaseDelayedReport = resolve; });
+await page.route("**/api/report?*", async route => {
+  const url = new URL(route.request().url());
+  if (delayFirstReport && url.searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID) {
+    delayFirstReport = false;
+    markFirstReportRequestStarted();
+    await delayedReportRelease;
+  }
+  await route.continue();
+});
+let remoteAssetRequests = 0;
+page.on("request", request => {
+  if (request.url().startsWith("https://example.invalid/")) remoteAssetRequests += 1;
+});
 let failed;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
   await page.locator("#connect").click();
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
   await page.locator(".event-card").waitFor({ state: "visible", timeout: 3000 });
   const literal = await page.locator(".event-content").textContent();
   if (!literal.includes("<img id=unsafe")) throw new Error("log markup was not shown literally");
@@ -112,14 +164,43 @@ try {
   if (await page.locator(".event-card:visible").count()) throw new Error("search did not filter rendered events");
   await page.locator("#event-search").fill("");
   if (await page.locator(".event-card:visible").count() !== 2) throw new Error("live append did not preserve both events");
+  if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.locator("#journal-filters").isVisible() || await page.locator("#journal-actions").isVisible() || await page.locator("#events").isVisible()) throw new Error("journal-only controls remained visible in report mode");
+  if (!await page.locator(".markdown-body table").count()) throw new Error("Markdown table was not rendered");
+  if (!await page.locator(".markdown-body pre code").filter({ hasText: "const literal" }).count()) throw new Error("fenced code was not rendered");
+  if (!await page.locator(".markdown-body blockquote").filter({ hasText: "quoted evidence" }).count()) throw new Error("blockquote was not rendered");
+  if (await page.locator(".markdown-body li").count() !== 2) throw new Error("Markdown list was not rendered");
+  if (await page.locator("#report-script").count()) throw new Error("raw report HTML became active DOM");
+  if (await page.locator("#report-event").count()) throw new Error("raw report event handler became active DOM");
+  if (await page.evaluate(() => globalThis.reportExecuted === true || globalThis.eventExecuted === true || globalThis.linkExecuted === true)) throw new Error("report script, event handler, or dangerous link executed");
+  const unsafeLink = page.getByText("unsafe link (blocked link)", { exact: true });
+  if (!await unsafeLink.count() || await unsafeLink.evaluate(element => element.hasAttribute("href"))) throw new Error("dangerous link became navigable");
+  if (await page.locator(".markdown-body img").count() || remoteAssetRequests) throw new Error("report rendering fetched a remote image");
+  if (!await page.locator(".report-source pre").filter({ hasText: "javascript:globalThis" }).count()) throw new Error("plain report source fallback was unavailable");
+  const report = `${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`;
+  fs.appendFileSync(report, "\n## Refreshed section\n\nreport refresh marker\n");
+  await page.getByRole("heading", { name: "Refreshed section" }).waitFor({ state: "visible", timeout: 3000 });
+  delayFirstReport = true;
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_FIRST_REPORT_ID }).click();
+  await firstReportRequestStarted;
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  const staleReportResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID);
+  releaseDelayedReport();
+  await (await staleReportResponse).finished();
+  await page.waitForTimeout(100);
+  if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale report response replaced the current report");
 } catch (error) {
   failed = error;
 } finally {
   releaseDelayed();
+  releaseDelayedReport();
   await page.close();
 }
 if (failed) throw failed;
 process.exit(0);
 NODE
 
-pass 'browser isolates rapid session switches and follows completed partial lines without reloading'
+pass 'browser safely renders and refreshes task Markdown while preserving journal follow and switch isolation'

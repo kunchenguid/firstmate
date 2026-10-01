@@ -7,6 +7,7 @@ const state = {
   identity: "",
   eof: false,
   partialBytes: 0,
+  reportContent: null,
   loading: false,
   selectionGeneration: 0,
   requestGeneration: 0,
@@ -24,11 +25,15 @@ const elements = {
   eventSearch: document.getElementById("event-search"),
   roleFilter: document.getElementById("role-filter"),
   typeFilter: document.getElementById("type-filter"),
+  journalFilters: document.getElementById("journal-filters"),
+  journalActions: document.getElementById("journal-actions"),
   fromStart: document.getElementById("from-start"),
   loadMore: document.getElementById("load-more"),
   follow: document.getElementById("follow"),
   notice: document.getElementById("notice"),
   events: document.getElementById("events"),
+  report: document.getElementById("report"),
+  reportRendered: document.getElementById("report-rendered"),
 };
 
 function setStatus(message, error = false) {
@@ -61,6 +66,158 @@ function appendText(container, text, className = "block") {
   paragraph.className = className;
   paragraph.textContent = typeof text === "string" ? text : JSON.stringify(text, null, 2);
   container.append(paragraph);
+}
+
+function safeLinkTarget(target) {
+  try {
+    const parsed = new URL(target);
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function appendInline(container, source) {
+  const pattern = /(!?)\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)|`([^`]+)`/g;
+  let offset = 0;
+  for (const match of source.matchAll(pattern)) {
+    container.append(document.createTextNode(source.slice(offset, match.index)));
+    if (match[4] !== undefined) {
+      const code = document.createElement("code");
+      code.textContent = match[4];
+      container.append(code);
+    } else if (match[1] === "!") {
+      const omitted = document.createElement("span");
+      omitted.className = "omitted-image";
+      omitted.textContent = `[Image omitted: ${match[2] || "no alt text"}]`;
+      container.append(omitted);
+    } else {
+      const target = safeLinkTarget(match[3]);
+      if (target) {
+        const link = document.createElement("a");
+        link.href = target;
+        link.rel = "noreferrer noopener";
+        link.target = "_blank";
+        link.textContent = match[2] || match[3];
+        container.append(link);
+      } else {
+        const blocked = document.createElement("span");
+        blocked.className = "blocked-link";
+        blocked.textContent = `${match[2] || match[3]} (blocked link)`;
+        container.append(blocked);
+      }
+    }
+    offset = match.index + match[0].length;
+  }
+  container.append(document.createTextNode(source.slice(offset)));
+}
+
+function tableCells(line) {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map(cell => cell.trim());
+}
+
+function isTableSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function startsMarkdownBlock(lines, index) {
+  const line = lines[index] ?? "";
+  return /^\s*$/.test(line)
+    || /^ {0,3}```/.test(line)
+    || /^ {0,3}#{1,6}\s+/.test(line)
+    || /^ {0,3}>/.test(line)
+    || /^\s*(?:[-+*]|\d+[.)])\s+/.test(line)
+    || (line.includes("|") && isTableSeparator(lines[index + 1] ?? ""));
+}
+
+function renderMarkdown(container, source) {
+  container.replaceChildren();
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) { index += 1; continue; }
+    const fence = line.match(/^ {0,3}```\s*([^\s`]*)\s*$/);
+    if (fence) {
+      const parts = [];
+      index += 1;
+      while (index < lines.length && !/^ {0,3}```\s*$/.test(lines[index])) parts.push(lines[index++]);
+      if (index < lines.length) index += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (fence[1]) code.dataset.language = fence[1];
+      code.textContent = parts.join("\n");
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const element = document.createElement(`h${heading[1].length}`);
+      appendInline(element, heading[2]);
+      container.append(element);
+      index += 1;
+      continue;
+    }
+    if (/^ {0,3}>/.test(line)) {
+      const quote = document.createElement("blockquote");
+      const parts = [];
+      while (index < lines.length && /^ {0,3}>/.test(lines[index])) parts.push(lines[index++].replace(/^ {0,3}> ?/, ""));
+      const paragraph = document.createElement("p");
+      appendInline(paragraph, parts.join("\n"));
+      quote.append(paragraph);
+      container.append(quote);
+      continue;
+    }
+    const listMatch = line.match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = /^\d/.test(listMatch[1]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*([-+*]|\d+[.)])\s+(.+)$/);
+        if (!item || /^\d/.test(item[1]) !== ordered) break;
+        const entry = document.createElement("li");
+        appendInline(entry, item[2]);
+        list.append(entry);
+        index += 1;
+      }
+      container.append(list);
+      continue;
+    }
+    if (line.includes("|") && isTableSeparator(lines[index + 1] ?? "")) {
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const cell of tableCells(line)) {
+        const header = document.createElement("th");
+        appendInline(header, cell);
+        headRow.append(header);
+      }
+      head.append(headRow);
+      table.append(head);
+      index += 2;
+      const body = document.createElement("tbody");
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        const row = document.createElement("tr");
+        for (const cell of tableCells(lines[index++])) {
+          const data = document.createElement("td");
+          appendInline(data, cell);
+          row.append(data);
+        }
+        body.append(row);
+      }
+      table.append(body);
+      container.append(table);
+      continue;
+    }
+    const paragraphLines = [line.trim()];
+    index += 1;
+    while (index < lines.length && !startsMarkdownBlock(lines, index)) paragraphLines.push(lines[index++].trim());
+    const paragraph = document.createElement("p");
+    appendInline(paragraph, paragraphLines.join(" "));
+    container.append(paragraph);
+  }
 }
 
 function renderContent(container, content) {
@@ -174,7 +331,7 @@ function requestIsCurrent(selectionGeneration, requestGeneration, source, id) {
 }
 
 async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
-  if (!state.selected || (state.loading && !resetDisplay)) return;
+  if (!state.selected || state.selected.source === "report" || (state.loading && !resetDisplay)) return;
   const { source, id } = state.selected;
   const selectionGeneration = state.selectionGeneration;
   const requestGeneration = ++state.requestGeneration;
@@ -214,6 +371,37 @@ async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
   }
 }
 
+async function loadReport({ resetDisplay = false } = {}) {
+  if (!state.selected || state.selected.source !== "report" || (state.loading && !resetDisplay)) return;
+  const { source, id } = state.selected;
+  const selectionGeneration = state.selectionGeneration;
+  const requestGeneration = ++state.requestGeneration;
+  state.loading = true;
+  try {
+    const body = await api(`/api/report?${new URLSearchParams({ id })}`);
+    if (!requestIsCurrent(selectionGeneration, requestGeneration, source, id)) return;
+    if (resetDisplay || body.content !== state.reportContent) {
+      renderMarkdown(elements.reportRendered, body.content);
+      elements.report.querySelector(".report-source pre").textContent = body.content;
+      state.reportContent = body.content;
+    }
+    setStatus(`${body.size.toLocaleString()} bytes · updated ${new Date(body.modifiedAt).toLocaleString()}`);
+  } catch (error) {
+    if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) setStatus(error.message, true);
+  } finally {
+    if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) state.loading = false;
+  }
+}
+
+function selectDisplay(reportSelected) {
+  elements.events.hidden = reportSelected;
+  elements.report.hidden = !reportSelected;
+  elements.journalFilters.hidden = reportSelected;
+  elements.journalActions.hidden = reportSelected;
+  elements.fromStart.disabled = reportSelected;
+  elements.loadMore.disabled = reportSelected;
+}
+
 function renderSessions() {
   const source = elements.source.value;
   const query = elements.sessionSearch.value.toLowerCase();
@@ -227,7 +415,8 @@ function renderSessions() {
     const name = document.createElement("span");
     name.textContent = session.label;
     const metadata = document.createElement("small");
-    metadata.textContent = `${session.source === "short" ? "Short agent" : "Supervisor"} · ${new Date(session.modifiedAt).toLocaleString()} · ${session.bytes.toLocaleString()} B`;
+    const sourceLabel = session.source === "short" ? "Short agent" : session.source === "supervisor" ? "Supervisor" : "Task report";
+    metadata.textContent = `${sourceLabel} · ${new Date(session.modifiedAt).toLocaleString()} · ${session.bytes.toLocaleString()} B`;
     button.append(name, metadata);
     button.addEventListener("click", () => selectSession(session));
     elements.sessions.append(button);
@@ -235,7 +424,7 @@ function renderSessions() {
   if (!matches.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "No matching journals.";
+    empty.textContent = "No matching journals or reports.";
     elements.sessions.append(empty);
   }
 }
@@ -243,9 +432,20 @@ function renderSessions() {
 async function selectSession(session) {
   state.selectionGeneration += 1;
   state.selected = session;
+  state.loading = false;
   elements.sessionTitle.textContent = session.label;
   renderSessions();
-  await loadEvents({ resetDisplay: true });
+  const reportSelected = session.source === "report";
+  selectDisplay(reportSelected);
+  if (reportSelected) {
+    state.reportContent = null;
+    elements.reportRendered.replaceChildren();
+    elements.report.querySelector(".report-source pre").textContent = "";
+    showNotice();
+    await loadReport({ resetDisplay: true });
+  } else {
+    await loadEvents({ resetDisplay: true });
+  }
 }
 
 async function connect() {
@@ -253,10 +453,10 @@ async function connect() {
   if (!state.token) return setStatus("Enter an access token.", true);
   try {
     const body = await api("/api/sessions");
-    state.sessions = body.sessions;
+    state.sessions = [...body.sessions, ...body.reports].sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
     renderSessions();
-    setStatus(`${body.sessions.length} journals available.`);
-    if (!state.selected && body.sessions.length) await selectSession(body.sessions[0]);
+    setStatus(`${body.sessions.length} journals and ${body.reports.length} reports available.`);
+    if (!state.selected && state.sessions.length) await selectSession(state.sessions[0]);
   } catch (error) {
     state.sessions = [];
     renderSessions();
@@ -275,5 +475,7 @@ elements.loadMore.addEventListener("click", () => loadEvents());
 elements.fromStart.addEventListener("click", () => loadEvents({ resetDisplay: true, fromStart: true }));
 
 state.timer = window.setInterval(() => {
-  if (state.selected && (state.eof || state.partialBytes > 0) && elements.follow.checked) loadEvents();
+  if (!state.selected || !elements.follow.checked) return;
+  if (state.selected.source === "report") loadReport();
+  else if (state.eof || state.partialBytes > 0) loadEvents();
 }, 1000);
