@@ -34,7 +34,9 @@
 #              otherwise reports `cancel=not-running` having sent one press.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
-#              busy, then submits the harness's exit command. Postcondition:
+#              busy, then submits the harness's exit command. An exact Claude
+#              background-work dialog with Exit and stop tasks selected is
+#              confirmed; detach and unknown dialogs are refused. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
 #              Already-stopped is success (idempotent). An endpoint that reads
 #              `missing` is put through the control plane's per-backend absence
@@ -120,6 +122,13 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#
+# Candidate execution without installation: invoke the candidate root's
+# bin/fm-control.sh with FM_HOME set to the owning home and FM_ROOT_OVERRIDE
+# set to that candidate root. Records and config still belong to FM_HOME;
+# executable owners come from the candidate. Unset unrelated FM_STATE_OVERRIDE,
+# FM_DATA_OVERRIDE and FM_CONFIG_OVERRIDE rather than redirecting task identity.
+# A refusal still requires ordinary recovery; never bypass lifecycle guards.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -571,10 +580,67 @@ retire_busy_incarnation() {
   fi
 }
 
+# Complete only an adapter-owned exact exit confirmation, with fresh endpoint
+# and agent proof immediately before Enter. Never choose the detach option.
+complete_exit_confirmation() {
+  local screen confirmation
+  [ "$HARNESS" = claude ] || return 1
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 1
+  confirmation=$(fm_control_exit_confirmation "$HARNESS" "$screen")
+  case "$confirmation" in
+    none) return 1 ;;
+    refuse) die "task $ID shows an unsupported or ambiguous exit confirmation; refusing lifecycle input" ;;
+    stop)
+      fm_backend_validate_task_endpoint "$META" "$ID" || return 2
+      [ "$(agent_state)" = alive ] || die "task $ID no longer proves a live agent; refusing exit confirmation"
+      # Re-read after the identity checks so a changed selection is refused.
+      screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 2
+      [ "$(fm_control_exit_confirmation "$HARNESS" "$screen")" = stop ] \
+        || die "task $ID exit confirmation changed before delivery; refusing Enter"
+      fm_backend_send_key "$BACKEND" "$T" Enter "$LABEL" || return 2
+      return 0 ;;
+  esac
+}
+
+wait_exit_stopped() {
+  local elapsed=0 state rc confirmed=${1:-0} retries=1 screen content
+  while :; do
+    state=$(agent_state)
+    [ "$state" != dead ] || return 0
+    if [ "$state" = alive ] && [ "$confirmed" = 0 ]; then
+      rc=0
+      complete_exit_confirmation || rc=$?
+      case "$rc" in
+        0) confirmed=1 ;;
+        1)
+          # A slash popup can consume the first Enter. Retry only while the
+          # current composer still proves this exact exit command, never on
+          # an opaque modal or an unrelated pending draft.
+          if [ "$HARNESS" = claude ] && [ "$retries" -lt "$EXIT_RETRIES" ]; then
+            screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || screen=
+            content=$(fm_composer_extract_selected_content 'styled=0
+cursor=0
+identity=0' "$screen" 2>/dev/null) || content=
+            if [ "${content//[$' \t\r\n']/}" = /exit ]; then
+              fm_backend_validate_task_endpoint "$META" "$ID" || return 1
+              [ "$(agent_state)" = alive ] || return 1
+              fm_backend_send_key "$BACKEND" "$T" Enter "$LABEL" || return 1
+              retries=$((retries + 1))
+            fi
+          fi ;;
+        *) return 1 ;;
+      esac
+    fi
+    awk -v e="$elapsed" -v t="$EXIT_WAIT" 'BEGIN{exit !(e < t)}' || return 1
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed dialog
+  local state cmd hazard verdict composer_state cancel absence submit_retries=$EXIT_RETRIES interrupt_result=not-needed dialog
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -618,6 +684,18 @@ do_exit() {
       esac
       ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
+  esac
+  # A previous guarded exit may already have opened the supported modal.
+  local confirmation_rc=0
+  complete_exit_confirmation || confirmation_rc=$?
+  case "$confirmation_rc" in
+    0)
+      wait_exit_stopped 1 || die "task $ID exit confirmation delivered but agent stop remains unconfirmed"
+      retire_busy_incarnation
+      printf 'stopped'
+      return 0 ;;
+    1) ;;
+    *) die "task $ID exit confirmation could not be delivered safely" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
   case "$(busy_verdict)" in
@@ -666,7 +744,9 @@ do_exit() {
   # authoritative proof is the agent-state wait below. The retried Enter still
   # matters, because a slash command opens a completion popup on some TUIs that
   # swallows the first Enter.
-  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
+  # Claude retries belong to the guarded wait: a modal is not a composer.
+  [ "$HARNESS" != claude ] || submit_retries=1
+  verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$submit_retries" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
@@ -679,7 +759,8 @@ do_exit() {
       refuse_blocking_prompt "$dialog"
     fi
   fi
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+  wait_exit_stopped || {
+    state=$(agent_state)
     # A submit can return before any read sees the picker: a native busy
     # verdict needs no composer read, and a cleared composer can be read
     # before the picker renders. Read the screen once more here.

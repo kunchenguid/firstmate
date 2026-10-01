@@ -14,6 +14,9 @@
 # Run explicitly with FM_HERDR_SUBMIT_CONFIRM_LIVE=1 after a Herdr or Claude
 # upgrade, and before trusting a refreshed docs/verification/runtime-backends.md
 # "Herdr submit confirmation" entry.
+# FM_HERDR_EXIT_CONFIRM_ONLY=1 selects a token-free control guard instead:
+# direct Bash background work exercises submitted and already-open exit modals
+# through real fm-control. It never approves trust or changes permission mode.
 # Every Herdr call, including adapter calls, is routed through bin/fm-herdr-lab.sh.
 set -u
 
@@ -26,7 +29,11 @@ LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
+if [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" = 1 ]; then
+  fm_live_gate default-on FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
+else
+  fm_live_gate opt-in FM_HERDR_SUBMIT_CONFIRM_LIVE herdr jq claude
+fi
 
 [ -x "$LAB_HELPER" ] || fail "FM_HERDR_SUBMIT_CONFIRM_LIVE=1 but the Herdr lab helper is not executable at $LAB_HELPER"
 
@@ -69,6 +76,9 @@ EOF
 chmod +x "$FAKEBIN/herdr"
 
 "$LAB_HELPER" provision "$SESSION" || fail "could not provision the isolated Herdr lab"
+if [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" = 1 ]; then
+  "$LAB_HELPER" viewer start "$SESSION" || fail "could not attach owned lab viewer for styled composer proof"
+fi
 export PATH="$FAKEBIN:$ORIGINAL_PATH"
 
 # shellcheck source=/dev/null
@@ -83,7 +93,11 @@ TARGET="$SESSION:$PANE"
 VERSION=$(PATH="$ORIGINAL_PATH" claude --version 2>/dev/null | head -1 || printf 'version-unknown')
 HERDR_VER=$(PATH="$ORIGINAL_PATH" herdr --version 2>/dev/null | head -1 || printf 'herdr-unknown')
 
-lab pane run "$PANE" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" >/dev/null \
+CLAUDE_LAUNCH="claude --settings '{\"feedbackDrafts\":\"off\"}'"
+if [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" != 1 ]; then
+  CLAUDE_LAUNCH="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'"
+fi
+lab pane run "$PANE" "$CLAUDE_LAUNCH" >/dev/null \
   || fail "could not launch Claude Code ($VERSION) in the isolated Herdr pane"
 
 idle=0
@@ -92,7 +106,7 @@ i=0
 while [ "$i" -lt 60 ]; do
   screen=$(lab pane read "$PANE" --source visible 2>/dev/null || true)
   case "$screen" in
-    *'bypass permissions on'*)
+    *'bypass permissions on'*|*'shift+tab to cycle'*)
       # The composer footer means Claude is past any folder-trust prompt. Herdr
       # can report the agent idle while that prompt is still up, so the wait
       # keys off the rendered composer rather than the native status alone.
@@ -105,6 +119,8 @@ while [ "$i" -lt 60 ]; do
       # keep waiting for a real idle composer; the accepted dialog stays in the
       # viewport. The prompt preselects "No, exit", so move to "Yes" before
       # confirming; a bare Enter quits Claude.
+      [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" != 1 ] \
+        || fail "Claude Code ($VERSION): workspace trust is not granted; token-free guard refuses to approve it"
       if [ "$trusted" = 0 ]; then
         trusted=1
         lab pane send-keys "$PANE" down enter >/dev/null \
@@ -116,6 +132,76 @@ while [ "$i" -lt 60 ]; do
   sleep 1
 done
 [ "$idle" = 1 ] || fail "Claude Code ($VERSION) on $HERDR_VER never rendered an idle composer in the lab pane"
+
+# Token-free lifecycle mode uses Claude's direct Bash composer, never a model
+# prompt, and never changes approval or trust settings. It exercises both a
+# newly submitted /exit and a modal left open by a prior attempt.
+if [ "${FM_HERDR_EXIT_CONFIRM_ONLY:-0}" = 1 ]; then
+  LAB_HOME="$TMP_ROOT/control-home"
+  mkdir -p "$LAB_HOME/state" "$LAB_HOME/data/labexit"
+  {
+    printf 'window=%s\nendpoint_task_id=labexit\nworktree=%s\nproject=%s\n' "$TARGET" "$ROOT" "$ROOT"
+    printf 'harness=claude\nkind=ship\nmode=local-only\nyolo=off\nbackend=herdr\n'
+    printf 'herdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+      "$SESSION" "$(printf '%s' "$WS_JSON" | jq -r '.result.workspace.workspace_id')" \
+      "$(printf '%s' "$WS_JSON" | jq -r '.result.tab.tab_id')" "$PANE"
+  } > "$LAB_HOME/state/labexit.meta"
+  for scenario in submitted existing; do
+    if [ "$scenario" = existing ]; then
+      lab pane run "$PANE" "$CLAUDE_LAUNCH" >/dev/null || fail "could not restart Claude in same lab pane"
+    fi
+    # The fresh lab has no user draft. Startup placeholder styling can be
+    # absent on Herdr, so don't use a delivery guard to block the fixture's
+    # direct Bash setup. The production exit still proves an empty composer.
+    if [ "$scenario" = existing ]; then
+      ready=0
+      for ((i=0; i<60; i++)); do
+        screen=$(lab pane read "$PANE" --source visible)
+        case "$screen" in *'shift+tab to cycle'*) ready=1; break ;; esac
+        sleep 0.5
+      done
+      [ "$ready" = 1 ] || fail "Claude Code ($VERSION): restarted lab did not render its composer"
+    fi
+    lab pane run "$PANE" '!sleep 90' >/dev/null || fail "could not start direct Bash work"
+    running=0
+    for ((i=0; i<30; i++)); do
+      screen=$(lab pane read "$PANE" --source visible)
+      case "$screen" in *'ctrl+b to run in background'*) running=1; break ;; esac
+      sleep 0.2
+    done
+    [ "$running" = 1 ] || fail "Claude Code ($VERSION): direct Bash task never rendered"
+    lab pane send-keys "$PANE" ctrl+b >/dev/null || fail "could not background direct Bash task"
+    ready=0
+    for ((i=0; i<30; i++)); do
+      if [ "$(fm_backend_herdr_composer_state "$TARGET")" = empty ]; then ready=1; break; fi
+      sleep 0.2
+    done
+    [ "$ready" = 1 ] || fail "Claude Code ($VERSION): background work did not leave an empty composer"
+    if [ "$scenario" = existing ]; then
+      # Unlike pane run's immediate Enter, use the existing payload proof
+      # and settle budget so the slash popup can finish rendering first.
+      verdict=$(fm_backend_herdr_send_text_submit "$TARGET" /exit 1 0.5 1.2)
+      [ "$verdict" != send-failed ] || fail "could not prove and submit prior exit command"
+      supported=0
+      # shellcheck source=bin/fm-control-lib.sh
+      . "$ROOT/bin/fm-control-lib.sh"
+      for ((i=0; i<30; i++)); do
+        screen=$(lab pane read "$PANE" --source visible)
+        if [ "$(fm_control_exit_confirmation claude "$screen")" = stop ]; then supported=1; break; fi
+        sleep 0.2
+      done
+      [ "$supported" = 1 ] || fail "Claude Code ($VERSION): expected exact stop dialog never rendered; viewport: $screen"
+    fi
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LAB_HOME" FM_CONTROL_EXIT_WAIT=10 "$ROOT/bin/fm-control.sh" labexit exit 2>&1) \
+      || fail "Claude Code ($VERSION) on $HERDR_VER: $scenario control exit failed: $out"
+    [ "$(fm_backend_herdr_agent_state "$TARGET")" = dead ] \
+      || fail "Claude Code ($VERSION): $scenario exit did not prove agent gone"
+    [ "$(fm_backend_herdr_current_path "$TARGET")" = "$ROOT" ] \
+      || fail "$scenario exit changed the worktree"
+    pass "live Claude exit confirmation: $scenario /exit stops tasks and proves agent gone on the same endpoint and worktree ($VERSION; $HERDR_VER)"
+  done
+  exit 0
+fi
 
 TOKEN="FMHERDRPONG$$_$RANDOM"
 verdict=$(fm_backend_herdr_send_text_submit "$TARGET" "Reply with exactly $TOKEN and nothing else." 3 0.4 0.4) \
