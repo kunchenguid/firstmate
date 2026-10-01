@@ -1152,7 +1152,59 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# Fake completed validation must not manufacture terminal_in_flight for a
+# preserved product-output wait. Actual accepted readiness remains contradictory.
+test_validation_output_acceptance_snapshot() {
+  local home fakebin out head
+  home=$(make_home validation-output-acceptance)
+  fm_git_init_commit "$home/projects/output"
+  git -C "$home/projects/output" checkout -q -b fm/output
+  head=$(git -C "$home/projects/output" rev-parse HEAD)
+  git -C "$home/projects/output" update-ref refs/remotes/origin/fm/output "$head"
+  fm_write_meta "$home/state/output.meta" "window=firstmate:fm-output" \
+    "worktree=$home/projects/output" "project=$home/projects/output" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf '## In flight\n- [ ] output - Preserved product task (repo: alpha) (kind: ship) (since 2026-07-11)\n\n## Queued\n\n## Done\n' > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+# Fake pipeline fixture; no real daemon is consulted.
+case "${1:-}" in
+  axi) cat "$FM_HOME/fake-run.txt" ;;
+  daemon) printf 'fake daemon up\n' ;;
+esac
+SH
+  cat > "$home/fake-run.txt" <<EOF
+run:
+  id: "01FAKE"
+  branch: fm/output
+  status: completed
+  head: "$head"
+  pr: ""
+outcome: passed
+EOF
+  printf 'paused [at=1790876000]: product output acceptance pending\n' > "$home/state/output.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CREW_STATE_NO_FORGE=1 "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '.valid == true and .invalidity == {kind:null,ids:[]}' >/dev/null \
+    || fail "completed validation of unfinished output made snapshot contradictory: $out"
+  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$home/state/output.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CREW_STATE_NO_FORGE=1 "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '.valid == false and .invalidity == {kind:"terminal_in_flight",ids:["output"]}' >/dev/null \
+    || fail "genuinely accepted readiness must still contradict an in-flight row: $out"
+  cat >> "$home/fake-run.txt" <<'EOF'
+branch_sync:
+  state: pipeline_owned
+  next_action:
+    code: recover_custody
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_CREW_STATE_NO_FORGE=1 "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '.valid == true and .invalidity == {kind:null,ids:[]}' >/dev/null \
+    || fail "unrecovered custody was incorrectly accepted as terminal: $out"
+  pass 'snapshot distinguishes validation-ready output waits, accepted readiness and unrecovered custody'
+}
+
 test_empty_fleet_json
+test_validation_output_acceptance_snapshot
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging

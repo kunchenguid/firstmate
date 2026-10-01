@@ -96,7 +96,7 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed/passed-with-override/passed-with-skips -> done,
+#      passed/checks-passed/passed-with-override/passed-with-skips -> validation ready,
 #      failed -> failed, cancelled -> unknown (no verdict unless the green
 #      delivery safeguard below applies). A cancelled outcome takes precedence
 #      over an interrupted step's failed status or outstanding gate findings;
@@ -105,19 +105,23 @@
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
 #      vocabulary), read identically to a clean passed. passed-with-skips is
 #      also a passing outcome (publication or CI verification was
-#      automatically skipped, no-mistakes' own vocabulary), read as done but
-#      with that skip kept visible in the detail, unlike a clean passed.
+#      automatically skipped, no-mistakes' own vocabulary), with that skip
+#      kept visible in the detail, unlike a clean passed. Validation readiness
+#      becomes task done only through the mode's final ready declaration and
+#      bin/fm-dod-lib.sh's named-head/custody acceptance. Without that declaration
+#      it reads paused, preserving an output pause, blocker or open decision.
 #      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a check of the full ci-step log overrides working -> done once checks read
+#      a check of the full ci-step log overrides working -> validation ready once checks read
 #      green, so a green PR is never silently read as still-validating. And a
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
 #      rebase is allowed) and the ci log's last marker reads checks green,
-#      also reads done only when the bounded forge read confirms the PR is
-#      open (held-for-merge) or merged. Closed, missing, unreadable, or skipped
-#      forge evidence leaves the original failed or unknown classification.
+#      also reads validation ready only when the bounded forge read confirms
+#      the PR is open (held-for-merge) or merged; final acceptance still applies.
+#      Closed, missing, unreadable, or skipped forge evidence leaves the original
+#      failed or unknown classification.
 #      A monitor whose only remaining job is to observe a merge decision must not
 #      convert the absence of that decision into a failure verdict
 #      (nm_reclassify_failed_run_as_held_green). In the
@@ -130,7 +134,10 @@
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
 #      decisions. If it says needs-decision/blocked but
 #      the run-step shows the run moved on, the log is deterministically stale and
-#      is flagged superseded. A genuinely parked run plus a needs-decision log
+#      is flagged superseded while validation is active. A completed validation
+#      cannot supersede an unfinished output wait; a final ready declaration
+#      supersedes resolved validation waits through status_current_line.
+#      A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
@@ -244,7 +251,7 @@ fi
 # not treated as finished-and-safe.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
-  if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
+  if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META" "${ACCEPT_RUN_OUT:-}"); then
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"
@@ -1043,6 +1050,8 @@ fi
 # --- run-step authoritative path -------------------------------------------
 
 if [ "$HAVE_RUN" = 1 ]; then
+  ACCEPT_RUN_OUT=""
+  [ "$RUN_SOURCE" != full ] || ACCEPT_RUN_OUT=$RUN_OUT
   RUN_STATE=working
   RUN_DETAIL=""
   CI_STEP_STATUS=""
@@ -1173,9 +1182,35 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
-  # has moved past (anything but a genuinely parked run) is deterministically
-  # stale: the gate resolved and the run resumed or finished.
+  LOG_LATEST=$(last_status_line "$LOG")
+  if [ "$LOG_VERB" = blocked ] \
+    && [ "$(status_line_verb "$LOG_LATEST")" = blocked ] \
+    && log_reports_daemon_socket_down "$LOG_LATEST"; then
+    emit blocked status-log "$(status_line_note "$LOG_LATEST")${SEP}daemon socket down despite attributed run record"
+  fi
+
+  # Validation-ready is not task acceptance. Use the existing mode's final
+  # declaration predicate (excluding no-mistakes' implementation handoff) and
+  # its head-bound delivery gate, including captured custody evidence. Preserve
+  # the validation outcome/detail regardless of the task-level verdict.
+  if [ "$RUN_STATE" = "done" ] && [ "$KIND" = ship ]; then
+    if fm_dod_should_gate_ship_done "$KIND" "$(meta_value mode)" "$LOG_LINE"; then
+      if ! ACCEPT_REASON=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META" "$ACCEPT_RUN_OUT"); then
+        emit blocked status-log "$ACCEPT_REASON${SEP}$RUN_DETAIL${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
+      fi
+    else
+      ACCEPT_STATE=$(map_log_state "$LOG_LINE")
+      case "$ACCEPT_STATE" in
+        paused|blocked|parked)
+          emit "$ACCEPT_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}$RUN_DETAIL${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}" ;;
+      esac
+      emit paused run-step "$RUN_DETAIL${SEP}final output acceptance pending${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
+    fi
+  fi
+
+  # Reconcile an active run's status log. A needs-decision/blocked log line
+  # the active run has moved past is stale: the gate resolved and validation
+  # resumed. Validation-ready output waits were handled above, not superseded.
   #
   # A refused or missing daemon socket is positive daemon-down evidence and
   # outranks any attributed run record, including a terminal one left behind
@@ -1190,12 +1225,6 @@ if [ "$HAVE_RUN" = 1 ]; then
   # without touching the shared daemon.
   case "$LOG_VERB" in
     needs-decision|blocked)
-      LOG_LATEST=$(last_status_line "$LOG")
-      if [ "$LOG_VERB" = blocked ] \
-        && [ "$(status_line_verb "$LOG_LATEST")" = blocked ] \
-        && log_reports_daemon_socket_down "$LOG_LATEST"; then
-        emit blocked status-log "$(status_line_note "$LOG_LATEST")${SEP}daemon socket down despite attributed run record"
-      fi
       # An UNVERIFIED record cannot close an open decision. The crew observed
       # its gate or its blocker first hand; a record the dead instrument left
       # behind is the weaker witness, so the log answers and the unverified
