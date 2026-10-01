@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {spawnSync,spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 
-export async function archivedCleanupCases({root,tmp,live,setup,snap,write,cmd,processIdentity}) {
+export async function archivedCleanupCases({root,tmp,live,setup,snap,write,cmd,git,processIdentity}) {
   const generation='s1789472265.3949747.1720';
   const names=['request.json','result.json','operation-0.intent.json','operation-0.effect.json','operation-0.output.json'];
   const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -15,6 +15,11 @@ export async function archivedCleanupCases({root,tmp,live,setup,snap,write,cmd,p
   const archived=spawnSync('bash',[root+'/bin/fm-task-state.sh','assess','task','--basis',inspection.basis,'--judgment',JSON.stringify({disposition:'archived',outcome:'The fixture is explicitly archived, not successfully completed',remaining_gap:'Physical cleanup bookkeeping remains unverified',authority_ref:'data/task/archive-authority.md',evidence:['data/task/archive-authority.md']})],{env:f.env,encoding:'utf8'});
   assert.equal(archived.status,0,archived.stderr);
   const copyBinding=f.life('cleanup-copy-inspect');
+  const projectHead=git('-C',f.project,'rev-parse','HEAD');
+  write(f.copy+'/committed.txt','preserve unmerged content\n');git('-C',f.copy,'add','committed.txt');git('-C',f.copy,'commit','-m','unmerged');
+  write(f.copy+'/uncommitted.txt','preserve dirty content\n');
+  assert.notEqual(git('-C',f.copy,'rev-parse','HEAD'),projectHead,'fixture must contain an unmerged commit');
+  assert.match(git('-C',f.copy,'status','--porcelain'),/uncommitted\.txt/,'fixture must contain uncommitted work');
   cmd('tasks-axi',['done','task','--report','data/task/report.md','--file',f.home+'/data/backlog.md'],f.env);
   cmd('tasks-axi',['prune','--keep','0','--file',f.home+'/data/backlog.md'],f.env,f.home);
   assert.match(fs.readFileSync(f.home+'/data/done-archive.md','utf8'),/task/);
@@ -39,6 +44,12 @@ export async function archivedCleanupCases({root,tmp,live,setup,snap,write,cmd,p
     const bytes=fs.readFileSync(file);write(file,{...JSON.parse(bytes),[key]:value});refuse(pattern);fs.writeFileSync(file,bytes);
   }
   refuse(/belongs to MAIN/,{...f.env,FM_SUPERVISION_ACTOR:'branch'});
+  const archiveFile=f.home+'/data/done-archive.md',archiveBytes=fs.readFileSync(archiveFile),judgmentBytes=fs.readFileSync(f.qfile);
+  fs.writeFileSync(archiveFile,archiveBytes.toString('utf8').replace('data/task/report.md','data/other/report.md'));
+  assert.notDeepEqual(fs.readFileSync(archiveFile),archiveBytes,'fixture must remove the exact archived report reference');
+  write(f.qfile,{...f.q,evidence:f.q.evidence.map(item=>item.ref==='data/done-archive.md'?{...item,sha256:hash(archiveFile)}:item)});
+  refuse(/configured history/);
+  fs.writeFileSync(archiveFile,archiveBytes);fs.writeFileSync(f.qfile,judgmentBytes);
   for(const file of [f.home+'/data/task/brief.md',f.home+'/data/task/report.md',f.home+'/data/done-archive.md',f.home+'/data/task/archive-authority.md',f.home+'/data/task/current-bookkeeping-authority.md',...names.map(name=>f.dir+'/'+name)]) {
     const bytes=fs.readFileSync(file);fs.appendFileSync(file,'changed\n');refuse(/changed|JSON|configured history/);fs.writeFileSync(file,bytes);
   }

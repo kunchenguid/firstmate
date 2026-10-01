@@ -520,12 +520,12 @@ function archivedCopyBinding(v) {
   if(binding.copy.path!==v.binding.worktree||binding.project.path!==v.binding.project) fail('archived cleanup operation directory identity changed');
   return binding;
 }
-function archivedDisposition(home,task) {
+function archivedDisposition(home,task,artifact) {
   const root=path.dirname(path.dirname(fileURLToPath(import.meta.url))),data=path.join(home,'data');
   let value;
   try {
-    value=execFileSync('bash',['-c','. "$1"; snapshot=$(fm_task_disposition_snapshot "$2") || exit 1; fm_task_disposition_for "$snapshot" "$3"',
-      'archived-cleanup',path.join(root,'bin/fm-task-disposition-lib.sh'),data,task],
+    value=execFileSync('bash',['-c','. "$1"; snapshot=$(fm_task_disposition_snapshot "$2" "$4") || exit 1; fm_task_disposition_for "$snapshot" "$3"',
+      'archived-cleanup',path.join(root,'bin/fm-task-disposition-lib.sh'),data,task,artifact],
     {encoding:'utf8',cwd:home,env:cleanupOwnerEnvironment(home),stdio:['ignore','pipe','pipe']}).trim();
   } catch {fail('archived cleanup configured history authority is unavailable');}
   if(value!=='archive_done') fail('archived cleanup configured history authority changed');
@@ -569,7 +569,7 @@ function archivedCleanupContext(home,id,index,file) {
   }
   if(hashBytes(regularBytes(path.join(home,'data',task,'brief.md')))!==q.brief_sha256) fail('archived cleanup brief changed');
   for(const suffix of ['.meta','.cleanup.json','.backlog-close']) if(pathEntryExists(path.join(home,'state',task+suffix))) fail('archived cleanup requires absent task, cleanup and pending-close records');
-  archivedDisposition(home,task);
+  archivedDisposition(home,task,`data/${task}/report.md`);
   const copyBinding=archivedCopyBinding(v);
   if(!equal(copyBinding,q.copy_binding)) fail('archived cleanup directory/Git ownership changed');
   archivedEndpointAbsent(v);
