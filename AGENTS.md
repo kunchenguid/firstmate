@@ -48,6 +48,8 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, and 
 Ship shared tracked changes through this repo's normal branch, CI, and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 
+When the shell you run commands in is zsh (common on macOS, not the default on most Linux installs), a bare `$var:path` (for example `git show "$REF:apps/..."`) is a parameter-expansion modifier, not the literal colon you wrote, and can silently rewrite the path instead of erroring; brace the variable as `"${VAR}:path"` instead, which is correct in every shell, in a command you type or write into a brief.
+
 ## 2. Layout and state
 
 `docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.

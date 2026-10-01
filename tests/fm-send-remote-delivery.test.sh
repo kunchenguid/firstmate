@@ -403,6 +403,88 @@ test_remote_fire_and_forget_never_arms_reply_recovery() {
   pass "fm-send remote: fire-and-forget delivery is idempotent without reply recovery"
 }
 
+test_remote_fire_and_forget_generated_id_reuses_printed_id_on_retry() {
+  local dir fb ssh_log home rhome rc count out delivery
+  dir="$TMP_ROOT/remote-fire-and-forget-generated"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-fire-and-forget-generated)
+  home=$(setup_remote_parent_home remote-fire-and-forget-generated "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_SSH_AFTER_AMBIGUOUS_RC=1 \
+    "$SEND" rsm --fire-and-forget-auto "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 3 "$rc" "an ambiguous generated-id fire-and-forget delivery must report unconfirmed"
+  out=$(cat "$dir/out")
+  delivery=$(printf '%s' "$out" | grep -oE '[a-f0-9]{16}' | head -1)
+  [ -n "$delivery" ] || fail "no generated delivery id was printed for the remote leg: $out"
+  assert_contains "$(cat "$dir/err")" "delivery-id=$delivery" \
+    "the unconfirmed-delivery error should name the generated id to retry with"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "the ambiguous generated-id delivery did not land exactly once"
+  grep -F "delivery=$delivery" "$(remote_inbox_records "$rhome" | head -1)" >/dev/null \
+    || fail "the remote record did not carry the printed generated delivery id"
+
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm --fire-and-forget "$delivery" "reconcile your own books" \
+    >"$dir/retry.out" 2>"$dir/retry.err" \
+    || fail "reusing the printed generated id on retry failed: $(cat "$dir/retry.err")"
+  count=$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "reusing the printed generated id as an explicit retry id created a duplicate remote record"
+  pass "fm-send remote: a generated fire-and-forget id is printed once and its reuse on retry is idempotent"
+}
+
+test_remote_fire_and_forget_generated_id_not_printed_on_invalid_budget() {
+  local dir fb ssh_log home rhome rc out
+  # A late but still input-only refusal (a malformed FM_SEND_REMOTE_BUDGET)
+  # must be caught before id generation: nothing was sent, so nothing should
+  # be printed to retry with (independent re-review of PR 26).
+  dir="$TMP_ROOT/remote-fire-and-forget-bad-budget"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-fire-and-forget-bad-budget)
+  home=$(setup_remote_parent_home remote-fire-and-forget-bad-budget "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_SEND_REMOTE_BUDGET=invalid \
+    "$SEND" rsm --fire-and-forget-auto "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "an invalid FM_SEND_REMOTE_BUDGET must refuse"
+  out=$(cat "$dir/out")
+  [ -z "$out" ] || fail "a send refused for an invalid remote budget must not print a generated delivery id: $out"
+  assert_contains "$(cat "$dir/err")" "FM_SEND_REMOTE_BUDGET must be a positive integer" \
+    "the refusal should name the invalid budget"
+  [ "$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+    || fail "a refused send for an invalid remote budget still landed a remote record"
+  pass "fm-send remote: an invalid remote budget refuses before id generation, printing nothing"
+}
+
+test_remote_fire_and_forget_generated_id_not_printed_on_expected_host_mismatch() {
+  local dir fb ssh_log home rhome rc out
+  # The final route-revalidation refusal (a stale FM_SEND_EXPECTED_REMOTE_HOST)
+  # is deterministic, not a race, but it still runs after the id would have
+  # been generated. It must still print nothing: the id is generated early
+  # (to embed in the message) but only printed immediately before the actual
+  # transport, which this refusal precedes.
+  dir="$TMP_ROOT/remote-fire-and-forget-host-mismatch"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-fire-and-forget-host-mismatch)
+  home=$(setup_remote_parent_home remote-fire-and-forget-host-mismatch "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    FM_SEND_EXPECTED_SPAWN_GEN="" FM_SEND_EXPECTED_REMOTE_HOST=retired-mac \
+    "$SEND" rsm --fire-and-forget-auto "reconcile your own books" \
+    >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a mismatched expected remote host must still refuse with a generated id requested"
+  out=$(cat "$dir/out")
+  [ -z "$out" ] || fail "a send refused for a mismatched expected remote host must not print a generated delivery id: $out"
+  assert_contains "$(cat "$dir/err")" "retired or changed route" \
+    "the refusal should report the route replacement"
+  [ "$(find "$rhome/state/parent-route/rsm.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 0 ] \
+    || fail "a refused send for a mismatched expected remote host still landed a remote record"
+  pass "fm-send remote: a final-route refusal (expected-host mismatch) prints no generated id"
+}
+
 test_remote_send_revalidates_after_retirement_lock() {
   local dir rhome meta lock ready release rc sender_pid holder_pid
   dir="$TMP_ROOT/remote-retire-race"; mkdir -p "$dir"
@@ -789,6 +871,9 @@ test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
 test_remote_fire_and_forget_never_arms_reply_recovery
+test_remote_fire_and_forget_generated_id_reuses_printed_id_on_retry
+test_remote_fire_and_forget_generated_id_not_printed_on_invalid_budget
+test_remote_fire_and_forget_generated_id_not_printed_on_expected_host_mismatch
 test_remote_send_revalidates_after_retirement_lock
 test_remote_send_revalidates_parent_route_after_retirement_lock
 test_remote_expected_host_revalidates_final_route

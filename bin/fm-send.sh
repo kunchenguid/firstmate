@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id> | --fire-and-forget=<delivery-id> | --fire-and-forget-auto] <text...>
+#   The explicit forms ("--fire-and-forget <id>" or "--fire-and-forget=<id>")
+#   always require and validate a nonempty 16-lowercase-hex id, exactly as
+#   before: the next token is never guessed at, so a mistyped id can never be
+#   folded into the delivered message. --fire-and-forget-auto instead
+#   generates one and prints it to stdout once every other pre-send check has
+#   passed (so a refused send never prints an id for nothing); reuse that
+#   printed id for an idempotent retry, the same as a caller-supplied one.
+#   This deliberately differs from issue #22's literal example
+#   (--fire-and-forget with no extra token at all): that shape is
+#   inherently ambiguous with the explicit-id form once the message can
+#   itself be a bare 16-character word, so a distinct flag was chosen over a
+#   shape-based guess. See the issue thread for the concrete corruption
+#   scenario this closes.
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -36,8 +49,9 @@
 # idempotent only through the printed FM_PENDING_REPLY_EXISTING_CORR=<corr>
 # command: it preserves the same correlation, body, and record, while a plain
 # re-run mints a new correlation and delivers a separate record. An explicit
-# fire-and-forget request instead retries with its same caller-supplied delivery
-# id. A still-unconfirmed reply-bearing request keeps its reply expectation
+# fire-and-forget request instead retries with its same delivery id, explicit
+# or printed by an earlier generated-id call. A still-unconfirmed reply-bearing
+# request keeps its reply expectation
 # preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
@@ -121,9 +135,10 @@
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
 # unmarked captain input never creates one. A marked secondmate instruction
-# sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
-# without creating a reply expectation; its delivery id makes uncertain retries
-# idempotent while allowing a later identical instruction to be distinct.
+# sent with --fire-and-forget (an explicit id, or a generated one printed by
+# --fire-and-forget-auto) uses the same inbox transport without creating a
+# reply expectation; its delivery id makes uncertain retries idempotent while
+# allowing a later identical instruction to be distinct.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) that writes the message as a
@@ -452,6 +467,14 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
+# Set instead of FIRE_AND_FORGET_ID by --fire-and-forget-auto. The id is
+# generated after every input-validated structural refusal (wrong target
+# kind, --resolve-key/--key combined, empty message, malformed remote
+# budget), but printing is deferred further still, past the plane-specific
+# metadata-lock and route revalidation, to immediately before the transport
+# or inbox write - see fm_send_fire_and_forget_print - so a printed id is
+# never handed to a caller whose send was actually refused.
+FIRE_AND_FORGET_REQUESTED=0
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -483,20 +506,37 @@ while :; do
     shift
     ;;
   --fire-and-forget)
-    [ $# -ge 2 ] || {
-      echo "error: --fire-and-forget requires a delivery id" >&2
+    # Strict and positional: the next token is ALWAYS the id, never message
+    # text, so a mistyped id can never be folded into the delivered
+    # instruction; validated against the required shape below. Use
+    # --fire-and-forget-auto to generate one instead - a distinct, named
+    # flag, never a guess based on what the next token looks like.
+    [ -z "$FIRE_AND_FORGET_ID" ] && [ "$FIRE_AND_FORGET_REQUESTED" = 0 ] || {
+      echo "error: duplicate --fire-and-forget" >&2
       exit 1
     }
-    [ -z "$FIRE_AND_FORGET_ID" ] || {
-      echo "error: duplicate --fire-and-forget" >&2
+    [ $# -ge 2 ] || {
+      echo "error: --fire-and-forget requires a delivery id (or use --fire-and-forget-auto to generate one)" >&2
       exit 1
     }
     FIRE_AND_FORGET_ID=$2
     shift 2
     ;;
-  --fire-and-forget=*)
-    [ -z "$FIRE_AND_FORGET_ID" ] || {
+  --fire-and-forget-auto)
+    [ -z "$FIRE_AND_FORGET_ID" ] && [ "$FIRE_AND_FORGET_REQUESTED" = 0 ] || {
       echo "error: duplicate --fire-and-forget" >&2
+      exit 1
+    }
+    FIRE_AND_FORGET_REQUESTED=1
+    shift
+    ;;
+  --fire-and-forget=*)
+    [ -z "$FIRE_AND_FORGET_ID" ] && [ "$FIRE_AND_FORGET_REQUESTED" = 0 ] || {
+      echo "error: duplicate --fire-and-forget" >&2
+      exit 1
+    }
+    [ -n "${1#--fire-and-forget=}" ] || {
+      echo "error: --fire-and-forget= requires a nonempty delivery id; use --fire-and-forget-auto to generate one" >&2
       exit 1
     }
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
@@ -581,12 +621,14 @@ fm_send_resolve_close_note() { # <key> <excerpt>
   printf 'answered: %s' "$excerpt"
 }
 
-if [ -n "$FIRE_AND_FORGET_ID" ]; then
-  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
-    {
-      echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2
-      exit 1
-    }
+if [ -n "$FIRE_AND_FORGET_ID" ] || [ "$FIRE_AND_FORGET_REQUESTED" = 1 ]; then
+  if [ -n "$FIRE_AND_FORGET_ID" ]; then
+    printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
+      {
+        echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2
+        exit 1
+      }
+  fi
   [ "$MARK_FROM_FIRSTMATE" = 1 ] ||
     {
       echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2
@@ -714,7 +756,7 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # error with the attempted resolution attached.
 
 if [ "${1:-}" = "--key" ]; then
-  [ -z "$FIRE_AND_FORGET_ID" ] ||
+  { [ -z "$FIRE_AND_FORGET_ID" ] && [ "$FIRE_AND_FORGET_REQUESTED" = 0 ]; } ||
     {
       echo "error: --fire-and-forget cannot accompany --key" >&2
       exit 1
@@ -761,6 +803,24 @@ else
       ;;
     esac
   fi
+  # Generate only now (every input-validated structural refusal above - wrong
+  # target kind, --resolve-key/--key combined, an empty message, a malformed
+  # remote budget - has already passed), but do NOT print yet: the id must be
+  # embedded in MESSAGE below before the remote/inbox plane split, while the
+  # remaining refusals (a lost metadata lock, a retired or changed endpoint)
+  # are plane-specific and checked further down. fm_send_fire_and_forget_print
+  # prints it once, immediately before the transport or inbox write actually
+  # runs in each plane's branch, so a refusal from those later checks -
+  # deterministic (a mismatched FM_SEND_EXPECTED_REMOTE_HOST) or racy (a
+  # concurrent retirement) alike - never prints an id for a send that never
+  # happened.
+  if [ "$FIRE_AND_FORGET_REQUESTED" = 1 ] && [ -z "$FIRE_AND_FORGET_ID" ]; then
+    FIRE_AND_FORGET_ID=$(fm_pending_reply_new_id)
+  fi
+  fm_send_fire_and_forget_print() {
+    [ "$FIRE_AND_FORGET_REQUESTED" = 1 ] || return 0
+    echo "fire-and-forget delivery id: $FIRE_AND_FORGET_ID"
+  }
   # The pre-marker answer text, kept for the closing resolved note so the
   # durable ledger records the plain answer without marker or corr bytes.
   RESOLVE_ANSWER_TEXT=$MESSAGE
@@ -885,6 +945,7 @@ else
       echo "error: steer not sent to remote secondmate $TARGET_REMOTE_ID: its parent task retired or changed route during target resolution" >&2
       exit 1
     fi
+    fm_send_fire_and_forget_print
     remote_rc=0
     remote_completion_unknown=0
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
@@ -990,6 +1051,7 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    fm_send_fire_and_forget_print
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
