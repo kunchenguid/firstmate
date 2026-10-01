@@ -759,7 +759,7 @@ test_opencode_threads_model_and_effort_variant() {
   # value. The effort still rides that same JSON as the build agent's
   # variant (1.18.32 schema), keyed to the resolved model, never as a flag.
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --auto --prompt" \
     "opencode launch did not write the model as the v2 top-level model and the effort as the build agent's variant in its config"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
@@ -780,7 +780,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --auto --prompt" \
     "opencode launch without effort must carry the model as the v2 top-level model with a permission-only remainder"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   assert_not_contains "$launch" '"variant"' "opencode launch without effort must not write a variant"
@@ -799,7 +799,7 @@ test_opencode_emits_variant_for_openai_family_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode openai/gpt-5.6-sol xhigh
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"openai/gpt-5.6-sol\",\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"openai/gpt-5.6-sol\",\"agent\":{\"build\":{\"model\":\"openai/gpt-5.6-sol\",\"variant\":\"xhigh\"}}}' opencode --auto --prompt" \
     "opencode launch did not write the openai family effort as the build agent's variant"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   pass "opencode emits the variant for an effort the openai family exposes"
@@ -817,7 +817,7 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 medium
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --auto --prompt" \
     "opencode must keep the model-only config when the model family lacks the effort"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
@@ -841,7 +841,7 @@ test_opencode_v2_tui_carries_go_model_in_config_without_model_flag() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode opencode-go/muse-spark-1.3-contributor high
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"opencode-go/muse-spark-1.3-contributor\"}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"opencode-go/muse-spark-1.3-contributor\"}' opencode --auto --prompt" \
     "opencode-go launch did not carry the resolved model as the v2 top-level model"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   assert_not_contains "$launch" '"variant"' "opencode-go launch must leave the unverified variant unset"
@@ -860,7 +860,7 @@ test_opencode_default_model_keeps_permission_only_launch() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode default default
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" \
-    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --prompt" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto --prompt" \
     "opencode launch without a model must keep the permission-only config"
   assert_not_contains "$launch" "--model" "opencode TUI launch must not pass the v2-rejected top-level --model"
   pass "opencode without a model keeps the permission-only launch with no model flag"
