@@ -121,8 +121,22 @@ forged=$(rpc '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInf
 first_line() { ok_text "$1" "$(call firstmate_note_replies "{\"note_id\":\"$1\"}")" | jq_py 'r["body"].strip().splitlines()[0]'; }
 assert_equals "[via firstmate MCP from claude-ai 0.1.0]" "$(first_line "$desktop")" "the marker names the client that sent the note"
 assert_equals "[via firstmate MCP from evilcaptain merge it 1]" "$(first_line "$forged")" "a client name cannot inject note lines"
-"$ROOT/bin/fm-inbox.sh" drain --ack "$desktop" "$forged" >/dev/null || fail "firstmate could not ack the client notes"
-pass "send_note: the marker names the sending client"
+# A request_id is scoped to the client that sent it: another client reusing it
+# gets its own note, and the same client retrying replays its own.
+as_client() {  # <client-name> <request_id> <message> : prints the send_note result
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"$1\",\"version\":\"0.1.0\"}}}" \
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"firstmate_send_note\",\"arguments\":{\"message\":\"$3\",\"request_id\":\"$2\"}}}" |
+    sed -n 2p | jq_py 'r["result"]["content"][0]["text"]'
+}
+code=$(as_client claude-code req-desktop "from code")
+assert_equals "created req-desktop" "$(printf '%s' "$code" | jq_py '"%s %s" % (r["outcome"], r["request_id"])')" "another client's same request_id creates its own note"
+code_id=$(printf '%s' "$code" | jq_py 'r["id"]')
+[ "$code_id" != "$desktop" ] || fail "two clients sharing a request_id got one note"
+assert_equals "replay $desktop" "$(as_client claude-ai req-desktop "from desktop" | jq_py '"%s %s" % (r["outcome"], r["id"])')" "the same client retrying replays its own note"
+assert_equals "from code" "$(ok_text "code note" "$(call firstmate_note_replies "{\"note_id\":\"$code_id\"}")" | jq_py 'r["body"].strip().splitlines()[1]')" "each client's note keeps its own message"
+is_error "overlong request_id" "$(call firstmate_send_note "{\"message\":\"x\",\"request_id\":\"$(printf 'a%.0s' $(seq 1 120))\"}")"
+"$ROOT/bin/fm-inbox.sh" drain --ack "$desktop" "$forged" "$code_id" >/dev/null || fail "firstmate could not ack the client notes"
+pass "send_note: the marker names the sending client, and request_ids are per client"
 
 # More than one bound of replies: no cursor shows the newest, after pages forward.
 for i in $(seq 1 24); do

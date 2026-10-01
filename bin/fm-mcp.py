@@ -9,13 +9,15 @@ Every action request becomes an inbox note (fm-inbox.sh note), and firstmate's
 own rules decide what happens next. Each such note's body starts with the line
 "[via firstmate MCP from <client> <version>]", naming the client from its
 initialize handshake (or "unknown client"), so firstmate can tell it from a note
-the captain typed and tell Claude Desktop from Claude Code.
+the captain typed and tell Claude Desktop from Claude Code. The client's
+request_id is stored prefixed with a short hash of that client name, so two
+clients reusing one request_id get separate notes; the caller sees its own id.
 
 Usage:
   fm-mcp.py            serve MCP over stdin/stdout (newline-delimited JSON-RPC)
 
 Tools:
-  firstmate_send_note      fm-inbox.sh note --request-id <id> --json -  (the only write)
+  firstmate_send_note      fm-inbox.sh note --request-id <client-hash>-<id> --json -  (the only write)
   firstmate_note_replies   fm-inbox.sh receipts [--after <cursor>]
   firstmate_status         fm-inbox.sh status + fm-inbox.sh ready
   firstmate_home_summary   state/home-summary.json
@@ -35,6 +37,7 @@ Only the standard library is used, so any python3 a firstmate home already
 needs can run it. docs/mcp.md owns client setup.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -45,6 +48,7 @@ from pathlib import Path
 BIN = Path(__file__).resolve().parent
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,119}")
 TIMEOUT = 60
 MARKER = "[via firstmate MCP from {client}]"
 # The client named in initialize's clientInfo, so firstmate can tell Claude Desktop
@@ -107,7 +111,13 @@ def valid_id(value):
 def send_note(message, request_id):
     if not message.strip():
         raise ToolError("message is empty")
-    return run("fm-inbox.sh", "note", "--request-id", request_id, "--json", "-", stdin=MARKER.format(client=CLIENT) + "\n" + message)
+    if not REQUEST_ID.fullmatch(request_id):
+        raise ToolError(f"invalid request_id: {request_id!r} (1-119 of A-Za-z0-9._:-)")
+    stored = hashlib.sha256(CLIENT.encode()).hexdigest()[:8] + "-" + request_id
+    note = json.loads(run("fm-inbox.sh", "note", "--request-id", stored, "--json", "-",
+                          stdin=MARKER.format(client=CLIENT) + "\n" + message))
+    note["request_id"] = request_id
+    return json.dumps(note)
 
 
 def note_replies(note_id=None, after=None):
@@ -195,12 +205,13 @@ TOOLS = {
         " approvals, steering a crew, merges, cancellations. The note is only a request;"
         " this tool itself never spawns, steers, merges, tears down, or edits backlog or state -"
         " firstmate reads the note and its own rules decide what happens.\n"
-        "Returns JSON with the note id and request_id. Choose a fresh request_id for each new note;"
+        "Returns JSON with the note id and request_id. Use a fresh UUID as the request_id for each new"
+        " note (other sessions of the same app share this client's request_id space);"
         " if a call fails or times out, retry with the SAME request_id: a repeat returns the"
         " original note instead of a duplicate."
         " Check for firstmate's answer later with firstmate_note_replies(note_id).",
         {"message": param("The note for firstmate"),
-         "request_id": param("Idempotency key, unique per note; reuse it when retrying the same note")},
+         "request_id": param("Idempotency key: a fresh UUID per note (1-119 of A-Za-z0-9._:-); reuse it when retrying the same note")},
         ["message", "request_id"],
         {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
     ),
