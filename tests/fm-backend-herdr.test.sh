@@ -4604,6 +4604,60 @@ test_send_text_submit_detects_swallowed_enter() {
   pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
 }
 
+test_send_text_submit_names_refusals_without_private_values() {
+  local guard dir log resp fb out err expected n keys literal_count
+  local payload='PRIVATE_PAYLOAD_NEVER_PRINT_HEAD_END'
+  for guard in pre-content-extraction pre-content-not-empty literal-transport \
+    post-content-extraction post-payload-proof post-clear-unverified enter-transport; do
+    dir="$TMP_ROOT/submit-named-$guard"
+    mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; err="$dir/stderr"; : > "$log"
+    herdr_submit_claude_prefix "$resp" "$payload"
+    printf '  ❯\n' > "$resp/6.out"
+    expected=send-failed
+    case "$guard" in
+      pre-content-extraction) printf 'unrecognized surface\n' > "$resp/2.out" ;;
+      pre-content-not-empty) printf '  ❯ PRIVATE_SELECTION_NEVER_PRINT\n' > "$resp/2.out" ;;
+      literal-transport) printf '1\n' > "$resp/3.exit" ;;
+      post-content-extraction) printf 'unrecognized surface\n' > "$resp/4.out" ;;
+      post-payload-proof) printf '  ❯ END\n' > "$resp/4.out" ;;
+      post-clear-unverified)
+        expected=unknown
+        printf '  ❯ END\n' > "$resp/4.out"
+        for ((n=6; n<=100; n++)); do printf '  ❯ END\n' > "$resp/$n.out"; done ;;
+      enter-transport)
+        printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+        printf '1\n' > "$resp/6.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      FM_PRIVATE_TEST_ONLY=PRIVATE_ENV_NEVER_PRINT FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "$1" 1 0.01 0.01' \
+      "$ROOT" "$payload" 2> "$err")
+    [ "$out" = "$expected" ] || fail "$guard must retain its stdout verdict: $out"
+    grep -qxF "fm-herdr-submit: refused guard=$guard" "$err" || fail "$guard must name its actual refusal"
+    if grep -Eq 'PRIVATE_|default:|w1:p2|HERDR_SESSION|FM_PRIVATE_TEST_ONLY' "$err"; then
+      fail "$guard diagnostic leaked private input or location"
+    fi
+    keys=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+    if [ "$guard" = enter-transport ]; then
+      [ "$keys" = 1 ] || fail "Enter transport refusal must retain its single attempted Enter"
+    else
+      [ "$keys" = 0 ] || fail "$guard must refuse before Enter"
+    fi
+    literal_count=$(grep -c $'\x1f''pane'$'\x1f''send-text' "$log")
+    case "$guard" in
+      pre-*) [ "$literal_count" = 0 ] || fail "$guard must refuse before typing" ;;
+      *) [ "$literal_count" = 1 ] || fail "$guard must type at most one literal" ;;
+    esac
+    if [ "$guard" = post-clear-unverified ]; then
+      grep -qxF 'fm-herdr-submit: refused guard=post-payload-proof' "$err" \
+        || fail "clear uncertainty must retain its original payload refusal"
+    fi
+  done
+  pass "submit refusals name the actual guard without payload, selected text, environment or endpoint values"
+}
+
 test_send_text_submit_replays_literal_send_stderr() {
   local dir log resp fb out err
   dir="$TMP_ROOT/submit-send-stderr"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -6152,6 +6206,7 @@ test_wait_for_working_returns_unknown_when_never_readable
 test_wait_for_working_treats_blocked_as_submit_active
 test_send_text_submit_detects_landed_send
 test_send_text_submit_detects_swallowed_enter
+test_send_text_submit_names_refusals_without_private_values
 test_send_text_submit_replays_literal_send_stderr
 test_send_text_submit_popup_autocomplete_requires_second_enter
 test_send_text_submit_confirms_blocked_after_enter

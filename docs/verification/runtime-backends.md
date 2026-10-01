@@ -1210,6 +1210,25 @@ ok - live Claude exit confirmation: existing /exit stops tasks and proves agent 
 
 The portable executable regression is `tests/fm-control.test.sh`, including refusal of detach, stay, ambiguous dialogs and pending drafts without confirmation input.
 
+### Herdr submit refusal diagnostics
+
+Verified 2026-10-01 with the executable submit regressions in `tests/fm-backend-herdr.test.sh`.
+`bin/backends/herdr.sh` owns the supported stderr diagnostic vocabulary; stdout delivery verdicts and return codes retain their existing contract.
+The regressions distinguish selected-content extraction, pending content, literal transport, post-literal extraction, full-payload proof, uncertain clearing and Enter transport refusals without emitting payload, selected text, environment or endpoint values.
+Refresh with:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
+```
+
+Observed:
+
+```text
+ok - submit refusals name the actual guard without payload, selected text, environment or endpoint values
+```
+
+The token-free Claude exit guard above launches the real `ultracode` titled composer and its slash-completion view while exercising both modal scenarios.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:
