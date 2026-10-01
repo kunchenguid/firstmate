@@ -38,7 +38,9 @@ fm_sup_stat_mtime() {
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
 #                         registered event source (a source is a wait on an
 #                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         a registered custom check, or a local browser inbox
+#                         (state/.inbox, appended by the external bridge at any
+#                         time, so only a running watcher can surface it)
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -75,7 +77,8 @@ fm_supervision_status() {
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
-    || [ "$FM_SUP_CHECKS" -gt 0 ]; then
+    || [ "$FM_SUP_CHECKS" -gt 0 ] \
+    || [ -e "$state/.inbox" ] || [ -L "$state/.inbox" ]; then
     FM_SUP_NEEDED=true
   fi
 

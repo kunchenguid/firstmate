@@ -7,6 +7,7 @@ This keeps the watcher from draining a queue owned by another process.
 
 The watcher checks for complete newline-terminated records and adds one `check` wake while unread records exist.
 It does not advance the cursor.
+Once `state/.inbox` exists, the home counts as needing supervision even with no work in flight, so the Stop auto-arm and turn-end guards keep a watcher running for messages that arrive while firstmate is idle.
 `bin/fm-web-inbox.sh drain` returns pending records in file order with their ending byte offsets.
 Handle the first record, publish a correlated response if it is valid, then acknowledge that record with its exact id and offset.
 Retries of the same reply are idempotent; a different second reply is refused.
