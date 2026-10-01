@@ -218,3 +218,18 @@ pass "authority boundary: reads leave the home byte-identical"
 rm "$H/state/home-summary.json"
 is_error "missing summary" "$(call firstmate_home_summary)"
 pass "missing files are errors"
+
+# A lock left by a process that is gone (a resumed session that has not re-taken
+# it) reads as unproven liveness, never as firstmate being down. A free lock
+# gets no such line.
+stale_line="firstmate's liveness cannot be proven right now; notes still queue and wake firstmate."
+assert_not_contains "$(ok_text "status" "$(call firstmate_status)")" "$stale_line" "a free lock is not reported as stale"
+bash -c 'exit 0' & dead=$!
+wait "$dead"
+printf '%s\n' "$dead" >"$H/state/.lock"
+printf 'gone-session\n' >"$H/state/.lock-session"
+st=$(ok_text "status" "$(call firstmate_status)")
+assert_contains "$st" '"state":"stale"' "readiness reports the dead owner's lock as stale"
+assert_contains "$st" "$stale_line" "a stale lock is reported as unproven liveness, not as down"
+rm "$H/state/.lock" "$H/state/.lock-session"
+pass "status: a stale lock reads as unproven liveness"

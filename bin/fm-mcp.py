@@ -160,8 +160,18 @@ def newest_page_cursor():
     return "%012d" % (seq - REPLIES) if seq > REPLIES else None
 
 
+STALE_LOCK = "firstmate's liveness cannot be proven right now; notes still queue and wake firstmate."
+
+
 def status():
-    return run("fm-inbox.sh", "status") + "\n--- firstmate readiness ---\n" + run("fm-inbox.sh", "ready")
+    ready = run("fm-inbox.sh", "ready")
+    try:
+        stale = json.loads(ready)["lock"]["state"] == "stale"
+    except (ValueError, KeyError, TypeError):
+        stale = False
+    # A stale lock only means the recorded owner process is gone (for example a
+    # resumed session that has not re-taken it), not that firstmate is down.
+    return run("fm-inbox.sh", "status") + "\n--- firstmate readiness ---\n" + ready + (STALE_LOCK + "\n" if stale else "")
 
 
 def home_file(*parts, missing):
@@ -241,6 +251,8 @@ TOOLS = {
         status,
         "What is happening now: notes waiting, in-flight backlog items, each crew's last event"
         " (fm-inbox.sh status), and whether firstmate itself is live to receive notes (fm-inbox.sh ready)."
+        " A stale lock is reported as liveness that cannot be proven, not as firstmate being down:"
+        " notes still queue and wake firstmate."
         " Sends no wake and never interrupts firstmate." + NOTE_ONLY,
         {}, [], None,
     ),
