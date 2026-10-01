@@ -390,10 +390,28 @@ fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_J
 NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
+# worker.pid is the serve child; its Linux restart supervisor sits above it and
+# would reclaim the lock directory the moment the child alone dies. Kill the
+# isolated worker group so the lock is genuinely abandoned, matching an unclean
+# exit with no supervisor left to clean up.
 CRASHED_WORKER_PID=$NEW_WORKER_PID
-kill -KILL "$CRASHED_WORKER_PID"
-wait "$CRASHED_WORKER_PID" 2>/dev/null || true
+CRASHED_WORKER_PGID=$(fm_remote_job_process_pgid "$CRASHED_WORKER_PID") \
+  || fail "the stale-ownership fixture could not resolve its process group"
+kill -KILL -- "-$CRASHED_WORKER_PGID" 2>/dev/null || true
+# The serve child is not this shell's direct child, so wait cannot reap it; poll
+# until the whole group is gone before planting the reused-pid state.
+i=0
+while kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null && [ "$i" -lt 50 ]; do
+  i=$((i + 1))
+  sleep 0.05
+done
+! kill -0 -- "-$CRASHED_WORKER_PGID" 2>/dev/null \
+  || fail "the stale-ownership fixture left the worker group alive"
 assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
+[ -d "$STATE_ROOT/worker.lock" ] && [ ! -L "$STATE_ROOT/worker.lock" ] \
+  || fail "the retained worker ownership lock is not a directory"
+[ -f "$STATE_ROOT/worker.lock/pid" ] \
+  || fail "the retained worker ownership lock lost its pid record before the reused-pid plant"
 sleep 20 &
 OTHER_PID=$!
 printf '%s\n' "$OTHER_PID" > "$STATE_ROOT/worker.pid"
