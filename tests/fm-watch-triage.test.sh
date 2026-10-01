@@ -4208,10 +4208,6 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  # The first stale sight seeds the declaration anchor and is absorbed for a
-  # mate; age that anchor past the cadence so the next poll re-surfaces.
-  wait_poll_cycle "$state" "$pid" || fail "watcher did not re-surface a paused secondmate (first sight was not absorbed)"
-  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a paused secondmate"
   grep -F "stale: $window" "$out" >/dev/null || fail "paused secondmate did not emit a stale recheck"
   grep -F "awaiting external" "$out" >/dev/null || fail "paused secondmate recheck omitted its external-wait reason"
@@ -4246,10 +4242,6 @@ test_secondmate_captain_held_resurfaces_in_normal_mode() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  # The first stale sight seeds the declaration anchor and is absorbed for a
-  # mate; age that anchor past the cadence so the next poll re-surfaces.
-  wait_poll_cycle "$state" "$pid" || fail "watcher did not re-surface a captain-held secondmate (first sight was not absorbed)"
-  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || fail "watcher did not re-surface a captain-held secondmate"
   grep -F "stale: $window" "$out" >/dev/null || fail "captain-held secondmate did not emit a stale recheck"
   grep -F "awaiting the captain" "$out" >/dev/null || fail "captain-held secondmate recheck did not name the captain as the blocker: $(cat "$out")"
@@ -6581,10 +6573,6 @@ test_captain_held_rechecked_under_a_quiet_record() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  # The first stale sight seeds the declaration anchor and is absorbed for a
-  # mate; age that anchor past the cadence so the next poll re-surfaces.
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a captain-held mate's first sight was not absorbed beside quiet mode's record"; }
-  set_mtime "$back" "$state/.paused-since-$key"
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a captain-held item was not rechecked beside quiet mode's record"; }
   unset FM_FAKE_CREW_STATE
   grep -F "awaiting the captain" "$out" >/dev/null || fail "the recheck beside a quiet record did not name the captain: $(cat "$out")"
