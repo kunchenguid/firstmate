@@ -13,9 +13,12 @@ SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 SUPERVISOR_DIR="$HOME_FIXTURE/state/branch-session"
 TOKEN=viewer-test-token-value
+TOKEN_FILE="$TMP_ROOT/viewer.token"
 PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
 mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR"
+printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
 
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"safe <img src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
@@ -38,7 +41,14 @@ import fs from "node:fs";
 fs.writeFileSync(process.argv[2], `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "x".repeat(1200000) }] } })}\n`);
 NODE
 
-FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN="$TOKEN" FM_JSONL_VIEWER_PORT=0 \
+cp "$TOKEN_FILE" "$TMP_ROOT/insecure.token"
+chmod 644 "$TMP_ROOT/insecure.token"
+if FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TMP_ROOT/insecure.token" \
+  node "$ROOT/bin/fm-jsonl-viewer.mjs" --host 127.0.0.1 --port 0 > "$TMP_ROOT/insecure.out" 2>&1; then
+  fail "viewer accepted a group/world-readable token file"
+fi
+
+FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
   node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 cleanup() {

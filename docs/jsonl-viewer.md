@@ -6,14 +6,19 @@ It does not expose arbitrary paths, follow symlinks, modify a journal, or offer 
 
 ## Start the viewer
 
-Set an unpredictable token with at least 16 bytes, then run the server from the tracked Firstmate checkout.
-The token is supplied through `FM_JSONL_VIEWER_TOKEN`; the server does not print it or put it in a URL.
+Create an unpredictable token with at least 16 bytes in a private file, then run the server from the tracked Firstmate checkout.
+The server requires the token file to be absolute, owned by the current user, mode `0600` or stricter, regular, and not a symlink.
+It does not print the token or put it in a URL.
 
 ```sh
+umask 077
+openssl rand -hex 32 > /absolute/private/path/jsonl-viewer.token
 FM_HOME=/absolute/path/to/firstmate-home \
-FM_JSONL_VIEWER_TOKEN="$PRIVATE_VIEWER_TOKEN" \
+FM_JSONL_VIEWER_TOKEN_FILE=/absolute/private/path/jsonl-viewer.token \
 node bin/fm-jsonl-viewer.mjs
 ```
+
+`FM_JSONL_VIEWER_TOKEN` remains available for an ephemeral token supplied directly by a secret manager, but it cannot be combined with `FM_JSONL_VIEWER_TOKEN_FILE`.
 
 The default listener is `0.0.0.0:17847`.
 Override it with `--host` and `--port`, or `FM_JSONL_VIEWER_HOST` and `FM_JSONL_VIEWER_PORT`.

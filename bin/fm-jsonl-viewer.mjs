@@ -3,10 +3,12 @@
 // current Firstmate home's ShortTask journals and supervision branch sessions.
 //
 // Usage:
-//   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN='...' \
+//   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file \
 //     node bin/fm-jsonl-viewer.mjs [--host 0.0.0.0] [--port 17847]
 //
-// The token is accepted only through the environment and is never printed.
+// The token is accepted only through a protected file or the environment and
+// is never printed. A token file must be absolute, owned by this user, mode
+// 0600 or stricter, regular, and not a symlink.
 // Static UI assets contain no private data; every discovery/read endpoint
 // requires Authorization: Bearer <token>. Only regular, non-symlink JSONL files
 // below state/short-agents and state/branch-session are eligible.
@@ -26,7 +28,7 @@ const TAIL_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 
 function usage(stream = process.stdout) {
-  stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN=<secret> node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
+  stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
 }
 
 function fail(message) {
@@ -83,6 +85,25 @@ function authorized(req, token) {
   const supplied = Buffer.from(header.slice(prefix.length));
   const expected = Buffer.from(token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function accessToken() {
+  const direct = process.env.FM_JSONL_VIEWER_TOKEN || "";
+  const tokenFile = process.env.FM_JSONL_VIEWER_TOKEN_FILE || "";
+  if (direct && tokenFile) fail("set only one of FM_JSONL_VIEWER_TOKEN and FM_JSONL_VIEWER_TOKEN_FILE");
+  let token = direct;
+  if (tokenFile) {
+    if (!isAbsolute(tokenFile)) fail("FM_JSONL_VIEWER_TOKEN_FILE must be absolute");
+    let info;
+    try { info = lstatSync(tokenFile); } catch { fail("FM_JSONL_VIEWER_TOKEN_FILE is unreadable"); }
+    if (!info.isFile() || info.isSymbolicLink()) fail("FM_JSONL_VIEWER_TOKEN_FILE must be a regular non-symlink file");
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) fail("FM_JSONL_VIEWER_TOKEN_FILE must be owned by the current user");
+    if ((info.mode & 0o077) !== 0) fail("FM_JSONL_VIEWER_TOKEN_FILE must not grant group or other access");
+    token = readFileSync(tokenFile, "utf8").replace(/\r?\n$/, "");
+    if (token.includes("\n") || token.includes("\r")) fail("FM_JSONL_VIEWER_TOKEN_FILE must contain one token line");
+  }
+  if (Buffer.byteLength(token) < 16) fail("the viewer access token must contain at least 16 bytes");
+  return token;
 }
 
 function inside(root, candidate) {
@@ -293,8 +314,7 @@ function readEvents(roots, source, id, query) {
 function serve() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { usage(); return; }
-  const token = process.env.FM_JSONL_VIEWER_TOKEN || "";
-  if (Buffer.byteLength(token) < 16) fail("FM_JSONL_VIEWER_TOKEN must contain at least 16 bytes");
+  const token = accessToken();
   let home;
   try { home = realpathSync(options.home); } catch { fail("Firstmate home does not exist"); }
   const roots = {
