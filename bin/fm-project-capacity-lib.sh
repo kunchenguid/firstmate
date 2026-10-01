@@ -24,9 +24,14 @@
 # <project-name> is the project's registered name, which is the basename of its
 # clone directory, and <capacity> is a positive integer of at most six digits.
 # The capacity is the last whitespace-separated field, so the name before it may
-# contain spaces. Blank lines and lines whose first non-blank character is # are
-# ignored, so a project whose name starts with # cannot be declared. Any
-# other shape, a project named twice, or an unreadable file makes the whole
+# contain spaces. Blank lines are ignored. A line is a comment when it is `#`,
+# when `#` is followed by whitespace, or when it starts with `#` and its last
+# field is not an integer. A project whose name begins with `#` is declared by
+# writing that `#` immediately against the rest of the name and ending the line
+# with the capacity, for example `#repo 2`. A name that is `#`, or that begins
+# with `#` followed by a space, is the same spelling as a comment and cannot be
+# declared. Any other shape, a project named twice, or an unreadable file makes
+# the whole
 # declaration unreadable, and bin/fm-spawn.sh then refuses every fresh ship or
 # scout spawn from this machine's homes rather than guessing which limit was
 # meant.
@@ -109,7 +114,18 @@ fm_project_capacity_lookup() {  # <config-dir> <project-name>
     line=${line%$'\r'}
     line=${line#"${line%%[![:space:]]*}"}
     line=${line%"${line##*[![:space:]]}"}
-    case "$line" in '' | '#'*) continue ;; esac
+    # '#' followed by whitespace is always a comment, including one that ends
+    # with a number. A line that begins with '#' glued to the rest of a name is
+    # a declaration only when its last field is an integer; any other such line
+    # stays a comment, so a note does not refuse every spawn.
+    case "$line" in
+      '' | '#' | '#'[[:space:]]*) continue ;;
+      '#'*)
+        case "${line##*[[:space:]]}" in
+          *[!0-9]*) continue ;;
+        esac
+        ;;
+    esac
     # The capacity is the last field, so the name before it may hold spaces.
     pcap=${line##*[[:space:]]}
     pname=${line%"$pcap"}

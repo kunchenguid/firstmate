@@ -246,8 +246,7 @@ test_exhausted_capacity_defers_without_leaving_anything_behind() {
 }
 
 # The capacity is the last field, so a project whose clone directory name holds
-# spaces can be declared; only a line whose first non-blank character is # is a
-# comment.
+# spaces can be declared. An indented '#' line is still a comment.
 test_spaced_project_name_is_declared() {
   local case_dir home spaced out rc=0
   case_dir=$(make_case spaced task-c)
@@ -262,6 +261,37 @@ test_spaced_project_name_is_declared() {
     "the deferral did not use the spaced project's declared capacity"
   assert_absent "$home/state/task-c.meta" "the deferred spaced-name spawn published a record"
   pass "a project name with spaces is declared by taking the capacity from the last field"
+}
+
+# A clone directory may be named with a leading '#'. That name is declared when
+# the '#' is written against the rest of the name and the line ends with the
+# capacity. A '#' followed by whitespace stays a comment even when the line
+# ends with a number, and a '#' note that is not a capacity stays a comment.
+test_hash_prefixed_project_name_is_declared() {
+  local case_dir home hashed spaced out rc=0 wt
+  case_dir=$(make_case hash-name task-c task-d)
+  home="$case_dir/home"
+  hashed="$case_dir/#hash-project"
+  spaced="$case_dir/# serves"
+  git clone -q "$(git -C "$case_dir/project" remote get-url origin)" "$hashed"
+  git clone -q "$(git -C "$case_dir/other-project" remote get-url origin)" "$spaced"
+  declare_capacity "$home" "# serves 2" "#not-a-capacity" "#hash-project 1"
+  write_live "$home" live-a "$hashed"
+  out=$(run_spawn "$case_dir" "$home" "$case_dir/unused" task-c "$hashed" --mode no-mistakes --yolo off) || rc=$?
+  expect_code "$DEFER_EXIT" "$rc" "a project whose name begins with # was not capped by its declaration: $out"
+  assert_contains "$out" "deferred: project #hash-project admits 1 worker(s) at once" \
+    "the deferral did not use the hash-prefixed project's declared capacity"
+  assert_absent "$home/state/task-c.meta" "the deferred hash-prefixed spawn published a record"
+
+  write_live "$home" live-b "$spaced"
+  write_live "$home" live-c "$spaced"
+  git -C "$spaced" worktree add --quiet -b wt-d "$case_dir/wt-d"
+  wt="$case_dir/wt-d"
+  rc=0
+  out=$(run_spawn "$case_dir" "$home" "$wt" task-d "$spaced" --mode no-mistakes --yolo off) || rc=$?
+  expect_code 0 "$rc" "a '#' comment that ends with a number was read as a capacity: $out"
+  assert_contains "$out" "spawned task-d" "a project whose declaration line is a comment did not stay uncapped"
+  pass "a project name beginning with # is declared, and a # comment stays a comment"
 }
 
 # A home reached through a symlink is still one home: its workers hold one
@@ -576,6 +606,7 @@ test_undeclared_capacity_keeps_dispatch_uncapped
 test_available_capacity_admits_the_worker
 test_exhausted_capacity_defers_without_leaving_anything_behind
 test_spaced_project_name_is_declared
+test_hash_prefixed_project_name_is_declared
 test_symlinked_home_counts_each_worker_once
 test_release_frees_a_place
 test_occupancy_counts_only_this_projects_workers
