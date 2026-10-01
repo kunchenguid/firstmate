@@ -419,6 +419,10 @@ assert call('fm-task-state.sh','observe','target')['state']=='pending'
 before=(home/'data/target/lifecycle.json').read_bytes()
 assert call('fm-task-state.sh','observe','target')['state']=='running', 'ordinary published launch lost its brief receipt'
 assert (home/'data/target/lifecycle.json').read_bytes()==before, 'readback changed semantic authority'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: run-step · validating (running)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='running', 'active validation run-step was not accepted as actual start proof'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: status-log · validating (running)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='pending', 'status history became actual start proof'
 m=home/'state/target.meta';original=m.read_text()
 for phase in ('prepared','unconfirmed'):
     m.write_text(original.replace('launch_state=confirmed','launch_state='+phase))
