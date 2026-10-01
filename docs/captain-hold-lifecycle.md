@@ -62,7 +62,7 @@ Repeat and edge cases:
 - Re-holding released work starts a new timestamped lifecycle.
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
-- `--origin` records the origin the call was held for on its own `Captain hold origin:` body line, which `complete` and `verify` check.
+- After the backend hold succeeds, `--origin` records the origin the call was held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
   tasks-axi stores a reason on one parenthesised markdown line, so `hold` writes a version-marked base64 value and the readers that show it decode only that reason field (`bin/fm-hold-reason-lib.sh` owns the encoding).
   Public `bin/fm-tasks-axi.sh show` and `list` reads preserve the reason through quoted strings, while unmarked legacy reasons and other fields pass through unchanged.
@@ -108,6 +108,7 @@ A post-teardown visual review can complete against the surviving report and dura
 `--none` is refused while the origin still has a lifecycle-open keyed status decision.
 Before recording completion, `complete` verifies every listed task against tasks-axi.
 The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
+For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
 An entry whose recorded origin differs from the one being completed is refused.
 An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
 

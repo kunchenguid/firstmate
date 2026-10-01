@@ -809,8 +809,20 @@ body_hold_origin() {  # <decoded-task-body>
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
 
+task_identity() {
+  local id=$1
+  if task_show "$id"; then
+    id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
+    validate_slug backend-task-id "$id"
+  elif ! printf '%s\n' "$TASK_SHOW_OUTPUT" | grep -q '^code: NOT_FOUND$'; then
+    fail "could not resolve the backend identity of $id"
+  fi
+  printf '%s' "$id"
+}
+
 write_hold_origin() {  # <task-id> <shown-body> <origin>
   local id=$1 body=$2 origin=$3 stamp rest new_body tmp
+  origin=$(task_identity "$origin") || return $?
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   stamp=$(printf '%s\n' "$body" | sed -n 1p)
@@ -835,6 +847,14 @@ write_hold_origin() {  # <task-id> <shown-body> <origin>
   rm -f -- "$tmp"
 }
 
+refuse_self_inventory() {
+  local origin=$1 entry=$2 meta="$STATE/$1.meta"
+  if list_has_key "$(meta_value "$meta" decision_keys)" "$entry"; then
+    fail "origin $origin cannot be its own captain-call inventory entry; historical decision_keys in $meta still contains $entry; hold a separate captain task with --origin $origin, replace only $entry in the final decision_keys= line with that task id while preserving all other entries, then re-run complete $origin <task-id>"
+  fi
+  fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
+}
+
 # Resolve one entry and verify the row it names is durably captain-held. A
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
@@ -842,11 +862,11 @@ write_hold_origin() {  # <task-id> <shown-body> <origin>
 # as absence. On success prints "<id> <how>" so the caller can keep the
 # attestation evidence.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
-  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded
+  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id
   # The origin task is never its own captain-call inventory: it is the work the
   # calls were found in, so accepting it would let a refused hold look recorded.
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
-    fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
+    refuse_self_inventory "$origin" "$entry"
   fi
   resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
   if [ "$resolve_status" -ne 0 ]; then
@@ -856,14 +876,21 @@ verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origi
   fi
   id=${resolved%% *}
   how=${resolved##* }
-  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$id" = "$origin" ]; then
-    fail "origin $origin cannot be its own captain-call inventory entry; hold a separate captain task for the call and list that task"
-  fi
   verify_hold_durable "$id"
+  id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
+  validate_slug backend-task-id "$id"
   stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
+  origin_id=$origin
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    origin_id=$(task_identity "$origin") || exit $?
+    [ "$id" != "$origin_id" ] || refuse_self_inventory "$origin" "$entry"
+  fi
   if [ -n "$stored" ]; then
-    if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$stored" != "$origin" ]; then
-      fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
+    if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+      stored_id=$(task_identity "$stored") || exit $?
+      if [ "$stored_id" != "$origin_id" ]; then
+        fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
+      fi
     fi
     origin_state=recorded
   fi
@@ -952,9 +979,6 @@ command_hold() {
   task_show_or_fail "$id" "task $id disappeared while recording its hold-set stamp"
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id did not retain its hold-set stamp"
-  if [ -n "$origin" ]; then
-    write_hold_origin "$id" "$(show_field "$show" body)" "$origin"
-  fi
   if [ -n "$until" ]; then
     tasks_axi hold "$id" --reason "$stored_reason" --kind captain --until "$until" >/dev/null \
       || fail "could not hold task $id for the captain"
@@ -969,6 +993,9 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
+  if [ -n "$origin" ]; then
+    write_hold_origin "$id" "$(show_field "$show" body)" "$origin" || exit $?
+  fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
