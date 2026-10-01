@@ -306,6 +306,13 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Intended worker environment (config/worker-env):
+#   bin/fm-worker-env.sh owns the contract. For the opencode adapter, whose
+#   executable and store come from generic PATH and XDG values, every launch
+#   carries explicit PATH, XDG_CONFIG_HOME, and XDG_DATA_HOME assignments
+#   resolved from the launching process or the declared file, and an
+#   OPENCODE_BIN pin replaces the bare command. This makes the worker match the
+#   primary session instead of whatever a long-lived endpoint daemon exported.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -356,6 +363,9 @@
 #                  turn-end extension, written by this script; outside the worktree so
 #                  omp's cwd-only auto-discovery cannot load it a second time)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
+#     __OPENCODEBIN__ the opencode command token: a quoted absolute path from a
+#                  declared config/worker-env OPENCODE_BIN, else the bare name
+#                  resolved through the explicit worker PATH the launch carries
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
@@ -630,6 +640,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-worker-env.sh
+. "$SCRIPT_DIR/fm-worker-env.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2028,7 +2040,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2386,6 +2398,14 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   else
     unset CLAUDE_CONFIG_DIR
   fi
+fi
+# Intended worker environment (config/worker-env; docs/configuration.md "Worker
+# environment"). bin/fm-worker-env.sh's header owns the contract. Resolved here,
+# before any endpoint, worktree, or record exists, so a malformed file refuses
+# the spawn instead of launching a worker on an environment the captain did not
+# declare. The declared values are threaded onto the launch below.
+if ! fm_worker_env_load "$CONFIG"; then
+  exit 1
 fi
 
 secondmate_registry_value() {
@@ -5019,6 +5039,10 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+# The opencode command token: a declared config/worker-env OPENCODE_BIN becomes
+# a quoted absolute path; an undeclared pin leaves the bare name so the explicit
+# worker PATH established below decides the build.
+OPENCODE_LAUNCH_BIN=$(fm_worker_env_opencode_launch_bin)
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
@@ -5059,6 +5083,7 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+opencode) LAUNCH=${LAUNCH//__OPENCODEBIN__/$OPENCODE_LAUNCH_BIN} ;;
 devin)
   LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
   LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
@@ -5143,6 +5168,23 @@ if [ "$KIND" = secondmate ]; then
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+fi
+# Intended worker environment on the launch (config/worker-env; the header of
+# bin/fm-worker-env.sh owns the contract). opencode resolves its executable,
+# config store, and data store from PATH and the XDG roots, all of which a
+# worker pane would otherwise inherit from a long-lived backend daemon whose
+# values can drift from this primary session. Establish them explicitly instead
+# of relying on that inheritance, so the worker runs the same build and reads
+# the same auth and context as the primary. An undeclared config/worker-env
+# leaves each value as the launching process's own or its documented default.
+if [ "$HARNESS" = opencode ]; then
+  WORKER_ENV_PATH=$(fm_worker_env_resolved_path)
+  if [ -n "$FM_WORKER_ENV_OPENCODE_BIN" ]; then
+    WORKER_ENV_PATH=$(fm_worker_env_promote_bindir "$WORKER_ENV_PATH" "$FM_WORKER_ENV_OPENCODE_BIN")
+  fi
+  WORKER_ENV_CONFIG_HOME=$(fm_worker_env_resolved_config_home)
+  WORKER_ENV_DATA_HOME=$(fm_worker_env_resolved_data_home)
+  LAUNCH="export PATH=$(shell_quote "$WORKER_ENV_PATH") XDG_CONFIG_HOME=$(shell_quote "$WORKER_ENV_CONFIG_HOME") XDG_DATA_HOME=$(shell_quote "$WORKER_ENV_DATA_HOME"); $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without
 # rewriting the project's core.hooksPath. GIT_CONFIG_* takes precedence over

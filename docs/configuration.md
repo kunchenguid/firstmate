@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [worker environment](#worker-environment-configworker-env) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -994,6 +994,50 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Worker environment (config/worker-env)
+
+A worker's pane shell is created by a long-lived backend daemon rather than by the firstmate process that launches the worker, so the environment a worker inherits can drift from the primary session's.
+`config/launch-env-allowlist` limits which ambient names reach a worker, while `config/worker-env` declares the values the worker should have regardless of the daemon.
+[`bin/fm-worker-env.sh`](../bin/fm-worker-env.sh) is the single owner of the intended environment and of the drift detector.
+
+Firstmate establishes the worker environment explicitly on every launch that can resolve it from PATH and XDG, currently the opencode adapter.
+The launch carries `PATH`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` as its own assignments, and an opencode worker therefore runs the build and reads the auth and context the launching process would, instead of whatever the endpoint daemon last exported.
+The Claude, Pi, and Muse adapters keep their existing explicit store assignments.
+
+### Configuration
+
+The optional local, gitignored `config/worker-env` declares the intended values, one `NAME=value` per line.
+Blank lines and lines beginning with `#` are ignored, and values are literal, never expanded.
+[`bin/fm-worker-env.sh`](../bin/fm-worker-env.sh)'s header owns the exact parsing and validation mechanics.
+The recognized names are:
+
+| Name | Value |
+| --- | --- |
+| `PATH` | Colon-separated absolute directories the worker searches |
+| `XDG_CONFIG_HOME` | Absolute config root |
+| `XDG_DATA_HOME` | Absolute data root |
+| `OPENCODE_BIN` | Absolute path to the opencode executable to launch |
+
+An absent file leaves every default in force, and a malformed or unreadable file stops the launch before any endpoint exists.
+The file is inherited into secondmate homes under the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate's own opencode workers use the same build and stores.
+
+### Defaults
+
+With no declaration, the launching process decides: `PATH` is its own `PATH`, `XDG_CONFIG_HOME` and `XDG_DATA_HOME` are its own values or `$HOME/.config` and `$HOME/.local/share`, and the opencode executable is the first `opencode` the worker PATH resolves.
+When `OPENCODE_BIN` is declared, its directory is promoted to the front of the worker `PATH` so a child that re-resolves the name reaches the same build.
+
+### Detecting drift
+
+`bin/fm-worker-env.sh check` reports whether a worker would resolve the intended executable, config and data roots, and worktree root:
+
+```sh
+bin/fm-worker-env.sh check --worktree <task-worktree> --primary <primary-checkout>
+```
+
+It resolves the executable, config root, data root, and auth from `config/worker-env` and the launching environment, and it prints one `ok`, `warn`, or `drift` line per fact.
+Missing auth or a worktree root that resolves to the primary checkout is a drift, and any drift exits non-zero.
+This is a diagnostic for a live worker or a suspected machine; the launch itself prevents endpoint-daemon drift by establishing the values above.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
