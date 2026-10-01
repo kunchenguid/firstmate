@@ -702,7 +702,7 @@ export default function (pi: ExtensionAPI) {
     return JSON.stringify(taskState);
   }
   // The admission is the branch's canonical, bounded lifecycle read. Keep the
-  // semantic gap and prepared operation beside the already-projected
+  // semantic gap and current operation beside the already-projected
   // observation so the model does not have to rediscover them from historical
   // reports or guess evidence labels as paths. Lifecycle validation bounds the
   // evidence list and record size before this projection is constructed.

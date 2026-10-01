@@ -309,7 +309,7 @@ The single periodic-stow clock also permits bounded readback while MAIN is strea
 The canonical coordination reservation and persistent retry budget survive session replacement, while actual branch-session entry persistence proves delivery.
 Cold Pi sessions defer persistence until the first assistant response, so an in-memory append never acknowledges that delivery.
 An admission or report proves neither worker receipt nor goal completion.
-The persisted admission and model prompt carry the same bounded projection of the current assessment and next action: outcome, remaining gap, evidence key, exact authority/evidence references, and the prepared action identity, payload reference, generation, phase and limits.
+The persisted admission and model prompt carry the same bounded projection of the current assessment and next action: outcome, remaining gap, evidence key, exact authority/evidence references, and the current action identity, payload and receipt references, generation, phase, limits and continuation constraint.
 That projection is a view of the already-read lifecycle record, not a second store; it lets the branch select an exact material `inspect` readback without falling back to older reports or treating descriptive labels as paths.
 
 For a delegated task, branch may compare bounded artifacts with the existing brief, record a provisional precheck, request missing evidence from the same worker, and transfer information along explicitly authorized dependency edges.
