@@ -129,6 +129,19 @@ const { chromium } = require(process.env.PLAYWRIGHT_ROOT);
 const version = await fetch(`${process.env.CDP_URL}/json/version`).then(response => response.json());
 const browser = await chromium.connectOverCDP(version.webSocketDebuggerUrl);
 const page = await browser.contexts()[0].newPage();
+let delayTasks = true;
+let releaseTasks = () => {};
+let markTasksStarted;
+const tasksStarted = new Promise(resolve => { markTasksStarted = resolve; });
+const delayedTasks = new Promise(resolve => { releaseTasks = resolve; });
+await page.route("**/api/tasks", async route => {
+  if (delayTasks) {
+    delayTasks = false;
+    markTasksStarted();
+    await delayedTasks;
+  }
+  await route.continue();
+});
 let delayFirst = false;
 let releaseDelayed = () => {};
 let markFirstRequestStarted;
@@ -170,6 +183,12 @@ try {
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
   await page.locator("#remember-token").check();
   await page.locator("#connect").click();
+  await tasksStarted;
+  await page.locator("#source").selectOption("short");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
+  await page.getByText("<img id=unsafe src=x onerror=alert(1)>", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  releaseTasks();
+  await page.locator("#source").selectOption("tasks");
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
