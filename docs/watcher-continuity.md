@@ -226,7 +226,7 @@ A downtime republication of a pending episode reuses its generation.
 A watcher close leaves an announced downtime episode announced, while a successful durable append opens a fresh pending generation so a live watcher can recover the new work.
 An announced handling episode becomes pending downtime on the same generation because its handling turn may have been interrupted.
 That handling republication gives a successor exactly one recovery presentation without orphaning the acknowledgement already printed for that generation.
-A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but supervision never lapsed, so the taking arm restores an acknowledged episode that stop reopened when no wake was appended in between; any other episode is left for the next cycle's arm check.
+A watcher stopped so an arm can take its cycle over (`bin/fm-watch-arm.sh --take-over`) publishes downtime like any close, but supervision never lapsed, so the taking arm restores an acknowledged episode that stop reopened only when the taken-over arm recorded that exact watcher ending by the take-over's TERM and no wake was appended in between; any other episode is left for the next cycle's arm check.
 
 ### What an acknowledgement retires
 

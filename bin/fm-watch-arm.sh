@@ -553,7 +553,7 @@ fi
 # 1 when it was not stopped (its handover state was unreadable, or it outlived
 # the stop), which leaves it to the plain attach below.
 take_over_cycle() {  # <watcher-pid> <identity>
-  local pid=$1 i
+  local pid=$1 i owner_signal
   cycle_begin "$pid" attached "$2"
   fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
   if attached_holder_live "$pid"; then
@@ -572,9 +572,26 @@ take_over_cycle() {  # <watcher-pid> <identity>
     printf '%s\n' "$DELIVERED_REASON"
     return 3
   fi
-  fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
-    "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
-  cycle_log_append unknown unknown taken-over none
+  # Only the owner can wait on this watcher and distinguish our TERM from a
+  # self-exit that raced the stop. Give its post-wait ledger append a short bound.
+  i=0
+  owner_signal=
+  while [ "$i" -lt 50 ]; do
+    owner_signal=$(awk -F '\t' -v arm="$take_over_arm_pid" -v watcher="$pid" '
+      $1 == "arm_pid=" arm && $2 == "watcher_pid=" watcher { signal = $7 }
+      END { sub(/^signal=/, "", signal); print signal }
+    ' "$CYCLE_LOG" 2>/dev/null || true)
+    [ -z "$owner_signal" ] || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ "$owner_signal" = TERM ]; then
+    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+      "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+    cycle_log_append unknown unknown taken-over none
+  else
+    cycle_log_append unknown unknown taken-over-unconfirmed-stop none
+  fi
   return 0
 }
 
