@@ -182,6 +182,25 @@ SH
   chmod +x "$fb/sleep"
 }
 
+# wait_for_any <pid> <path>... -> succeeds once any path exists. Waits on the
+# real condition, not a poll count: it stops early only when <pid>, the process
+# that must create the path, has exited, so a loaded host is slower rather than
+# a false failure. The shared stub ceiling still bounds a genuine hang.
+wait_for_any() {
+  local pid=$1 path deadline=$((SECONDS + FM_TEST_STUB_MAX_BLOCK_SECONDS))
+  shift
+  while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do
+    for path in "$@"; do
+      [ ! -e "$path" ] || return 0
+    done
+    /bin/sleep 0.01
+  done
+  for path in "$@"; do
+    [ ! -e "$path" ] || return 0
+  done
+  return 1
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -491,7 +510,7 @@ test_relaunch_preserves_durable_task_metadata() {
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
-  local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
+  local dir control_pid link_pid rc traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
   add_ship_task "$dir" rl28 claude
   printf '%s\n' "$$" > "$dir/home/state/.lock"
@@ -507,11 +526,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     FM_FAKE_TRACE_RELEASE="$launch_release" \
     run_control "$dir" rl28 relaunch --note "continue after publication" > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$prepare" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$prepare" ] || {
+  wait_for_any "$control_pid" "$prepare" || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
     fail "relaunch did not reach trace delivery"
@@ -525,11 +540,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     "$X_LINK" rl28 request-28 --carry-count 1 --carry-ts 1700000000 \
       --carry-platform x --carry-max 280 > "$dir/link.out" 2>&1 &
   link_pid=$!
-  i=0
-  while [ ! -e "$waiting" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
+  wait_for_any "$link_pid" "$waiting" "$ready"
   [ -e "$waiting" ] && [ ! -e "$ready" ] || {
     : > "$launch_release"
     : > "$release"
@@ -538,12 +549,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication() {
     fail "a durable metadata writer was not blocked during relaunch delivery"
   }
   : > "$launch_release"
-  i=0
-  while [ ! -e "$ready" ] && [ "$i" -lt 500 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$ready" ] || {
+  wait_for_any "$link_pid" "$ready" || {
     kill "$link_pid" "$control_pid" 2>/dev/null || true
     wait "$link_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
@@ -1311,7 +1317,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
 }
 
 test_prepublication_failure_keeps_concurrent_durable_metadata() {
-  local dir control_pid link_out rc i=0
+  local dir control_pid link_out rc
   dir=$(new_case rollback-race rl30)
   add_ship_task "$dir" rl30 claude
   printf '%s' "$dir/proj" > "$dir/fake/cwd"
@@ -1319,11 +1325,7 @@ test_prepublication_failure_keeps_concurrent_durable_metadata() {
     run_control "$dir" rl30 relaunch --harness codex --note "preserve concurrent metadata" \
       > "$dir/control.out" &
   control_pid=$!
-  while [ ! -e "$dir/cwd-race-ready" ] && [ "$i" -lt 200 ]; do
-    /bin/sleep 0.01
-    i=$((i + 1))
-  done
-  [ -e "$dir/cwd-race-ready" ] || {
+  wait_for_any "$control_pid" "$dir/cwd-race-ready" || {
     kill "$control_pid" 2>/dev/null || true
     wait "$control_pid" 2>/dev/null || true
     fail "relaunch did not reach its pre-publication endpoint check"
@@ -1608,7 +1610,7 @@ SH
 }
 
 test_concurrent_relaunch_is_refused() {
-  local dir out rc lock holder i
+  local dir out rc lock holder
   dir=$(new_case lock rl19)
   add_ship_task "$dir" rl19 claude
   lock="$dir/home/state/.control-rl19.lock"
@@ -1621,12 +1623,7 @@ test_concurrent_relaunch_is_refused() {
     sleep 30
   ) &
   holder=$!
-  i=0
-  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -e "$lock" ] || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
+  wait_for_any "$holder" "$lock" || { kill "$holder" 2>/dev/null; fail "could not stage a held control lock"; }
   out=$(run_control "$dir" rl19 relaunch --note "concurrent"); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
@@ -1640,7 +1637,7 @@ test_concurrent_relaunch_is_refused() {
 
 # shellcheck disable=SC2031
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
-  local dir out rc lock holder i=0
+  local dir out rc lock holder
   dir=$(new_case spawnlock rl26)
   add_ship_task "$dir" rl26 claude
   printf 'zsh' > "$dir/fake/command"
@@ -1651,11 +1648,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
     sleep 30
   ) &
   holder=$!
-  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -e "$lock" ] || fail "could not stage the lifecycle lock"
+  wait_for_any "$holder" "$lock" || fail "could not stage the lifecycle lock"
   out=$(run_spawn "$dir" rl26 --relaunch --harness claude); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
@@ -1668,7 +1661,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
 
 # shellcheck disable=SC2031
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
-  local dir out rc lock holder i=0
+  local dir out rc lock holder
   dir=$(new_case promotelock rl29)
   add_ship_task "$dir" rl29 claude
   lock="$dir/home/state/.control-rl29.lock"
@@ -1678,11 +1671,7 @@ test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
     sleep 30
   ) &
   holder=$!
-  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
-    sleep 0.1
-    i=$((i + 1))
-  done
-  [ -e "$lock" ] || fail "could not stage the promotion lifecycle lock"
+  wait_for_any "$holder" "$lock" || fail "could not stage the promotion lifecycle lock"
   out=$(FM_HOME="$dir/home" "$PROMOTE" rl29 --mode direct-PR --yolo on 2>&1); rc=$?
   kill "$holder" 2>/dev/null || true
   wait "$holder" 2>/dev/null || true
