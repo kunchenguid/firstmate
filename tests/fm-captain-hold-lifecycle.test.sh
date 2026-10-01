@@ -1444,6 +1444,44 @@ test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home() {
   pass "the completion gate accepts a call held or answered in a registered secondmate home only"
 }
 
+# The same acceptance through the real route: bin/fm-home-seed.sh seeds the
+# secondmate and writes its data/secondmates.md row, the scout's call is held in
+# the main home, and bin/fm-backlog-handoff.sh moves that held row into the
+# secondmate's backlog before the main home tears the scout down.
+test_completion_gate_accepts_a_call_handed_to_a_seeded_secondmate() {
+  local parent mate origin out
+  parent=$(make_home main-handoff)
+  mate="$TMP_ROOT/handoff-mate-home"
+  origin=sample-handoff-proposal
+  FM_SECONDMATE_CHARTER='Sample provider decisions.' FM_HOME="$parent" \
+    "$ROOT/bin/fm-home-seed.sh" handoff-mate "$mate" --no-projects > "$parent/seed.out" 2>&1 \
+    || fail "real secondmate seeding failed: $(cat "$parent/seed.out")"
+  mate=$(cd "$mate" && pwd -P)
+  fm_write_secondmate_meta "$parent/state/handoff-mate.meta" "$mate" \
+    "firstmate:fm-handoff-mate" sample
+  tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
+  run_captain "$parent" hold sample-handoff-call --title "Choose the sample provider" \
+    --reason "captain provider choice pending" --repo sample --origin "$origin" --until 2099-12-31 >/dev/null \
+    || fail "main-home hold creation failed"
+  PATH="$parent/fakebin:$PATH" FM_HOME="$parent" FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$ROOT/bin/fm-backlog-handoff.sh" handoff-mate sample-handoff-call > "$parent/handoff.out" 2>&1 \
+    || fail "handing the captain call to the seeded secondmate failed: $(cat "$parent/handoff.out")"
+  assert_no_grep "sample-handoff-call" "$parent/data/backlog.md" "the handed-off call stayed in the main backlog"
+  run_captain "$mate" open sample-handoff-call >/dev/null \
+    || fail "the handed-off call is not held for the captain in the secondmate home"
+
+  write_scout_with_attested_inventory "$parent" "$origin" sample-handoff-call
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call handed to and held in a seeded secondmate home"
+  out=$(run_captain "$parent" complete "$origin" sample-handoff-call) \
+    || fail "complete refused a call handed to and held in a seeded secondmate home"
+  assert_contains "$out" "sample-handoff-call=handoff-mate" \
+    "complete did not name the seeded secondmate that carries the call"
+  run_teardown "$parent" "$origin" >/dev/null 2> "$parent/handoff-teardown.err" \
+    || fail "scout cleanup refused a call handed to a seeded secondmate: $(cat "$parent/handoff-teardown.err")"
+  pass "the completion gate accepts a call handed to a seeded secondmate through the real handoff"
+}
+
 # Inside a secondmate home a hold and its answer reach the parent channel from
 # the script itself, keyed per hold occurrence, so a re-held task opens and
 # closes a distinct parent decision and a retry never duplicates a line. A main
@@ -4711,6 +4749,7 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home
+test_completion_gate_accepts_a_call_handed_to_a_seeded_secondmate
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
