@@ -56,6 +56,7 @@ lib_eval() {  # <fakebin> <expression>
 # which the whole-args regex cannot anchor (^pi$ never matches a full args line),
 # while an unrelated node script must still never be taken for a harness.
 test_bare_interpreter_harness_token_is_identified() {
+  local trap_dir
   lib_eval "$FAKEBIN" '
     fm_harness_process_matches node "node /home/u/.local/lib/node_modules/@mariozechner/pi/bin/pi --mode rpc" \
       && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
@@ -66,6 +67,18 @@ test_bare_interpreter_harness_token_is_identified() {
     || fail "a node process running a .../bin/claude script was not identified as the claude harness"
   if lib_eval "$FAKEBIN" 'fm_harness_process_matches node "node /opt/some-tool/index.js --port 8080"'; then
     fail "a node process running an unrelated script was identified as a harness"
+  fi
+  # A literal wildcard in the process args must stay a literal: expanding it
+  # against the lock checker's cwd would mis-identify an unrelated node process
+  # whenever that cwd happens to contain a harness-named path.
+  trap_dir="$TMP_ROOT/wildcard-trap"
+  mkdir -p "$trap_dir/pi"
+  : > "$trap_dir/pi/cli.js"
+  if (
+    cd "$trap_dir" || exit 1
+    lib_eval "$FAKEBIN" 'fm_harness_process_matches node "node /opt/tool.js ./*/cli.js"'
+  ); then
+    fail "a node process whose args contain a literal wildcard was identified as a harness via pathname expansion"
   fi
   pass "session-lock: a bare interpreter is identified by a harness path component in any argv token"
 }

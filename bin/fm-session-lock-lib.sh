@@ -84,15 +84,25 @@ fm_harness_process_matches() {  # <comm> <args>
   # Bare interpreter (e.g. node): match a harness path component in any argv
   # token. A full args line like `node /home/.../bin/pi` never matches ^pi$ as a
   # whole string; fm_harness_path_name on each token does (.../bin/pi -> pi).
+  # Word-split only, inside a noglob subshell, so a literal wildcard token
+  # cannot pick up a harness-named path from the lock checker's cwd.
   case "$comm" in
     *node*|*python*)
-      local _tok _name
-      for _tok in $args; do
-        if _name=$(fm_harness_path_name "$_tok"); then
-          case "$_name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
-          return 0
-        fi
-      done
+      local _name
+      if _name=$(
+        set -f
+        # shellcheck disable=SC2086 # intentional IFS split of the ps args blob
+        for _tok in $args; do
+          if _n=$(fm_harness_path_name "$_tok"); then
+            printf '%s' "$_n"
+            exit 0
+          fi
+        done
+        exit 1
+      ); then
+        case "$_name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
