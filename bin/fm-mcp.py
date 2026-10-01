@@ -10,8 +10,9 @@ own rules decide what happens next. Each such note's body starts with the line
 "[via firstmate MCP from <client> <version>]", naming the client from its
 initialize handshake (or "unknown client"), so firstmate can tell it from a note
 the captain typed and tell Claude Desktop from Claude Code. The client's
-request_id is stored prefixed with a short hash of that client name, so two
-clients reusing one request_id get separate notes; the caller sees its own id.
+request_id is stored prefixed with a short hash of the client name (not its
+version), so two clients reusing one request_id get separate notes; the caller
+sees its own id, from both firstmate_send_note and firstmate_note_replies.
 
 Usage:
   fm-mcp.py            serve MCP over stdin/stdout (newline-delimited JSON-RPC)
@@ -54,6 +55,7 @@ MARKER = "[via firstmate MCP from {client}]"
 # The client named in initialize's clientInfo, so firstmate can tell Claude Desktop
 # ("claude-ai") from Claude Code. Client-supplied, so it is flattened and capped.
 CLIENT = "unknown client"
+PREFIX = hashlib.sha256(b"").hexdigest()[:8] + "-"
 REPLIES = 20
 
 INSTRUCTIONS = (
@@ -113,8 +115,7 @@ def send_note(message, request_id):
         raise ToolError("message is empty")
     if not REQUEST_ID.fullmatch(request_id):
         raise ToolError(f"invalid request_id: {request_id!r} (1-119 of A-Za-z0-9._:-)")
-    stored = hashlib.sha256(CLIENT.encode()).hexdigest()[:8] + "-" + request_id
-    note = json.loads(run("fm-inbox.sh", "note", "--request-id", stored, "--json", "-",
+    note = json.loads(run("fm-inbox.sh", "note", "--request-id", PREFIX + request_id, "--json", "-",
                           stdin=MARKER.format(client=CLIENT) + "\n" + message))
     note["request_id"] = request_id
     return json.dumps(note)
@@ -136,12 +137,19 @@ def note_replies(note_id=None, after=None):
         if cursor and not after:
             receipts["omitted"].append({"surface": "older replies omitted",
                                         "reveal": "pass note_id to read one note's reply"})
-        return json.dumps(receipts)
-    receipts = json.loads(run("fm-inbox.sh", "receipts", "--all-pending", "--all-handled"))
+        return json.dumps(own_request_ids(receipts))
+    receipts = own_request_ids(json.loads(run("fm-inbox.sh", "receipts", "--all-pending", "--all-handled")))
     for note in receipts["pending"] + receipts["handled"]:
         if note["id"] == note_id:
             return json.dumps(note)
     raise ToolError(f"no note with id {note_id!r}")
+
+
+def own_request_ids(receipts):
+    for note in receipts["pending"] + receipts["handled"]:
+        if (note.get("request_id") or "").startswith(PREFIX):
+            note["request_id"] = note["request_id"][len(PREFIX):]
+    return receipts
 
 
 def newest_page_cursor():
@@ -296,12 +304,13 @@ def call_tool(params):
 
 
 def handle(msg):
-    global CLIENT
+    global CLIENT, PREFIX
     method, params = msg.get("method"), msg.get("params") or {}
     if method == "initialize":
         info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
         label = " ".join(str(info[k]) for k in ("name", "version") if info.get(k))
         CLIENT = re.sub(r"[^\w .:@/+-]", "", label)[:80].strip() or "unknown client"
+        PREFIX = hashlib.sha256(str(info.get("name") or "").encode()).hexdigest()[:8] + "-"
         asked = params.get("protocolVersion")
         return {
             "protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],

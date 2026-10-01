@@ -16,7 +16,7 @@ A home file is never read through a symlink or from outside `FM_HOME`, so a syml
 The script header lists each tool and the command or file it wraps.
 
 `request_id` is required and chosen by the client, one per note, so a client retrying a failed or timed-out call with the same id still produces exactly one note.
-The server stores it prefixed with a short hash of the client name, so Claude Desktop and Claude Code reusing the same id still get separate notes; the response returns the caller's own id unchanged.
+The server stores it prefixed with a short hash of the client name (not its version, so a retry after the client updates still replays), so Claude Desktop and Claude Code reusing the same id still get separate notes; `firstmate_send_note` and `firstmate_note_replies` both return the caller's own id unchanged.
 Sessions of the same app share one client name, so the tool asks for a fresh UUID per note.
 Replies arrive asynchronously through `fm-inbox.sh reply` and are read back with `firstmate_note_replies`; without a `note_id` or `after` cursor it asks `fm-inbox.sh receipts` for only the newest 20 replies (fewer when a re-answered note left a gap in the reply sequence), and each call's `reply_cursor` passed back as `after` returns only newer ones.
 

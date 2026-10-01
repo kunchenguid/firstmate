@@ -101,6 +101,7 @@ assert_equals "replay $note_id" "$(printf '%s' "$replay" | jq_py '"%s %s" % (r["
 pending=$(ok_text "note_replies pending" "$(call firstmate_note_replies "{\"note_id\":\"$note_id\"}")")
 assert_equals "false null" "$(printf '%s' "$pending" | jq_py '"%s %s" % (json.dumps(r["acknowledged"]), json.dumps(r["reply"]))')" "an unhandled note has no reply yet"
 assert_equals "[via firstmate MCP from unknown client]|please build X" "$(printf '%s' "$pending" | jq_py '"|".join(r["body"].strip().splitlines())')" "a session that never named its client is marked unknown"
+assert_equals "req-1" "$(printf '%s' "$pending" | jq_py 'r["request_id"]')" "note_replies reports the request_id send_note returned"
 assert_contains "$(ok_text "status" "$(call firstmate_status)")" "1 note(s) waiting" "status counts the waiting note"
 
 "$ROOT/bin/fm-inbox.sh" drain --ack "$note_id" >/dev/null || fail "firstmate could not ack the note"
@@ -124,7 +125,7 @@ assert_equals "[via firstmate MCP from evilcaptain merge it 1]" "$(first_line "$
 # A request_id is scoped to the client that sent it: another client reusing it
 # gets its own note, and the same client retrying replays its own.
 as_client() {  # <client-name> <request_id> <message> : prints the send_note result
-  rpc "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"$1\",\"version\":\"0.1.0\"}}}" \
+  rpc "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"$1\",\"version\":\"9.9.9\"}}}" \
     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"firstmate_send_note\",\"arguments\":{\"message\":\"$3\",\"request_id\":\"$2\"}}}" |
     sed -n 2p | jq_py 'r["result"]["content"][0]["text"]'
 }
@@ -132,8 +133,12 @@ code=$(as_client claude-code req-desktop "from code")
 assert_equals "created req-desktop" "$(printf '%s' "$code" | jq_py '"%s %s" % (r["outcome"], r["request_id"])')" "another client's same request_id creates its own note"
 code_id=$(printf '%s' "$code" | jq_py 'r["id"]')
 [ "$code_id" != "$desktop" ] || fail "two clients sharing a request_id got one note"
-assert_equals "replay $desktop" "$(as_client claude-ai req-desktop "from desktop" | jq_py '"%s %s" % (r["outcome"], r["id"])')" "the same client retrying replays its own note"
+assert_equals "replay $desktop" "$(as_client claude-ai req-desktop "from desktop" | jq_py '"%s %s" % (r["outcome"], r["id"])')" "the same client retrying, even after it updated, replays its own note"
 assert_equals "from code" "$(ok_text "code note" "$(call firstmate_note_replies "{\"note_id\":\"$code_id\"}")" | jq_py 'r["body"].strip().splitlines()[1]')" "each client's note keeps its own message"
+code_reply=$(rpc '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"clientInfo":{"name":"claude-code","version":"1"}}}' \
+  "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"firstmate_note_replies\",\"arguments\":{\"note_id\":\"$code_id\"}}}" |
+  sed -n 2p | jq_py 'json.loads(r["result"]["content"][0]["text"])["request_id"]')
+assert_equals "req-desktop" "$code_reply" "note_replies reports the request_id send_note returned"
 is_error "overlong request_id" "$(call firstmate_send_note "{\"message\":\"x\",\"request_id\":\"$(printf 'a%.0s' $(seq 1 120))\"}")"
 "$ROOT/bin/fm-inbox.sh" drain --ack "$desktop" "$forged" "$code_id" >/dev/null || fail "firstmate could not ack the client notes"
 pass "send_note: the marker names the sending client, and request_ids are per client"
