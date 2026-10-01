@@ -335,7 +335,21 @@ test_runs_under_set_u_without_bashpid() {
   pass 'fm_exec_timed runs under set -u where BASHPID may be unset'
 }
 
+test_subshell_without_bashpid_watches_the_script_not_its_parent() {
+  # The launcher exits at once while the script lives on; the script, not its
+  # parent, owns the bound, so the command must not be torn down with it.
+  local dir i
+  dir=$(mktemp -d)
+  sh -c '/bin/bash -c '\''set -u; . "$1/bin/fm-timeout-lib.sh"; ( fm_exec_timed 10 1 sh -c "sleep 1; echo ran > \"$2/ran\"" ); echo $? > "$2/rc"'\'' _ "$1" "$2" >/dev/null 2>&1 & sleep 0.3' _ "$ROOT" "$dir"
+  for i in $(seq 1 100); do [ -s "$dir/rc" ] && break; sleep 0.1; done
+  [ "$(cat "$dir/rc" 2>/dev/null)" = 0 ] || fail "a subshell caller's command was killed when the script's parent exited (rc=$(cat "$dir/rc" 2>/dev/null))"
+  [ "$(cat "$dir/ran" 2>/dev/null)" = ran ] || fail "a subshell caller's command did not run to completion"
+  rm -rf "$dir"
+  pass "fm_exec_timed in a subshell keeps the command alive after the script's parent exits"
+}
+
 test_runs_under_set_u_without_bashpid
+test_subshell_without_bashpid_watches_the_script_not_its_parent
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
