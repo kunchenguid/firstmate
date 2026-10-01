@@ -15,6 +15,8 @@ const state = {
   requestGeneration: 0,
   taskRequestGeneration: 0,
   taskLoading: false,
+  taskLoaded: false,
+  taskLoadError: "",
   taskSelectionGeneration: 0,
   taskDocumentLoading: null,
   taskDocumentContent: null,
@@ -62,7 +64,26 @@ const elements = {
   taskDocumentRendered: document.getElementById("task-document-rendered"),
   taskDocumentSource: document.getElementById("task-document-source"),
   closeTask: document.getElementById("close-task"),
+  openTaskReport: document.getElementById("open-task-report"),
 };
+
+const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const displayTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: DISPLAY_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+function displayTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "" : `${displayTimeFormatter.format(date)} UTC+8`;
+}
 
 function setStatus(message, error = false) {
   elements.status.textContent = message;
@@ -103,6 +124,8 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskSelectionGeneration += 1;
   state.taskRequestGeneration += 1;
   state.taskLoading = false;
+  state.taskLoaded = false;
+  state.taskLoadError = "";
   state.taskDocumentLoading = null;
   elements.token.value = "";
   elements.rememberToken.checked = false;
@@ -328,7 +351,7 @@ function renderEntry(entry) {
   card.dataset.type = type;
   card.dataset.search = `${role} ${type} ${entry.raw ?? ""}`.toLowerCase();
   if (entry.error) card.classList.add("error");
-  fragment.querySelector("time").textContent = timestampOf(value) ? new Date(timestampOf(value)).toLocaleString() : `byte ${entry.offset}`;
+  fragment.querySelector("time").textContent = timestampOf(value) ? displayTime(timestampOf(value)) : `byte ${entry.offset}`;
   fragment.querySelector(".role").textContent = role;
   fragment.querySelector(".type").textContent = type;
   fragment.querySelector(".event-summary").textContent = summaryOf(value, entry);
@@ -451,7 +474,7 @@ async function loadReport({ resetDisplay = false } = {}) {
       elements.report.querySelector(".report-source pre").textContent = body.content;
       state.reportContent = body.content;
     }
-    setStatus(`${body.size.toLocaleString()} bytes · updated ${new Date(body.modifiedAt).toLocaleString()}`);
+    setStatus(`${body.size.toLocaleString()} bytes · updated ${displayTime(body.modifiedAt)}`);
   } catch (error) {
     if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) setStatus(error.message, true);
   } finally {
@@ -477,6 +500,15 @@ const taskGroups = [
 
 function taskMatches(task, query) {
   return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""}`.toLowerCase().includes(query);
+}
+
+function taskEmptyMessage(query, loadedMessage) {
+  if (!state.taskLoaded) {
+    if (state.taskLoading) return "Loading task status…";
+    if (state.taskLoadError) return `Task loading failed: ${state.taskLoadError}`;
+    return "Connect to load task status.";
+  }
+  return query ? "No matching tasks." : loadedMessage;
 }
 
 function taskCard(task) {
@@ -512,7 +544,7 @@ function renderTaskDashboard() {
     const name = document.createElement("span");
     name.textContent = label;
     const value = document.createElement("strong");
-    value.textContent = String(count);
+    value.textContent = state.taskLoaded ? String(count) : "—";
     counter.append(name, value);
     elements.taskCounts.append(counter);
 
@@ -528,7 +560,7 @@ function renderTaskDashboard() {
     if (!matches.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = query ? "No matching tasks." : "No tasks in this category.";
+      empty.textContent = taskEmptyMessage(query, "No tasks in this category.");
       list.append(empty);
     }
     group.append(heading, list);
@@ -546,6 +578,7 @@ function renderTaskDetail() {
   elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");
   elements.taskDetailWait.hidden = !task.wait;
   elements.taskDetailWait.textContent = task.wait || "";
+  elements.openTaskReport.hidden = task.documentType !== "report";
 }
 
 function clearTaskDocument(message) {
@@ -604,23 +637,34 @@ async function loadTasks() {
   if (!state.token || state.taskLoading) return;
   const requestGeneration = ++state.taskRequestGeneration;
   state.taskLoading = true;
+  state.taskLoadError = "";
+  elements.taskStatus.textContent = state.taskLoaded ? "Refreshing task status…" : "Loading task status…";
+  renderSessions();
   try {
     const body = await api("/api/tasks");
     if (requestGeneration !== state.taskRequestGeneration) return;
     state.tasks = body.tasks;
+    state.taskLoaded = true;
     if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
       state.selectedTaskId = null;
       state.taskSelectionGeneration += 1;
       clearTaskDocument("");
     }
     renderSessions();
-    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${new Date(body.generatedAt).toLocaleString()}${body.warning ? ` · ${body.warning}` : ""}`;
+    const cacheLabel = body.cacheHit ? ` · cached ${Math.round(body.cacheAgeMs / 1000)}s ago` : "";
+    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${body.warning ? ` · ${body.warning}` : ""}`;
   } catch (error) {
     if (requestGeneration !== state.taskRequestGeneration) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
-    else elements.taskStatus.textContent = error.message;
+    else {
+      state.taskLoadError = error.message;
+      elements.taskStatus.textContent = error.message;
+    }
   } finally {
-    if (requestGeneration === state.taskRequestGeneration) state.taskLoading = false;
+    if (requestGeneration === state.taskRequestGeneration) {
+      state.taskLoading = false;
+      if (state.taskLoadError) renderSessions();
+    }
   }
 }
 
@@ -642,7 +686,7 @@ function renderSessions() {
     if (!matches.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = "No matching tasks.";
+      empty.textContent = taskEmptyMessage(query, "No matching tasks.");
       elements.sessions.append(empty);
     }
     renderTaskDashboard();
@@ -659,7 +703,7 @@ function renderSessions() {
     name.textContent = session.label;
     const metadata = document.createElement("small");
     const sourceLabel = session.source === "short" ? "Short agent" : session.source === "supervisor" ? "Supervisor" : "Task report";
-    metadata.textContent = `${sourceLabel} · ${new Date(session.modifiedAt).toLocaleString()} · ${session.bytes.toLocaleString()} B`;
+    metadata.textContent = `${sourceLabel} · ${displayTime(session.modifiedAt)} · ${session.bytes.toLocaleString()} B`;
     button.append(name, metadata);
     button.addEventListener("click", () => selectSession(session));
     elements.sessions.append(button);
@@ -727,6 +771,13 @@ elements.closeTask.addEventListener("click", () => {
   state.selectedTaskId = null;
   state.taskSelectionGeneration += 1;
   renderTaskDashboard();
+});
+elements.openTaskReport.addEventListener("click", () => {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  if (task?.documentType !== "report") return;
+  elements.source.value = "report";
+  showSelectedView();
+  selectSession({ source: "report", id: task.id, label: task.id });
 });
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
 elements.source.addEventListener("change", showSelectedView);

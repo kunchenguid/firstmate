@@ -16,7 +16,7 @@
 // data/<task>/{report.md,brief.md} files are eligible as content artifacts.
 
 import { timingSafeEqual } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import http from "node:http";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -32,6 +32,10 @@ const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
 const TASK_DISPOSITION_TIMEOUT_MS = 15000;
+const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
+
+let taskOverviewCache = null;
+let taskOverviewInFlight = null;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -400,6 +404,32 @@ function taskOverview(home, roots, codeRoot) {
   };
 }
 
+async function cachedTaskOverview(home, roots, codeRoot) {
+  const now = Date.now();
+  if (taskOverviewCache
+    && taskOverviewCache.home === home
+    && taskOverviewCache.codeRoot === codeRoot
+    && now - taskOverviewCache.servedAt < TASK_OVERVIEW_CACHE_TTL_MS) {
+    return { ...taskOverviewCache.body, cacheHit: true, cacheAgeMs: now - taskOverviewCache.servedAt };
+  }
+  if (!taskOverviewInFlight) {
+    const workerEnvironment = { ...process.env, FM_HOME: home, FM_JSONL_VIEWER_TASK_WORKER: "1" };
+    delete workerEnvironment.FM_JSONL_VIEWER_TOKEN;
+    delete workerEnvironment.FM_JSONL_VIEWER_TOKEN_FILE;
+    taskOverviewInFlight = new Promise((resolve, reject) => {
+      execFile(process.execPath, [fileURLToPath(import.meta.url), "--task-overview-worker", "--home", home], {
+        encoding: "utf8",
+        env: workerEnvironment,
+        timeout: FLEET_SNAPSHOT_TIMEOUT_MS,
+        maxBuffer: 32 * 1024 * 1024,
+      }, (error, stdout) => error ? reject(error) : resolve(JSON.parse(stdout)));
+    }).finally(() => { taskOverviewInFlight = null; });
+  }
+  const body = await taskOverviewInFlight;
+  taskOverviewCache = { home, codeRoot, servedAt: Date.now(), body };
+  return { ...body, cacheHit: false, cacheAgeMs: 0 };
+}
+
 function resolveSelection(roots, source, id) {
   if (source === "short" && /^short-[a-f0-9]{64}$/.test(id)) {
     const directory = join(roots.short || "", id);
@@ -643,8 +673,10 @@ function serve() {
       roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
     });
     if (url.pathname === "/api/tasks") {
-      try { return json(res, 200, taskOverview(home, roots, codeRoot)); }
-      catch { return json(res, 503, { error: "task overview is temporarily unavailable" }); }
+      cachedTaskOverview(home, roots, codeRoot)
+        .then(body => json(res, 200, body))
+        .catch(() => json(res, 503, { error: "task overview is temporarily unavailable" }));
+      return;
     }
     if (url.pathname === "/api/events") {
       const result = readEvents(roots, url.searchParams.get("source") || "", url.searchParams.get("id") || "", url.searchParams);
@@ -669,4 +701,17 @@ function serve() {
   });
 }
 
-serve();
+function runTaskOverviewWorker() {
+  const options = parseArgs(process.argv.slice(2).filter(argument => argument !== "--task-overview-worker"));
+  const home = realpathSync(options.home);
+  const roots = {
+    short: existingRoot(home, ["state", "short-agents"]),
+    supervisor: existingRoot(home, ["state", "branch-session"]),
+    reports: existingRoot(home, ["data"]),
+  };
+  const codeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  process.stdout.write(JSON.stringify(taskOverview(home, roots, codeRoot)));
+}
+
+if (process.argv.includes("--task-overview-worker")) runTaskOverviewWorker();
+else serve();
