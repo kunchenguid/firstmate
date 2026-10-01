@@ -23,6 +23,7 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
+unset PI_CODING_AGENT_DIR
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
@@ -959,6 +960,74 @@ assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  
 assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "the sibling Pi account reads that same schema 5 row"
 cp "$LANE_RULES" "$RULES"
 pass "exact openai-codex wins over healthy codex-home; schema 5 still joins by provider"
+
+PI_ACCOUNT_HOME="$TMP_ROOT/pi-account-home"
+PI_ORDINARY_ROOT="$PI_ACCOUNT_HOME/.pi/agent"
+PI_OTHER_ROOT="$TMP_ROOT/pi-other-account"
+PI_ALIAS="$TMP_ROOT/pi home alias"
+PI_PIN="$HOME_DIR/config/pi-account"
+SCHEMA6_PI_HOME="$TMP_ROOT/schema6-pi-home.json"
+mkdir -p "$PI_ORDINARY_ROOT" "$PI_OTHER_ROOT"
+ln -s "$PI_ORDINARY_ROOT" "$PI_ALIAS"
+jq '.providers |= map(if .provider == "codex" then .provider = "pi" else . end)' "$SCHEMA6_HOME" > "$SCHEMA6_PI_HOME"
+for harness in pi pi-signed; do
+  jq --arg harness "$harness" '.rules[0].use[0].harness = $harness' "$HOME_RULES" > "$RULES"
+  for account_case in ambient-home ordinary absolute alias alternate ambient-alternate; do
+    rm -f "$PI_PIN"
+    ambient_root=$PI_OTHER_ROOT
+    expected_helper="$harness openai-codex/gpt-5.6-sol"
+    expected_code=0
+    case "$account_case" in
+      ambient-home) ambient_root=$PI_ORDINARY_ROOT ;;
+      ordinary) printf 'ordinary\nopenai-codex\n' > "$PI_PIN" ;;
+      absolute) printf '%s\nopenai-codex\n' "$PI_ORDINARY_ROOT" > "$PI_PIN" ;;
+      alias) printf '%s\nopenai-codex\n' "$PI_ALIAS" > "$PI_PIN" ;;
+      alternate)
+        printf '%s\nopenai-codex\n' "$PI_OTHER_ROOT" > "$PI_PIN"
+        ambient_root=$PI_ORDINARY_ROOT
+        expected_helper=none
+        expected_code=1
+        ;;
+      ambient-alternate) expected_helper=none; expected_code=1 ;;
+    esac
+    reset_log
+    HOME="$PI_ACCOUNT_HOME" PI_CODING_AGENT_DIR="$ambient_root" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_HOME" run code out err "$BRIEF"
+    expect_code 0 "$code" "$harness $account_case resolves"
+    if [ "$expected_code" = 0 ]; then
+      assert_contains "$out" "candidate: $harness:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=97%" "$harness $account_case reads home quota"
+      assert_contains "$out" "  profile: --harness '$harness' --model 'openai-codex/gpt-5.6-sol'" "$harness $account_case selects the home candidate"
+    else
+      assert_contains "$out" "candidate: $harness:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked:" "$harness $account_case cannot borrow home quota"
+      assert_not_contains "$out" '  profile:' "$harness $account_case has no rankable candidate"
+    fi
+    helper_out=$(HOME="$PI_ACCOUNT_HOME" PI_CODING_AGENT_DIR="$ambient_root" FM_HOME="$HOME_DIR" \
+      bash "$ROOT/bin/fm-quota-choose.sh" --snapshot "$SCHEMA6_PI_HOME" --candidate "$harness:openai-codex/gpt-5.6-sol")
+    helper_code=$?
+    expect_code "$expected_code" "$helper_code" "$harness $account_case helper exit"
+    assert_equals "$expected_helper" "$helper_out" "$harness $account_case helper respects the selected root"
+  done
+
+  printf '%s\nopenai-codex\n' "$PI_OTHER_ROOT" > "$PI_PIN"
+  for snapshot in "$SCHEMA6_BOTH" "$SCHEMA6_DEFAULT_ONLY" "$SCHEMA5_HOME"; do
+    reset_log
+    HOME="$PI_ACCOUNT_HOME" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$snapshot" run code out err "$BRIEF"
+    expect_code 0 "$code" "$harness alternate account boundary snapshot exits 0"
+    case "$snapshot" in
+      "$SCHEMA6_BOTH") evidence='scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' ;;
+      "$SCHEMA6_DEFAULT_ONLY") evidence='-> eligible, unranked:' ;;
+      "$SCHEMA5_HOME") evidence='scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' ;;
+    esac
+    assert_contains "$out" "candidate: $harness:openai-codex/gpt-5.6-sol  provider=codex  $evidence" "$harness pin preserves exact-row precedence, no default fallback, and schema 5"
+  done
+  jq --arg harness "$harness" '.rules[0].use[0] = {harness: $harness, model: "codex-native/gpt-6-astra", provider: "codex", effort: "ultra"}' "$HOME_RULES" > "$RULES"
+  reset_log
+  HOME="$PI_ACCOUNT_HOME" TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_HOME" run code out err "$BRIEF"
+  expect_code 0 "$code" "$harness native adapter with a Pi pin exits 0"
+  assert_contains "$out" "  profile: --harness '$harness' --model 'codex-native/gpt-6-astra' --effort 'ultra'" "$harness native adapter quota is independent of the Pi root"
+  rm -f "$PI_PIN"
+done
+cp "$LANE_RULES" "$RULES"
+pass "Pi home quota fallback respects worker account roots in both quota consumers"
 
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
