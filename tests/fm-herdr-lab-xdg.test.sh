@@ -66,6 +66,7 @@ case "$1 ${2:-}" in
     plugdir="${XDG_CONFIG_HOME:-$HOME/.config}/herdr/plugins"
     mkdir -p "$plugdir"
     printf '%s\n' "$3" > "$plugdir/$(basename "$3").link"
+    printf 'HOME=%s\n' "$HOME" >> "$FM_FAKE_HERDR_LOG"
     printf 'XDG_CONFIG_HOME=%s\n' "${XDG_CONFIG_HOME:-<unset>}" >> "$FM_FAKE_HERDR_LOG"
     printf 'XDG_DATA_HOME=%s\n' "${XDG_DATA_HOME:-<unset>}" >> "$FM_FAKE_HERDR_LOG"
     printf 'XDG_STATE_HOME=%s\n' "${XDG_STATE_HOME:-<unset>}" >> "$FM_FAKE_HERDR_LOG"
@@ -184,7 +185,56 @@ test_isolated_provision_observes_live_default() {
   pass "fm-herdr-lab: --isolated-xdg snapshots fleet state with the caller XDG so the live default is observed"
 }
 
+test_explicit_fleet_home_preserves_private_runtime() {
+  local name="fm-lab-home-$$" fleet="$TMP_ROOT/fleet-home" plugin="$TMP_ROOT/home-plugin" out
+  mkdir -p "$fleet" "$plugin"
+  export FM_FAKE_HERDR_REAL_CONFIG="$fleet/.config"
+  if out=$(lab_cli --isolated-xdg provision "$name" 2>&1); then
+    fail "private HOME falsely observed the fleet"
+  fi
+  assert_contains "$out" "exactly one running default" "wrong private-HOME refusal"
+  : > "$FAKE_LOG"
+  export FM_HERDR_LAB_FLEET_HOME="$fleet"
+  XDG_CONFIG_HOME="$TMP_ROOT/wrong-config" lab_cli --isolated-xdg provision "$name" \
+    || fail "explicit fleet HOME did not observe actual default"
+  lab_cli --isolated-xdg run "$name" plugin link "$plugin" >/dev/null || fail "private runtime failed"
+  assert_contains "$(cat "$FAKE_LOG")" "HOME=$FAKE_HOME" "runtime adopted fleet HOME"
+  assert_present "$TRIPWIRES/$name.xdg/config/herdr/plugins/home-plugin.link" "runtime adopted fleet XDG"
+  assert_absent "$fleet/.config/herdr/plugins/home-plugin.link" "runtime wrote fleet plugin registry"
+  lab_cli --isolated-xdg stop "$name" || fail "guarded stop failed"
+  local other="$TMP_ROOT/other-fleet"
+  mkdir -p "$other"
+  if out=$(FM_HERDR_LAB_FLEET_HOME="$other" lab_cli --isolated-xdg teardown "$name" 2>&1); then
+    fail "unverifiable default accepted during teardown"
+  fi
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "failed tripwire lost ownership"
+  lab_cli --isolated-xdg teardown "$name" || fail "unchanged-default teardown failed"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "teardown retained tripwire"
+  unset FM_HERDR_LAB_FLEET_HOME FM_FAKE_HERDR_REAL_CONFIG
+  pass "fm-herdr-lab: explicit fleet HOME observes default without adopting runtime context"
+}
+
+test_invalid_fleet_home_refuses() {
+  local value name out
+  for value in '' relative "$TMP_ROOT/missing-home"; do
+    name="fm-lab-invalid-home-$$"
+    : > "$FAKE_LOG"
+    if out=$(FM_HERDR_LAB_FLEET_HOME="$value" lab_cli --isolated-xdg provision "$name" 2>&1); then
+      fail "invalid fleet HOME provision succeeded"
+    fi
+    assert_contains "$out" "cannot read Herdr sessions" "invalid context did not refuse tripwire"
+    if rg -q '^server |^session stop |^session delete ' "$FAKE_LOG"; then
+      fail "invalid fleet HOME reached lifecycle mutation"
+    fi
+    assert_absent "$TRIPWIRES/$name.fleet-state.json" "invalid context retained ownership"
+  done
+  pass "fm-herdr-lab: empty, relative and missing fleet HOME refuse before lifecycle mutation"
+}
+
 test_isolated_lab_links_inside_lab_only
 test_default_behavior_still_inherits_caller_xdg
 test_help_names_the_flag
 test_isolated_provision_observes_live_default
+
+test_explicit_fleet_home_preserves_private_runtime
+test_invalid_fleet_home_refuses
