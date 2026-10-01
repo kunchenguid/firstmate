@@ -942,6 +942,35 @@ tests/fm-afk-return.test.sh
 tests/fm-branch-supervision.test.sh
 ```
 
+### Kiro primary away cycle
+
+This supports [Away](../supervision-host.md#away) beside a Kiro primary and the Kiro entries of the [afk skill](../../.agents/skills/afk/SKILL.md): on a home with `config/supervision-host`, the captain's away message writes the record and starts no away daemon, the host's engine merges a green pull request under away authority while main stays parked, and the captain's next message archives the record.
+It was measured on 2026-10-01 at 10:49 UTC on Linux with kiro-cli 2.24.1 (`claude-sonnet-5`) as the primary, launched through `bin/fm-kiro-primary.sh` on a private tmux socket, and Claude Code 2.1.283 as the engine (`sonnet`).
+The pull request lives on a lab-only fake forge (`gh` and `gh-axi` on the lab's `PATH`) in a repository that does not exist on GitHub.
+
+```text
+$ FM_KIRO_AFK_HOST_LIVE_E2E=1 FM_KIRO_LIVE_MODEL=claude-sonnet-5 bash tests/fm-kiro-afk-host-live-e2e.test.sh
+ok - a real Kiro primary published its endpoint from its first prompt
+ok - the afk message wrote the away-posture record and launched no away daemon
+ok - the doorbell owner runs the supervision host for the parked Kiro primary
+ok - a real engine turn merged the green PR under away authority and logged it under the captain's words
+ok - main stayed parked: no doorbell, no note, no turn, and the host is still parked
+ok - the captain's return archived the record and reported the merge
+ok - cleanup left no lab process or lab Kiro session
+```
+
+The forge logged `pr merge 7 --repo fm-lab-invalid/demo --match-head-commit <verified head> --squash`, and the merging turn's outcome opened with `per your away instructions: merged the demo PR`.
+The three away engine turns (the stand-in worker's wait, its idle pane, and the ready line) cost $0.19, $0.09, and $0.14.
+
+Without `config/supervision-host` a Kiro home still runs the away daemon, whose composer guard reads the supervisor pane under the primary's harness.
+On the idle kiro-cli 2.24.1 pane of the same lab, `fm_backend_composer_state` read `pending` with no harness and `empty` with `kiro-cli`, and the daemon's `pane_input_pending` read `empty` for a `kiro-cli` primary and `pending` for a `codex` one.
+
+Deterministic entry point:
+
+```sh
+tests/fm-daemon.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

@@ -3037,6 +3037,43 @@ test_inject_msg_herdr_composer_guard_defers() {
   pass "inject_msg: herdr composer-guard defers before ever attempting a submit"
 }
 
+# The 29/09 and 30/09 Kiro away nights: every digest deferred as
+# "composer not confirmed-empty (state=pending)" because the guard read Kiro's
+# bright idle placeholder without the primary's harness identity. The guard
+# must classify the composer as the primary harness it serves: the same idle
+# Kiro screen injects for a kiro-cli primary and still defers for any other.
+test_inject_msg_kiro_idle_placeholder_is_harness_scoped() {
+  local dir state fakebin capture harness rc
+  dir=$(make_supercase inject-kiro-idle)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  capture="$dir/pane.txt"
+  afk_enter "$state"
+  for harness in kiro-cli codex; do
+    printf '%s\n' 'transcript line' '› ask a question or describe a task ↵' \
+      '                                                 /sessions to resume · /copy to clipboard' > "$capture"
+    rc=0
+    (
+      pane_is_busy() { return 1; }
+      fm_backend_send_text_submit() { printf '%s\n' "$3" > "$dir/submitted-$harness"; printf 'empty'; }
+      PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURSOR_Y=1 \
+        FM_DAEMON_PRIMARY_HARNESS=$harness LOG="$dir/log-$harness" \
+        FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET=fakepane \
+        inject_msg "done: PR https://example.test/pull/11 checks green" "$state"
+    ) || rc=$?
+    printf '%s\n' "$rc" > "$dir/rc-$harness"
+  done
+  [ "$(cat "$dir/rc-kiro-cli")" = 0 ] \
+    || fail "an idle Kiro composer deferred the digest for a kiro-cli primary: $(cat "$dir/log-kiro-cli" 2>/dev/null)"
+  grep -F 'done: PR https://example.test/pull/11 checks green' "$dir/submitted-kiro-cli" >/dev/null \
+    || fail "the kiro-cli primary was not typed the digest"
+  [ "$(cat "$dir/rc-codex")" != 0 ] || fail "the Kiro placeholder injected for a primary that is not kiro-cli"
+  [ ! -e "$dir/submitted-codex" ] || fail "text was typed into a composer another harness reads as pending"
+  grep -F 'composer not confirmed-empty (state=pending' "$dir/log-codex" >/dev/null \
+    || fail "the non-Kiro deferral did not name the pending composer: $(cat "$dir/log-codex" 2>/dev/null)"
+  pass "inject_msg: an idle Kiro composer injects for a kiro-cli primary and still defers for another harness"
+}
+
 test_inject_msg_herdr_pane_gone_defers() {
   local dir state
   dir=$(make_supercase inject-herdr-gone)
@@ -3246,6 +3283,7 @@ test_pane_is_busy_defaults_to_tmux_when_backend_omitted
 test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
+test_inject_msg_kiro_idle_placeholder_is_harness_scoped
 test_inject_msg_herdr_pane_gone_defers
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown

@@ -414,5 +414,6 @@ Each arm owner's own suite covers its host mode against a stub host.
 | `tests/fm-supervision-host-live-e2e.test.sh` | Runs a real engine turn; opt-in because it spends tokens. |
 | `tests/fm-host-mirror-live-e2e.test.sh` | Proves the Claude and Cursor mirror writers against the real harnesses; opt-in because it spends tokens. |
 | `tests/fm-kiro-host-mirror-live-e2e.test.sh` | Proves the Kiro mirror writer against a real Kiro primary from its first prompt; opt-in because it spends tokens. |
+| `tests/fm-kiro-afk-host-live-e2e.test.sh` | Runs a whole away cycle on a real Kiro primary: the afk message writes the record with no daemon, a real engine merges a green PR on a fake forge while main stays parked, and the return archives the record; opt-in because it spends tokens. |
 
 [verification/supervision.md](verification/supervision.md#supervision-host) records the dated live results.

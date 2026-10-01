@@ -676,7 +676,10 @@ mark_escalated_seen() {  # <state> <captured-endpoint-file>
 # This rendered reader applies only to the supervisor pane during away-mode
 # injection. It never classifies a recorded worker task. The detected primary
 # harness selects exactly one signature, so output from another harness cannot
-# make the primary read busy.
+# make the primary read busy. The composer read carries the same harness,
+# because some primaries' idle placeholders are empty only under their own
+# identity: Kiro's bright `ask a question or describe a task` reads as typed
+# text without it, which deferred every away digest on a Kiro primary.
 #
 # A daemon launched in its own terminal (bin/fm-afk-launch.sh) is outside the
 # captain's process tree, so the launcher names the captain's harness in
@@ -707,9 +710,13 @@ pane_is_busy() {  # <target> [backend]
 # pane_input_pending dispatches through fm_backend_composer_state and treats
 # every verdict except exact empty as unsafe. inject_msg reads the full verdict
 # directly and applies the same positive-proof boundary.
-pane_input_pending() {  # <target> [backend]
+supervisor_composer_state() {  # <target> [backend]
   local target=$1 backend=${2:-tmux}
-  [ "$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)" != empty ]
+  fm_backend_composer_state "$backend" "$target" '' "$(fm_daemon_primary_harness)" 2>/dev/null
+}
+
+pane_input_pending() {  # <target> [backend]
+  [ "$(supervisor_composer_state "$@")" != empty ]
 }
 
 task_window_backend() {  # <window> <state>
@@ -1443,7 +1450,7 @@ inject_msg() {  # <message> [state]
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
-  #      composer. The shared classifier (fm_backend_composer_state ->
+  #      composer. The shared classifier (supervisor_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
   #      for real unsubmitted text (a human's half-typed line, or a swallowed
   #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
@@ -1451,7 +1458,7 @@ inject_msg() {  # <message> [state]
   #      target - typing the escalation into a shell could execute it - so defer
   #      on anything that is not affirmatively 'empty'. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
-  composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
+  composer=$(supervisor_composer_state "$target" "$backend")
   if [ "$composer" != empty ]; then
     INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     log "inject $INJECT_LAST_FAILURE"

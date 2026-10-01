@@ -359,6 +359,7 @@ family_for_basename() {
     fm-launch-prompt-signals-live-e2e.test.sh|\
     fm-kiro-resume-live-e2e.test.sh|fm-kiro-primary-live-e2e.test.sh|\
     fm-kiro-host-mirror-live-e2e.test.sh|fm-kiro-supervision-host-live-e2e.test.sh|\
+    fm-kiro-afk-host-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-worker-account-live-e2e.test.sh|\
