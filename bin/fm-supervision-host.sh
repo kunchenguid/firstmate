@@ -578,10 +578,17 @@ retire_successor() {
 # Hand the close to main: stop the successor cycle, print the close, why, and
 # any further "supervision-host:" lines, and exit.
 exit_to_main() {  # <why> [further lines]
+  local lines=${2:-} rc=0
   retire_successor
+  if [ -n "$SUCCESSOR_GENERATION" ] \
+    && ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime >/dev/null 2>&1; then
+    log_line "to-main	downtime-unrestored	$1"
+    lines=${lines:+$lines$'\n'}"supervision-host: watcher downtime could not be restored for the main hand-back"
+    rc=1
+  fi
   log_line "to-main	$1"
-  emit "supervision-host: $1" "${2:-}"
-  exit 0
+  emit "supervision-host: $1" "$lines"
+  exit "$rc"
 }
 
 # The outcome store (bin/fm-branch-outcome.sh) owns and validates these rows.

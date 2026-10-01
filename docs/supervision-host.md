@@ -227,7 +227,8 @@ The captain row is still durable, and the next drain presents it until it is ack
 ## Failure direction
 
 Every path that cannot finish a wake the engine took hands that wake to main, with one `supervision-host: <why>` line after the close.
-Before handing it back, the host stops its successor cycle.
+Before handing a confirmed handling generation back, the host stops its successor cycle and explicitly republishes downtime.
+That publication is required even when the successor already exited, because no watcher cleanup remains to make the close deliverable to the arm owner.
 So the owner's next arm starts from the same state as without the host, and the wake stays durable in the queue.
 
 ### Paths that hand the wake back

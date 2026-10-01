@@ -537,6 +537,13 @@ if [ "$ACTIONABLE" -eq 1 ]; then
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 2
   fi
+  if [ "$HOST_MODE" -eq 1 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+    printf 'firstmate watcher auto-arm FAILED - the supervision host returned an actionable wake, but its rewake could not be committed.\n' >&2
+    if autoarm_commit failed "$FAILURE_NOTICE"; then
+      [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+      exit 2
+    fi
+  fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
