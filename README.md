@@ -119,6 +119,7 @@ Start `omp` with this checkout as its working directory: it auto-discovers the t
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+Pi's `/fm-agents` command opens a current, read-only agent overview; keyboard navigation works in either TUI mode, while row clicking is available in fullscreen mode, and the second menu offers only guarded message and keyed-wait actions.
 The `/calm` toggle on Pi, and on Claude Code behind its default-off early-access function-hooks flag, hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 Calm changes only presentation, not the user-role delivery, ordering, authority, persistence, or exports of the operational inputs it hides.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.

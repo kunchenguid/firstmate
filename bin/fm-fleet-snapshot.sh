@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # fm-fleet-snapshot.sh - structured fleet snapshot with observational caching.
 #
-# Output contract: `--json` prints one object with schema
-# `fm-fleet-snapshot.v1`.
-# The command does not acquire the session lock, drain wakes, arm watchers,
-# mutate backlog state, or write reports. Its default ledger collector may
+# Output contracts: `--json` prints one object with schema `fm-fleet-snapshot.v1`;
+# `--agent-overview` prints only fresh task rows with schema `fm-agent-overview.v1`.
+# Neither mode acquires the session lock, drains wakes, arms watchers, mutates
+# backlog state, or writes reports. The default JSON ledger collector may
 # atomically refresh parent-side cached copies of remote home summaries under
 # state/secondmate-summary-cache; those observational cache writes are its only
-# fleet-state mutation.
+# fleet-state mutation. The agent-overview mode skips that collector and
+# contribution projection, making it suitable for a read-only UI.
 #
 # Top-level fields:
 #   schema: stable schema id.
@@ -233,6 +234,7 @@ esac
 usage() {
   cat <<'EOF'
 usage: fm-fleet-snapshot.sh --json
+       fm-fleet-snapshot.sh --agent-overview
        fm-fleet-snapshot.sh --secondmate-home-summary
 
 Print a structured snapshot of the firstmate fleet.
@@ -241,6 +243,11 @@ refreshes only its parent-side remote-summary cache as an observational side eff
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
 without worker observations or cross-home collection.
+
+--agent-overview emits {schema,generated,tasks} only, using the same captured
+metadata, current-state, and keyed-open-decision evidence as --json. It skips
+backlog projection, contribution collection, and cross-home summary collection,
+and does not refresh observational caches.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -289,6 +296,7 @@ EOF
 OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
+  --agent-overview) OUTPUT_MODE=agent-overview ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
   --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
@@ -1972,7 +1980,10 @@ scout_report_lines() {
     | jq -s 'sort_by(.id)'
 }
 
-BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+BACKLOG_JSON=null
+if [ "$OUTPUT_MODE" != agent-overview ]; then
+  BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+fi
 contribution_tasks_json() {
   local meta id merge_authority
   for meta in "$STATE"/*.meta; do
@@ -1996,6 +2007,11 @@ if [ "$OUTPUT_MODE" = contribution-input ]; then
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+if [ "$OUTPUT_MODE" = agent-overview ]; then
+  jq -n --arg generated "$SNAPSHOT_NOW" --argjson tasks "$TASKS_JSON" \
+    '{schema:"fm-agent-overview.v1",generated:$generated,tasks:$tasks}'
+  exit 0
+fi
 
 JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
   || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
