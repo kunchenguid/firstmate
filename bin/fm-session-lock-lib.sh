@@ -55,6 +55,32 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Print the harness name carried by one bare-interpreter argv token, or return 1.
+#
+# fm_harness_path_name alone is too wide here: ps joins argv with spaces, so a
+# path containing whitespace becomes a later relative fragment such as
+# pi/file.js, which still has a harness path component. Require the token to be
+# a real launch shape: basename is the harness word (.../bin/pi, bare pi) or a
+# conventional CLI entry under a harness directory (.../pi/cli.js). Absolute and
+# relative forms both count. Kept outside fm_harness_process_matches because
+# stock macOS Bash 3.2 cannot parse a case/;; nested inside $().
+fm_harness_argv_token_name() {  # <token>
+  local tok=$1 name base
+  name=$(fm_harness_path_name "$tok") || return 1
+  base=$(basename -- "$tok")
+  if [ "$base" = "$name" ]; then
+    printf '%s' "$name"
+    return 0
+  fi
+  case "$base" in
+    cli|cli.js|cli.mjs|cli.cjs|cli.ts|cli.py)
+      printf '%s' "$name"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -65,9 +91,10 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python): each argv token via fm_harness_path_name
-#      (so node .../bin/pi or .../pi/cli.js matches), then the existing full-args
-#      FM_HARNESS_RE fallback.
+#   3. a bare interpreter (node, python): each argv token via
+#      fm_harness_argv_token_name (so node .../bin/pi, bin/pi, or .../pi/cli.js
+#      matches; a space-split fragment like pi/file.js does not), then the
+#      existing full-args FM_HARNESS_RE fallback.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -83,11 +110,13 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match a harness path component in any argv
-  # token. A full args line like `node /home/.../bin/pi` never matches ^pi$ as a
-  # whole string; fm_harness_path_name on each token does (.../bin/pi -> pi).
-  # Word-split only, inside a noglob subshell, so a literal wildcard token
-  # cannot pick up a harness-named path from the lock checker's cwd.
+  # Bare interpreter (e.g. node): match a harness launch path in any argv token.
+  # A full args line like `node /home/.../bin/pi` never matches ^pi$ as a whole
+  # string; fm_harness_argv_token_name on each token does (.../bin/pi -> pi,
+  # .../pi/cli.js -> pi) without treating a space-split fragment like pi/file.js
+  # as a launch path. Word-split only, inside a noglob subshell, so a literal
+  # wildcard token cannot pick up a harness-named path from the lock checker's
+  # cwd.
   case "$comm" in
     *node*|*python*)
       local _name
@@ -95,7 +124,7 @@ fm_harness_process_matches() {  # <comm> <args>
         set -f
         # shellcheck disable=SC2086 # intentional IFS split of the ps args blob
         for _tok in $args; do
-          if _n=$(fm_harness_path_name "$_tok"); then
+          if _n=$(fm_harness_argv_token_name "$_tok"); then
             printf '%s' "$_n"
             exit 0
           fi

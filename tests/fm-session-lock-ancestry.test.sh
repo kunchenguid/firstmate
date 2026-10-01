@@ -89,6 +89,29 @@ test_bare_interpreter_harness_token_is_identified() {
   ); then
     fail "a node process whose args contain a literal wildcard was identified as a harness via pathname expansion"
   fi
+  # A path with an embedded space is flattened by ps into separate words. The
+  # trailing fragment must not become a harness launch path on its own.
+  if lib_eval "$FAKEBIN" 'fm_harness_process_matches node "node /opt/reports/report pi/file.js"'; then
+    fail "a node process whose path contains whitespace was identified as a harness via a split path fragment"
+  fi
+  # Relative launch paths still count (bin/pi, packages/pi/cli.js), as do bare
+  # harness words - greptile rejected a prefix-only filter that dropped these.
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node bin/pi --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process running bin/pi was not identified as a harness"
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node packages/pi/cli.js --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process running packages/pi/cli.js was not identified as a harness"
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node ./bin/pi --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process running ./bin/pi was not identified as a harness"
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node pi --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process whose script token is the bare harness word was not identified"
   pass "session-lock: a bare interpreter is identified by a harness path component in any argv token"
 }
 
