@@ -351,6 +351,34 @@ test_pr_based_dod_requires_non_draft() {
   pass "fm-brief.sh: PR-based done requires a non-draft PR; a deliberate draft declares a wait"
 }
 
+# PR-based ships must complete the shared local verification contract before
+# publishing or handing work to no-mistakes, while local-only work has no PR.
+test_pr_dod_requires_local_verification() {
+  local home id brief
+  home="$TMP_ROOT/local-verification-home"
+  mkdir -p "$home/data"
+  for mode in direct-PR no-mistakes; do
+    id="brief-local-verification-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode brief was not scaffolded"
+    assert_grep 'Before any push, PR creation, or no-mistakes handoff, load `local-browser-verification` and complete its contract.' "$brief" \
+      "$mode brief omitted the pre-publication verification contract"
+    assert_grep 'missing credentials or a local environment is a blocker rather than a skipped check.' "$brief" \
+      "$mode brief allowed missing local verification prerequisites to be skipped"
+    assert_grep "$home/data/$id/local-verification.md" "$brief" \
+      "$mode brief omitted the private local verification evidence path"
+  done
+  id="brief-local-verification-local-only"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep 'local-browser-verification' "$brief" \
+    "local-only brief received the PR publication contract"
+  assert_present "$ROOT/.agents/skills/local-browser-verification/SKILL.md" \
+    "the local verification skill is missing"
+  pass "fm-brief.sh: PR-based delivery requires local verification before publication"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -1399,6 +1427,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_pr_dod_requires_local_verification
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
