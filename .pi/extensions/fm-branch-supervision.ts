@@ -2952,7 +2952,7 @@ ${context.command}
           .filter((seq) => seq <= through && !loadedOutcomeSequences.has(seq));
         if (missingEvidence.length > 0) {
           return {
-            content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first with fm_branch_outcomes sequences=${missingEvidence.join(",")}` }],
+            content: [{ type: "text", text: `acknowledgement refused: load exact durable outcome evidence first for sequences=${missingEvidence.join(",")} using the retrieval method named in the active processing request` }],
             details: undefined,
             isError: true,
           };

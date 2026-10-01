@@ -6652,7 +6652,7 @@ if (!largeVisible.find((entry) => entry.data.task === unicodeOver.id)?.data.summ
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.task === unicodeOver.id).length !== 1) throw new Error("notification retry duplicated an oversized visible outcome");
 const largeSeqs = largeVisible.map((entry) => entry.data.seq).sort((a, b) => a - b);
 const refusedLargeAck = await acknowledge.execute("ack-reference-before-load", { through: Math.max(...largeSeqs) }, undefined, undefined, {});
-if (!refusedLargeAck.isError || !refusedLargeAck.content[0].text.includes("load exact durable outcome evidence first")) throw new Error("reference-only results bypassed the evidence-load acknowledgement gate");
+if (!refusedLargeAck.isError || !refusedLargeAck.content[0].text.includes("using the retrieval method named in the active processing request") || refusedLargeAck.content[0].text.includes("with fm_branch_outcomes")) throw new Error("reference-only results bypassed the evidence-load acknowledgement gate or received impossible recovery guidance");
 await fire("agent_settled", {}, defaultSessionCtx);
 await settle(() => requests().length === 4, "reference-only ShortTask re-presentation");
 const repeatedReference = requests().at(-1).message.content;
