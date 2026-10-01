@@ -645,6 +645,10 @@ github_read_required_contexts() {
         error("branch payload is unreadable")
       elif .protected == false then
         empty
+      elif .protection.required_status_checks == null then
+        # Protected by review/other rules with no classic required checks is
+        # readable emptiness, not an unreadable producer source.
+        empty
       elif (.protection.required_status_checks | type) != "object" then
         error("branch protection summary is unreadable")
       else

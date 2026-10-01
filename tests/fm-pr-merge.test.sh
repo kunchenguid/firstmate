@@ -3662,7 +3662,9 @@ test_unreadable_required_set_refuses() {
         printf 'gh: Not Found (HTTP 404)\n' > "$case_dir/github-branch-fail"
         ;;
       branch-shape)
-        printf '{"name":"main","protected":true}\n' > "$case_dir/github-branch.json"
+        # Non-null, non-object required_status_checks is unreadable; null/absent
+        # means "no classic required checks" and is handled separately below.
+        printf '{"name":"main","protected":true,"protection":{"required_status_checks":"bogus"}}\n' > "$case_dir/github-branch.json"
         ;;
       rules-read-fails)
         printf 'gh: Not Found (HTTP 404)\n' > "$case_dir/github-required-rules-fail"
@@ -3715,6 +3717,24 @@ test_unreadable_required_set_refuses() {
     "required-plan-gated-classic-absent: the unreported classic check was not named"
   pass "fm-pr-merge refuses when the required checks cannot be read, and tells a plan without rules apart"
 }
+
+# A branch protected only by review rules can report protected:true with
+# required_status_checks:null. That is readable emptiness for classic checks,
+# not an unreadable producer that must refuse the merge.
+test_protected_without_classic_required_checks_allows() {
+  local case_dir head
+  head=a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
+  case_dir=$(make_case github-protected-no-classic-checks)
+  add_gh_mocks "$case_dir" "$head"
+  printf '{"name":"main","protected":true,"protection":{"enabled":true,"required_status_checks":null}}\n' \
+    > "$case_dir/github-branch.json"
+  printf '[{"type":"deletion"}]\n' > "$case_dir/github-required-rules.json"
+  run_required_case "$case_dir" 96
+  expect_code 0 "$RC" "protected-no-classic: null required_status_checks must not refuse: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 96 example/repo --squash
+  pass "fm-pr-merge treats protected+null classic required checks as no classic requirements"
+}
+
 
 test_allow_missing_waives_only_the_named_unreported_check() {
   local case_dir head
@@ -3880,6 +3900,7 @@ test_required_check_that_never_reported_refuses
 test_required_checks_reported_and_green_merge
 test_red_and_unreported_checks_are_reported_together
 test_unreadable_required_set_refuses
+test_protected_without_classic_required_checks_allows
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
