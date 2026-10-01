@@ -7,7 +7,7 @@ It does not expose arbitrary paths, follow symlinks, modify a journal, or offer 
 ## Start the viewer
 
 Create an unpredictable token with at least 16 bytes in a private file, then run the server from the tracked Firstmate checkout.
-The server requires the token file to be absolute, owned by the current user, mode `0600` or stricter, regular, and not a symlink.
+The server requires the token file to be absolute, owned by the current user, regular, not a symlink, and grant no permissions to group or other users.
 It does not print the token or put it in a URL.
 
 ```sh
@@ -22,7 +22,8 @@ node bin/fm-jsonl-viewer.mjs
 
 The default listener is `0.0.0.0:17847`.
 Override it with `--host` and `--port`, or `FM_JSONL_VIEWER_HOST` and `FM_JSONL_VIEWER_PORT`.
-Binding to every interface can expose private conversations and tool output to the network, so keep the token private and place any durable deployment behind the host's existing network controls.
+The server provides plain HTTP without TLS termination.
+Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
 
 Open `http://SERVER:17847/`, enter the token in the page, and choose a journal.
 The token stays in page memory and is sent only in the `Authorization` header for journal APIs.

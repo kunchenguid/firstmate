@@ -7,8 +7,8 @@
 //     node bin/fm-jsonl-viewer.mjs [--host 0.0.0.0] [--port 17847]
 //
 // The token is accepted only through a protected file or the environment and
-// is never printed. A token file must be absolute, owned by this user, mode
-// 0600 or stricter, regular, and not a symlink.
+// is never printed. A token file must be absolute, owned by this user, regular,
+// not a symlink, and grant no permissions to group or other users.
 // Static UI assets contain no private data; every discovery/read endpoint
 // requires Authorization: Bearer <token>. Only regular, non-symlink JSONL files
 // below state/short-agents and state/branch-session are eligible.
