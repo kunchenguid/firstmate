@@ -53,6 +53,10 @@ fm_quota_pi_home_matches() {
   . "${BASH_SOURCE[0]%/*}/fm-worker-account-lib.sh"
   selection=$(fm_worker_account_resolve pi "$1") || return 2
   [ -n "$selection" ] || return 1
+  case " ${selection##*$'\t'} " in
+    *" openai-codex "*) ;;
+    *) return 1 ;;
+  esac
   root=${selection#*$'\t'}
   root=${root%%$'\t'*}
   [ "$root" = "$ordinary" ] || [ "$root" -ef "$ordinary" ]
