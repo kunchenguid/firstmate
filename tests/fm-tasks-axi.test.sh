@@ -227,6 +227,69 @@ test_wrapper_refuses_add_start() {
   pass "fm-tasks-axi.sh refuses add --start while plain add and start <id> pass through"
 }
 
+# A note rewrite composes on top of a read, so a read that failed must never
+# look like an empty note: the incident this guards against was a script that
+# kept going after its JSON parser choked on `show --full --json`, composed only
+# the new text, and replaced five notes with it.
+test_note_rewrite_refuses_a_failed_read() {
+  local dir out rc before
+  dir=$(make_split note-rewrite)
+  wrapper_from_code "$dir" add nr-1 "noted" --body $'first line\n  indented line' >/dev/null \
+    || fail "add nr-1 failed"
+
+  out=$(wrapper_from_code "$dir" show nr-1 --full --json 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "show --json"
+  assert_contains "$out" "note-show" "the show --json refusal did not name note-show"
+
+  out=$(wrapper_from_code "$dir" note-show missing-id 2>/dev/null)
+  rc=$?
+  expect_code 1 "$rc" "note-show of an unknown id"
+  assert_equals "" "$out" "a failed note-show printed a note"
+
+  # The incident shape: the failed read left an empty "seen" note and the new
+  # note carries only the new text.
+  : > "$dir/code/seen-failed.md"
+  printf 'only the new text\n' > "$dir/code/new-only.md"
+  before=$(cat "$dir/home/data/backlog.md")
+  out=$(wrapper_from_code "$dir" note-rewrite nr-1 --body-file new-only.md \
+    --expect-body-file seen-failed.md 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "note-rewrite on a failed read"
+  assert_contains "$out" "refusing to rewrite" "the failed-read refusal did not explain itself"
+  assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "a refused rewrite changed the backlog"
+
+  out=$(wrapper_from_code "$dir" note-rewrite missing-id --body-file new-only.md \
+    --expect-body-file seen-failed.md 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "note-rewrite of an unknown id"
+  assert_contains "$out" "without a confirmed read" "an unreadable note was not refused as such"
+
+  wrapper_from_code "$dir" note-show nr-1 > "$dir/code/seen.md" || fail "note-show nr-1 failed"
+  assert_equals $'first line\n  indented line' "$(cat "$dir/code/seen.md")" "note-show did not print the note exactly"
+  printf ' \n\n' > "$dir/code/blank.md"
+  out=$(wrapper_from_code "$dir" note-rewrite nr-1 --body-file blank.md --expect-body-file seen.md 2>&1)
+  rc=$?
+  expect_code 2 "$rc" "note-rewrite with an empty note"
+  assert_equals "$before" "$(cat "$dir/home/data/backlog.md")" "an empty rewrite changed the backlog"
+
+  { cat "$dir/code/seen.md"; printf '\nadded line\n'; } > "$dir/code/new.md"
+  wrapper_from_code "$dir" note-rewrite nr-1 --body-file new.md --expect-body-file seen.md >/dev/null \
+    || fail "a rewrite composed from a confirmed read was refused"
+  assert_equals $'first line\n  indented line\n\nadded line' "$(wrapper_from_code "$dir" note-show nr-1)" \
+    "the rewritten note did not read back"
+  assert_grep "indented line" "$dir/home/data/note-archive.md" "the previous note was not archived"
+
+  out=$(wrapper_from_code "$dir" note-rewrite nr-1 --body-file new-only.md --expect-body-file seen.md 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "note-rewrite against a stale read"
+  assert_contains "$(wrapper_from_code "$dir" note-show nr-1)" "added line" "a stale rewrite replaced the note"
+
+  wrapper_from_code "$dir" add nr-dash "dash" --body "-" >/dev/null || fail "add nr-dash failed"
+  assert_equals "-" "$(wrapper_from_code "$dir" note-show nr-dash)" "a note that is exactly - read as empty"
+  pass "note-rewrite refuses a failed, stale, or empty read and archives the note it replaces"
+}
+
 test_wrapper_single_home() {
   local dir
   dir="$TMP_ROOT/single-wrapper"
@@ -249,6 +312,7 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refusals
   test_wrapper_refuses_add_start
   test_wrapper_single_home
+  test_note_rewrite_refuses_a_failed_read
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi
