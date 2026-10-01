@@ -3681,18 +3681,84 @@ test_declared_required_checks_do_not_weaken_app_binding() {
   pass "fm-pr-merge keeps forge app bindings when a local declaration names the same check"
 }
 
+# Execute the public merge entrypoint with real permission failures, not a
+# mocked file probe. State/data remain accessible while the declaration cannot
+# be read or inspected; green validate and plan-unavailable rules must not merge.
+test_inaccessible_required_check_declarations_refuse() {
+  local case_dir head source variant config file blocked
+  head=d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8d8
+  for source in home override; do
+    for variant in directory file ancestor; do
+      case_dir=$(make_case "declared-required-inaccessible-$source-$variant")
+      add_gh_mocks "$case_dir" "$head"
+      write_github_rollup_json "$case_dir" "$head" "$(check_run validate COMPLETED SUCCESS)"
+      printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\n' \
+        > "$case_dir/github-required-rules-fail"
+      config="$case_dir/home/config"
+      if [ "$source" = override ]; then
+        config="$case_dir/custom-config"
+        mkdir "$config"
+      fi
+      file="$config/required-checks"
+      printf 'example/repo autofirma/local-mac-gate\n' > "$file"
+      case "$variant" in
+        directory) blocked=$config ;;
+        file) blocked=$file ;;
+        ancestor)
+          mkdir "$case_dir/hidden"
+          mv "$config" "$case_dir/hidden/config"
+          ln -s "$case_dir/hidden/config" "$config"
+          blocked="$case_dir/hidden"
+          ;;
+      esac
+      chmod 000 "$blocked"
+      if [ "$variant" = file ]; then
+        [ ! -r "$file" ] || fail "inaccessible-$source-$variant: fixture is still readable"
+      else
+        { [ ! -e "$file" ] && [ ! -L "$file" ]; } \
+          || fail "inaccessible-$source-$variant: fixture is still inspectable"
+      fi
+      if [ "$source" = override ]; then
+        FM_CONFIG_OVERRIDE="$config" run_required_case "$case_dir" 119
+      else
+        run_required_case "$case_dir" 119
+      fi
+      chmod 755 "$blocked"
+      expect_code 1 "$RC" "inaccessible-$source-$variant: declarations must refuse: $(cat "$case_dir/stderr")"
+      assert_grep "required-check declarations in $file could not be read" "$case_dir/stderr" \
+        "inaccessible-$source-$variant: missing declaration diagnostic"
+      assert_no_grep 'pr merge' "$case_dir/gh.log" \
+        "inaccessible-$source-$variant: inaccessible declarations reached merge"
+      assert_no_grep 'verified: ' "$case_dir/stderr" \
+        "inaccessible-$source-$variant: inaccessible declarations claimed a verified head"
+    done
+  done
+  pass "fm-pr-merge refuses unreadable declarations and inaccessible paths in both config locations"
+}
+
 test_declared_required_checks_file_states() {
   local case_dir head variant expected
   head=d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7
-  for variant in empty comments directory dangling; do
+  for variant in absent absent-config empty comments symlink directory dangling not-directory loop; do
     case_dir=$(make_case "declared-required-file-$variant")
     add_gh_mocks "$case_dir" "$head"
     expected=0
     case "$variant" in
+      absent) ;;
+      absent-config) rmdir "$case_dir/home/config" ;;
       empty) : > "$case_dir/home/config/required-checks" ;;
       comments) printf ' # local checks\n\t\n' > "$case_dir/home/config/required-checks" ;;
+      symlink)
+        printf 'example/repo ci\n' > "$case_dir/declarations"
+        ln -s "$case_dir/declarations" "$case_dir/home/config/required-checks" ;;
       directory) mkdir "$case_dir/home/config/required-checks"; expected=1 ;;
       dangling) ln -s "$case_dir/absent" "$case_dir/home/config/required-checks"; expected=1 ;;
+      not-directory)
+        rmdir "$case_dir/home/config"
+        printf 'not a directory\n' > "$case_dir/home/config"; expected=1 ;;
+      loop)
+        rmdir "$case_dir/home/config"
+        ln -s config "$case_dir/home/config"; expected=1 ;;
     esac
     run_required_case "$case_dir" 118
     expect_code "$expected" "$RC" "declared-file-$variant: $(cat "$case_dir/stderr")"
@@ -4011,6 +4077,8 @@ test_allow_missing_follows_the_allow_red_rules() {
   [ ! -s "$case_dir/glab.log" ] || fail "gitlab-allow-missing: glab ran despite the waiver"
   pass "fm-pr-merge --allow-missing is single use, attended-only, and GitHub-only like --allow-red"
 }
+
+test_inaccessible_required_check_declarations_refuse
 
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once

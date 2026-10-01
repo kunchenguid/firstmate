@@ -636,12 +636,19 @@ FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
   local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
-  local declared='' declaration_json declaration_error file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/required-checks"
+  local declared='' declaration_present declaration_json declaration_error file="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/required-checks"
   FM_PR_GITHUB_REQUIRED='[]'
   FM_PR_GITHUB_REQUIRED_ERROR=
   branch_path=$(github_urlencode_path_segment "$base")
 
-  if [ -e "$file" ] || [ -L "$file" ]; then
+  # Shell file tests also return false on inspection errors, not just absence.
+  if ! declaration_present=$(perl -MErrno=ENOENT -e '
+    if (lstat $ARGV[0]) { print 1 }
+    elsif ($! == ENOENT) { print 0 }
+    else { exit 1 }
+  ' -- "$file" 2>/dev/null); then
+    FM_PR_GITHUB_REQUIRED_ERROR="required-check declarations in $file could not be read"
+  elif [ "$declaration_present" = 1 ]; then
     if [ ! -f "$file" ] || [ ! -r "$file" ] \
       || ! declaration_json=$(jq -Rsc --arg repo "$PR_OWNER/$PR_REPO" --arg file "$file" '
         split("\n") | to_entries
