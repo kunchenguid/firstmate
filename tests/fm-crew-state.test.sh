@@ -5333,11 +5333,11 @@ test_competing_live_runs_report_unknown_with_both_ids() {
   pass 'competing live runs report unknown with both run ids'
 }
 
-# The AXI overview can surface a historical row before the active current run
-# when an old run was updated by its stale PR being closed. The current branch
-# status identifies the active run, so crew-state must not trust the overview's
-# row order and report the stale PR state, even when both ledger rows share a
-# minute-level timestamp.
+# Overview order A (historical-first / reversed): AXI can surface a historical
+# row before the active current run when an old run was updated by its stale PR
+# being closed. The current branch status identifies the active run, so
+# crew-state must not trust the overview's row order and report the stale PR
+# state, even when both ledger rows share a minute-level timestamp.
 test_current_active_run_beats_stale_overview_row() {
   reset_fakes
   local d old_head new_head out
@@ -5368,9 +5368,10 @@ branch_sync:
   pass 'active current run beats a stale overview row'
 }
 
-# A bare AXI status can lag the creation-ordered overview and name an older
-# live run. That historical identity must not hide the overview's newer
-# completed result.
+# Overview order B (recorded newer-first): a bare AXI status can lag the
+# creation-ordered overview and name an older live run. That historical
+# identity must not hide the overview's newer completed result, including when
+# both ledger rows share a minute-level timestamp (row order is the tie-break).
 test_older_live_status_does_not_hide_newer_completed_run() {
   reset_fakes
   local d new_head old_head out
@@ -5389,8 +5390,11 @@ runs[2]{id,branch,status,head,pr}:
   FM_FAKE_AXI_STATUS="$(run_running fm/reused-branch | sed 's/01RUN/01OLD/')"
   FM_FAKE_AXI_STATUS_RUN_01OLD="$FM_FAKE_AXI_STATUS"
   FM_FAKE_AXI_STATUS_RUN_01NEW="$(FM_FAKE_RUN_HEAD=$new_head run_passed fm/reused-branch | sed 's/01RUN/01NEW/')"
+  # Same-minute timestamps: ledger row order (newest-first) is the tie-break,
+  # matching recorded AXI overviews. The bare status naming the older live run
+  # must not hide the newer completed result.
   FM_FAKE_RUNS_LIST="  completed fm/reused-branch ${new_head:0:7} 2026-09-28 12:00
-  running fm/reused-branch ${old_head:0:7} 2026-09-28 11:00"
+  running fm/reused-branch ${old_head:0:7} 2026-09-28 12:00"
   out=$(run_crew_state "$d" reused)
   assert_contains "$out" 'state: done' 'the newer completed run remains authoritative'
   assert_contains "$out" '01NEW' 'the newer run identity is reported'
