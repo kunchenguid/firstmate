@@ -2660,7 +2660,7 @@ while :; do
   # orchestrator's wake queue. Surface complete mailbox lines through the same
   # durable queue the primary already consumes; .inbox.seen remains the
   # primary's acknowledgement and is advanced only after it handles a line.
-  web_inbox_pending=1
+  web_inbox_pending=0
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-web-inbox.sh" pending >/dev/null 2>&1 || web_inbox_pending=$?
   if [ "$web_inbox_pending" -eq 0 ]; then

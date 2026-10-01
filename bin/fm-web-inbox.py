@@ -12,7 +12,7 @@ from pathlib import Path
 
 def fail(message: str) -> "NoReturn":
     print(f"fm-web-inbox: {message}", file=sys.stderr)
-    raise SystemExit(1)
+    raise SystemExit(2)
 
 
 def state_dir() -> Path:

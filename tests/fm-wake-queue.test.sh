@@ -129,6 +129,9 @@ PY
   rm "$state/.inbox.seen"
   ln -s "$dir/missing" "$state/.inbox.seen"
   if FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" drain >/dev/null 2>&1; then fail "symlink cursor must be refused"; fi
+  pending=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WEB_INBOX" pending >/dev/null 2>&1 || pending=$?
+  [ "$pending" -eq 2 ] || fail "unsafe mailbox state must be distinguishable from an empty mailbox"
   pass "browser mailbox reads complete rows, orders acknowledgements, and writes correlated replies"
 }
 
