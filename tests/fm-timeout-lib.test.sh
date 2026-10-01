@@ -327,6 +327,15 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+test_runs_under_set_u_without_bashpid() {
+  # bash 3.2 has no BASHPID; /bin/bash is that shell on macOS.
+  local rc=0 out
+  out=$(/bin/bash -c 'set -u; . "$1/bin/fm-timeout-lib.sh"; fm_exec_timed 2 1 true' _ "$ROOT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed aborted under set -u (rc=$rc): $out"
+  pass 'fm_exec_timed runs under set -u where BASHPID may be unset'
+}
+
+test_runs_under_set_u_without_bashpid
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
