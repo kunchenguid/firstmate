@@ -37,7 +37,7 @@ An unresolved retired-task row remains available here without making unrelated r
 Treat the merged fleet event as already handled for fleet operations: MAIN must not re-drain, re-run, or acknowledge it.
 Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
 Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
-[Delegated task continuation](../pi-supervision-branch.md#delegated-task-continuation) owns task-local opt-in, preliminary evidence checks and the MAIN final-acceptance boundary.
+[Live task continuation](../pi-supervision-branch.md#live-task-continuation) owns original-row progress, actionable MAIN reminders and the MAIN final-acceptance boundary.
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.

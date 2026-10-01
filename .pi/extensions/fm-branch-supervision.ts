@@ -91,7 +91,7 @@ import {
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
-import { installTaskContinuation, type TaskContinuationOffer } from "./lib/fm-task-continuation.ts";
+import { installTaskContinuation } from "./lib/fm-task-continuation.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
@@ -2104,103 +2104,6 @@ ${context.command}
     return delivery;
   }
 
-  // Continuations have canonical lifecycle reservations, never wake queue rows.
-  // Reuse branchChain so these and ordinary wake prompts cannot overlap.
-  function offerTaskContinuation(offer: TaskContinuationOffer): boolean {
-    if (shuttingDown || resetInProgress || afkActive() || branchBroken || !generationOwnsLockSync(generation)) return false;
-    const acceptedGeneration = generation;
-    const selection = branchSelectionRevision;
-    const trace = (stage: string, reason: string) => appendBranchRoutingTrace(state, {
-      token: offer.admission, actor: "branch", stage, reason, trigger: "continuation",
-      generation: acceptedGeneration, selectionRevision: selection,
-    }, pi.events);
-    trace("admission", "accepted");
-    const delivery = branchChain.then(async () => {
-      if (acceptedGeneration !== generation || selection !== branchSelectionRevision ||
-          !(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver replaced");
-      const read = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", offer.task], { env: scriptEnv });
-      if (read.status !== 0) throw new Error(read.stderr || "continuation lifecycle read refused");
-      const record = JSON.parse(read.stdout);
-      if (["goal_revision", "brief_sha256", "execution_generation"].some((key) => record[key] !== offer.record[key]) ||
-          record.delegation?.revision !== offer.record.delegation?.revision || record.delegation?.revoked ||
-          Date.parse(record.delegation?.expires_at || "") <= Date.now() || record.disposition !== "open") {
-        throw new Error("delegation identity changed before branch receipt");
-      }
-      const branchForTask = await ensureBranch(acceptedGeneration);
-      const { session, sessionManager } = branchForTask;
-      await flushMirror(session, acceptedGeneration);
-      if (!(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver lost ownership");
-      const currentContext = taskContinuationContext(record);
-      const entryId = sessionManager.appendCustomEntry("fm-task-continuation-admission", {
-        task: offer.task, admission: offer.admission, observation: offer.observation,
-        goal_revision: record.goal_revision, delegation_revision: record.delegation.revision,
-        execution_generation: record.execution_generation, generation: acceptedGeneration,
-        ...currentContext,
-      });
-      const sessionFile = sessionManager.getSessionFile();
-      if (!sessionFile || !sessionManager.getEntries().some((entry) => entry.id === entryId)) throw new Error("branch admission was not retained");
-      let receipted = false;
-      recordContinuationReceipt = () => {
-        if (receipted) return;
-        // Cold Pi sessions flush only after the first assistant response.
-        // In-memory append is not a durable delivery receipt.
-        if (!existsSync(sessionFile)) return;
-        const entry = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean)
-          .map((line) => JSON.parse(line)).find((entry) => entry.id === entryId);
-        if (entry?.customType !== "fm-task-continuation-admission" || entry.data?.admission !== offer.admission) {
-          throw new Error("branch admission persistence conflict");
-        }
-        offer.delivered({ sessionFile, entryId, generation: acceptedGeneration });
-        receipted = true;
-      };
-      recordContinuationReceipt();
-      const before = durableReportRevision;
-      const entryOffset = sessionManager.getEntries().length;
-      wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
-      branchTaskBindings = { [offer.task]: taskBinding(record) };
-      branchTaskObservations = { [offer.task]: { key: offer.observation.key,
-        state: offer.observation.state, reason: offer.observation.reason } };
-      branchTaskAdmissionRevisions = { [offer.task]: record.revision };
-      branchTaskAdmissionSnapshots = { [offer.task]: taskContinuationSnapshot(record) };
-      continuationToolsRemaining = 8;
-      const timeout = setTimeout(() => { void session.abort(); }, 120_000);
-      trace("prompt", "started");
-      try {
-        await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
-          `Admission ${offer.admission}. This is not a queue wake: do not drain/ack queue rows.\n` +
-          `The admission below contains the canonical refresh/observation plus the bounded current assessment and next action. Do not repeat inspect, refresh or observe for no-change bookkeeping, after every action, for an already handled instruction, or for an unchanged healthy wait. ` +
-          `For a material comparison or prepared readback, inspect only the exact authority/evidence/payload refs in the admission; labels such as "current task state" are not paths. ` +
-          `Only the MAIN-issued delegation permits routine actions. Use fm_task_continuation patch for a material precheck or changed already-authorized next_action, ` +
-          `fm-send --action-id for its exact body, and existing stable handoff identities for explicit dependency edges. ` +
-          `Existing send/handoff owners persist exact effect receipts automatically; do not call fm_task_continuation merely to record them. Read back attempted/uncertain effects only when the receipt is unresolved; never replay. ` +
-          `Use observe_receipt only for an identical instruction that was already handled before its prepared action, and retain any later remaining gap. New input blocks new effects until MAIN routes it. ` +
-          `Do not enroll, spawn, change authority, accept, archive, merge or add a reviewer. ` +
-          `Stop after at most eight tool calls; retain remaining responsibility. ` +
-          `Finish with fm_branch_report: routine for healthy progress, captain only for a candidate, real decision, exhausted blocker or failure.\n` +
-          JSON.stringify({ task: offer.task, goal_revision: record.goal_revision, brief_sha256: record.brief_sha256,
-            execution_generation: record.execution_generation, revision: record.revision, delegation: record.delegation,
-            observation: offer.observation, ...currentContext }));
-        recordContinuationReceipt();
-        if (!receipted) throw new Error("branch admission has no durable receipt");
-      } finally { clearTimeout(timeout); continuationToolsRemaining = null; recordContinuationReceipt = null; branchTaskBindings = {}; branchTaskObservations = {}; branchTaskAdmissionRevisions = {}; branchTaskAdmissionSnapshots = {}; wakeTaskScope = null; }
-      const error = settledPromptProviderError(sessionManager, entryOffset);
-      if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
-      recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);
-      trace("settlement", "reported-continuation");
-    });
-    branchChain = delivery.catch(async (error) => {
-      trace("failure", "continuation-failed");
-      // Canonical reservation/budget remains due. Publish the failure through
-      // the existing outcome owner, not a second event queue.
-      if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
-        await runOutcomeScript(["append", "--task", offer.task, "--verdict", "captain", "--summary",
-          `Delegated continuation failed; obligation retained: ${String(error).slice(0, 1200)}`]);
-        await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
-      }
-    }).catch(() => { /* Native reservation retains responsibility if failure reporting also fails. */ }).finally(() => { requestHealth(); offer.settled(); });
-    return true;
-  }
-
   // A model or effort change applies to the next branch turn without waiting
   // for /new: the live session is dropped synchronously so nothing enqueued
   // afterwards can capture it, then disposed in dispatch order behind work
@@ -3230,6 +3133,5 @@ ${context.command}
   // accepted between a helper callback and the main generation transition.
   const continuation = installTaskContinuation(pi, {
     root: fmRoot, home: fmHome, state, owns: () => generationOwnsLockSync(generation),
-    offer: offerTaskContinuation,
   });
 }

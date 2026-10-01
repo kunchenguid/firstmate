@@ -273,7 +273,7 @@ Running, fixing, or CI states remain working; parked approval or fix-review stat
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 On the ordinary no-mistakes path, the worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 These runtime states establish delivery milestones, not semantic acceptance of the original goal.
-On every returned artifact or terminal-looking event, compare the evidence with the durable brief: accept and continue the selected delivery path when it satisfies the goal, route one specific bounded continuation when an authorized gap remains, or record the precise hard blocker when no authorized recovery path remains.
+On every returned artifact or terminal-looking event, compare the actual result with the task's goal and acceptance method: accept and continue the selected delivery path when they are satisfied, route one specific bounded continuation when an authorized gap remains, or record the precise hard blocker when no authorized recovery path remains.
 
 ### PR ready, landing, and teardown
 
@@ -284,7 +284,7 @@ A captain instruction to merge is explicit authority; outside the BITS lifecycle
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-Retire a lifecycle-enrolled ship only through the [task completion and resource cleanup contract](docs/task-lifecycle.md) after semantic acceptance or explicit archive; business completion may precede independent pane and copy cleanup, and unsafe copies remain retained.
+Retire a ship only through the [task completion and resource cleanup contract](docs/task-lifecycle.md) after semantic acceptance or explicit archive; business completion may precede independent pane and copy cleanup, and unsafe copies remain retained.
 For a legacy ship record, tear down only after landing is confirmed, and treat a refusal for uncommitted or unlanded work as a stop-and-investigate result rather than an obstacle to bypass.
 Never force legacy teardown without explicit discard authority, and never use force to bypass completed-copy preservation.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
@@ -307,7 +307,8 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 At each actionable review, re-read the task's durable goal contract, compare its acceptance evidence with the current artifacts, identify the remaining gap, and take or route the next authorized action before yielding.
-At intake, finalize the brief and initialize its durable assessment through `bin/fm-task-state.sh init`; [task lifecycle](docs/task-lifecycle.md) routes reconciliation, bounded continuation, archive migration and residual cleanup through their existing owners.
+At intake, make the ordinary task title state the goal and record its acceptance method, current state, remaining gap and next step through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
+Update that original task record only after material changes; [task lifecycle](docs/task-lifecycle.md) owns continuation, legacy-record readback, archive migration and residual cleanup.
 An empty worker inbox, process exit, provider success, status `done`, implementation commit, report, or intermediate milestone never closes that comparison by itself.
 Do not broaden authority to close a goal gap: stop only at a genuine permission boundary, a decision the captain must make, an explicit stop, or an evidenced external blocker whose bounded retries and materially different authorized recovery path are exhausted.
 Relay may require that same live cycle with no fleet work.

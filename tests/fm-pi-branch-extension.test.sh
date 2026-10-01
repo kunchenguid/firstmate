@@ -54,6 +54,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/@earendil-works/pi-tui" \
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
+  cp "$ROOT/.pi/extensions/fm-periodic-stow.ts" "$repo/.pi/extensions/fm-periodic-stow.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
@@ -6246,7 +6247,7 @@ JS
   pass "$out"
 }
 
-test_native_semantic_lifecycle_with_installed_session_manager() {
+test_native_compact_continuation_with_installed_session_manager() {
   local repo home sdk
   sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
   if [ ! -f "$sdk/dist/index.js" ]; then
@@ -6258,11 +6259,14 @@ test_native_semantic_lifecycle_with_installed_session_manager() {
   install_pi_branch_extension_fixture "$repo"
   cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '#!/bin/sh\nprintf "watcher: healthy pid=1 (beacon 0s)\\n"\n' > "$repo/bin/fm-watch-arm.sh"
+  # shellcheck disable=SC2016 # The fixture wrapper expands these values when it runs.
+  printf '#!/bin/sh\nexec "$REAL_ROOT/bin/fm-task-state.sh" "$@"\n' > "$repo/bin/fm-task-state.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-task-state.sh"
   FM_HOME="$home" FM_NATIVE_SDK="$sdk" REAL_ROOT="$ROOT" \
     FM_ROOT_OVERRIDE="$repo" FM_NATIVE_WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
     PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" \
-    node "$ROOT/tests/lifecycle-native.mjs" || fail "installed SDK semantic workflow failed"
+    node "$ROOT/tests/lifecycle-native.mjs" || fail "installed SDK compact continuation workflow failed"
 }
 
 test_continuation_defers_reserved_admission_at_ui_boundary() {
@@ -6834,10 +6838,4 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_expired_delegation_refuses_bound_branch_report
-test_branch_native_continuation_is_scoped_compact_and_material_only
-
-test_native_semantic_lifecycle_with_installed_session_manager
-test_continuation_defers_reserved_admission_at_ui_boundary
-test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
-test_continuation_defers_pending_short_receipt_at_public_boundary
-test_continuation_survives_ack_compaction_and_unrelated_input
+test_native_compact_continuation_with_installed_session_manager

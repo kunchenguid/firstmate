@@ -51,40 +51,30 @@ The portable checks are `tests/fm-pi-branch-status.test.sh`; `tests/fm-pi-branch
 ## Live task continuation
 
 Presentation acknowledgement does not establish task acceptance.
-The main session retains an enrolled task's goal assessment in the canonical `data/<task>/lifecycle.json` owner, exposed by `bin/fm-task-state.sh`; `bin/fm-task-lifecycle.py --help` owns its schema and compare-and-swap transitions.
-MAIN uses the native tool's `inspect` and `assess` actions to bind evidence and submit a semantic judgment; the lifecycle owner derives mechanical fields and returns a concise current result.
-For an authenticated follow-up, `route` with `update_brief:true` appends the exact input through that same owner, so the following steer does not require a hand-authored reconciliation document.
-The existing watcher offers due eligible rows before native lifecycle and shell tool operations; decisions, uncertain results and other MAIN-only rows remain durably actionable in the original queue.
-The full lifecycle read and legacy reconciliation interface remain available for recovery and explicit delegation changes.
-Enrollment is limited to existing task briefs named by explicit task intake, a task update, wake claim, or processed outcome, with no historical fleet migration.
-MAIN supplies the evidence-backed disposition, outcome, remaining gap and next action, including a genuine blocker with responsible owner and observable release evidence.
-The lifecycle owner derives identifiers, hashes, timestamps, counters and verified executor receipts, while the existing merge and cleanup owners append generation-bound result receipts without changing semantic acceptance.
-A queued handoff, successful send, provider terminal state, reported plan, or PR result cannot independently establish acceptance.
-The existing durable handoff owner retains lease conflicts and deduplicates retries by the original id.
-Attempted and uncertain effects remain readback work; the continuation observer never executes a payload or grants new authority.
-The Pi extension checks existing task obligations before logical-run settlement and uses the existing heartbeat coordinator's tick for bounded rechecks.
-Chat remains native transcript evidence; only an explicit task intent update stages a recoverable append transaction, with no independent message goal or answer bookkeeping.
-Unchanged genuine blockers, healthy observed execution, accepted goals, and explicitly archived goals stay quiet.
-The canonical refresh and observation that admit a delegated branch turn are already sufficient for its no-change decision.
-The branch does not repeat model-driven `inspect`, `refresh`, `observe`, or assessment calls after every action, for an already handled instruction, or for an unchanged healthy wait.
-Existing send, handoff and lifecycle owners persist exact receipts automatically; only a material evidence fingerprint, changed next authorized action, unresolved effect, candidate, blocker or decision needs a native continuation call.
-Every admitted turn still finishes with `fm_branch_report`, including a no-change result.
-The [task lifecycle](task-lifecycle.md#intake-and-evidence-reconciliation) owns the narrow unchanged-open-goal acknowledgement exception; branch reporting does not manufacture lifecycle progress.
-Changing dependency evidence or a missing executor makes the precise retained obligation actionable again without re-presenting its already acknowledged outcome.
-The extension limits unchanged automatic prompts to two with backoff, including settlement-triggered continuations.
-The canonical lifecycle record retains the budget across reload, compaction and unrelated input.
-Before releasing a logical Pi run with actionable obligations, the existing heartbeat coordinator actually reads them and persists a generation-bound receipt; the task remains pending, and that receipt proves coordination rather than execution or acceptance.
-After two delivered requests without a verified continuation, the main session durably presents one initial coordination-failure follow-up and starts an executable main turn, including when full heartbeat maintenance is disabled.
-The initial request budget stays exhausted, but if the durable observation remains unchanged after that turn, the same clock schedules deduplicated recovery turns with increasing delay until authoritative observation changes; reload, compaction, and unrelated input preserve that pace.
-A lifecycle observation refusal never infers a receiver or execution state: it presents an explicit reconciliation request and follows the same persisted recovery pacing until canonical observation succeeds.
-An exact pending short-operation or live supervision-lease refusal instead stays a quiet, session-persisted ownership deferral with bounded backoff; it cannot escape the Pi settlement boundary, authorize an effect replay, or prevent unrelated task observations, while any other refusal remains an actionable reconciliation error.
-The task stays open: the escalation is neither an executor receipt nor a fabricated task blocker, and main must assign an authorized executor, reconcile a real dependency, or assess acceptance when it resumes.
-Between due recovery turns, the same clock continues bounded readback without blocking heartbeat maintenance or independent input.
-A MAIN admission deferred by UI, tool, input or compaction activity stays reserved in the existing owner until the complete safety check permits delivery; a persisted native message confirms delivery without spending another attempt.
-Both timer delivery and the final before-settle submission recheck those protections after asynchronous readback; before-settle does not require the still-active logical run to become idle.
-This safeguard applies while Pi is alive; it introduces no process-exit recovery, external watchdog, cleanup engine, or parallel lifecycle truth store.
-`tests/lifecycle-semantic.py` and `tests/lifecycle-native.mjs` exercise semantic assessment, ordinary-chat exclusion, authenticated intent updates, bounded incremental session indexing, automatic owner receipts, operation ordering and refusal boundaries through public interfaces.
-`tests/fm-task-handoff.test.sh`, `tests/fm-pi-branch-extension.test.sh`, and `tests/fm-periodic-stow-herdr-live-e2e.test.sh` cover the existing handoff, continuation and live-runtime boundaries.
+The original in-flight backlog row is the active continuation record.
+Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
+MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
+The opaque record token prevents a stale MAIN update from overwriting a concurrent user correction.
+The branch cannot write progress or make final semantic acceptance.
+
+The Pi extension uses the existing heartbeat coordinator's tick and `progress-list` to inspect canonical task ids.
+A healthy working executor, unchanged wait, task with no compact progress, or task with no remaining gap stays quiet.
+An actionable gap without healthy execution reminds MAIN with the canonical task id, goal, acceptance method, current state, remaining gap and next step.
+Endpoint text is never substituted for task identity.
+The extension paces at most two unchanged reminders and one visible coordination escalation in the session transcript.
+Those entries are delivery receipts only; reload and compaction recover task progress from the original row, not from transcript pacing.
+
+The reminder does not execute the next step or grant new authority.
+MAIN continues through the existing send, handoff, dispatch, provider, decision, merge or cleanup owner and reviews actual artifacts before clearing the gap.
+Attempted or uncertain effects retain their existing readback and no-replay contracts.
+A queued handoff, successful send, provider terminal state, report or pull request cannot independently establish acceptance.
+An unreadable task record produces a scoped reconciliation request without inventing an executor or progress state.
+
+Ordinary chat creates no progress record.
+For an authenticated follow-up, `route` with `update_brief:true` appends the selected original input through the existing interruption-safe intent owner.
+The native `legacy` action keeps an existing rich lifecycle record readable, but historical records are not scanned or reactivated as current work.
+No continuation path creates a second scheduler, task store or lifecycle progress record.
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/lifecycle-native.mjs` cover original-row persistence, MAIN-only updates, canonical identity reminders, restart recovery, quiet unchanged execution and compact native calls.
 
 ## Components and their owners
 
@@ -238,7 +228,7 @@ A home upgraded with outcomes already delivered treats those rows as processed o
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
 The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
-Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized lifecycle paths when evidence is incomplete, complete evidence becomes a candidate for MAIN acceptance and retirement, explicit stops remain stopped, and delivery or merge authority never expands.
+Its "Goal-directed acceptance" section owns semantic review of material task returns: intermediate and provider-terminal results continue through existing authorized task and effect owners when acceptance is incomplete, satisfied acceptance becomes a candidate for MAIN retirement, explicit stops remain stopped, and delivery or merge authority never expands.
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
 Main can also read recent durable outcomes on demand through its `fm_branch_outcomes` tool outside the processing path.
 
@@ -299,36 +289,10 @@ The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension a
 
 ## Delegated task continuation
 
-MAIN can issue an explicit task-local lifecycle v2 delegation through the existing `fm-task-state.sh reconcile` owner.
-The [routine continuation configuration](configuration.md#routine-continuation-policy-configtask-continuation-policyjson) owns the home policy's operator-facing schema, activation and rollback contract.
-The [task lifecycle](task-lifecycle.md#routine-branch-ownership) owns task-local grant materialization, renewal, revocation and receipt semantics; `fm-task-lifecycle.py` owns exact data validation and command mechanics.
-A v1 record keeps its existing MAIN continuation path; reads never enroll historical tasks or reopen accepted or archived goals.
+The branch no longer receives a delegated lifecycle projection for ordinary task progress.
+It can still process eligible wake rows and perform already-authorized operations through their existing owners, but it cannot write the compact task progress block or make final semantic acceptance.
+Material branch results return through the ordinary outcome channel so MAIN can review the artifact, advance the next step, and update the original task row.
 
-The branch receives delegated continuation admissions on its existing serial execution chain, independently of wake queue sequences.
-The single periodic-stow clock also permits bounded readback while MAIN is streaming; MAIN notifications retain their existing input and UI safety checks.
-The canonical coordination reservation and persistent retry budget survive session replacement, while actual branch-session entry persistence proves delivery.
-Cold Pi sessions defer persistence until the first assistant response, so an in-memory append never acknowledges that delivery.
-An admission or report proves neither worker receipt nor goal completion.
-The persisted admission and model prompt carry the same bounded projection of the current assessment and next action: outcome, remaining gap, evidence key, exact authority/evidence references, and the current action identity, payload and receipt references, generation, phase, limits and continuation constraint.
-That projection is a view of the already-read lifecycle record, not a second store; it lets the branch select an exact material `inspect` readback without falling back to older reports or treating descriptive labels as paths.
-
-For a delegated task, branch may compare bounded artifacts with the existing brief, record a provisional precheck, request missing evidence from the same worker, and transfer information along explicitly authorized dependency edges.
-It must use the existing action, inbox, handoff and receipt owners, preserving the selected delivery path without adding a reviewer.
-Its isolated session exposes a restricted native `fm_task_continuation` tool for inspect, refresh/observation, task-local CAS patch, uncertain-effect readback and exact handled-receipt observation.
-The tool is scoped to the current admission and generation and cannot enroll, assess, accept, archive, mutate policy or authority, or perform lifecycle control, merge or cleanup.
-No-change responses are fingerprinted and compact; material mutations return only the revision and affected precheck/action projection.
-MAIN alone classifies new user input, decides scope and authority, dispatches new work, issues operation grants, accepts the final result and communicates with the user.
-Candidate, conflict and blocked prechecks return to MAIN for judgment; routine progress and healthy executor readback do not open a MAIN model turn.
-The initial delegation contract does not permit spawn or executor replacement, interrupt/exit/relaunch, lifecycle control, merge, archival, operation or short grants, or independent short-result routing.
-
-A pending intent append prevents new delegated effects for that exact task while allowing readback; unrelated chat does not create a fleet-wide barrier.
-MAIN revokes the old delegation before changing a brief or goal, then issues a new revision after classification.
-Status questions read the named task and its evidence without enrolling or sweeping historical work.
-Expired, revoked, stale-generation and mismatched task bindings refuse at the actual mutation boundary.
-An attempted or uncertain effect is read back by stable action identity, never replayed because a receipt is missing.
-Exact pre-existing handled-receipt recovery follows the [task lifecycle contract](task-lifecycle.md#routine-branch-ownership) and never accepts the goal.
-
-Routine-policy rollout requires one explicit home policy activation after code reload; explicit task-local delegation remains available without that policy.
-Policy activation does not migrate historical absent records or activate parked, paused, stopped, accepted or archived work.
-Rollback disables the policy and leaves v2 records, effects and budgets intact for MAIN reconciliation; older binaries must refuse v2 rather than rewrite it as v1.
-Public-owner regression coverage is in `tests/fm-task-lifecycle.test.sh` and `tests/fm-task-handoff.test.sh`, with SDK and concurrent notification coverage in the Pi extension tests.
+Historical lifecycle delegation, policy and action records remain readable for recovery of effects that were already prepared, attempted or uncertain before this simplification.
+They do not enroll tasks, produce new routine progress admissions or become a second active progress source.
+Their existing identity, authority, receipt and no-replay checks remain authoritative until those historical effects are reconciled.
