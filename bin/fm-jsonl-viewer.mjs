@@ -30,7 +30,8 @@ const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const TAIL_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORT_BYTES = 8 * 1024 * 1024;
-const TASK_SNAPSHOT_TIMEOUT_MS = 15000;
+const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;
+const TASK_DISPOSITION_TIMEOUT_MS = 15000;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -248,7 +249,7 @@ function taskDispositions(codeRoot, dataRoot, environment) {
   const output = execFileSync("bash", ["-c", '. "$1"; fm_task_disposition_snapshot "$2"', "fm-jsonl-viewer", library, dataRoot], {
     encoding: "utf8",
     env: environment,
-    timeout: TASK_SNAPSHOT_TIMEOUT_MS,
+    timeout: TASK_DISPOSITION_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024,
   });
   const dispositions = new Map();
@@ -294,7 +295,7 @@ function taskOverview(home, roots, codeRoot) {
   const raw = execFileSync(join(codeRoot, "bin", "fm-fleet-snapshot.sh"), ["--json"], {
     encoding: "utf8",
     env: environment,
-    timeout: TASK_SNAPSHOT_TIMEOUT_MS,
+    timeout: FLEET_SNAPSHOT_TIMEOUT_MS,
     maxBuffer: 32 * 1024 * 1024,
   });
   const snapshot = JSON.parse(raw);

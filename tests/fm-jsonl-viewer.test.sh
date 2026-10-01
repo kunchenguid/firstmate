@@ -19,6 +19,16 @@ TOKEN=viewer-test-token-value
 TOKEN_FILE="$TMP_ROOT/viewer.token"
 PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
+SERVER_PID=
+TIMEOUT_SERVER_PID=
+cleanup() {
+  for pid in "$SERVER_PID" "$TIMEOUT_SERVER_PID"; do
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup EXIT INT TERM
 mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR" "$BRIEF_DIR"
 cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
 backend = "markdown"
@@ -98,15 +108,66 @@ if FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TMP_ROOT/insecure.token"
   fail "viewer accepted a group/world-readable token file"
 fi
 
+# Exercise the fleet-snapshot timeout behavior with an isolated code-root copy.
+# The production bound is scaled down here so the genuine hang case stays fast.
+TIMEOUT_CODE_ROOT="$TMP_ROOT/timeout-code"
+TIMEOUT_HOME="$TMP_ROOT/timeout-home"
+TIMEOUT_LOG="$TMP_ROOT/timeout-server.log"
+mkdir -p "$TIMEOUT_CODE_ROOT/bin" "$TIMEOUT_CODE_ROOT/web" "$TIMEOUT_HOME/data" "$TIMEOUT_HOME/state"
+sed 's/const FLEET_SNAPSHOT_TIMEOUT_MS = 60000;/const FLEET_SNAPSHOT_TIMEOUT_MS = 1000;/' \
+  "$ROOT/bin/fm-jsonl-viewer.mjs" > "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs"
+grep -q 'const FLEET_SNAPSHOT_TIMEOUT_MS = 1000;' "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs" \
+  || fail "timeout regression fixture did not scale the production bound"
+cat > "$TIMEOUT_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$(cat "$FM_HOME/snapshot-mode")" in
+  slow)
+    sleep 0.2
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-01T00:00:00Z","main_inventory":{"valid":true},"backlog":{"records":[]},"tasks":[]}'
+    ;;
+  hang)
+    exec sleep 10
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SH
+chmod +x "$TIMEOUT_CODE_ROOT/bin/fm-fleet-snapshot.sh"
+cat > "$TIMEOUT_CODE_ROOT/bin/fm-task-disposition-lib.sh" <<'SH'
+fm_task_disposition_snapshot() { :; }
+SH
+printf 'slow\n' > "$TIMEOUT_HOME/snapshot-mode"
+FM_HOME="$TIMEOUT_HOME" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
+  node "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs" > "$TIMEOUT_LOG" 2>&1 &
+TIMEOUT_SERVER_PID=$!
+for _ in $(seq 1 100); do
+  timeout_port=$(sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' "$TIMEOUT_LOG")
+  [ -n "$timeout_port" ] && break
+  sleep 0.05
+done
+[ -n "${timeout_port:-}" ] || fail "timeout regression viewer did not report its bound port"
+timeout_base="http://127.0.0.1:$timeout_port"
+status=$(curl -sS -o "$TMP_ROOT/timeout-slow.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
+[ "$status" = 200 ] || fail "slow fleet snapshot returned HTTP $status"
+jq -e '.generatedAt == "2026-10-01T00:00:00Z" and .tasks == []' "$TMP_ROOT/timeout-slow.json" >/dev/null \
+  || fail "slow fleet snapshot response was not preserved"
+printf 'hang\n' > "$TIMEOUT_HOME/snapshot-mode"
+started_at=$(date +%s)
+status=$(curl --max-time 4 -sS -o "$TMP_ROOT/timeout-hang.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
+elapsed=$(( $(date +%s) - started_at ))
+[ "$status" = 503 ] || fail "hanging fleet snapshot returned HTTP $status"
+[ "$elapsed" -lt 4 ] || fail "hanging fleet snapshot exceeded its finite timeout"
+jq -e '.error == "task overview is temporarily unavailable"' "$TMP_ROOT/timeout-hang.json" >/dev/null \
+  || fail "hanging fleet snapshot did not return the honest unavailable response"
+kill "$TIMEOUT_SERVER_PID" 2>/dev/null || true
+wait "$TIMEOUT_SERVER_PID" 2>/dev/null || true
+TIMEOUT_SERVER_PID=
+
 FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
   node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
-cleanup() {
-  kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
-  fm_test_cleanup
-}
-trap cleanup EXIT INT TERM
 
 for _ in $(seq 1 100); do
   sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' "$SERVER_LOG" > "$PORT_FILE"
