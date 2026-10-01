@@ -739,6 +739,22 @@ assert_contains "$out" '  reason: no rankable eligible candidate' "no-candidate 
 assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candidates keep their reason"
 pass "no rankable candidate: the tool escalates instead of guessing"
 
+# --- single unranked candidate: a lone eligible profile with no quota row clears
+reset_log
+ONLY_UNRANKED_RULE="$TMP_ROOT/only-unranked-rule.json"
+printf '%s\n' '{"rules":[{"when":"Clear coding task.","use":{"harness":"kiro-cli","model":"claude-sonnet-5","effort":"medium","provider":"ghost"}}]}' > "$ONLY_UNRANKED_RULE"
+cp "$ONLY_UNRANKED_RULE" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.97,"probabilities":{"rule_1":0.97,"default":0.03}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a lone unranked eligible candidate still clears"
+assert_contains "$out" 'candidate: kiro-cli:claude-sonnet-5  provider=ghost  -> eligible, unranked: provider ghost not in the quota snapshot: disclosed uncertainty' "the lone candidate's unranked evidence is disclosed"
+assert_contains "$out" '  note: the only eligible candidate is unranked: provider ghost not in the quota snapshot' "the clear note names the disclosed uncertainty"
+assert_contains "$out" "  profile: --harness 'kiro-cli' --model 'claude-sonnet-5' --effort 'medium'" "the lone unranked candidate is still chosen"
+cp "$BASE_RULES" "$RULES"
+pass "a matched rule with one eligible unranked candidate clears instead of escalating"
+
 # --- schema 6: rows keyed by provider + accountKey bind per account ----------------
 # quota-axi emits schema 6 once a provider expands to several accounts; every
 # row then carries accountKey and one provider id may appear on several rows.
