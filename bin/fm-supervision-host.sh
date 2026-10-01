@@ -134,9 +134,10 @@
 # left running (recorded with identities, never by name), including the
 # engine descendants its turn recorded, removes that turn's files, and
 # releases the branch actor's leases; it releases them again after every
-# engine turn. It also consumes the record of a successor a pass-through left
-# for main, and while that arm still runs under its recorded identity, the
-# first cycle takes its cycle over rather than attaching to it.
+# engine turn. It also reads the record of a successor a pass-through left for
+# main: while that arm still runs under its recorded identity, the first cycle
+# takes its cycle over rather than attaching to it, and the record stays until
+# that arm is gone, so a later host retries a take-over that left it running.
 #
 # STATE (all under state/, owned here): .supervision-host (this host's pid and
 # the processes it runs), .supervision-host-engine (the engine conversation:
@@ -146,7 +147,7 @@
 # .supervision-host-wake (the prompt and wake text of the current turn),
 # .supervision-host-mirror (the dialog-mirror feed while an attended wake is
 # rendered), .supervision-host-left (the pid and identity of the successor arm a
-# pass-through left running for main, until the next host takes it over),
+# pass-through left running for main, until that arm is gone),
 # .supervision-host-health (the latch: errors, cooldown, and probe time, keyed
 # to the main session, engine, and model), and .supervision-host.log (a bounded
 # ledger of where every close went, with each engine turn's usage and
@@ -372,13 +373,15 @@ activate() {
   rm -f "$STATE"/.supervision-host-arm.* "$STATE"/.supervision-host-descendants.* "$STATE"/.supervision-host-result.* \
     "$STATE"/.supervision-host-errors.* "$STATE"/.supervision-host-readback.* "$TURN_FILE" "$MIRROR_FEED" 2>/dev/null || true
   # The successor a pass-through left for main: the first cycle takes it over
-  # only while it still answers to its recorded identity.
+  # while it still answers to its recorded identity, and its record goes only
+  # once it does not.
   if [ -f "$LEFT_RECORD" ]; then
     pid='' identity=''
     IFS="$(printf '\t')" read -r pid identity < "$LEFT_RECORD" || true
-    rm -f "$LEFT_RECORD"
     if fm_pid_alive "$pid" && [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ]; then
       LEFT_ARM=$pid
+    else
+      rm -f "$LEFT_RECORD"
     fi
   fi
   printf 'host\t%s\t%s\n' "$HOST_PID" "$(identity_of "$HOST_PID")" > "$HOST_RECORD" || return 1
@@ -663,9 +666,9 @@ start_successor() {  # <predecessor-arm-pid>
 # already holds that descriptor and keeps waiting on the watcher.
 detach_successor() {
   [ -n "${SUCCESSOR_PID:-}" ] || return 0
+  printf '%s\t%s\n' "$SUCCESSOR_PID" "$(identity_of "$SUCCESSOR_PID")" > "$LEFT_RECORD" 2>/dev/null || true
   disown "$SUCCESSOR_PID" 2>/dev/null || true
   forget_process "$SUCCESSOR_PID"
-  printf '%s\t%s\n' "$SUCCESSOR_PID" "$(identity_of "$SUCCESSOR_PID")" > "$LEFT_RECORD" 2>/dev/null || true
   SUCCESSOR_PID=
 }
 

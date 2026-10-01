@@ -1367,9 +1367,13 @@ host_owns_the_only_cycle() {  # <home>
 # later. The next park now takes that cycle over: one arm, the host's own
 # child, owns the watcher, nothing reaches main for the takeover, no downtime
 # episode is opened, and the cycle it owns still delivers the next close.
-test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
-  local home left_watcher left_arm first_session
-  home=$(make_primary_home hook-takeover)
+# A main-only pass-through in <home> leaves its successor cycle running, main
+# handles and acknowledges the close, and the session restarts. Sets
+# LEFT_WATCHER and LEFT_ARM to the successor watcher and the arm that owns it.
+LEFT_WATCHER=
+LEFT_ARM=
+leave_a_cycle_for_main_and_restart() {  # <home>
+  local home=$1 first_session
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "takeover: the Stop hook never started a watcher cycle: $(cat "$home/hook.err" 2>/dev/null)"
@@ -1377,9 +1381,9 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   wait_until 250 hook_exited "$home" || fail "takeover: the decision close never reached the Stop hook: $(cat "$home/state/.supervision-host.log")"
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "fixture: the close was not a main-only pass-through"
   assert_rewoke_main "$home" "takeover (pass-through)"
-  left_watcher=$(cat "$home/state/.watch.lock/pid")
-  left_arm=$(parent_of "$left_watcher")
-  [ -n "$left_arm" ] && [ "$left_arm" != 1 ] || fail "fixture: the successor watcher has no arm of its own"
+  LEFT_WATCHER=$(cat "$home/state/.watch.lock/pid")
+  LEFT_ARM=$(parent_of "$LEFT_WATCHER")
+  [ -n "$LEFT_ARM" ] && [ "$LEFT_ARM" != 1 ] || fail "fixture: the successor watcher has no arm of its own"
   main_drain "$home" >/dev/null
   # shellcheck disable=SC2086 # the printed acknowledgement arguments
   [ -z "$MAIN_ACK" ] || FM_HOME="$home" "$FAKE_CLAUDE" -c '"$0" "$@" >/dev/null 2>&1' "$ROOT/bin/fm-wake-drain.sh" $MAIN_ACK \
@@ -1389,8 +1393,16 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   : > "$home/session.stop"
   wait_until 100 sh -c '! kill -0 "$1" 2>/dev/null' _ "$first_session" || fail "fixture: the first session did not end"
   rm -f "$home/session.stop"
-  kill -0 "$left_arm" 2>/dev/null || fail "fixture: the successor arm did not outlive its session"
+  kill -0 "$LEFT_ARM" 2>/dev/null || fail "fixture: the successor arm did not outlive its session"
   start_hook_session "$home"
+}
+
+test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
+  local home left_watcher left_arm
+  home=$(make_primary_home hook-takeover)
+  leave_a_cycle_for_main_and_restart "$home"
+  left_watcher=$LEFT_WATCHER
+  left_arm=$LEFT_ARM
   turn_end "$home"
   wait_until 150 host_owns_the_only_cycle "$home" \
     || fail "takeover: the next park did not own the home's only watcher cycle (left arm $left_arm, watcher $left_watcher):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
@@ -1406,6 +1418,40 @@ test_next_park_takes_over_the_cycle_a_pass_through_left_for_main() {
   assert_rewoke_main "$home" "takeover (next close)"
   assert_re '^signal: .*demo.status' "$home/hook.err" "takeover: the next close must carry the watcher's reason line"
   pass "host+hook: the next park takes over the cycle a main-only pass-through left, so one arm owns it"
+}
+
+# A park stopped before its take-over stops the left cycle (here held in the
+# take-over's handover snapshot by the recovery-marker lock) must not forget
+# that cycle's arm: the park the Stop hook runs next still takes it over rather
+# than attaching to it beside the orphan.
+test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park() {
+  local home holder host
+  home=$(make_primary_home hook-takeover-interrupted)
+  leave_a_cycle_for_main_and_restart "$home"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 1
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.1; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down.lock" "$home/marker-lock-held" "$home/marker-lock-release" &
+  holder=$!
+  wait_until 100 test -e "$home/marker-lock-held" || fail "fixture: could not hold the recovery-marker lock"
+  turn_end "$home"
+  wait_until 150 grep -q "	take-over	arm=$LEFT_ARM\$" "$home/state/.supervision-host.log" \
+    || fail "interrupted takeover: the park did not start a take-over of $LEFT_ARM: $(cat "$home/state/.supervision-host.log")"
+  host=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
+  sleep 1
+  kill -0 "$LEFT_WATCHER" 2>/dev/null || fail "fixture: the take-over stopped the left watcher before the park was stopped"
+  kill -TERM "$host" 2>/dev/null || fail "fixture: the park host $host was not running"
+  wait_until 150 sh -c '! kill -0 "$1" 2>/dev/null' _ "$host" || fail "fixture: the park host did not stop"
+  : > "$home/marker-lock-release"
+  wait "$holder" 2>/dev/null || true
+  # The Stop hook runs the next park in place of the one stopped by a signal.
+  wait_until 150 host_owns_the_only_cycle "$home" \
+    || fail "interrupted takeover: the next park did not own the home's only watcher cycle (left arm $LEFT_ARM):"$'\n'"$(home_arms "$home")"$'\n'"$(cat "$home/state/.supervision-host.log")"
+  ! kill -0 "$LEFT_ARM" 2>/dev/null || fail "interrupted takeover: the left arm still runs (pid $LEFT_ARM)"
+  pass "host+hook: a park stopped mid take-over leaves the take-over to the next park"
 }
 
 # The captain returns after the loop accepted a decision close away but before
@@ -2729,6 +2775,7 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails
 test_successor_close_during_main_turn_is_delivered_at_the_next_turn_end
 test_next_park_takes_over_the_cycle_a_pass_through_left_for_main
+test_a_park_stopped_mid_take_over_leaves_the_take_over_to_the_next_park
 test_primary_without_a_verified_mirror_runs_away_only
 test_attended_wake_carries_the_dialog_mirror
 test_dialog_bearing_files_are_owner_only
