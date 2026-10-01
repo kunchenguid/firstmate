@@ -3,9 +3,12 @@
 #
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
+# A local-only project's slot can instead sit behind local main, either on the
+# commit a lagging origin still names or on a feature branch its primary had
+# checked out.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the fetched origin tip, starts a locally landing task
+# from local main, or stops when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -238,6 +241,165 @@ make_originless_case() {  # <name> <id>
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
+# An origin-less project whose primary moved on: local main advanced, then the
+# primary checked out a feature branch, and the slot sits on that branch's tip,
+# which is where Treehouse places a slot when the project has no origin.
+make_originless_side_branch_case() {  # <name> <id>
+  local rec
+  rec=$(make_originless_case "$1" "$2")
+  read_case_record "$rec"
+  printf 'local main moved on\n' > "$PROJECT_DIR/local-main-ahead.txt"
+  git -C "$PROJECT_DIR" add local-main-ahead.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-main
+  git -C "$PROJECT_DIR" checkout --quiet -b fm/hand-old "$INITIAL_SHA"
+  printf 'old hand-off work\n' > "$PROJECT_DIR/hand-old.txt"
+  git -C "$PROJECT_DIR" add hand-old.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm hand-old
+  git -C "$POOL_DIR" checkout --quiet --detach fm/hand-old
+  printf '%s\n' "$rec"
+}
+
+# A local-only project that still carries an origin: origin names the initial
+# commit while local main has moved past it, and the slot sits on the initial
+# commit.
+make_lagging_origin_case() {  # <name> <id>
+  local rec origin
+  rec=$(make_originless_case "$1" "$2")
+  read_case_record "$rec"
+  origin="$CASE_DIR/origin.git"
+  git clone --quiet --bare "$PROJECT_DIR" "$origin"
+  git -C "$PROJECT_DIR" remote add origin "file://$origin"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" remote set-head origin --auto >/dev/null
+  rm -f "$PROJECT_DIR/.git/FETCH_HEAD"
+  printf 'local main moved on\n' > "$PROJECT_DIR/local-main-ahead.txt"
+  git -C "$PROJECT_DIR" add local-main-ahead.txt
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm advance-local-main
+  printf '%s\n' "$rec"
+}
+
+test_local_only_ship_starts_on_local_main_ahead_of_lagging_origin() {
+  local rec id out status local_main lagging
+  id='pool-local-only-lagging-origin-r1'
+  rec=$(make_lagging_origin_case local-only-lagging-origin "$id")
+  read_case_record "$rec"
+  local_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  lagging=$(git -C "$PROJECT_DIR" rev-parse refs/remotes/origin/main)
+  [ "$local_main" != "$lagging" ] || fail "fixture did not put local main ahead of origin/main"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$lagging" ] || fail "fixture did not start the slot on the lagging origin commit"
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a local-only ship should launch from local main"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_main" ] \
+    || fail "a local-only ship started on $(git -C "$POOL_DIR" rev-parse HEAD), not local main $local_main"
+  assert_grep 'local main moved on' "$POOL_DIR/local-main-ahead.txt" \
+    "the local-only ship's copy omitted local main's content"
+  [ ! -e "$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-common-dir)/FETCH_HEAD" ] \
+    || fail "a local-only ship fetched the lagging origin it does not land on"
+
+  id='pool-remote-ship-lagging-origin-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "a remote-delivery ship on the same project should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$lagging" ] \
+    || fail "a remote-delivery ship did not start on the origin tip it delivers to"
+  pass "a local-only ship starts on local main ahead of a lagging origin, while a remote-delivery ship keeps origin's tip"
+}
+
+test_registered_local_only_scout_starts_on_local_main() {
+  local rec id out status local_main
+  id='pool-local-only-scout-r1'
+  rec=$(make_lagging_origin_case local-only-scout "$id")
+  read_case_record "$rec"
+  printf -- '- project [local-only] - disposable local-only fixture (added 2026-10-01)\n' \
+    > "$HOME_DIR/data/projects.md"
+  local_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a scout of a registered local-only project should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_main" ] \
+    || fail "a scout of a registered local-only project did not start on local main"
+
+  printf -- '- project [local-only forge=gerrit] - malformed fixture (added 2026-10-01)\n' \
+    > "$HOME_DIR/data/projects.md"
+  git -C "$POOL_DIR" checkout --quiet --detach origin/main
+  id='pool-local-only-scout-malformed-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout launched although its registry entry resolves to no posture"
+  assert_contains "$out" "base branch is unknown" "the scout refusal did not explain the unknown base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused scout published task metadata"
+  pass "a scout of a registered local-only project starts on local main, and an unresolvable entry refuses"
+}
+
+test_originless_slot_on_feature_branch_starts_on_local_main() {
+  local rec id kind out status local_main hand_old
+  for kind in ship scout; do
+    id="pool-originless-side-$kind-r1"
+    rec=$(make_originless_side_branch_case "originless-side-$kind" "$id")
+    read_case_record "$rec"
+    local_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+    hand_old=$(git -C "$PROJECT_DIR" rev-parse refs/heads/fm/hand-old)
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$hand_old" ] || fail "fixture did not start the slot on the feature branch"
+
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode local-only --yolo off)
+    else
+      out=$(run_spawn "$id" --scout)
+    fi
+    status=$?
+    expect_code 0 "$status" "an origin-less $kind should launch from local main"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_main" ] \
+      || fail "an origin-less $kind started on $(git -C "$POOL_DIR" rev-parse HEAD), not local main $local_main"
+    [ ! -e "$POOL_DIR/hand-old.txt" ] || fail "an origin-less $kind kept the feature branch's content"
+    [ "$(git -C "$PROJECT_DIR" rev-parse refs/heads/fm/hand-old)" = "$hand_old" ] \
+      || fail "an origin-less $kind moved the feature branch"
+  done
+  pass "an origin-less slot left on a feature branch starts ships and scouts on local main"
+}
+
+test_attached_slot_branch_survives_refresh() {
+  local rec id out status local_main hand_old
+  id='pool-attached-branch-r1'
+  rec=$(make_originless_side_branch_case attached-branch "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet main
+  git -C "$POOL_DIR" checkout --quiet fm/hand-old
+  local_main=$(git -C "$PROJECT_DIR" rev-parse refs/heads/main)
+  hand_old=$(git -C "$PROJECT_DIR" rev-parse refs/heads/fm/hand-old)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "a slot attached to an earlier branch should launch from local main"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_main" ] || fail "the attached slot did not start on local main"
+  ! git -C "$POOL_DIR" symbolic-ref --quiet HEAD >/dev/null || fail "the refreshed slot is still attached to a branch"
+  [ "$(git -C "$PROJECT_DIR" rev-parse refs/heads/fm/hand-old)" = "$hand_old" ] \
+    || fail "refreshing the slot moved the branch it was attached to, losing its unlanded work"
+  pass "refreshing a slot attached to an earlier branch detaches it and leaves that branch's work in place"
+}
+
+test_originless_without_default_branch_refuses_pool() {
+  local rec id out status before
+  id='pool-originless-no-default-r1'
+  rec=$(make_originless_case originless-no-default "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch --quiet -m main trunk
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched although no local default branch could be resolved"
+  assert_contains "$out" "could not determine the local default branch" \
+    "spawn did not name the unresolved local default branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "spawn moved HEAD while refusing"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "an origin-less project with no resolvable default branch refuses rather than launching unverified"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -255,11 +417,11 @@ test_originless_pool_launches_without_a_freshness_fetch() {
     "spawn attempted a freshness fetch against a nonexistent origin"
   [ ! -e "$POOL_DIR/.git/FETCH_HEAD" ] || fail "spawn fetched against a pooled worktree with no origin"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD on an origin-less pooled worktree that had nothing to refresh against"
+    || fail "spawn moved HEAD off local main on an origin-less pooled worktree already there"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed origin-less launch: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
   fi
-  pass "an origin-less pooled worktree launches as-is, skipping the freshness gate"
+  pass "an origin-less pooled worktree launches from local main without a freshness fetch"
 }
 
 test_originless_dirty_pool_refuses_without_discarding_work() {
@@ -753,6 +915,11 @@ test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
+test_local_only_ship_starts_on_local_main_ahead_of_lagging_origin
+test_registered_local_only_scout_starts_on_local_main
+test_originless_slot_on_feature_branch_starts_on_local_main
+test_attached_slot_branch_survives_refresh
+test_originless_without_default_branch_refuses_pool
 test_originless_dirty_pool_refuses_without_discarding_work
 test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool

@@ -243,13 +243,17 @@
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   task worktree, then detaches it at the project's current default-branch
+#   commit and verifies HEAD landed there before launching. A task that lands
+#   locally takes that commit from the project's local default branch without
+#   fetching: a local-only ship, a scout of a project registered local-only, or
+#   any task whose worktree has no origin configuration. Every other task
+#   fetches the detected origin, resolves its current remote default branch, and
+#   takes that tip. Detaching never moves a branch the slot was left on.
+#   Relaunch reuses the recorded worktree without fetching or moving its base.
+#   An unreachable detected origin, unresolved default branch, unresolvable
+#   scout registry entry, or non-clean worktree refuses a fresh spawn rather
+#   than risking work based on stale history or discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -3312,8 +3316,33 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# A task that lands locally starts from the project's local default branch,
+# the ref bin/fm-merge-local.sh fast-forwards, because an origin a local-only
+# project still carries can lag it by weeks. A ship decides by its explicit
+# --mode; a scout records no delivery mode, so it decides by the project's
+# registered posture. A worktree with no origin configuration has no other
+# base to start from. Treehouse alone does not cover that last case: with no
+# origin it places a slot on whatever the primary has checked out, which a
+# local-only project's primary can leave on a feature branch.
+spawn_base_is_local() { # <worktree>
+  local worktree=$1 posture
+  spawn_worktree_has_origin_config "$worktree" || return 0
+  case "$KIND" in
+  ship) [ "$MODE" = local-only ] ;;
+  scout)
+    if ! posture=$("$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" 2>/dev/null); then
+      "$FM_ROOT/bin/fm-project-mode.sh" "$(basename "$PROJ_ABS")" >/dev/null || true
+      echo "error: the registry entry for $(basename "$PROJ_ABS") does not resolve to a delivery posture (see the refusal above), so this scout's base branch is unknown; correct data/projects.md and spawn again" >&2
+      return 2
+    fi
+    [ "${posture%% *}" = local-only ]
+    ;;
+  *) return 1 ;;
+  esac
+}
+
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status local_base=0 rc=0
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3326,32 +3355,46 @@ freshen_spawn_worktree_base() { # <worktree>
     fi
     return 1
   fi
-  if ! spawn_worktree_has_origin_config "$worktree"; then
-    return 0
-  fi
-  if ! git -C "$worktree" fetch --quiet origin; then
-    echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  spawn_base_is_local "$worktree" || rc=$?
+  case "$rc" in
+  0) local_base=1 ;;
+  1) ;;
+  *) return 1 ;;
+  esac
+  if [ "$local_base" -eq 1 ]; then
+    default=$(default_branch "$PROJ_ABS") || {
+      echo "error: could not determine the local default branch of '$PROJ_ABS' (expected origin/HEAD, main, or master) for pooled worktree '$worktree'; refusing to launch from an unverified base" >&2
+      return 1
+    }
+    target="refs/heads/$default"
+  else
+    if ! git -C "$worktree" fetch --quiet origin; then
+      echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
+    target="origin/$default"
+    if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
-    echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
+  # Detach rather than reset: a slot left attached to an earlier task's branch
+  # keeps that branch where it was, which for a local-only project is the only
+  # copy of its unlanded work.
+  if ! git -C "$worktree" checkout --quiet --detach "$expected" --; then
+    echo "error: could not move pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
   actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
