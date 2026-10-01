@@ -65,10 +65,11 @@
 # Retry ring (fm_task_inbox_mark_retry): only while config/wait-no-turns is
 # present. A fire-and-forget record never enters the ladder, but when
 # fm-send's ring at enqueue did not land
-# (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
+# (fm_task_inbox_ring returned 1, 2, or 4) it marks the record, and one grace later
 # the due action is `retry`: once the worker has no open decision of its own,
 # the watcher rings once more and spends the mark
-# whatever the result, so the record never rings a third time and never
+# unless selector preflight refuses before input, in which case the retry
+# stays pending. The record never rings a third time and never
 # escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
 # without this retry the record could sit unread until a checkpoint. A pending ordinary record's
 # ladder rings the same inbox, so the retry waits behind it, and an
@@ -301,7 +302,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the ring was
 # refused or failed, 3 skipped because the endpoint is positively dead or
-# missing (nothing typed; recovery owns the record). No return value is delivery proof; the
+# missing (nothing typed; recovery owns the record), 4 selector preflight
+# refused before input (a fire-and-forget retry stays pending).
+# No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
 # After selector preflight, the advisory skip is deliberately narrow: only an
 # exact `pending` verdict can defer,
@@ -322,7 +325,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
-  fm_task_inbox_selector_preflight "$backend" "$target" "$label" "$harness" || return 2
+  fm_task_inbox_selector_preflight "$backend" "$target" "$label" "$harness" || return 4
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
@@ -354,21 +357,25 @@ fm_task_inbox_agent_view() {  # <backend> <target> [expected-label]
   local cap
   fm_backend_source "$1" || return 1
   cap=$(fm_backend_capture "$1" "$2" 40 "${3:-}" 2>/dev/null) || return 1
+  [ -n "$cap" ] || return 1
   fm_composer_claude_agent_view "$cap"
 }
 
-# Shared safety gate for inbox rings and local typed sends. Only a supplied
-# claude* harness is checked; other or unidentified harnesses pass unchanged.
+# Shared safety gate for inbox rings and local typed sends. Check supplied
+# claude* and unidentified harnesses; known non-Claude harnesses pass unchanged.
 # Return 0 when the capture shows no selector or an unfocused main view;
-# return 1 on capture failure, a focused list, a subagent view, or an unknown
+# return 1 on failed/empty capture for Claude, a focused list, a subagent view, or an unknown
 # selector verdict. Refusal sends no terminal input and never navigates:
 # concurrent callers could otherwise send a second Escape after the first
 # closes the list, interrupting main. fm_composer_claude_agent_view owns the
 # screen shapes; tests/fm-task-inbox.test.sh covers the delivery boundary.
 fm_task_inbox_selector_preflight() {  # <backend> <target> [expected-label] [harness]
   local view
-  case "${4:-}" in claude*) ;; *) return 0 ;; esac
-  view=$(fm_task_inbox_agent_view "$1" "$2" "${3:-}") || return 1
+  case "${4:-}" in claude*|'') ;; *) return 0 ;; esac
+  if ! view=$(fm_task_inbox_agent_view "$1" "$2" "${3:-}"); then
+    [ -z "${4:-}" ]
+    return $?
+  fi
   case "$view" in none|main) return 0 ;; *) return 1 ;; esac
 }
 
