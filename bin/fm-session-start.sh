@@ -52,7 +52,9 @@
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
 #                       isolated so one task's read can never abort the
-#                       digest: read-only, always runs. The per-task reads
+#                       digest: read-only, always runs. A remote second
+#                       mate's endpoint is never read here; its line names
+#                       the host and defers to the network checks. The per-task reads
 #                       run serially, so with a wedged backend the stage's
 #                       ceiling is tasks x the per-read bound
 #                       (FM_SESSION_START_ENDPOINT_TIMEOUT, default 10s) and
@@ -894,7 +896,15 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ]; then
+    # A remote second mate's endpoint lives on its own host: a local backend
+    # probe would report a live mate dead, and asking the host is a network
+    # call this blocking digest never makes. The deferred network checks own
+    # that read (secondmate liveness), as does bin/fm-crew-state.sh on demand.
+    printf 'endpoint: remote (host=%s window=%s - not probed locally; the network checks read its liveness)\n' \
+      "$remote_host" "${window:-none}"
+  elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0
     fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
