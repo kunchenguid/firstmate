@@ -58,6 +58,13 @@ elif mode.name == "bad-budget-value":
     data["alwaysLoadedByteBudgets"][0]["maxBytes"] = "45000"
 elif mode.name == "unclassified-budget":
     data["alwaysLoadedByteBudgets"].append({"path": "missing.md", "maxBytes": 10})
+elif mode.name == "renamed-agents-budget":
+    for budget in data["alwaysLoadedByteBudgets"]:
+        if budget["path"] == "AGENTS.md":
+            budget["path"] = "README.md"
+            break
+    else:
+        raise SystemExit("inventory has no AGENTS.md byte budget")
 else:
     raise SystemExit(f"unknown mode: {mode.name}")
 destination.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
@@ -105,10 +112,12 @@ test_always_loaded_byte_budget_fails_with_remediation() {
   local dropped="$TMP_ROOT/drop-budgets.json"
   local bad_value="$TMP_ROOT/bad-budget-value.json"
   local unclassified="$TMP_ROOT/unclassified-budget.json"
+  local renamed="$TMP_ROOT/renamed-agents-budget.json"
   mutate_inventory "$INVENTORY" "$tight" tight-agents-budget
   mutate_inventory "$INVENTORY" "$dropped" drop-budgets
   mutate_inventory "$INVENTORY" "$bad_value" bad-budget-value
   mutate_inventory "$INVENTORY" "$unclassified" unclassified-budget
+  mutate_inventory "$INVENTORY" "$renamed" renamed-agents-budget
   run_expect_failure "over its always-loaded ceiling of 1 bytes" \
     "$CHECK" --inventory "$tight"
   run_expect_failure "apply the knowledge-placement tree in firstmate-coding-guidelines; move conditional detail to a skill" \
@@ -119,7 +128,9 @@ test_always_loaded_byte_budget_fails_with_remediation() {
     "$CHECK" --inventory "$bad_value"
   run_expect_failure "always-loaded byte budget names an unclassified surface: missing.md" \
     "$CHECK" --inventory "$unclassified"
-  pass "an always-loaded contract over its byte ceiling fails with the placement remediation, and the ceiling cannot silently disappear"
+  run_expect_failure "alwaysLoadedByteBudgets must include an explicit entry for AGENTS.md" \
+    "$CHECK" --inventory "$renamed"
+  pass "an always-loaded contract over its byte ceiling fails with the placement remediation, the ceiling cannot silently disappear, and the AGENTS.md entry cannot be dropped or renamed away"
 }
 
 write_fixture_inventory() {

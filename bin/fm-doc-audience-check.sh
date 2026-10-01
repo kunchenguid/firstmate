@@ -178,6 +178,8 @@ def validate_byte_budgets(root: Path, data: dict, classifications: dict[str, str
                 f"over its always-loaded ceiling of {max_bytes} bytes "
                 f"(~{estimated_tokens(max_bytes)} estimated tokens); {BUDGET_REMEDIATION}"
             )
+    if "AGENTS.md" in classifications and "AGENTS.md" not in seen:
+        fail("alwaysLoadedByteBudgets must include an explicit entry for AGENTS.md")
     return len(budgets)
 
 
