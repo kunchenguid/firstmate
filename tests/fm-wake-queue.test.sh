@@ -802,6 +802,7 @@ SH
 # session:window makes the pane look missing, which is the leftover-row tests'
 # ring-unsafe path and must keep the parent alarm. These cases print fm-mate
 # and a claude foreground command so a proven-idle mate can actually be rung.
+# Capture shows an empty main composer, not an unreadable empty pane.
 install_secondmate_alive_tmux() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'
@@ -809,7 +810,7 @@ install_secondmate_alive_tmux() {  # <fakebin>
 set -u
 case "${1:-}" in
   list-windows) printf '%s\n' 'fm-mate' ;;
-  capture-pane) exit 0 ;;
+  capture-pane) printf '────────────────\n❯\n────────────────\n' ;;
   display-message)
     case "$*" in
       *pane_current_command*) printf 'claude\n' ;;
