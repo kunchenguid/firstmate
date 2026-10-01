@@ -148,11 +148,23 @@ Images are only for actual visual artifacts - a generated illustration, a screen
 
 Before classifying an inbox item as a new mention, check whether `source` is `discord-selfhosted-decision`.
 Such an item is an answer to a specific pushed decision: use its `.decision` object and `.text`, and do not reply publicly or treat it as fresh work.
-For `trigger=captain-hold`, call `bin/fm-captain-hold.sh answer-one "$key" "$answer" "Discord reply" --source discord-selfhosted`; it folds tabs and line breaks in the answer into spaces before keyed resolution.
+For `trigger=captain-hold`, call `bin/fm-captain-hold.sh answer-one "$task_id" "$answer" "Discord reply" --source discord-selfhosted --expect-occurrence "$occurrence"`; it folds tabs and line breaks in the answer into spaces before keyed resolution.
+`$task_id` is `.decision.task_id` and `$occurrence` is the trailing integer of `.decision.key`, which has the shape `captain-hold-<task-id>-<occurrence>`; both come from the decision object, and never be derived from the reply text.
+`--expect-occurrence` is not optional for a Discord reply: without it a reply that arrives after the call was answered and re-held resolves the *newer* question the captain was never asked, which is a silent wrong answer rather than a visible failure.
+A refusal naming the occurrence is a real outcome, not an error to retry: the captain's reply answered a question that has since moved on, so leave the inbox record in place, report the refusal in the plain outcome channel, and do not resolve anything.
 For `trigger=ask-user` or `trigger=pr-ready`, invoke `bin/fm-send.sh <status_task_id> --resolve-key <key> "$answer"` with the captured answer as one quoted argument.
+For `trigger=perm-ask`, invoke `bin/fm-opencode-permission.sh decide "$task_id" "$request_id" <once|always|reject>`, where `$task_id` is `.decision.task_id` and `$request_id` is `.decision.key` with its `perm-` prefix removed.
+Map the captain's words to exactly one of the three options the message offered, and pass only that word: `Approve once` becomes `once`, `Approve once and remember this` becomes `always`, and `Reject the request` becomes `reject`.
+When the reply does not clearly select one of the three offered options, do not guess and do not apply anything: report the three options in the plain outcome channel and leave the request pending.
+That script is the only thing that can grant, and it refuses on its own when the request expired, was already answered, or belongs to a task generation that has moved on.
 These are the existing keyed-answer paths; never edit status files directly.
 Remove the inbox record only after the matching command confirms success.
 On failure leave it for retry and report the exact error.
+
+Every decision answer is applied and then confirmed, in that order.
+Confirmation is what tells the captain their reply landed, and it is the only receipt they get: `bin/fm-discord-notify.sh --report <channel_id> "<outcome>"`, using `.channel_id` from the decision object and stating plainly which decision was applied and what it enabled.
+Post it after the keyed command succeeds, never before, and never instead of applying.
+Without that receipt the captain answered a decision and got no evidence it was consumed, which is indistinguishable from the reply being lost.
 
 This is a drain over the inbox, not a single reply.
 The watcher coalesces same-key `check:` wakes, so one `x-mention` wake can stand in for several pending mentions.

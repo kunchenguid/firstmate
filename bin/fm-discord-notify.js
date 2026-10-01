@@ -59,6 +59,9 @@ function localize(value) {
 		"Leave it open": "열린 상태로 두기",
 		"Continue with the request": "요청대로 계속 진행",
 		"Leave it on hold": "보류 상태로 두기",
+		"Approve once": "이 1회만 허용",
+		"Approve once and remember this": "허용하고 이 경로를 기억",
+		"Reject the request": "요청 거부",
 	})[value] || value;
 }
 

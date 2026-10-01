@@ -23,6 +23,8 @@
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#   fm-captain-hold.sh answer-one <task-id> <answer> <label> \
+#     --source <provenance> [--expect-occurrence <n>]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -118,6 +120,14 @@
 # A channel's ONLY job is to turn whatever it received into those keyed lines
 # and pipe them here. It must never map keys to tasks, build decision records,
 # choose a close mode beyond what its card declared, or close anything itself.
+#
+# `answer-one` is the single-key form of that same intake, for a channel that
+# captured exactly one decision. `--expect-occurrence <n>` is its occurrence
+# guard: pass the occurrence the decision was actually asked at, and a task
+# that is no longer at that occurrence - already answered, or answered and
+# re-held, or no longer captain-held - is refused before any resolution is
+# written. Without the flag the guard does not run, so an existing caller that
+# has no occurrence to assert keeps its current behavior.
 #
 # `bind`, `unbind`, and `binding` record that a captured-answer SOURCE feeds
 # this intake, for any channel whose answers arrive detached from their origin
@@ -2048,11 +2058,12 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
 }
 
 command_answer_one() {
-  local key=${1:-} answer=${2:-} label=${3:-} source=''
+  local key=${1:-} answer=${2:-} label=${3:-} source='' occurrence=''
   [ "$#" -ge 3 ] || { usage >&2; exit 2; }
   shift 3
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --expect-occurrence) shift; occurrence=${1:-} ;; --expect-occurrence=*) occurrence=${1#*=} ;;
       --source) shift; source=${1:-} ;;
       *) usage >&2; exit 2 ;;
     esac
@@ -2061,10 +2072,38 @@ command_answer_one() {
   [ -n "$source" ] || fail "--source provenance is required so the durable decision records where the answer came from"
   validate_slug task-id "$key"
   [ "${#key}" -le 128 ] || fail "task-id must be at most 128 characters"
+  if [ -n "$occurrence" ]; then
+    require_current_occurrence "$key" "$occurrence"
+  fi
   answer=$(sanitize_field "$answer")
   label=$(sanitize_field "$label")
   printf '%s\t%s\t%s\n' "$key" "$answer" "$label" \
     | command_answers --any-origin --source "$source"
+}
+
+# Refuse a keyed answer that names a superseded occurrence of a still-open
+# captain call. The Discord decision key carries the occurrence
+# `captain-hold-<task-id>-<occurrence>` that was actually put in front of the
+# captain, so a reply that arrives after the call was answered and re-held
+# targets an occurrence the captain was never asked about. Resolution is
+# refused rather than forwarded, so a stale reply cannot silently answer a
+# newer question. A closed task, an unreadable body, or an absent task fails
+# closed here exactly as it does in the resolution path itself.
+require_current_occurrence() {  # <task-id> <expected-occurrence>
+  local key=$1 expected=$2 show body hold_kind count
+  case "$expected" in ''|*[!0-9]*|0) fail "--expect-occurrence must be a positive integer" ;; esac
+  task_show "$key" || fail "no captain-held task $key in this home's configured backlog (data directory $DATA)"
+  show=$TASK_SHOW_OUTPUT
+  body=$(show_field_value "$show" body)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  count=$(resolution_record_count "$body") || count=''
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  if [ "$hold_kind" != captain ]; then
+    fail "refusing the answer: $key is not currently held for the captain (hold_kind=$hold_kind), so its occurrence $((count + 1)) cannot be confirmed"
+  fi
+  if [ "$((count + 1))" != "$expected" ]; then
+    fail "refusing the answer: $key is at occurrence $((count + 1)), not the occurrence $expected this decision was asked at"
+  fi
 }
 
 case "${1:-}" in

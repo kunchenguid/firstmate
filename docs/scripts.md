@@ -165,6 +165,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-discord-notify.js`   | Persist and deliver self-hosted Discord decision notifications through the REST API  |
 | `fm-discord-poll.sh`     | Invoke the bounded self-hosted Discord poll for mentions and authorized decision replies |
 | `fm-discord-poll.js`     | Poll Discord messages, capture authorized decision replies, and emit inbox wakes     |
+| `fm-opencode-permission.sh` | Record a real OpenCode permission request, push it to the captain as a keyed decision, and apply the keyed answer to exactly that request |
 | `fm-x-reply.sh`          | Post or dry-run preview a composed Relay reply or follow-up                          |
 | `fm-x-dismiss.sh`        | Dismiss a skipped Relay mention at the relay without replying                        |
 | `fm-x-link.sh`           | Link a spawned task to its originating Relay mention in task meta                    |

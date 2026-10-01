@@ -3821,22 +3821,11 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
-# state/<id>.git-hooks is the spawn-owned commit-msg strip directory, left
-# read-only by its installer.
-chmod u+w "$STATE/$ID.git-hooks" 2>/dev/null || true
-rm -rf "$STATE/$ID.inbox" "$STATE/$ID.git-hooks"
-# A presentation journal the close path left behind is orphaned once the
-# recorded pane is proven gone (the Herdr gate above) unless it still names a
-# live projected workspace - a version 2 binding of some other pane, or a
-# version 1 attempt whose token-bearing workspace is still present - which the
-# session-start sweep alone may judge (header).
-if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
-  if teardown_herdr_journal_orphaned; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
-    echo "warning: retaining herdr presentation journal for $ID; it still names a projected workspace the session-start sweep owns, not the closed endpoint" >&2
-  fi
-fi
+rm -rf "$STATE/$ID.inbox"
+# OpenCode permission request records (bin/fm-opencode-permission.sh). The
+# retired endpoint cannot answer them anymore, so the records go with it; a
+# request that was never answered has already expired on the server.
+rm -rf "$STATE/$ID.opencode-permission"
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

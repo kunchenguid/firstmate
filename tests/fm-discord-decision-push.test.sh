@@ -350,6 +350,43 @@ EOF
   assert_equals "1352000000000001000" "$(jq -r '.replied_to.message_id' "$record")" "notification accepts only one reply"
   pass "reply to a pushed decision enters x-inbox with keyed answer context"
 }
+test_perm_ask_reply_carries_the_identity_the_applier_needs() {
+  local home record wake req inbox
+  home="$TMP_ROOT/perm-ask-reply"
+  mkdir -p "$home/state/x-context" "$home/state/x-inbox"
+  chmod 700 "$home/state" "$home/state/x-context" "$home/state/x-inbox"
+  make_fake_node "$home"
+  record="$home/state/x-context/discord-notify-test.json"
+  cat > "$record" <<'EOF'
+{"schema":"fm-discord-decision-notification.v1","kind":"decision-notification","state":"sent","task_id":"oc-perm-task","key":"perm-per_abc123","trigger":"perm-ask","channel_id":"1000000000000000001","message_id":"1352000000000002000","summary":"OpenCode worker needs permission: action=external_directory resource=/tmp/x/*","options":["Approve once","Approve once and remember this","Reject the request"],"recorded_at":1790319000}
+EOF
+  chmod 600 "$record"
+  FM_TEST_REAL_NODE=$(command -v node) \
+    FM_DISCORD_FAKE_MESSAGES='[{"id":"1352000000000002001","channel_id":"1000000000000000001","guild_id":"1000000000000000000","author":{"id":"8000000000000000001","username":"captain"},"content":"Approve once","message_reference":{"message_id":"1352000000000002000","channel_id":"1000000000000000001"}}]' \
+    PATH="$home/fake-bin:$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DISCORD_BOT_TOKEN=fake-token FM_DISCORD_CHANNEL_ID=1000000000000000001 \
+    FM_DISCORD_AUTHORIZED_USER_IDS=8000000000000000001 \
+    "$ROOT/bin/fm-discord-poll.sh" > "$home/wake.log" || fail "poll failed"
+  wake=$(cat "$home/wake.log")
+  req=discord-sh-1352000000000002001
+  assert_equals "x-mention $req" "$wake" "the permission reply wakes the responder"
+  inbox="$home/state/x-inbox/$req.json"
+  assert_present "$inbox" "the permission reply is captured in the existing inbox"
+  assert_equals "discord-selfhosted-decision" "$(jq -r '.source' "$inbox")" "the permission reply is a decision reply, not fresh work"
+  # Everything the applier needs is already in the captured object: the task it
+  # belongs to, the request id behind the key, the exact options offered, and
+  # the channel a confirmation goes back to.
+  assert_equals "oc-perm-task" "$(jq -r '.decision.task_id' "$inbox")" "the owning task is carried"
+  assert_equals "perm-ask" "$(jq -r '.decision.trigger' "$inbox")" "the trigger is carried"
+  assert_equals "perm-per_abc123" "$(jq -r '.decision.key' "$inbox")" "the request key is carried"
+  assert_equals "3" "$(jq -r '.decision.options | length' "$inbox")" "all three decisions are carried"
+  assert_equals "1000000000000000001" "$(jq -r '.channel_id' "$inbox")" "the channel a confirmation posts to is carried"
+  assert_equals "Approve once" "$(jq -r '.text' "$inbox")" "the captain's own words are preserved"
+  # And the capture is durable even when this ingress run is not the watcher's.
+  assert_equals "1" "$(awk -F '\t' -v want="discord-$req" 'NF >= 5 && $3 == "check" && $4 == want { n++ } END { print n + 0 }' "$home/state/.wake-queue")" \
+    "the captured permission reply enqueued its own durable wake"
+  pass "a permission reply reaches the inbox with the exact identity the applier needs"
+}
 test_captured_reply_without_offer_recovers_one_wake() {
   local home record req inbox offered wake
   home="$TMP_ROOT/recover-reply-wake"
@@ -505,6 +542,7 @@ test_stale_sending_notification_recovers_without_duplicate_post
 test_captain_hold_triggers_push
 test_captain_hold_truncates_long_reason_for_discord
 test_reply_to_notification_enters_existing_inbox
+test_perm_ask_reply_carries_the_identity_the_applier_needs
 test_captured_reply_without_offer_recovers_one_wake
 test_unauthorized_decision_reply_is_ignored
 test_no_unrelated_reply_is_captured

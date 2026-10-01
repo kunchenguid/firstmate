@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Send one firstmate-initiated decision to the configured self-hosted Discord channel.
-# Usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready> <task-id> <key> <summary> <option|option...> [status-task-id]
+# `perm-ask` carries a real OpenCode permission request; its key is `perm-<request-id>`.
+# Usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> [status-task-id]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +20,7 @@ elif [ "${1:-}" = --retry-pending ]; then
   [ "$#" -eq 1 ] || { echo "usage: fm-discord-notify.sh --retry-pending" >&2; exit 2; }
   retry_pending=1
 elif [ "$#" -lt 5 ] || [ "$#" -gt 6 ]; then
-  echo "usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready> <task-id> <key> <summary> <option|option...> [status-task-id]" >&2
+  echo "usage: fm-discord-notify.sh <captain-hold|ask-user|pr-ready|perm-ask> <task-id> <key> <summary> <option|option...> [status-task-id]" >&2
   exit 2
 fi
 if [ "$retry_pending" -eq 0 ] && [ "$report_mode" -eq 0 ]; then
@@ -56,6 +57,7 @@ case "$trigger:$decision_key" in
   captain-hold:captain-hold-*) ;;
   ask-user:nm-*) ;;
   pr-ready:pr-ready-*) ;;
+  perm-ask:perm-*) ;;
   *) echo "fm-discord-notify: trigger does not match its decision key" >&2; exit 2 ;;
 esac
 case "$summary" in *$'\n'*|*$'\r'*) echo "fm-discord-notify: summary must be one line" >&2; exit 2 ;; esac

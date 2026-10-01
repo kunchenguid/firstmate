@@ -2428,6 +2428,68 @@ test_answer_one_keeps_multiline_reply_in_one_field() {
   pass "answer-one folds embedded separators before keyed resolution"
 }
 
+test_answer_one_occurrence_guard_refuses_a_superseded_question() {
+  local home show
+  home=$(make_home answer-one-occurrence)
+  run_captain "$home" hold sample-occurrence --title "Choose an answer" \
+    --reason "first question" --repo sample >/dev/null \
+    || fail "could not register the occurrence fixture"
+
+  # The pushed decision key is captain-hold-<task-id>-<occurrence>, and a fresh
+  # hold starts at occurrence 1. Answer it with a release so the row stays open
+  # and can carry the next question, which is the shape a re-held call has.
+  printf 'yes, and keep the row open\n' > "$home/first.txt"
+  run_captain "$home" answer sample-occurrence --decision-file "$home/first.txt" --release >/dev/null \
+    || fail "could not answer and release the occurrence fixture"
+
+  # Re-held: a NEW question is now pending, at occurrence 2. A reply that
+  # arrives for the occurrence 1 message must not answer it.
+  run_captain "$home" hold sample-occurrence \
+    --reason "second question" >/dev/null \
+    || fail "could not re-hold the occurrence fixture"
+  printf 'stale reply to the first question\n' > "$home/stale.txt"
+  if run_captain "$home" answer-one sample-occurrence "stale reply to the first question" \
+    "Discord reply" --source discord-selfhosted --expect-occurrence 1 \
+    > "$home/stale.out" 2> "$home/stale.err"; then
+    fail "a reply to a superseded question resolved the newer occurrence"
+  fi
+  assert_contains "$(cat "$home/stale.err")" "occurrence 2" \
+    "the refusal must name the current occurrence"
+  show=$(tasks_in "$home" show sample-occurrence --full)
+  assert_contains "$show" "second question" \
+    "the re-held question must still be the open one"
+  assert_not_contains "$show" "Answer: stale reply to the first question" \
+    "the stale reply was recorded as the captain's answer"
+
+  # The occurrence the current decision was asked at still applies.
+  run_captain "$home" answer-one sample-occurrence "yes to the second" "Discord reply" \
+    --source discord-selfhosted --expect-occurrence 2 >/dev/null \
+    || fail "answer-one refused the current occurrence"
+  pass "answer-one refuses a reply to a superseded occurrence and applies the current one"
+}
+
+test_answer_one_occurrence_guard_refuses_without_a_captain_hold() {
+  local home
+  home=$(make_home answer-one-occurrence-unheld)
+  tasks_in "$home" add sample-not-held --title "No hold" >/dev/null 2>&1 \
+    || fail "could not register the unheld fixture"
+  if run_captain "$home" answer-one sample-not-held "yes" "Discord reply" \
+    --source discord-selfhosted --expect-occurrence 1 \
+    > "$home/unheld.out" 2> "$home/unheld.err"; then
+    fail "an occurrence guard passed on a task that is not held for the captain"
+  fi
+  assert_contains "$(cat "$home/unheld.err")" "not currently held for the captain" \
+    "the refusal must name the missing captain hold"
+  if run_captain "$home" answer-one sample-not-held "yes" "Discord reply" \
+    --source discord-selfhosted --expect-occurrence zero \
+    > "$home/bad.out" 2> "$home/bad.err"; then
+    fail "a non-numeric occurrence was accepted"
+  fi
+  assert_contains "$(cat "$home/bad.err")" "positive integer" \
+    "a non-numeric occurrence must be refused before any read"
+  pass "the occurrence guard refuses a task that is not captain-held, and a non-numeric occurrence"
+}
+
 test_origin_slug_validation_precedes_path_construction() {
   local home
   home=$(make_home slug-validation)
@@ -4678,6 +4740,8 @@ test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_answer_one_keeps_multiline_reply_in_one_field
+test_answer_one_occurrence_guard_refuses_a_superseded_question
+test_answer_one_occurrence_guard_refuses_without_a_captain_hold
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal

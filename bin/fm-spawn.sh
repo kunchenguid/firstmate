@@ -4704,6 +4704,45 @@ export default {
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'
+    # OpenCode 2 renders a permission ask as a modal inside the worker's own
+    # TUI, which the captain never sees and firstmate has no record of: the ask
+    # simply blocks the worker. This plugin is the only thing that makes a real
+    # ask reach the captain, so it records and delegates and decides nothing
+    # itself. bin/fm-opencode-permission.sh owns the ask, the durable record,
+    # the captain decision, and every fail-closed check.
+    cat >"$WT/.opencode/plugins/fm-opencode-permission.js" <<EOF
+// Firstmate OpenCode permission bridge; written by fm-spawn under the contract
+// owned by bin/fm-opencode-permission.sh. Records every permission.asked event
+// for this task's sessions and hands it to that script, which verifies the
+// request against the live server before anything is pushed to the captain.
+// Deliberately no decision logic, no grant, and no second notification path: a
+// plugin that approved anything here would be exactly the invisible grant this
+// exists to remove.
+import { execFile } from "node:child_process";
+const run = (...args) =>
+  new Promise((resolve) => {
+    execFile("$FM_ROOT/bin/fm-opencode-permission.sh", args, () => resolve());
+  });
+export default {
+  id: "fm-opencode-permission",
+  setup(ctx) {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event?.type !== "permission.asked") continue;
+          const data = event.data || {};
+          if (!data.id || !data.sessionID) continue;
+          await run("ask", "$ID", data.sessionID, data.id);
+        }
+      } catch {
+      }
+    })();
+    return () => controller.abort();
+  },
+};
+EOF
+    exclude_path '.opencode/plugins/fm-opencode-permission.js'
     ;;
   pi | pi-signed)
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
