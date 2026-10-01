@@ -836,14 +836,19 @@ cmd_read() {
     }
     # A choice prompt ends in Context data; the typed note of the captain is
     # only its `note` field. The prose before it is board-generated, never a note.
+    # The prose may echo a note that itself says `Context data: {`, so the block
+    # is the first occurrence whose remainder decodes as an object.
     sub choice_note {
       my ($prompt) = @_;
-      return "" unless $prompt =~ /Context data:\s*(\{.*\})\s*\z/s;
-      my $data = eval { JSON::PP::decode_json($1) };
-      return "" unless ref($data) eq "HASH" && defined $data->{note} && !ref $data->{note};
-      my $note = $data->{note};
-      utf8::encode($note);
-      return $note;
+      while ($prompt =~ /Context data:\s*(?=(\{.*\})\s*\z)/gs) {
+        my $data = eval { JSON::PP::decode_json($1) };
+        next unless ref($data) eq "HASH";
+        return "" unless defined $data->{note} && !ref $data->{note};
+        my $note = $data->{note};
+        utf8::encode($note);
+        return $note;
+      }
+      return "";
     }
     if (@messages) {
       my $message_label = $session_ended =~ /^(?:true|True|TRUE)$/
