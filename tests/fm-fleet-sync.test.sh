@@ -683,8 +683,8 @@ test_symlinked_clone_still_syncs() {
   home=$(new_home)
   clone=$(build_pair "$home" sigma)
   advance_origin "$home" sigma C1
-  # A symlinked clone dir is a real clone root; the guard compares resolved paths,
-  # so it must not be mistaken for a directory nested in someone else's repo.
+  # A symlinked clone dir is a real clone root and must not be mistaken for a
+  # directory nested in someone else's repo.
   mv "$clone" "$home/real-sigma"
   ln -s "$home/real-sigma" "$clone"
 
