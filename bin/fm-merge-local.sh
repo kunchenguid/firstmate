@@ -15,6 +15,8 @@
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
+# Completion evidence is checked by bin/fm-dod-lib.sh at the immutable head
+# passed to git, so a concurrent branch move cannot replace validated content.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 
@@ -24,6 +26,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
@@ -135,8 +139,10 @@ case "$hold_status" in
     exit 1
     ;;
 esac
+candidate=$(git -C "$PROJ" rev-parse --verify "refs/heads/$BRANCH^{commit}")
+fm_dod_receipt_accept "$STATE" "$ID" "$META" "$candidate" >&2 || exit 1
 merge_status=0
-git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
+git -C "$PROJ" merge --ff-only "$candidate" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"

@@ -424,6 +424,97 @@ EOF
   pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
 }
 
+# Exercise receipt publication, done acceptance and actual guarded local landing
+# against isolated repositories. No backend/harness or live fleet is consulted.
+test_completion_receipt_gates() {
+  local home repo wt meta evidence head before mode
+  home="$TMP_ROOT/receipt-home"
+  repo="$home/project" wt="$home/worker"
+  mkdir -p "$home/state" "$home/config" "$home/data"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  fm_git_worktree "$repo" "$wt" fm/receipt
+  git -C "$wt" commit -q --allow-empty -m 'receipt candidate'
+  meta="$home/state/receipt.meta" evidence="$home/evidence.txt"
+  printf 'bash targeted-test: PASS (all assertions passed)\nlimitations: no live services\n' > "$evidence"
+  printf 'project=%s\nworktree=%s\nbranch=fm/receipt\nkind=ship\nmode=local-only\nreceipt_required=1\nspawn_gen=fixture-receipt\n' "$repo" "$wt" > "$meta"
+  head=$(git -C "$wt" rev-parse HEAD)
+  before=$(git -C "$repo" rev-parse HEAD)
+  accept_done ship local-only "$wt" "$repo" 'done: ready' "$home/state" receipt "$meta" >/dev/null \
+    && fail "required absent receipt accepted done"
+  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt >/dev/null 2>&1 \
+    && fail "local landing accepted missing required proof"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt FAIL "$evidence" "$wt" >/dev/null \
+    || fail "FAIL receipt publication failed"
+  accept_done ship local-only "$wt" "$repo" 'done: ready' "$home/state" receipt "$meta" >/dev/null \
+    && fail "FAIL receipt accepted done"
+  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt >/dev/null 2>&1 \
+    && fail "local landing accepted FAIL"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$before" ] || fail "refused landing changed main"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt PASS "$evidence" "$wt" >/dev/null \
+    || fail "PASS receipt publication failed"
+  rm "$evidence"
+  jq -e '.evidence | contains("all assertions passed")' "$home/state/receipt.run-receipt.json" >/dev/null \
+    || fail "durable receipt lost embedded evidence"
+  accept_done ship local-only "$wt" "$repo" 'done: ready' "$home/state" receipt "$meta" \
+    || fail "valid receipt refused done"
+  for mode in direct-PR no-mistakes; do
+    sed "s/mode=local-only/mode=$mode/" "$meta" > "$home/state/forge.meta"
+    fm_dod_receipt_accept "$home/state" receipt "$home/state/forge.meta" "$head" >/dev/null \
+      && fail "mode mismatch accepted for $mode"
+  done
+  sed 's/spawn_gen=fixture-receipt/spawn_gen=fixture-relaunched/' "$meta" > "$home/meta.new"
+  mv "$home/meta.new" "$meta"
+  fm_dod_receipt_accept "$home/state" receipt "$meta" "$head" >/dev/null \
+    && fail "previous incarnation receipt accepted"
+  sed 's/spawn_gen=fixture-relaunched/spawn_gen=fixture-receipt/' "$meta" > "$home/meta.new"
+  mv "$home/meta.new" "$meta"
+  git -C "$wt" commit -q --allow-empty -m 'changed candidate'
+  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt >/dev/null 2>&1 \
+    && fail "local landing accepted stale candidate proof"
+  printf 'checks: PASS\n' > "$evidence"
+  printf 'dirty\n' > "$wt/dirty"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt PASS "$evidence" "$wt" >/dev/null 2>&1 \
+    && fail "dirty checkout produced PASS"
+  rm "$wt/dirty"
+  printf '  \n' > "$evidence"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt PASS "$evidence" "$wt" >/dev/null 2>&1 \
+    && fail "empty evidence produced PASS"
+  printf 'checks: PASS\n' > "$evidence"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt PASS "$evidence" "$wt" >/dev/null \
+    || fail "updated candidate receipt failed"
+  # Malformed proof must fail even when its requirement marker is absent.
+  cp "$home/state/receipt.run-receipt.json" "$home/valid.json"
+  printf '{}\n' > "$home/state/receipt.run-receipt.json"
+  fm_dod_receipt_accept "$home/state" receipt "$meta" "$head" >/dev/null \
+    && fail "malformed receipt accepted"
+  cat "$home/valid.json" "$home/valid.json" > "$home/state/receipt.run-receipt.json"
+  fm_dod_receipt_accept "$home/state" receipt "$meta" "$(git -C "$wt" rev-parse HEAD)" >/dev/null \
+    && fail "multiple JSON receipts accepted as one proof"
+  rm "$home/state/receipt.run-receipt.json"
+  mkdir "$home/receipt-target"
+  ln -s "$home/receipt-target" "$home/state/receipt.run-receipt.json"
+  FM_HOME="$home" "$ROOT/bin/fm-run-receipt.sh" receipt PASS "$evidence" "$wt" >/dev/null 2>&1 \
+    && fail "receipt publisher followed a directory symlink"
+  [ -z "$(ls -A "$home/receipt-target")" ] || fail "receipt publication wrote through symlink"
+  rm "$home/state/receipt.run-receipt.json"
+  cp "$home/valid.json" "$home/state/receipt.run-receipt.json"
+  printf 'receipt_required=0\n' >> "$meta"
+  fm_dod_receipt_accept "$home/state" receipt "$meta" "$(git -C "$wt" rev-parse HEAD)" >/dev/null \
+    && fail "ambiguous requirement allowed evidence bypass"
+  grep -v '^receipt_required=' "$meta" > "$home/meta.new"
+  printf 'receipt_required=1\n' >> "$home/meta.new"
+  mv "$home/meta.new" "$meta"
+  FM_HOME="$home" "$ROOT/bin/fm-merge-local.sh" receipt > "$home/merge.out" 2>&1 \
+    || fail "valid local landing failed: $(cat "$home/merge.out")"
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$wt" rev-parse HEAD)" ] \
+    || fail "valid local landing did not land proved candidate"
+  # Legacy tasks remain compatible when no receipt exists.
+  grep -v '^receipt_required=' "$meta" > "$home/state/legacy.meta"
+  fm_dod_receipt_accept "$home/state" legacy "$home/state/legacy.meta" "$head" \
+    || fail "legacy absent receipt refused"
+  pass "durable completion evidence binds candidate, mode and incarnation and gates local landing"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -464,5 +555,7 @@ test_worker_role_names_skill_and_fallback_file() {
 }
 
 test_worker_role_names_skill_and_fallback_file
+
+test_completion_receipt_gates
 
 echo "all fm-dod-lib tests passed"

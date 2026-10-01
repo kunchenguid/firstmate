@@ -266,6 +266,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
+  assert_grep 'receipt_required=1' "$meta" "promotion did not require completion evidence"
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided merge posture"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
@@ -380,6 +381,8 @@ STUB
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
+    assert_grep 'Completion receipt: required' "$brief_dod" "$mode: generated contract omitted completion evidence"
+
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"

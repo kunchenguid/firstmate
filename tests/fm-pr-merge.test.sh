@@ -3886,3 +3886,49 @@ test_allow_missing_follows_the_allow_red_rules
 test_required_producer_identity
 test_app_bound_required_status_context_matches_by_name
 test_required_partial_reads_report_all_failures
+
+
+# Receipts supplement forge checks and cannot be waived by check overrides.
+test_receipt_landing_guards() {
+  local provider verdict case_dir head url rc
+  head=abababababababababababababababababababab
+  for provider in github gitlab; do
+    for verdict in missing FAIL stale PASS; do
+      if [ "$provider" = github ]; then
+        case_dir=$(make_case "receipt-$provider-$verdict")
+        add_gh_mocks "$case_dir" "$head"
+        url=https://github.com/example/repo/pull/9
+      else
+        case_dir=$(make_gitlab_case "receipt-$provider-$verdict")
+        head=$(git -C "$case_dir/wt" rev-parse HEAD)
+        write_mr_json "$case_dir/mr.json" "head=$head" "pipeline_sha=$head"
+        url=$MR_URL
+      fi
+      printf 'receipt_required=1\n' >> "$case_dir/state/task-x1.meta"
+      if [ "$verdict" != missing ]; then
+        jq -n --arg head "$head" --arg verdict "$verdict" '
+          {schema:1,task:"task-x1",mode:"no-mistakes",spawn_gen:"",
+           head:$head,verdict:(if $verdict == "stale" then "PASS" else $verdict end),
+           at:1,evidence:"targeted checks passed"}
+          | if $verdict == "stale" then .head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" else . end
+        ' > "$case_dir/state/task-x1.run-receipt.json"
+      fi
+      set +e
+      run_pr_merge "$case_dir" task-x1 "$url" > "$case_dir/out" 2> "$case_dir/err"
+      rc=$?
+      set -e
+      if [ "$verdict" = PASS ]; then
+        expect_code 0 "$rc" "$provider valid completion receipt must merge: $(cat "$case_dir/err")"
+      else
+        expect_code 1 "$rc" "$provider $verdict proof must refuse landing"
+        assert_no_grep ' pr merge ' "$case_dir/gh.log" "receipt refusal called GitHub merge"
+        if [ "$provider" = gitlab ]; then
+          assert_no_grep ' mr merge ' "$case_dir/glab.log" "receipt refusal called GitLab merge"
+        fi
+      fi
+    done
+  done
+  pass "GitHub and GitLab refuse missing, FAIL and stale receipts and accept exact PASS evidence"
+}
+
+test_receipt_landing_guards
