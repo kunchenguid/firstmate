@@ -91,7 +91,7 @@ import {
 import { Box, Container, fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
-import { installTaskContinuation } from "./lib/fm-task-continuation.ts";
+import { installTaskContinuation, type TaskContinuationOffer } from "./lib/fm-task-continuation.ts";
 import { runCommandAsync } from "./lib/fm-async-exec.ts";
 import { classifyFeishuMessage } from "./lib/fm-feishu-native-channel.ts";
 import {
@@ -110,7 +110,7 @@ import {
   readLiveEligibleRows,
   releaseEligibleRowsSnapshot,
   scopeForUnreadWake,
-  lifecycleModesForWake,
+  scopeForUnreadWakeWithLifecycle,
   writeEligibleRowsSnapshot,
   type BranchDispatchOffer,
 } from "./lib/fm-branch-dispatch.ts";
@@ -690,6 +690,7 @@ export default function (pi: ExtensionAPI) {
   let continuationToolsRemaining: number | null = null;
   let recordContinuationReceipt: (() => void) | null = null;
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
+  let branchProgressBindings: Record<string, string> = {};
   let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
   let branchTaskAdmissionRevisions: Record<string, number> = {};
   let branchTaskAdmissionSnapshots: Record<string, string> = {};
@@ -1413,7 +1414,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event. A compact task continuation may use silent:true with verdict routine when authorized work advanced or a healthy wait remains; that stays inside the branch session and does not interrupt MAIN. Other reports write durably to the outcome store and merge into MAIN. verdict captain is reserved for goal-ready evidence, genuine blockers, or authority decisions.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1426,7 +1427,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True for a no-change fleet heartbeat or a routine compact continuation that should remain quiet while authorized work advances or waits healthily",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1435,7 +1436,9 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        const quietContinuation = silent && verdictRaw === "routine" && Boolean(branchProgressBindings[task]);
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") ||
+            (silent && !quietContinuation && (task !== "fleet" || verdictRaw !== "routine"))) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
             details: undefined,
@@ -1462,7 +1465,14 @@ export default function (pi: ExtensionAPI) {
             };
           }
           const binding = branchTaskBindings[task];
-          if (binding) {
+          const progressToken = branchProgressBindings[task];
+          if (progressToken) {
+            const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
+            const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
+            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state === "done") {
+              return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
+            }
+          } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
             const expiresAt = Date.parse(record?.delegation?.expires_at || "");
@@ -1470,6 +1480,21 @@ export default function (pi: ExtensionAPI) {
                 !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
               return { content: [{ type: "text", text: "report refused: newer task intent invalidated this branch result" }], details: undefined, isError: true };
             }
+          }
+          if (quietContinuation) {
+            const manager = branch?.sessionManager;
+            const entryId = manager?.appendCustomEntry("fm-task-continuation-settlement", {
+              task, admission: wakeTaskScope?.token, record_token: progressToken, summary,
+            });
+            if (!entryId || !manager?.getEntries().some((entry) => entry.id === entryId)) {
+              return { content: [{ type: "text", text: "quiet continuation settlement was not retained" }], details: undefined, isError: true };
+            }
+            durableReportRevision += 1;
+            appendBranchRoutingTrace(state, {
+              token: wakeTaskScope?.token || progressToken, actor: "branch", stage: "report", reason: "routine-silent",
+              generation: toolGeneration, selectionRevision: branchSelectionRevision,
+            }, pi.events);
+            return { content: [{ type: "text", text: "routine continuation retained quietly in branch" }], details: undefined };
           }
           const appended = await runOutcomeScript(appendArgs);
           if (!appended.ok) {
@@ -1515,6 +1540,7 @@ export default function (pi: ExtensionAPI) {
       FM_SUPERVISION_ACTOR: "branch",
       FM_BRANCH_GENERATION: String(toolGeneration),
       FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
+      FM_BRANCH_PROGRESS_BINDINGS: JSON.stringify(branchProgressBindings),
       FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : []),
       FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
       FM_LEASE_HOLDER_PID: ownedLockPid,
@@ -1527,13 +1553,15 @@ export default function (pi: ExtensionAPI) {
       name: "fm_task_continuation",
       label: "Task continuation",
       description:
-        "Operate only the exact delegated task admitted to this supervision-branch turn. " +
+        "Operate only the exact task admitted to this supervision-branch turn. Compact original-row continuation uses read only; MAIN remains the sole progress writer. " +
+        "Historical delegated lifecycle work may use the legacy inspect/refresh/observe/patch/readback/observe_receipt operations below. " +
         "inspect binds evidence, refresh/observe maintain current evidence, patch performs the canonical CAS for a precheck or already-authorized next action, " +
         "readback checks an uncertain existing effect, and observe_receipt confirms an identical pre-existing handled steer. " +
         "The admission already contains a refreshed observation: do not call this after every action or for an unchanged healthy wait. Automatic effect owners retain receipts without a follow-up call. " +
         "This tool cannot enroll, assess, accept, archive, change policy or authority, launch, relaunch, interrupt, merge, or clean up.",
       parameters: Type.Object({
         action: Type.Union([
+          Type.Literal("read"),
           Type.Literal("inspect"), Type.Literal("refresh"), Type.Literal("observe"),
           Type.Literal("patch"), Type.Literal("readback"), Type.Literal("observe_receipt"),
         ]),
@@ -1549,11 +1577,24 @@ export default function (pi: ExtensionAPI) {
       execute: async (_toolCallId, params) => {
         const task = String((params as { task?: unknown }).task || "").trim();
         try {
-          if (!taskAtom(task) || !wakeTaskScope?.tasks.has(task) || !branchTaskBindings[task]) {
+          if (!taskAtom(task) || !wakeTaskScope?.tasks.has(task) ||
+              (!branchTaskBindings[task] && !branchProgressBindings[task])) {
             throw new Error("continuation task is outside this exact branch admission");
           }
           if (!(await actingAsOwner(toolGeneration))) {
             throw new Error("supervision session was replaced or lost lock ownership");
+          }
+          const progressToken = branchProgressBindings[task];
+          const action = String((params as { action?: unknown }).action || "");
+          if (progressToken) {
+            if (action !== "read") throw new Error("compact task progress is MAIN-owned; branch continuation permits read only");
+            const current = await run(["progress", task]);
+            if (current.status !== 0) throw new Error(current.stderr.trim() || "task progress read refused");
+            const progress = JSON.parse(current.stdout);
+            if (progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state === "done") {
+              throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
+            }
+            return { content: [{ type: "text", text: JSON.stringify(progress) }], details: undefined };
           }
           const binding = branchTaskBindings[task];
           const current = await run(["lifecycle", task]);
@@ -1572,7 +1613,6 @@ export default function (pi: ExtensionAPI) {
             throw new Error(authority.stderr.trim() || "current continuation authority does not permit branch maintenance");
           }
 
-          const action = String((params as { action?: unknown }).action || "");
           let args: string[];
           let patchFile = "";
           if (action === "inspect") {
@@ -1785,7 +1825,7 @@ export default function (pi: ExtensionAPI) {
           // accidental in-shell reassignment fails loudly instead of silently
           // impersonating main. Confused-agent-grade by design; the threat
           // model lives in bin/fm-lease-lib.sh.
-          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_BRANCH_MAIN_SESSION_FILE FM_BRANCH_GENERATION FM_BRANCH_TASK_SCOPE FM_BRANCH_TASK_BINDINGS
+          command: `readonly FM_SUPERVISION_ACTOR FM_LEASE_HOLDER_PID FM_BRANCH_MAIN_SESSION_FILE FM_BRANCH_GENERATION FM_BRANCH_TASK_SCOPE FM_BRANCH_TASK_BINDINGS FM_BRANCH_PROGRESS_BINDINGS
 (
 ${context.command}
 )`,
@@ -1795,6 +1835,7 @@ ${context.command}
             FM_SUPERVISION_ACTOR: "branch",
             FM_BRANCH_GENERATION: String(branchGeneration),
             FM_BRANCH_TASK_BINDINGS: JSON.stringify(branchTaskBindings),
+            FM_BRANCH_PROGRESS_BINDINGS: JSON.stringify(branchProgressBindings),
             FM_BRANCH_TASK_SCOPE: JSON.stringify(wakeTaskScope ? [...wakeTaskScope.tasks] : ["*"]),
             FM_BRANCH_MAIN_SESSION_FILE: continuation.sessionFile() || "",
             FM_LEASE_HOLDER_PID: leaseHolderPid,
@@ -1978,9 +2019,9 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const modes = await lifecycleModesForWake(fmRoot, fmHome, state);
+        const { modes, routineDecisionTasks } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, heartbeat);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
-        const scope = scopeForUnreadWake(state, heartbeat, modes);
+        const scope = scopeForUnreadWake(state, heartbeat, modes, new Set(routineDecisionTasks));
         const disposition = dispositionForWakeTrigger(message, scope);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
@@ -2025,10 +2066,20 @@ ${context.command}
         // Retain exact task obligations before granting branch acknowledgement.
         await continuation.preserve([...admittedTasks]);
         branchTaskBindings = {};
+        branchProgressBindings = {};
         branchTaskObservations = {};
         branchTaskAdmissionRevisions = {};
         branchTaskAdmissionSnapshots = {};
         for (const task of admittedTasks) {
+          const compact = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
+          if (compact.status === 0) {
+            try {
+              const progress = JSON.parse(compact.stdout);
+              if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step) {
+                branchProgressBindings[task] = progress.record_token;
+              }
+            } catch { /* Malformed compact progress grants no branch capability. */ }
+          }
           const file = join(process.env.FM_DATA_OVERRIDE || join(fmHome, "data"), task, "lifecycle.json");
           if (existsSync(file)) {
             const record = JSON.parse(readFileSync(file, "utf8"));
@@ -2058,12 +2109,16 @@ ${context.command}
         wakeTaskScope = heartbeat ? null : { rows: admittedSeqs, tasks: admittedTasks, token: offer.token };
         trace("prompt", "started", admittedSeqs);
         try {
+          const canonicalScope = Object.fromEntries(admittedSeqs.map((seq) => [seq, scope.taskBySeq[seq]]));
           await session.prompt(
-            `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.`,
+            `FIRSTMATE SUPERVISION WAKE: ${message}\n` +
+            `Canonical task scope for the admitted queue rows: ${JSON.stringify(canonicalScope)}\n\n` +
+            `Use these canonical task ids instead of endpoint labels. Handle this per your operating procedure and finish with fm_branch_report.`,
           );
         } finally {
           wakeTaskScope = null;
           branchTaskBindings = {};
+          branchProgressBindings = {};
           branchTaskObservations = {};
           branchTaskAdmissionRevisions = {};
           branchTaskAdmissionSnapshots = {};
@@ -2102,6 +2157,99 @@ ${context.command}
       });
     branchChain = delivery.catch(() => {});
     return delivery;
+  }
+
+  // Compact continuations are original-task-record admissions, not wake queue
+  // rows and not rich lifecycle grants. Reuse branchChain so observation,
+  // same-worker routing, and ordinary wake handling cannot overlap.
+  function offerTaskContinuation(offer: TaskContinuationOffer): boolean {
+    if (shuttingDown || resetInProgress || afkActive() || branchBroken || !generationOwnsLockSync(generation)) return false;
+    const acceptedGeneration = generation;
+    const selection = branchSelectionRevision;
+    const trace = (stage: string, reason: string) => appendBranchRoutingTrace(state, {
+      token: offer.admission, actor: "branch", stage, reason, trigger: "continuation",
+      generation: acceptedGeneration, selectionRevision: selection,
+    }, pi.events);
+    trace("admission", "accepted");
+    const delivery = branchChain.then(async () => {
+      if (acceptedGeneration !== generation || selection !== branchSelectionRevision ||
+          !(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver replaced");
+      const read = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", offer.task], { env: scriptEnv });
+      const progress = read.status === 0 ? JSON.parse(read.stdout) : null;
+      if (!progress || progress.record_token !== offer.progress.record_token || !progress.remaining_gap ||
+          !progress.next_step || progress.task_state === "done") {
+        throw new Error("task goal, acceptance, progress, or disposition changed before branch receipt");
+      }
+      const branchForTask = await ensureBranch(acceptedGeneration);
+      const { session, sessionManager } = branchForTask;
+      await flushMirror(session, acceptedGeneration);
+      if (!(await actingAsOwner(acceptedGeneration))) throw new Error("continuation receiver lost ownership");
+      const entryId = sessionManager.appendCustomEntry("fm-task-continuation-admission", {
+        task: offer.task, admission: offer.admission, generation: acceptedGeneration,
+        record_token: progress.record_token, goal: progress.goal, acceptance: progress.acceptance,
+        current_state: progress.current_state, remaining_gap: progress.remaining_gap,
+        next_step: progress.next_step, task_state: progress.task_state,
+      });
+      const sessionFile = sessionManager.getSessionFile();
+      if (!sessionFile || !sessionManager.getEntries().some((entry) => entry.id === entryId)) throw new Error("branch admission was not retained");
+      let receipted = false;
+      recordContinuationReceipt = () => {
+        if (receipted || !existsSync(sessionFile)) return;
+        const entry = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean)
+          .map((line) => JSON.parse(line)).find((candidate) => candidate.id === entryId);
+        if (entry?.customType !== "fm-task-continuation-admission" || entry.data?.admission !== offer.admission) {
+          throw new Error("branch admission persistence conflict");
+        }
+        offer.delivered({ sessionFile, entryId, generation: acceptedGeneration });
+        receipted = true;
+      };
+      recordContinuationReceipt();
+      const before = durableReportRevision;
+      const entryOffset = sessionManager.getEntries().length;
+      wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
+      branchTaskBindings = {};
+      branchProgressBindings = { [offer.task]: progress.record_token };
+      continuationToolsRemaining = 8;
+      const timeout = setTimeout(() => { void session.abort(); }, 120_000);
+      trace("prompt", "started");
+      try {
+        await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
+          `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
+          `Compare the goal and acceptance method with actual task artifacts and current executor state. Perform or route the next already-authorized routine step without asking MAIN to rewrite progress first. ` +
+          `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
+          `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text. Route bounded ordinary gate continuations back to that same worker; do not run or respond to no-mistakes yourself. ` +
+          `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
+          `Use silent routine reporting while work advanced or a healthy executor/run is unchanged. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
+          `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
+          JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
+            current_state: progress.current_state, remaining_gap: progress.remaining_gap,
+            next_step: progress.next_step, task_state: progress.task_state,
+            record_token: progress.record_token }));
+        recordContinuationReceipt();
+        if (!receipted) throw new Error("branch admission has no durable receipt");
+      } finally {
+        clearTimeout(timeout);
+        continuationToolsRemaining = null;
+        recordContinuationReceipt = null;
+        branchTaskBindings = {};
+        branchProgressBindings = {};
+        wakeTaskScope = null;
+      }
+      const error = settledPromptProviderError(sessionManager, entryOffset);
+      if (error || durableReportRevision <= before) throw new Error(error || "continuation settled without a durable outcome");
+      recordDurableBranchReport(branchForTask.generation, branchForTask.selectionRevision);
+      trace("settlement", "reported-continuation");
+    });
+    branchChain = delivery.catch(async (error) => {
+      trace("failure", "continuation-failed");
+      if (acceptedGeneration === generation && await actingAsOwner(acceptedGeneration)) {
+        await runOutcomeScript(["append", "--task", offer.task, "--verdict", "captain", "--summary",
+          `Supervisor Branch could not continue the authorized task; obligation retained: ${String(error).slice(0, 1200)}`]);
+        await enqueueDelivery(() => reconcileWithHealth(acceptedGeneration));
+      }
+    }).catch(() => { /* Original task progress remains due if reporting also fails. */ })
+      .finally(() => { requestHealth(); offer.settled(); });
+    return true;
   }
 
   // A model or effort change applies to the next branch turn without waiting
@@ -3133,5 +3281,6 @@ ${context.command}
   // accepted between a helper callback and the main generation transition.
   const continuation = installTaskContinuation(pi, {
     root: fmRoot, home: fmHome, state, owns: () => generationOwnsLockSync(generation),
+    offer: offerTaskContinuation,
   });
 }

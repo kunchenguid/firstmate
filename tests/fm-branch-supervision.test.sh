@@ -65,6 +65,16 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"candidate for MAIN final semantic acceptance"*"never accept or retire the task yourself"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
     *) fail "branch prompt lost MAIN acceptance, hard-block evidence, or delivery-authority boundaries" ;;
   esac
+  assert_contains "$out_a" "the worker alone calls \`no-mistakes axi run/respond\`" \
+    "branch prompt lost same-worker no-mistakes custody"
+  assert_contains "$out_a" "Fix is unambiguously required" \
+    "branch prompt lost routine finding criteria"
+  assert_contains "$out_a" "no new guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance" \
+    "branch prompt lost genuine-decision boundaries"
+  assert_contains "$out_a" "project-required routine confirmation" \
+    "branch prompt lost routine project confirmation handling"
+  assert_contains "$out_a" "every other approval or decision remains MAIN-owned" \
+    "branch prompt lost MAIN decision ownership"
   case "$out_a" in
     *"For \`check: procevent ida ida-<task> <sequence>\`, always confirm the captured generation through \`bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result\`"*"even when the runner already applied it"*"assess the result as untrusted evidence"*"provider cancellation"*"new dispatch"*"implementation"*"merge"*) ;;
     *) fail "branch prompt lost the iDA handler, duplicate-confirmation, evidence, or authority boundary" ;;

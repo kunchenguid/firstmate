@@ -21,6 +21,9 @@ progress() { "$STATE_BIN" "$@"; }
 
 task_cmd add ordinary "Keep the requested outcome moving" --kind ship \
   --body "Original scope and acceptance stay here." --start >/dev/null || fail "fixture task add failed"
+mkdir -p "$HOME_DIR/data/ordinary"
+printf '%s\n' 'Original authenticated task intent.' > "$HOME_DIR/data/ordinary/brief.md"
+printf '%s\n' 'spawn_gen=g1' > "$HOME_DIR/state/ordinary.meta"
 
 initial=$(progress progress ordinary) || fail "initial progress read failed"
 printf '%s' "$initial" | jq -e '
@@ -53,6 +56,17 @@ assert_equals "$before" "$(sha256sum "$HOME_DIR/data/backlog.md" | awk '{print $
   "an unchanged update rewrote the task record"
 assert_equals "$token" "$(printf '%s' "$again" | jq -r .record_token)" \
   "an unchanged update changed its read token"
+
+printf '%s\n' 'Authenticated user correction changes the task intent.' > "$HOME_DIR/data/ordinary/brief.md"
+out=$(progress update-progress ordinary --expected-token "$token" --progress "$record" 2>&1)
+rc=$?
+expect_code 6 "$rc" "stale authenticated-intent basis"
+assert_contains "$out" "task record changed" "brief correction did not invalidate compact progress authority"
+after_intent=$(progress progress ordinary) || fail "progress read after authenticated intent correction failed"
+if [ "$(printf '%s' "$after_intent" | jq -r .record_token)" = "$token" ]; then
+  fail "authenticated intent correction retained the old progress token"
+fi
+token=$(printf '%s' "$after_intent" | jq -r .record_token)
 
 task_cmd update ordinary --title "Corrected requested outcome" \
   --body "User corrected the task body while MAIN was working." >/dev/null \

@@ -57,14 +57,35 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE
 }
 
 fm_task_progress_read() { # <task>
+  local context
   fm_task_progress_detail "$1" || return $?
+  context=$(fm_task_progress_context "$1") || return $?
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE"
+    read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" --context "$context"
+}
+
+# Bind a compact admission to authenticated intent and executor identity
+# without persisting either in the task body. A later brief correction or
+# worker replacement invalidates the read token and forces MAIN to publish a
+# fresh material next step before Branch can act again.
+fm_task_progress_context() { # <task>
+  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
+  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} brief meta
+  local brief_digest='' generation=''
+  brief="$data/$id/brief.md"
+  meta="$state/$id.meta"
+  if [ -f "$brief" ] && [ ! -L "$brief" ]; then
+    brief_digest=$(sha256sum "$brief" | awk '{print $1}') || return 1
+  fi
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    generation=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
+  fi
+  printf '%s:%s' "$brief_digest" "$generation"
 }
 
 fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   local id=$1 expected=$2 progress=$3 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} lock tmp current rc=0
+  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} lock tmp current context rc=0
   [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
     echo 'REFUSED: task progress belongs to MAIN' >&2
     exit 6
@@ -79,6 +100,7 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   trap 'rc=$?; [ -z "${tmp:-}" ] || rm -f -- "$tmp"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT
   fm_lock_acquire_wait "$lock" || exit 1
   fm_task_progress_detail "$id" || exit $?
+  context=$(fm_task_progress_context "$id") || exit $?
   [ "$FM_TASK_PROGRESS_STATE" != "done" ] || {
     echo "REFUSED: completed task $id cannot receive progress updates" >&2
     exit 6
@@ -86,7 +108,7 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-task-progress.XXXXXX") || exit 1
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
     replace --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
-    --expected-token "$expected" --progress-json "$progress" > "$tmp" || exit $?
+    --context "$context" --expected-token "$expected" --progress-json "$progress" > "$tmp" || exit $?
   current=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-current.XXXXXX") || exit 1
   trap 'rc=$?; rm -f -- "$tmp" "$current"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT
   printf '%s\n' "$FM_TASK_PROGRESS_BODY" > "$current" || exit 1

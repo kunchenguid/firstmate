@@ -10,7 +10,8 @@ import { classifyFirstmateOperationalText, encodeFirstmateOperationalInputWith }
 import { NATIVE_FEISHU_CUSTOM_TYPE, verifyFeishuSessionMessage } from "../../../bin/fm-feishu-state.mjs";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; record_token: string;
-  goal: string; acceptance: string; current_state: string; remaining_gap: string; next_step: string };
+  goal: string; acceptance: string; current_state: string; remaining_gap: string; next_step: string;
+  task_state: string };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string;
   update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string };
@@ -37,8 +38,17 @@ export type ContinuationReadbackOffer = {
   ctx: ExtensionContext; accept: (receiver: ContinuationReceiver) => void;
 };
 
+export type TaskContinuationOffer = {
+  task: string;
+  admission: string;
+  progress: Observation;
+  delivered: (proof: { sessionFile: string; entryId: string; generation: number }) => void;
+  settled: () => void;
+};
+
 export function installTaskContinuation(pi: ExtensionAPI, options: {
   root: string; home: string; state: string; owns: () => boolean;
+  offer?: (offer: TaskContinuationOffer) => boolean;
 }) {
   const { root, home, state, owns } = options;
   const data = process.env.FM_DATA_OVERRIDE || join(home, "data");
@@ -137,7 +147,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         const key = createHash("sha256").update(JSON.stringify([id, progress.record_token, taskState])).digest("hex");
         observations.push({ task_id: id, state: taskState, reason, key, record_token: progress.record_token,
           goal: progress.goal, acceptance: progress.acceptance, current_state: progress.current_state,
-          remaining_gap: progress.remaining_gap, next_step: progress.next_step });
+          remaining_gap: progress.remaining_gap, next_step: progress.next_step, task_state: progress.task_state });
       } catch (error) {
         if (epoch !== generation || !owns()) throw error;
         const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);
@@ -194,13 +204,28 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         pace.reserved = `n.${item.key}.${pace.attempts + 1}`;
       }
       if (pace.reserved && !submitted.has(pace.reserved) && !delivered.has(pace.reserved)) {
-        lines.push(`${item.task_id}: ${item.reason}`);
-        admissions.push(pace.reserved);
+        const id = pace.reserved;
+        if (options.offer?.({
+          task: item.task_id,
+          admission: id,
+          progress: item,
+          delivered(proof) {
+            if (!current()) return;
+            pi.appendEntry("fm-continuation-branch-delivery", { admissions: [id], ...proof });
+            delivered.set(id, Date.now());
+          },
+          settled() { submitted.delete(id); },
+        })) {
+          submitted.add(id);
+        } else {
+          lines.push(`${item.task_id}: ${item.reason}`);
+          admissions.push(id);
+        }
       } else if (pace.attempts >= ATTEMPTS) {
         const escalation = `e.${item.key}`;
         if (!submitted.has(escalation) && !delivered.has(escalation)) {
           escalations.push({ id: escalation, task: item.task_id,
-            reason: `MAIN returned twice without materially advancing the recorded next step: ${item.reason}` });
+            reason: `two bounded branch continuations did not materially advance the recorded next step: ${item.reason}` });
         }
       }
       pacing.set(paceId, pace);

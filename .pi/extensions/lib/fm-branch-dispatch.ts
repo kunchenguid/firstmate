@@ -410,12 +410,32 @@ export async function scopeForUnreadWakeWithLifecycle(
   home: string,
   state: string,
   heartbeat: boolean,
-): Promise<{ modes: Record<string, string>; scope: UnreadWakeScope }> {
+): Promise<{ modes: Record<string, string>; routineDecisionTasks: string[]; scope: UnreadWakeScope }> {
   const modes = await lifecycleModesForWake(root, home, state);
-  return { modes, scope: scopeForUnreadWake(state, heartbeat, modes) };
+  const initial = scopeForUnreadWake(state, heartbeat, modes);
+  const candidates = [...new Set(initial.needsDecisionKeys
+    .map((key) => initial.taskByWakeKey[key] ?? initial.taskByWakeKey[key.replace(/^fm-/, "")])
+    .filter((task): task is string => Boolean(task)))];
+  const routineDecisionTasks: string[] = [];
+  for (const task of candidates) {
+    const result = await runCommandAsync("bash", [`${root}/bin/fm-task-state.sh`, "progress", task], {
+      env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state,
+        FM_DATA_OVERRIDE: process.env.FM_DATA_OVERRIDE || `${home}/data` },
+    });
+    if (result.status !== 0) continue;
+    try {
+      const progress = JSON.parse(result.stdout);
+      if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step) {
+        routineDecisionTasks.push(task);
+      }
+    } catch { /* An unreadable progress record remains MAIN-owned. */ }
+  }
+  return { modes, routineDecisionTasks,
+    scope: scopeForUnreadWake(state, heartbeat, modes, new Set(routineDecisionTasks)) };
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {}): UnreadWakeScope {
+export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {},
+  routineDecisionTasks: ReadonlySet<string> = new Set()): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -522,8 +542,11 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleM
         // status append surfaced through the actionable signal path is
         // excluded from what the branch may claim without vetoing the scan
         // (docs/pi-supervision-branch.md "Autonomy").
-        needsDecisionKeys.push(key);
-        continue;
+        const decisionTask = taskByKey.get(key) ?? taskByKey.get(key.replace(/\.(?:status|turn-ended)$/, "")) ?? "";
+        if (!routineDecisionTasks.has(decisionTask)) {
+          needsDecisionKeys.push(key);
+          continue;
+        }
       }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
@@ -571,7 +594,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleM
           }
           staleDecisionOwnership.set(statusPath, decisionOwned);
         }
-        if (staleDecisionOwnership.get(statusPath)) {
+        if (staleDecisionOwnership.get(statusPath) && !routineDecisionTasks.has(task)) {
           needsDecisionKeys.push(key);
           continue;
         }

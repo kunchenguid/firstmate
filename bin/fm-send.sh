@@ -223,7 +223,29 @@ if [ -n "$TARGET_META" ]; then
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     if [ -z "$ACTION_ID" ]; then
       fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
-      if [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
+      branch_progress_token=''
+      if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
+        branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
+        printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
+          'type == "array" and (index("*") != null or index($task) != null)' >/dev/null 2>&1 || {
+          echo 'REFUSED: task is outside this exact branch admission' >&2; exit 6;
+        }
+        [ -n "$branch_progress_token" ] || {
+          echo 'REFUSED: compact continuation may steer only its token-bound task' >&2; exit 6;
+        }
+      fi
+      if [ -n "$branch_progress_token" ]; then
+        # shellcheck source=bin/fm-task-progress-lib.sh
+        . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+        branch_current_progress=$(fm_task_progress_read "$LEASE_GUARD_TASK") || exit 1
+        [ "$(printf '%s' "$branch_current_progress" | jq -r '.record_token')" = "$branch_progress_token" ] || {
+          echo 'REFUSED: task intent or progress changed after branch admission' >&2; exit 6;
+        }
+        printf '%s' "$branch_current_progress" | jq -e \
+          '.task_state == "in_flight" and .remaining_gap != "" and .next_step != ""' >/dev/null || {
+          echo 'REFUSED: compact task progress no longer permits continuation' >&2; exit 6;
+        }
+      elif [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
         fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {
           echo 'REFUSED: delegated steer requires --action-id' >&2; exit 6;
         }

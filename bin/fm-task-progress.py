@@ -73,7 +73,7 @@ def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None]:
     return values, match
 
 
-def projection(task: str, goal: str, state: str, body: str) -> dict[str, object]:
+def projection(task: str, goal: str, state: str, body: str, context: str) -> dict[str, object]:
     values, _ = parse(body)
     return {
         "task_id": task,
@@ -84,7 +84,10 @@ def projection(task: str, goal: str, state: str, body: str) -> dict[str, object]
         "current_state": values["current_state"] if values else "",
         "remaining_gap": values["remaining_gap"] if values else "",
         "next_step": values["next_step"] if values else "",
-        "record_token": digest(goal.encode() + b"\0" + body.encode()),
+        # Context is an opaque read-time concurrency salt supplied by the
+        # task owner (currently brief bytes plus execution generation). It is
+        # neither persisted progress nor an evidence reference.
+        "record_token": digest(goal.encode() + b"\0" + body.encode() + b"\0" + context.encode()),
     }
 
 
@@ -108,6 +111,7 @@ def main() -> int:
     parser.add_argument("--task", required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--state", required=True)
+    parser.add_argument("--context", default="")
     parser.add_argument("--expected-token")
     parser.add_argument("--progress-json")
     args = parser.parse_args()
@@ -115,7 +119,7 @@ def main() -> int:
     try:
         body = raw.decode("utf-8")
         goal = text(args.goal, "goal")
-        current = projection(args.task, goal, args.state, body)
+        current = projection(args.task, goal, args.state, body, args.context)
         if args.action == "read":
             print(json.dumps(current, ensure_ascii=False, separators=(",", ":")))
             return 0
