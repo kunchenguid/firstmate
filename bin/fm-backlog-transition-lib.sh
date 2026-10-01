@@ -529,6 +529,9 @@ fm_backlog_done() {  # <data-dir> <id> [flag...]
   local -a done_args=()
   shift 2
   for arg in "$@"; do
+    if [ "$previous_arg" = --note ]; then
+      arg=$(fm_backlog_local_note_marker "$arg") || arg=$arg
+    fi
     if [ "$previous_arg" = --pr ] && fm_backlog_pr_is_gerrit_change "$arg"; then
       done_args[${#done_args[@]}-1]=--note
       done_args+=("Gerrit change $arg")
@@ -567,6 +570,9 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
   shift 2
   FM_BACKLOG_TRANSITION_ERROR=
   for arg in "$@"; do
+    if [ "$previous_arg" = --note ]; then
+      arg=$(fm_backlog_local_note_marker "$arg") || arg=$arg
+    fi
     case "$previous_arg" in
       --report)
         deliverable="${deliverable:+$deliverable; }report $arg"
@@ -881,7 +887,23 @@ fm_backlog_close_marker_path() {  # <state-dir> <id>
 fm_backlog_local_note_valid() {
   case "$1" in
     local%20main) return 0 ;;
+    local\ *' <!-- fm-local-landing -->')
+      local branch=${1#local }
+      branch=${branch% <!-- fm-local-landing -->}
+      git check-ref-format --branch "$branch" >/dev/null 2>&1
+      ;;
     local\ *) git check-ref-format --branch "${1#local }" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backlog_local_note_marker() {
+  case "$1" in
+    local\ *' <!-- fm-local-landing -->') printf '%s\n' "$1" ;;
+    local\ *)
+      git check-ref-format --branch "${1#local }" >/dev/null 2>&1 || return 1
+      printf '%s <!-- fm-local-landing -->\n' "$1"
+      ;;
     *) return 1 ;;
   esac
 }

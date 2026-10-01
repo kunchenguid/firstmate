@@ -1635,7 +1635,7 @@ backlog_done_args() {
         else
           landing=main
         fi
-        BACKLOG_DONE_ARGS=(--note "local $landing")
+        BACKLOG_DONE_ARGS=(--note "local $landing <!-- fm-local-landing -->")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi

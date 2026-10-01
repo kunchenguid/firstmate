@@ -460,7 +460,8 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
         else ($reason | clean_title | if . == "" then null else . end)
         end;
     def local_note($body):
-      cap($body; "^(?<v>local[[:space:]][^[:space:]]+)$");
+      cap($body; "^local[[:space:]]+(?<v>[^[:space:]]+)[[:space:]]+<!-- fm-local-landing -->$")
+      | if . == null then null else "local " + . end;
     def completion($rest):
       (metadata_word($rest; "merged")) as $merged
       | (metadata_word($rest; "reported")) as $reported
@@ -538,7 +539,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                   elif .state == "done" then local_note(.body_lines[-1])
                   else null
                   end))
-          | .body_excerpt = ((.body_lines | join(" "))[:240])
+          | .body_excerpt = ((.body_lines
+              | map(sub("[[:space:]]+<!-- fm-local-landing -->$"; ""))
+              | join(" "))[:240])
         else . end)
     | .records as $records
     | (reduce ($records[] | select(.structured)) as $record ({};

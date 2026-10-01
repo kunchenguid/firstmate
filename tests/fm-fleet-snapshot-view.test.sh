@@ -581,16 +581,18 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note (repo: delta, done 2026-07-11) (kind: ship)
-  local main
+  local main <!-- fm-local-landing -->
 - [x] done-title-local - Release local office (repo: delta, done 2026-07-11) (kind: ship)
 - [x] done-named-note - Done Named Note (repo: delta, done 2026-07-11) (kind: ship)
-  local office
+  local office <!-- fm-local-landing -->
 - [x] done-body-note - Done Body Note (repo: delta, done 2026-07-11) (kind: ship)
   Kept the office change.
-  local office
+  local office <!-- fm-local-landing -->
 - [x] done-prose-local - Done Prose Local (repo: delta, done 2026-07-11) (kind: ship)
   local office
   The office sentence is ordinary prose.
+- [x] done-final-line-prose - Done Final Line Prose (repo: delta, done 2026-07-11) (kind: ship)
+  local office
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -718,6 +720,11 @@ EOF
       and .local_note == null
       and .body_excerpt == "local office The office sentence is ordinary prose."
   ' >/dev/null || fail "ordinary prose containing local office was treated as a landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-final-line-prose")
+    | .local_note == null
+      and .body_excerpt == "local office"
+  ' >/dev/null || fail "ordinary final-line prose was treated as a landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -741,6 +748,8 @@ EOF
     "view should keep a local landing note when the completed row has other body text"
   assert_contains "$view" "| done-prose-local | Done Prose Local | delta | ship | - | - |" \
     "view should not render ordinary prose as a local landing note"
+  assert_contains "$view" "| done-final-line-prose | Done Final Line Prose | delta | ship | - | - |" \
+    "view should not render final-line prose as a local landing note"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

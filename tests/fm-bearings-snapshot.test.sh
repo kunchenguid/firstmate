@@ -1713,19 +1713,19 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
   "$TASKS_AXI_BIN" add keyword-local "SHIP keyword local main" --kind ship \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the canonical keyword local delivery"
-  "$TASKS_AXI_BIN" 'done' keyword-local --note "local main" \
+  "$TASKS_AXI_BIN" 'done' keyword-local --note "local main <!-- fm-local-landing -->" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the canonical keyword local delivery"
   "$TASKS_AXI_BIN" add noted-local "Land the local-only change" --kind ship \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the recorded-note local delivery"
-  "$TASKS_AXI_BIN" 'done' noted-local --note "local main" \
+  "$TASKS_AXI_BIN" 'done' noted-local --note "local main <!-- fm-local-landing -->" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the recorded-note local delivery"
   "$TASKS_AXI_BIN" add legacy-noted-local "Complete the legacy work" \
     --repo firstmate --start --file "$main_backlog" >/dev/null \
     || fail "could not create the kindless local delivery"
-  "$TASKS_AXI_BIN" 'done' legacy-noted-local --note "local main" \
+  "$TASKS_AXI_BIN" 'done' legacy-noted-local --note "local main <!-- fm-local-landing -->" \
     --file "$main_backlog" >/dev/null \
     || fail "could not complete the kindless local delivery"
   "$TASKS_AXI_BIN" add shipping-scout "SHIPPING parser boundary" --kind scout \
@@ -1745,7 +1745,7 @@ test_landed_accepts_only_kind_owned_delivery_artifacts() {
 - [x] ship-reported-path - Ship naming data/ship-reported-path/report.md (repo: firstmate) (kind: ship) (reported 2026-07-12)
 - [x] reported-scout - Report with $report_pr context $report_path (repo: firstmate) (kind: scout) (reported 2026-07-12)
 - [x] local-delivery - Local with https://github.com/o/r/pull/9 context local main (repo: firstmate) (kind: ship) (done 2026-07-12)
-  local main
+  local main <!-- fm-local-landing -->
 EOF
 
   : > "$home/net.log"
