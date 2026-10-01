@@ -66,8 +66,7 @@ Repeat and edge cases:
 - Before the backend hold runs, `--origin` records the origin the call is held for on its own `Captain hold origin:` body line, which `complete` and `verify` check using backend identities rather than alias spellings.
   If that write fails, the backend hold is not attempted.
 - The reason may contain parentheses, semicolons, quotes, and line breaks.
-  tasks-axi stores a reason on one parenthesised markdown line, so `hold` writes a version-marked base64 value and the readers that show it decode only that reason field (`bin/fm-hold-reason-lib.sh` owns the encoding).
-  Public `bin/fm-tasks-axi.sh show` and `list` reads preserve the reason through quoted strings, while unmarked legacy reasons and other fields pass through unchanged.
+  [`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns the storage encoding and compatibility rules; [`bin/fm-tasks-axi.sh --help`](../bin/fm-tasks-axi.sh) owns the public read commands and output contract.
 
 ### Answering a call (`answer`)
 
@@ -124,7 +123,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` checks three things:
 
 - The recorded attestation exists.
-- Every recorded inventory entry is still durable: actively captain-held, or carrying a recorded answer.
+- Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete).
 - No keyed status decision opened after the last `complete`.
 
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
@@ -489,7 +488,7 @@ It then finishes any still-recorded dependency-edge cleanup without rewriting th
 
 ## Verification record
 
-The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
+The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic identities and decision text.
 It proves the behaviors below.
 The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
 
@@ -538,7 +537,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 
 ### Legacy paths
 
-- Every legacy path works: composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding.
+- Composed identities through the shim, valid pre-collapse `decision_keys=` inventories, routed-resolution replay, and a concrete-origin binding remain supported.
+  Historical self-inventories require the [documented repair](#recording-a-reviewed-inventory-complete).
 
 ### Task-body read-back cases
 

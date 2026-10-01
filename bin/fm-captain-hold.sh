@@ -138,7 +138,7 @@
 # `--none` is an explicit semantic attestation that the just-reviewed surface
 # has no unresolved captain call, and is refused while the origin still has an
 # open keyed status decision. With a non-empty inventory, every listed task is
-# verified durable (actively captain-held, or closed with a recorded answer),
+# verified durable (captain-held, or carrying a recorded resolution),
 # is never the origin itself, and, when `hold --origin` recorded one, was held
 # for this origin; a hold with no recorded origin is accepted on durability
 # alone and named in the output,
@@ -149,7 +149,8 @@
 # surviving report and tasks without recreating task state.
 # `verify` is read-only and is called by scout teardown, so teardown cannot
 # erase a source before this gate has succeeded: every recorded inventory
-# entry must still be durable and no keyed status decision may be open.
+# entry must still satisfy the same durability and origin checks as `complete`,
+# and no keyed status decision may be open.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -804,7 +805,7 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
 
 # The origin a hold was recorded for lives in the held task's own body, on a
 # line of its own, so `complete` can tell a call held for this origin from one
-# held for another. A hold recorded without --origin carries no such line.
+# held for another. Omitting --origin leaves any existing association intact.
 body_hold_origin() {  # <decoded-task-body>
   printf '%s\n' "$1" | sed -n 's/^Captain hold origin: \(.*\)$/\1/p' | head -1
 }
@@ -859,8 +860,8 @@ refuse_self_inventory() {
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
 # answered, which is not the same as an unknown entry and must not be spent
-# as absence. On success prints "<id> <how>" so the caller can keep the
-# attestation evidence.
+# as absence. The result carries the attestation evidence and whether an
+# origin was recorded, so completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
   local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id
   # The origin task is never its own captain-call inventory: it is the work the
@@ -915,9 +916,7 @@ command_hold() {
   done
   validate_slug task-id "$id"
   [ -n "$reason" ] || fail "reason must not be empty"
-  # tasks-axi stores the reason on one markdown line inside a parenthesised tag,
-  # so parentheses and line breaks are encoded here (bin/fm-hold-reason-lib.sh)
-  # and decoded by every reader, never refused.
+  # bin/fm-hold-reason-lib.sh owns the storage constraint and reversible encoding.
   stored_reason=$(fm_hold_reason_encode "$reason") || fail "could not encode the hold reason"
   if [ -n "$origin" ]; then
     validate_slug origin-id "$origin"
