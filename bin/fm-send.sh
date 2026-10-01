@@ -55,7 +55,9 @@
 # is present and its ring here was skipped or failed, the watcher rings it
 # exactly once more.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
+# re-ring ladder and the shared fm_task_inbox_selector_preflight used
+# before rings and local typed sends. After that preflight, the pending-text
+# composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
 # the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
@@ -65,7 +67,8 @@
 # the harness's own parser, and an explicit backend target names an endpoint,
 # not a task, so it stays typed even when local metadata happens to match it
 # (the same boundary that keeps it unmarked and outside --resolve-key). These
-# type the literal
+# first pass the shared selector preflight; a refusal exits 1 before typing.
+# Otherwise they type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
 # an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
@@ -748,10 +751,9 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
-# Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# Harness-specific delivery uses recorded metadata, including when an explicit
+# backend target matches it. An unmatched explicit target stays unidentified;
+# never guess its harness from the message or apply another harness's policy.
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own

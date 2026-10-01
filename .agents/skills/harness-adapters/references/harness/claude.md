@@ -57,9 +57,8 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 
 ## Agent selector
 
-While background agents run, Claude draws an agent list below its footer, `main` first, where `⏺` marks the agent the composer talks to; with a subagent viewed the composer reads `Message @<name>` and submitted text goes to that subagent, not main.
-On 2.1.286 Escape does not leave a subagent's view, and Left from main's composer opens a "Background this session?" dialog whose default stops every background task, so never send Left to a Claude pane.
-`fm_task_inbox_selector_preflight` in `../../../../../bin/fm-task-inbox-lib.sh` refuses inbox rings and local typed sends without sending any input when a Claude target shows an active selector or its capture fails; `fm_composer_claude_agent_view` in `../../../../../bin/fm-composer-lib.sh` owns the shape, and `../../../../../tests/fm-send-inbox-claude-selector-live-e2e.test.sh` is the live refusal guard.
+[`fm_task_inbox_selector_preflight`](../../../../../bin/fm-task-inbox-lib.sh) owns selector refusal for inbox rings and local typed sends; [`fm_composer_claude_agent_view`](../../../../../bin/fm-composer-lib.sh) owns the screen shapes.
+Never send Left to recover this view: it can open a dialog whose default stops every background task; [selector verification](../../../../../docs/verification/runtime-backends.md#claude-agent-selector) owns the observed key behavior and live guard.
 
 ## Feedback drafts
 

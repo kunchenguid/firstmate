@@ -1775,7 +1775,8 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
 # row. While a subagent is viewed, the composer placeholder reads
 # `Message @<name>`, and text submitted there goes to that subagent, never to
 # main. Two independent signals carry the verdict: the list's markers and
-# cursor, and that placeholder. Prints exactly one of:
+# cursor, and that placeholder inside the current composer's rules, excluding
+# transcript and scrollback copies. Prints exactly one of:
 #   none              no agent list and no subagent composer
 #   main              the list shows main viewed and unfocused
 #   subagent          a subagent is viewed and the list is unfocused

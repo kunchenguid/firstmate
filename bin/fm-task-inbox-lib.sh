@@ -294,15 +294,17 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted"
 }
 
-# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
-# composer pre-check, then the backend's submit machinery with a minimal retry
+# Ring the doorbell, best-effort: endpoint-liveness and selector preflight
+# (fm_task_inbox_selector_preflight below), then the advisory pending-text
+# composer check and the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# other than our own doorbell (the watcher re-rings later), 2 the backend send
-# failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the
+# other than our own doorbell (the watcher re-rings later), 2 the ring was
+# refused or failed, 3 skipped because the endpoint is positively dead or
+# missing (nothing typed; recovery owns the record). No return value is delivery proof; the
 # acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict can defer,
+# After selector preflight, the advisory skip is deliberately narrow: only an
+# exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
@@ -355,6 +357,14 @@ fm_task_inbox_agent_view() {  # <backend> <target> [expected-label]
   fm_composer_claude_agent_view "$cap"
 }
 
+# Shared safety gate for inbox rings and local typed sends. Only a supplied
+# claude* harness is checked; other or unidentified harnesses pass unchanged.
+# Return 0 when the capture shows no selector or an unfocused main view;
+# return 1 on capture failure, a focused list, a subagent view, or an unknown
+# selector verdict. Refusal sends no terminal input and never navigates:
+# concurrent callers could otherwise send a second Escape after the first
+# closes the list, interrupting main. fm_composer_claude_agent_view owns the
+# screen shapes; tests/fm-task-inbox.test.sh covers the delivery boundary.
 fm_task_inbox_selector_preflight() {  # <backend> <target> [expected-label] [harness]
   local view
   case "${4:-}" in claude*) ;; *) return 0 ;; esac
