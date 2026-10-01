@@ -391,8 +391,8 @@ Re-holding through the wrapper with `--until` remains the durable fix rather tha
 ### Recently Landed notes
 
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
-A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title.
-The snapshot reads that note only from the final body line, so earlier prose such as `local office` stays prose, while an ordinary title ending in that text stays a title.
+A local-only landing's note is written by `tasks-axi done --note` as the final indented body line `local <branch> <!-- fm-local-landing -->` rather than into the row title.
+The snapshot reads a note only when that final body line carries the marker, so ordinary prose such as `local office` stays prose, while an ordinary title ending in that text stays a title.
 A body that carries a captain resolution record is the captain's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
