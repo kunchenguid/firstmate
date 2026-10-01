@@ -80,6 +80,18 @@
 # Every field is optional: a task record written before this existed, or one
 # whose readings both failed, simply carries fewer of them.
 #
+# ALERTING
+#
+# fm_quota_accounting_alert decides, from a record whose closing reading has
+# been written, whether the measured drain is large enough to wake the first
+# mate about. The threshold is percentage points of the window, read from the
+# local config/quota-drain-alert-threshold file (default 10; see
+# docs/configuration.md). Only a `measured` delta can alert: an unavailable,
+# unanchored, or window-spanning difference is not evidence a task drained
+# anything. The alert is as non-gating as the readings: the caller appends it
+# to the existing wake queue best-effort, and a failure to alert never blocks
+# a cleanup.
+#
 # Environment: FM_QUOTA_ACCOUNTING_TIMEOUT bounds each quota-axi call in
 # seconds (default 20), so neither hook can stall on a slow vendor read.
 
@@ -334,6 +346,42 @@ EOF
   chmod 0600 "$tmp" 2>/dev/null || true
   mv -f -- "$tmp" "$meta" || { rm -f -- "$tmp"; return 1; }
   return 0
+}
+
+FM_QUOTA_ACCOUNTING_ALERT_DEFAULT=10
+
+# fm_quota_accounting_alert_threshold <config-dir>
+# Print the alert threshold in percentage points of the quota window: the first
+# non-empty line of <config-dir>/quota-drain-alert-threshold when it is a
+# non-negative number, otherwise the default.
+fm_quota_accounting_alert_threshold() {
+  local value
+  value=$(sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}' \
+    "$1/quota-drain-alert-threshold" 2>/dev/null)
+  case "$value" in
+    ''|*[!0-9.]*|.|*.*.*) value=$FM_QUOTA_ACCOUNTING_ALERT_DEFAULT ;;
+  esac
+  printf '%s' "$value"
+}
+
+# fm_quota_accounting_alert <meta> <task-id> <config-dir>
+# When the record carries a measured delta above the configured threshold,
+# print the wake payload naming the task and the measured drain and return 0;
+# otherwise print nothing and return 1. Only a `measured` delta can alert, and
+# the unit is named in the payload for the same reason it is named in the
+# summary.
+fm_quota_accounting_alert() {
+  local meta=$1 id=$2 config=$3 delta threshold window provider over
+  [ "$(fm_meta_get "$meta" quota_delta_status)" = measured ] || return 1
+  delta=$(fm_meta_get "$meta" quota_delta_percent_points)
+  threshold=$(fm_quota_accounting_alert_threshold "$config")
+  over=$(jq -n --arg d "$delta" --arg t "$threshold" \
+    '($d | tonumber) > ($t | tonumber)' 2>/dev/null) || return 1
+  [ "$over" = true ] || return 1
+  window=$(fm_meta_get "$meta" quota_window)
+  provider=$(fm_meta_get "$meta" quota_provider)
+  printf 'check: quota drain: task %s drained %s percentage points of the %s %s quota window while it ran (alert threshold %s), shared with everything else running in that window' \
+    "$id" "$delta" "$provider" "$window" "$threshold"
 }
 
 # fm_quota_accounting_summary <meta>

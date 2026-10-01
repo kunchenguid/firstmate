@@ -3828,6 +3828,14 @@ TEARDOWN_QUOTA_SUMMARY=
 if [ -f "$META" ] && [ ! -L "$META" ]; then
   if fm_quota_accounting_end_lines "$META" | fm_quota_accounting_meta_write "$META"; then
     TEARDOWN_QUOTA_SUMMARY=$(fm_quota_accounting_summary "$META")
+    # When the measured drain exceeds the configured threshold (see
+    # docs/configuration.md, config/quota-drain-alert-threshold), wake the
+    # first mate through the existing durable queue so a heavy task is
+    # surfaced rather than only recorded. Best-effort: alerting never blocks
+    # the cleanup this run owes.
+    if TEARDOWN_QUOTA_ALERT=$(fm_quota_accounting_alert "$META" "$ID" "$CONFIG"); then
+      fm_wake_append check "quota-drain-$ID" "$TEARDOWN_QUOTA_ALERT" || true
+    fi
   fi
 fi
 # The record is gone, so the backlog must not still show this task in flight

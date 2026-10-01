@@ -536,6 +536,16 @@ Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_
 
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Quota drain alert threshold (config/quota-drain-alert-threshold)
+
+Each task record carries an opening and a closing quota reading (see `bin/fm-quota-accounting-lib.sh`), and teardown measures the drain between them in percentage points of one provider quota window - not tokens, which quota-axi cannot observe.
+When that measured drain exceeds the threshold, teardown appends a `check` event to the durable wake queue naming the task and the measured drain, so the first mate is woken about a heavy task instead of it only being recorded.
+
+The local, gitignored `config/quota-drain-alert-threshold` file holds the threshold as its first non-empty line, a non-negative number of percentage points.
+An absent or unparseable file means the default, 10.
+Only a `measured` delta can alert; with concurrent workers the drain is an upper bound shared with everything else in the window, and the alert text says so.
+Alerting is best-effort and never blocks a cleanup.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.

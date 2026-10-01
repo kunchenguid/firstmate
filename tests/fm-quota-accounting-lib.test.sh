@@ -484,4 +484,54 @@ assert_equals '' "$(fm_quota_accounting_summary "$META")" \
   "a record with no accounting still produced a summary"
 pass "every unusable delta summarizes as not attributable, and no accounting means no summary"
 
+# --- drain alert -------------------------------------------------------------
+
+CONFIG_DIR="$TMP_ROOT/config"
+mkdir -p "$CONFIG_DIR"
+
+write_start_meta "$META" \
+  quota_delta_status=measured quota_delta_percent_points=12.5
+alert=$(fm_quota_accounting_alert "$META" fm:t1 "$CONFIG_DIR") \
+  || fail "a drain above the default threshold did not alert"
+assert_equals \
+  'check: quota drain: task fm:t1 drained 12.5 percentage points of the claude five_hour quota window while it ran (alert threshold 10), shared with everything else running in that window' \
+  "$alert" "the alert payload changed shape"
+pass "a measured drain above the default threshold alerts with task, drain, unit, and caveat"
+
+write_start_meta "$META" \
+  quota_delta_status=measured quota_delta_percent_points=9.99
+if fm_quota_accounting_alert "$META" fm:t1 "$CONFIG_DIR" >/dev/null; then
+  fail "a drain below the default threshold alerted"
+fi
+write_start_meta "$META" \
+  quota_delta_status=measured quota_delta_percent_points=10
+if fm_quota_accounting_alert "$META" fm:t1 "$CONFIG_DIR" >/dev/null; then
+  fail "a drain exactly at the threshold alerted"
+fi
+pass "a drain at or below the threshold stays quiet"
+
+printf '  2.5  \n' > "$CONFIG_DIR/quota-drain-alert-threshold"
+write_start_meta "$META" \
+  quota_delta_status=measured quota_delta_percent_points=3
+alert=$(fm_quota_accounting_alert "$META" fm:t1 "$CONFIG_DIR") \
+  || fail "a drain above the configured threshold did not alert"
+assert_contains "$alert" '(alert threshold 2.5)' "the configured threshold was not applied"
+pass "the config file lowers the threshold"
+
+printf 'not-a-number\n' > "$CONFIG_DIR/quota-drain-alert-threshold"
+assert_equals 10 "$(fm_quota_accounting_alert_threshold "$CONFIG_DIR")" \
+  "an unparseable threshold did not fall back to the default"
+rm -f "$CONFIG_DIR/quota-drain-alert-threshold"
+assert_equals 10 "$(fm_quota_accounting_alert_threshold "$CONFIG_DIR")" \
+  "an absent threshold file did not fall back to the default"
+pass "an unparseable or absent threshold file means the default"
+
+for status in window_reset no_start unavailable; do
+  write_start_meta "$META" "quota_delta_status=$status" quota_delta_percent_points=99
+  if fm_quota_accounting_alert "$META" fm:t1 "$CONFIG_DIR" >/dev/null; then
+    fail "a $status delta alerted"
+  fi
+done
+pass "only a measured delta can alert"
+
 printf '# all fm-quota-accounting-lib tests passed\n'
