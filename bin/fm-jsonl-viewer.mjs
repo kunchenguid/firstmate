@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // fm-jsonl-viewer.mjs - token-protected, read-only browser viewer for the
 // current Firstmate home's ShortTask journals, supervision branch sessions,
-// and canonical task reports.
+// canonical task reports, and canonical task briefs.
 //
 // Usage:
 //   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file \
@@ -12,8 +12,8 @@
 // not a symlink, and grant no permissions to group or other users.
 // Static UI assets contain no private data; every discovery/read endpoint
 // requires Authorization: Bearer <token>. Only regular, non-symlink JSONL files
-// below state/short-agents and state/branch-session and data/<task>/report.md
-// files are eligible.
+// below state/short-agents and state/branch-session and canonical
+// data/<task>/{report.md,brief.md} files are eligible.
 
 import { timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -148,7 +148,7 @@ function safeFile(root, candidate) {
   }
 }
 
-function safeReportFile(root, candidate) {
+function safeMarkdownFile(root, candidate) {
   if (!root || !regularNoSymlink(candidate)) return null;
   try {
     const canonical = realpathSync(candidate);
@@ -210,7 +210,7 @@ function listReports(root) {
     let directoryInfo;
     try { directoryInfo = lstatSync(directory); } catch { continue; }
     if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) continue;
-    const file = safeReportFile(root, join(directory, "report.md"));
+    const file = safeMarkdownFile(root, join(directory, "report.md"));
     if (!file) continue;
     let info;
     try { info = lstatSync(file); } catch { continue; }
@@ -218,6 +218,22 @@ function listReports(root) {
     reports.push({ source: "report", id, label: id, bytes: info.size, modifiedAt: info.mtime.toISOString() });
   }
   return reports.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+}
+
+function listTaskDocuments(root) {
+  if (!root) return [];
+  let ids = [];
+  try { ids = readdirSync(root).filter(taskIdPathSafe); } catch { return []; }
+  const documents = [];
+  for (const id of ids) {
+    const document = resolveTaskDocument(root, id);
+    if (!document) continue;
+    let info;
+    try { info = lstatSync(document.file); } catch { continue; }
+    if (!info.isFile() || info.isSymbolicLink()) continue;
+    documents.push({ source: document.source, id, bytes: info.size, modifiedAt: info.mtime.toISOString() });
+  }
+  return documents;
 }
 
 function taskCommandEnvironment(home) {
@@ -287,7 +303,7 @@ function taskOverview(home, roots, codeRoot) {
   }
   const dispositions = taskDispositions(codeRoot, dataRoot, environment);
   const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
-  const reports = new Map(listReports(roots.reports).map(report => [report.id, report]));
+  const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
   const items = new Map();
   const ensure = id => {
     if (!items.has(id)) items.set(id, { id, title: id });
@@ -322,10 +338,11 @@ function taskOverview(home, roots, codeRoot) {
   }
   for (const [id, disposition] of dispositions) ensure(id).recordDisposition ||= disposition;
   for (const [id, disposition] of lifecycles) ensure(id).lifecycleDisposition ||= disposition;
-  for (const [id, report] of reports) {
+  for (const [id, document] of documents) {
     const item = ensure(id);
     item.hasDocument = true;
-    item.documentModifiedAt = report.modifiedAt;
+    item.documentType = document.source;
+    item.documentModifiedAt = document.modifiedAt;
   }
   const tasks = [...items.values()].map(item => {
     const disposition = item.recordDisposition || "unknown";
@@ -371,6 +388,7 @@ function taskOverview(home, roots, codeRoot) {
       project: item.project || null,
       wait,
       hasDocument: Boolean(item.hasDocument),
+      documentType: item.documentType || null,
       documentModifiedAt: item.documentModifiedAt || null,
     };
   }).sort((left, right) => left.category.localeCompare(right.category) || left.title.localeCompare(right.title));
@@ -417,18 +435,33 @@ function resolveReport(root, id) {
     const info = lstatSync(directory);
     if (!info.isDirectory() || info.isSymbolicLink() || !inside(root, realpathSync(directory))) return null;
   } catch { return null; }
-  return safeReportFile(root, join(directory, "report.md"));
+  const file = safeMarkdownFile(root, join(directory, "report.md"));
+  return file ? { source: "report", file } : null;
 }
 
-function readReport(root, id) {
-  const file = resolveReport(root, id);
-  if (!file) return { status: 404, body: { error: "unknown or disallowed report" } };
+function resolveTaskDocument(root, id) {
+  if (!root || !taskIdPathSafe(id)) return null;
+  const directory = join(root, id);
+  try {
+    const info = lstatSync(directory);
+    if (!info.isDirectory() || info.isSymbolicLink() || !inside(root, realpathSync(directory))) return null;
+  } catch { return null; }
+  for (const [source, name] of [["report", "report.md"], ["brief", "brief.md"]]) {
+    const file = safeMarkdownFile(root, join(directory, name));
+    if (file) return { source, file };
+  }
+  return null;
+}
+
+function readMarkdownDocument(root, id, resolver, noun) {
+  const document = resolver(root, id);
+  if (!document) return { status: 404, body: { error: `unknown or disallowed ${noun}` } };
   let opened;
-  try { opened = openVerified(file, root); }
+  try { opened = openVerified(document.file, root); }
   catch (error) { return { status: 409, body: { error: error.message } }; }
   try {
     if (opened.info.size > MAX_REPORT_BYTES) {
-      return { status: 413, body: { error: "report exceeds the 8 MiB display limit" } };
+      return { status: 413, body: { error: `${noun} exceeds the 8 MiB display limit` } };
     }
     const content = Buffer.alloc(opened.info.size);
     let offset = 0;
@@ -439,12 +472,12 @@ function readReport(root, id) {
     }
     const after = fstatSync(opened.fd);
     if (offset !== content.length || after.size !== opened.info.size || after.mtimeMs !== opened.info.mtimeMs) {
-      return { status: 409, body: { error: "selected report changed during read" } };
+      return { status: 409, body: { error: `selected ${noun} changed during read` } };
     }
     return {
       status: 200,
       body: {
-        source: "report",
+        source: document.source,
         id,
         identity: opened.identity,
         size: opened.info.size,
@@ -455,6 +488,14 @@ function readReport(root, id) {
   } finally {
     closeSync(opened.fd);
   }
+}
+
+function readReport(root, id) {
+  return readMarkdownDocument(root, id, resolveReport, "report");
+}
+
+function readTaskDocument(root, id) {
+  return readMarkdownDocument(root, id, resolveTaskDocument, "task document");
 }
 
 function tailStart(fd, size) {
@@ -610,6 +651,10 @@ function serve() {
     }
     if (url.pathname === "/api/report") {
       const result = readReport(roots.reports, url.searchParams.get("id") || "");
+      return json(res, result.status, result.body);
+    }
+    if (url.pathname === "/api/task-document") {
+      const result = readTaskDocument(roots.reports, url.searchParams.get("id") || "");
       return json(res, result.status, result.body);
     }
     return json(res, 404, { error: "not found" });

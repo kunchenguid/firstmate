@@ -30,11 +30,13 @@ FIRST_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$FIRST_SHORT_ID"
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 FIRST_REPORT_ID=report-one
 REPORT_ID=report-two
+BRIEF_ID=brief-only
 FIRST_REPORT_DIR="$HOME_FIXTURE/data/$FIRST_REPORT_ID"
 REPORT_DIR="$HOME_FIXTURE/data/$REPORT_ID"
+BRIEF_DIR="$HOME_FIXTURE/data/$BRIEF_ID"
 TOKEN=browser-fixture-token-value
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR"
+mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR" "$BRIEF_DIR"
 cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
 backend = "markdown"
 
@@ -49,6 +51,7 @@ cat > "$HOME_FIXTURE/data/backlog.md" <<MARKDOWN
 - [ ] $FIRST_REPORT_ID - Delayed report task (repo: viewer) (kind: scout)
 
 ## Queued
+- [ ] $BRIEF_ID - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)
 - [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)
 
 ## Done
@@ -89,6 +92,8 @@ const literal = "<img id=code-unsafe src=x>";
 [unsafe link](javascript:globalThis.linkExecuted=true)
 ![remote image](https://example.invalid/should-not-load.png)
 MARKDOWN
+printf '# Superseded task brief\n\nThis must not replace the report.\n' > "$REPORT_DIR/brief.md"
+printf '# Brief-only instructions\n\nVisible task instructions.\n' > "$BRIEF_DIR/brief.md"
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
 JSONL
@@ -114,7 +119,7 @@ env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u al
   NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   PLAYWRIGHT_ROOT="$PLAYWRIGHT_ROOT" CDP_URL="$CDP_URL" VIEWER_URL="http://127.0.0.1:$PORT" \
   VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" \
-  VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_TOKEN="$TOKEN" \
+  VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_BRIEF_ID="$BRIEF_ID" VIEWER_TOKEN="$TOKEN" \
   node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -143,7 +148,7 @@ let releaseDelayedReport = () => {};
 let markFirstReportRequestStarted;
 const firstReportRequestStarted = new Promise(resolve => { markFirstReportRequestStarted = resolve; });
 const delayedReportRelease = new Promise(resolve => { releaseDelayedReport = resolve; });
-await page.route("**/api/report?*", async route => {
+await page.route("**/api/task-document?*", async route => {
   const url = new URL(route.request().url());
   if (delayFirstReport && url.searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID) {
     delayFirstReport = false;
@@ -168,12 +173,17 @@ try {
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-groups .task-card[data-category="completed"]').count() !== 1) throw new Error("completed task category was not rendered");
-  if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 1) throw new Error("held task category was not rendered separately");
+  if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
   if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("This must not replace the report.", { exact: true }).count()) throw new Error("task brief took precedence over its report");
+  await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
+  await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
   await page.getByRole("button", { name: /Held without document/ }).first().click();
-  await page.getByText("No Markdown report or document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  await page.getByText("No canonical task document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
 
   delayFirstReport = true;
   await page.getByRole("button", { name: /Delayed report task/ }).first().click();
@@ -187,7 +197,7 @@ try {
   if (await page.getByText("stale delayed report body", { exact: true }).count()) throw new Error("stale task document replaced the current task selection");
 
   const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
-  fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
+  fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] ${process.env.VIEWER_BRIEF_ID} - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
   await page.locator('.task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
 
   await page.reload({ waitUntil: "domcontentloaded" });

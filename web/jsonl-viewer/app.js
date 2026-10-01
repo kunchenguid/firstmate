@@ -57,6 +57,7 @@ const elements = {
   taskDetailTitle: document.getElementById("task-detail-title"),
   taskDetailMeta: document.getElementById("task-detail-meta"),
   taskDetailWait: document.getElementById("task-detail-wait"),
+  taskDocumentType: document.getElementById("task-document-type"),
   taskDocumentEmpty: document.getElementById("task-document-empty"),
   taskDocumentRendered: document.getElementById("task-document-rendered"),
   taskDocumentSource: document.getElementById("task-document-source"),
@@ -492,7 +493,8 @@ function taskCard(task) {
   const id = document.createElement("small");
   id.textContent = task.id;
   const metadata = document.createElement("small");
-  metadata.textContent = [task.project, task.kind, task.hasDocument ? "Document available" : "No document"].filter(Boolean).join(" · ");
+  const documentLabel = task.documentType === "report" ? "Task report" : task.documentType === "brief" ? "Task brief" : "No document";
+  metadata.textContent = [task.project, task.kind, documentLabel].filter(Boolean).join(" · ");
   button.append(badge, title, id, metadata);
   button.addEventListener("click", () => selectTask(task.id));
   return button;
@@ -548,6 +550,8 @@ function renderTaskDetail() {
 
 function clearTaskDocument(message) {
   state.taskDocumentContent = null;
+  elements.taskDocumentType.hidden = true;
+  elements.taskDocumentType.textContent = "";
   elements.taskDocumentRendered.replaceChildren();
   elements.taskDocumentSource.hidden = true;
   elements.taskDocumentSource.querySelector("pre").textContent = "";
@@ -559,7 +563,7 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   if (!task) return;
   if (!task.hasDocument) {
-    clearTaskDocument("No Markdown report or document is available for this task.");
+    clearTaskDocument("No canonical task document is available for this task.");
     return;
   }
   const taskId = task.id;
@@ -569,13 +573,15 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
   state.taskDocumentLoading = request;
   if (resetDisplay) clearTaskDocument("Loading task document…");
   try {
-    const body = await api(`/api/report?${new URLSearchParams({ id: taskId })}`);
+    const body = await api(`/api/task-document?${new URLSearchParams({ id: taskId })}`);
     if (selectionGeneration !== state.taskSelectionGeneration || state.selectedTaskId !== taskId || elements.source.value !== "tasks") return;
     if (resetDisplay || body.content !== state.taskDocumentContent) {
       renderMarkdown(elements.taskDocumentRendered, body.content);
       elements.taskDocumentSource.querySelector("pre").textContent = body.content;
       state.taskDocumentContent = body.content;
     }
+    elements.taskDocumentType.textContent = body.source === "report" ? "Task report" : "Task brief";
+    elements.taskDocumentType.hidden = false;
     elements.taskDocumentEmpty.hidden = true;
     elements.taskDocumentSource.hidden = false;
   } catch (error) {

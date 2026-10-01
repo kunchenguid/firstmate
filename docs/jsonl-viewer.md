@@ -1,8 +1,8 @@
 # Task, report, and agent journal viewer
 
-`fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task reports, ShortTask journals, and supervision-branch sessions.
-It reads only `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and `data/<task>/report.md` below the selected canonical home.
-It does not expose arbitrary paths, follow symlinks, modify a journal or report, or offer chat and lifecycle controls.
+`fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
+It reads only `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
+It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
 Task classification comes from the structured fleet snapshot, task lifecycle disposition, current backlog, and configured Done archive rather than the last status-log line.
 
 ## Start the viewer
@@ -27,7 +27,8 @@ The server provides plain HTTP without TLS termination.
 Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
 
 Open `http://SERVER:17847/`, enter the token in the page, and choose the task dashboard, a journal, or a task report.
-The dashboard separates processing, waiting or blocked, completed, and archived or cancelled tasks, and a task opens its canonical Markdown report when one exists.
+The dashboard separates processing, waiting or blocked, completed, and archived or cancelled tasks.
+Each task opens its canonical Markdown report when present, otherwise its canonical brief, and labels which document type is shown.
 The page sends the token only in the `Authorization` header for protected APIs.
 By default the token stays in page memory.
 Selecting **Remember access token** stores the validated token in same-origin browser local storage so that the page can reconnect after reload.
@@ -49,7 +50,7 @@ Rotation and detectable truncation add an explicit boundary while the browser re
 The viewer uses only local bundled HTML, JavaScript, and CSS.
 Log text is inserted with browser text nodes, so journal content is never executed as HTML.
 Report Markdown is converted into explicit browser nodes without accepting raw HTML, dangerous link schemes, or image loads.
-Reports larger than 8 MiB are refused rather than truncated.
+Task documents larger than 8 MiB are refused rather than truncated.
 
 Run `bin/fm-test-run.sh tests/fm-jsonl-viewer.test.sh` for the portable authenticated task, report, and journal behavior suite.
 Run `FM_JSONL_VIEWER_BROWSER_LIVE=1 bin/fm-test-run.sh tests/fm-jsonl-viewer-browser-live-e2e.test.sh` when the existing local Chrome CDP endpoint is available at `127.0.0.1:9333`.
