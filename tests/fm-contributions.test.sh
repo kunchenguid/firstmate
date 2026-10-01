@@ -309,9 +309,15 @@ test_verdict_actor_values_are_discoverable() {
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
     https://github.com/o/r/pull/8#issuecomment-99 bogus 'no such actor' 2>&1) \
     && fail 'an unknown actor was accepted'
+  [ "$(printf '%s\n' "$help" | sed -n '/^  fm-contributions.sh verdict /p')" = \
+    '  fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>' ] \
+    || fail "help usage does not name exactly the accepted actors: $help"
+  [ "$(printf '%s\n' "$help" | sed -n '/^actor is exactly one of /p')" = \
+    'actor is exactly one of captain, fleet, maintainer or nobody; any other value' ] \
+    || fail "help explanation does not name exactly the accepted actors: $help"
+  [ "$out" = "fm-contributions: invalid required actor 'bogus'; expected one of: captain, fleet, maintainer, nobody" ] \
+    || fail "refusal does not name exactly the accepted actors: $out"
   for actor in captain fleet maintainer nobody; do
-    printf '%s\n' "$help" | grep -q "verdict .*$actor" || fail "help does not name actor $actor"
-    printf '%s\n' "$out" | grep -q "expected one of: .*$actor" || fail "refusal does not name actor $actor: $out"
     with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_A" \
       https://github.com/o/r/pull/8#issuecomment-99 "$actor" 'documented actor' >/dev/null \
       || fail "documented actor $actor was refused"
