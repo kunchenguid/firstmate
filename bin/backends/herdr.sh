@@ -3497,16 +3497,30 @@ fm_backend_herdr_proof_lines() {  # <text>
 # 2.1.283 draws a typed slash command in muted grey 38;2;112;112;112 (verified
 # live), which that strip dropped, judging a typed /exit unsent. Claude's own
 # ghost suggestion is SGR-2 dim and is still stripped.
-fm_backend_herdr_composer_content() {  # <target>
-  local target=$1 cap caps
+# Submit enables refusal-only diagnostics for its post-literal read: capture
+# availability or the shared selector's fixed predicate/numeric geometry from
+# that exact frame, before the existing clear path changes the display.
+fm_backend_herdr_composer_content() {  # <target> [diagnostics=0]
+  local target=$1 cap caps diagnostics=${2:-0} capture=styled ansi=0
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
     caps=$(printf 'styled=1\ncursor=0\nidentity=0')
   elif cap=$(fm_backend_herdr_visible_capture "$target") && [ -n "$cap" ]; then
+    capture=plain
     caps=$(printf 'styled=0\ncursor=0\nidentity=0')
   else
+    if [ "$diagnostics" = 1 ]; then
+      printf 'fm-herdr-composer: refused predicate=capture-unavailable\n' >&2
+    fi
     return 1
   fi
-  FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap"
+  if FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap" "$diagnostics"; then
+    return 0
+  fi
+  if [ "$diagnostics" = 1 ]; then
+    case "$cap" in *$'\033['*) ansi=1 ;; esac
+    printf 'fm-herdr-composer: refused capture=%s ansi=%d\n' "$capture" "$ansi" >&2
+  fi
+  return 1
 }
 
 # fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
@@ -3590,7 +3604,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     || { fm_backend_herdr_submit_refusal literal-transport; printf 'send-failed'; return 0; }
   sleep "$settle"
   if [ "$proof" = 1 ]; then
-    if ! content=$(fm_backend_herdr_composer_content "$target"); then
+    if ! content=$(fm_backend_herdr_composer_content "$target" 1); then
       refusal=post-content-extraction
     elif ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
       refusal=post-payload-proof

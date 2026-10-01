@@ -1506,6 +1506,7 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
 
 _fm_composer_select_cursorless() {
   local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  FM_COMPOSER_SELECTION_REFUSAL=none
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1546,6 +1547,7 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
   if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTION_REFUSAL=lower-incomplete-box
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
@@ -1564,11 +1566,13 @@ _fm_composer_select_cursorless() {
     if ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
            && [ "$generic" = "$FM_COMPOSER_SCAN_BARE_ROW" ] \
            && _fm_composer_bare_rule_sandwich "$plain" "$FM_COMPOSER_SCAN_BARE_ROW"; }; then
+      FM_COMPOSER_SELECTION_REFUSAL=lower-unmatched-rule
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
   fi
   if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTION_REFUSAL=lower-shell-prompt
     FM_COMPOSER_SELECTED_KIND=
     return 1
   fi
@@ -1611,16 +1615,39 @@ _fm_composer_select_cursorless() {
     trimmed=$raw
     fm_composer_normalize_trim_var trimmed
     if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+      FM_COMPOSER_SELECTION_REFUSAL=stale-envelope
       FM_COMPOSER_SELECTED_KIND=
       return 1
     fi
   fi
-  [ -n "$FM_COMPOSER_SELECTED_KIND" ]
+  if [ -z "$FM_COMPOSER_SELECTED_KIND" ]; then
+    FM_COMPOSER_SELECTION_REFUSAL=no-composer-shape
+    return 1
+  fi
+  return 0
 }
 
-fm_composer_extract_selected_content() {  # <caps> <screen>
+# Optional extraction diagnostics describe only the actual refused selection's
+# fixed predicate and numeric row geometry. No capture text is emitted, and
+# there is no second read: the facts belong to the same frame that failed.
+_fm_composer_extract_refusal_geometry() {  # <plain-screen>
+  local predicate=${FM_COMPOSER_SELECTION_REFUSAL:-no-composer-shape} rows
+  case "$predicate" in
+    lower-incomplete-box|lower-unmatched-rule|lower-shell-prompt|stale-envelope|no-composer-shape) ;;
+    *) predicate=unrecognized ;;
+  esac
+  rows=$(printf '%s\n' "$1" | LC_ALL=C awk 'END { print NR }')
+  printf 'fm-composer-extract: refused predicate=%s rows=%d bare=%d rule=%d pair=%d incomplete=%d shell=%d box-bottom=%d leftbar-end=%d selected-first=%d selected-last=%d\n' \
+    "$predicate" "$rows" "$FM_COMPOSER_SCAN_BARE_ROW" \
+    "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" \
+    "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" "$FM_COMPOSER_SCAN_SHELL_ROW" \
+    "$FM_COMPOSER_SCAN_BOX_BOTTOM" "$FM_COMPOSER_SCAN_LEFTBAR_END" \
+    "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST" >&2
+}
+
+fm_composer_extract_selected_content() {  # <caps> <screen> [diagnostics=0]
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 diagnostics=${3:-0}
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1629,7 +1656,10 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  if ! _fm_composer_select_cursorless "$plain"; then
+    if [ "$diagnostics" = 1 ]; then _fm_composer_extract_refusal_geometry "$plain"; fi
+    return 1
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")

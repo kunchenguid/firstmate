@@ -6367,3 +6367,47 @@ test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
 test_target_absent_prunes_only_on_an_answered_pane_not_found
+
+
+test_post_extraction_diagnostic_uses_refused_frame_before_clear() {
+  local dir resp log err fb out reads enters
+  dir="$TMP_ROOT/submit-refused-frame"; mkdir -p "$dir/responses"
+  resp="$dir/responses"; log="$dir/log"; err="$dir/stderr"; : > "$log"
+  herdr_submit_claude_prefix "$resp" PRIVATE_PAYLOAD
+  printf '❯ PRIVATE_PAYLOAD\n────────\n' > "$resp/4.out"
+  # Clear sees a different, empty frame; diagnostics must still describe #4.
+  printf '❯\n' > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 PRIVATE_PAYLOAD 1 0.01 0.01' "$ROOT" 2> "$err")
+  [ "$out" = send-failed ] || fail "failed selection must retain verified-clear send-failed verdict"
+  grep -qF 'predicate=lower-unmatched-rule rows=2 bare=0 rule=1 pair=0 ' "$err" \
+    || fail "diagnostic must describe the exact refused frame before clear"
+  grep -qxF 'fm-herdr-composer: refused capture=styled ansi=0' "$err" || fail "refused capture provenance must be fixed and truthful"
+  grep -qxF 'fm-herdr-submit: refused guard=post-content-extraction' "$err" || fail "original named guard must remain"
+  if grep -Eq 'PRIVATE_|default:|w1:p2' "$err"; then fail "post-failure geometry leaked private values"; fi
+  reads=$(grep -c $'\x1f''pane'$'\x1f''read' "$log")
+  enters=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$reads" = 3 ] || fail "diagnostics must not add a recapture (pre/post/clear only), got $reads"
+  [ "$enters" = 0 ] || fail "diagnostic refusal must not send Enter"
+  pass "post-extraction diagnostics retain the actual failed frame, existing clear, and zero Enters without recapturing"
+}
+
+test_post_extraction_capture_unavailable_is_named_without_content() {
+  local dir resp log err fb out rc
+  dir="$TMP_ROOT/extract-no-capture"; mkdir -p "$dir/responses"
+  resp="$dir/responses"; log="$dir/log"; err="$dir/stderr"; : > "$log"
+  printf '1\n' > "$resp/1.exit"; printf '1\n' > "$resp/2.exit"
+  printf 'PRIVATE_TRANSPORT_ERROR\n' > "$resp/1.err"; printf 'PRIVATE_TRANSPORT_ERROR\n' > "$resp/2.err"
+  fb=$(make_herdr_fakebin "$dir")
+  rc=0
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_content default:w1:p2 1' "$ROOT" 2> "$err") || rc=$?
+  [ "$rc" = 1 ] && [ -z "$out" ] || fail "unavailable captures must retain extraction failure"
+  [ "$(cat "$err")" = 'fm-herdr-composer: refused predicate=capture-unavailable' ] \
+    || fail "unavailable capture diagnostic must emit only its fixed predicate"
+  pass "failed styled/plain capture remains refused with fixed privacy-safe provenance"
+}
+
+test_post_extraction_diagnostic_uses_refused_frame_before_clear
+test_post_extraction_capture_unavailable_is_named_without_content

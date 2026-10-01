@@ -1309,6 +1309,8 @@ The portable executable regression is `tests/fm-control.test.sh`, including refu
 Verified 2026-10-01 with the executable submit regressions in `tests/fm-backend-herdr.test.sh`.
 `bin/backends/herdr.sh` owns the supported stderr diagnostic vocabulary; stdout delivery verdicts and return codes retain their existing contract.
 The regressions distinguish selected-content extraction, pending content, literal transport, post-literal extraction, full-payload proof, uncertain clearing and Enter transport refusals without emitting payload, selected text, environment or endpoint values.
+Post-literal extraction refusals additionally report capture availability or the shared selector's fixed predicate and numeric geometry from the exact refused frame, before clearing and without another terminal read.
+`tests/fm-composer-lib.test.sh` verifies each selector refusal and default diagnostic silence; the backend regression verifies that a later clear frame cannot replace the original failure evidence.
 Refresh with:
 
 ```sh
