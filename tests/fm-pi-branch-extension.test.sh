@@ -6164,13 +6164,21 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     : promptCount === 4
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
       : promptCount === 5
-        ? `${realRoot}/bin/fm-task-handoff.sh send viewer other --id viewer-to-other-r1 'Continue the already-approved dependent step.'`
+        ? `${realRoot}/bin/fm-task-handoff.sh send viewer other --id viewer-to-other-r1 'Continue the already-approved dependent step.'; exit 9`
         : promptCount === 6 ? "" :
         `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
-    if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
+    if (promptCount === 5) {
+      if (!sent.isError) throw new Error("post-handoff failure fixture unexpectedly succeeded");
+    } else if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
   } else {
+    const inspected = await bash.execute("inspect", { command: `${realRoot}/bin/fm-task-state.sh progress viewer` });
+    if (inspected.isError || JSON.parse(inspected.content[0].text).record_token !== JSON.parse(readResult.content[0].text).record_token) {
+      throw new Error(`read-only Bash inspection failed: ${JSON.stringify(inspected)}`);
+    }
+    const failed = await bash.execute("unchanged-failure", { command: "/bin/false" });
+    if (!failed.isError) throw new Error("unchanged failure fixture unexpectedly succeeded");
     appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
     appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
   }
@@ -6373,6 +6381,9 @@ if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry)
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
   throw new Error("unchanged continuation was not retained quietly in the branch");
 }
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
+  throw new Error("the earlier handoff effect was replayed after its failing shell result");
+}
 
 // Only MAIN performs final semantic acceptance after the fixture's requested
 // outcome is satisfied. Empty gap/next step removes the task from monitoring.
@@ -6393,7 +6404,7 @@ if (promptCount !== 6 || routed.filter((item) => item.command.includes("fm-send.
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation delivered exact owner changes to MAIN, isolated dotted task identities, kept unchanged execution quiet, and stopped only after MAIN acceptance");
+console.log("compact continuation delivered exact owner changes to MAIN, kept read-only and unchanged failures quiet, isolated task identities, and stopped only after MAIN acceptance");
 process.exit(0);
 EOF
   status=$?

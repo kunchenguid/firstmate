@@ -63,8 +63,8 @@
 // its deliberate limits.
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { lstat as lstatAsync } from "node:fs/promises";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, type Dir } from "node:fs";
+import { lstat as lstatAsync, open as openAsync, opendir as opendirAsync } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // Pi exposes pi-ai to extensions as a first-class module in both its Node
@@ -690,7 +690,6 @@ export default function (pi: ExtensionAPI) {
   let branchChain: Promise<void> = Promise.resolve();
   let continuationToolsRemaining: number | null = null;
   let recordContinuationReceipt: (() => void) | null = null;
-  let compactContinuationUsedBash = false;
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
   let branchProgressBindings: Record<string, string> = {};
   let branchProgressSnapshots: Record<string, string> = {};
@@ -709,6 +708,8 @@ export default function (pi: ExtensionAPI) {
     try {
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(task)) throw new Error("invalid task id");
       const data = process.env.FM_DATA_OVERRIDE || join(fmHome, "data");
+      const handoffRecords = join(state, "task-handoffs", "records");
+      const handoffStatus = join(state, "task-handoffs", "status");
       const directSuffixes = [
         "meta", "status", "turn-ended", "progress", "busy-state", "busy-gen", "busy-session",
         "check.sh", "check-trust", "pr-poll", "pr-poll-registration", "pr-poll-retirement",
@@ -734,6 +735,52 @@ export default function (pi: ExtensionAPI) {
         join(data, task, "lifecycle.json"),
         join(data, task, "report.md"),
       ];
+      let handoffNames: string[] = [];
+      let handoffDirectory: Dir | undefined;
+      try {
+        handoffDirectory = await opendirAsync(handoffRecords);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (handoffDirectory) {
+        try {
+          for (let count = 0; ; count += 1) {
+            const entry = await handoffDirectory.read();
+            if (!entry) break;
+            if (count >= 256) throw new Error("too many task handoffs");
+            if (entry.name.endsWith(".msg")) handoffNames.push(entry.name);
+          }
+        } finally {
+          await handoffDirectory.close();
+        }
+        handoffNames.sort();
+      }
+      for (const name of handoffNames) {
+        const id = name.slice(0, -4);
+        if (!/^[A-Za-z0-9._-]{1,160}$/.test(id)) throw new Error("invalid task handoff id");
+        const record = join(handoffRecords, name);
+        const stat = await lstatAsync(record, { bigint: true });
+        if (stat.isSymbolicLink() || !stat.isFile()) throw new Error("invalid task handoff record");
+        const handle = await openAsync(record, "r");
+        const buffer = Buffer.alloc(1024);
+        let bytesRead = 0;
+        try {
+          ({ bytesRead } = await handle.read(buffer, 0, buffer.length, 0));
+        } finally {
+          await handle.close();
+        }
+        const header = new Map<string, string>();
+        for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+          if (line === "--") break;
+          const separator = line.indexOf("=");
+          if (separator > 0) header.set(line.slice(0, separator), line.slice(separator + 1));
+        }
+        if (header.get("schema") !== "fm-task-handoff.v1" || header.get("id") !== id ||
+            !header.has("from") || !header.has("target")) throw new Error("invalid task handoff record");
+        if (header.get("from") === task || header.get("target") === task) {
+          paths.push(record, join(handoffStatus, `${id}.state`));
+        }
+      }
       const entries = await Promise.all(paths.map(async (path) => {
         const label = relative(fmHome, path);
         try {
@@ -1521,7 +1568,7 @@ export default function (pi: ExtensionAPI) {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
             const before = branchProgressSnapshots[task];
-            unchangedContinuation = !compactContinuationUsedBash && Boolean(before) && await compactResumeSnapshot(task) === before;
+            unchangedContinuation = Boolean(before) && await compactResumeSnapshot(task) === before;
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1896,11 +1943,6 @@ ${context.command}
         };
       },
     });
-    const executeBash = bashTool.execute.bind(bashTool);
-    bashTool.execute = async (...args) => {
-      if (Object.keys(branchProgressBindings).length > 0) compactContinuationUsedBash = true;
-      return executeBash(...args);
-    };
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
@@ -2269,7 +2311,6 @@ ${context.command}
       const entryOffset = sessionManager.getEntries().length;
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchTaskBindings = {};
-      compactContinuationUsedBash = false;
       branchProgressBindings = { [offer.task]: progress.record_token };
       branchProgressSnapshots = { [offer.task]: await compactResumeSnapshot(offer.task) };
       continuationToolsRemaining = 8;
@@ -2297,7 +2338,6 @@ ${context.command}
         branchTaskBindings = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
-        compactContinuationUsedBash = false;
         wakeTaskScope = null;
       }
       const error = settledPromptProviderError(sessionManager, entryOffset);
