@@ -73,10 +73,10 @@
 # (bin/fm-supervision-host.sh). Only when this home's healthy watcher is that
 # arm's own child, it stops that watcher by its locked identity: a cycle that
 # delivered a reason before the stop landed reports it exactly as an attached
-# arm would, and otherwise this arm owns a fresh cycle as a plain arm does,
-# after undoing the downtime the stop published when nothing was queued in
-# between (docs/watcher-continuity.md "Generation reuse"), so the handover
-# brings no recovery wake. Any other watcher, or one that outlives the stop,
+# arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
+# Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
+# an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
+# Any other watcher, or one that outlives the stop,
 # is attached to exactly as a plain arm attaches.
 #
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
@@ -148,9 +148,10 @@ ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
-# The lifecycle ledger is diagnostic evidence, not a supervision dependency.
-# Writes are bounded and best-effort so an observability failure cannot stall an
-# otherwise healthy watcher cycle.
+# Lifecycle writes are bounded and best-effort so an observability failure
+# cannot stall an otherwise healthy watcher cycle. Take-over also uses the
+# owner's row as stop evidence; missing evidence takes the safe recovery path
+# (docs/watcher-continuity.md "Generation reuse").
 cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
