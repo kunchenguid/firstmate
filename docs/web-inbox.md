@@ -11,7 +11,7 @@ Once `state/.inbox` exists, the home counts as needing supervision even with no 
 `bin/fm-web-inbox.sh drain` returns pending records in file order with their ending byte offsets.
 Handle the first record, publish a correlated response if it is valid, then acknowledge that record with its exact id and offset.
 Retries of the same reply are idempotent; a different second reply is refused.
-An unterminated final fragment stays pending only after its newline arrives.
+An unterminated final fragment is not pending until its newline arrives.
 
 Incoming rows use the shared bridge shape:
 
@@ -27,4 +27,4 @@ Replies append `{id, ts, kind, text, in_reply_to}` to `.outbox`.
 The supported reply kinds are `answer`, `proposal`, `ready`, `decision`, `blocked`, and `fyi`.
 
 The bridge polls the two streams, so no browser-specific process or API server runs in the firstmate home.
-See the `local browser inbox` wake rule in `AGENTS.md` for the handling and acknowledgement procedure.
+The [`web-inbox`](../.agents/skills/web-inbox/SKILL.md) skill owns the handling and acknowledgement procedure.
