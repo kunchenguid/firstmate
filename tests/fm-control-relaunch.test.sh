@@ -1146,7 +1146,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       direct-PR)
         rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
       local-only)
-        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
+        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into the repository's configured default branch." ;;
       *)
         rule='1. Never push to the default branch. Never merge a PR.' ;;
     esac

@@ -144,7 +144,7 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
       return 1 ;;
   esac
   if [ "$forge" != none ] && [ "$mode" = local-only ]; then
-    echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
+    echo "error: $caller: forge=$forge cannot ship mode=local-only - that mode publishes nothing, so a forge has no meaning there, and its landing would fast-forward the local default branch with content the review server has never seen; ship no-mistakes or direct-PR, which publish through the forge" >&2
     return 1
   fi
   return 0
@@ -383,10 +383,8 @@ fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [base-branch]
   local mode=$1 id=$2 forge=${4:-none} base=${5:-} base_q
   local branch=${3:-fm/$id}
   local landing_branch_words='the current default branch'
-  # shellcheck disable=SC2016  # backticks are worker-facing command markup, not expansions
-  local landing_target="local \`main\`"
-  # shellcheck disable=SC2016
-  local rebase_words="if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward"
+  local landing_target="the repository's configured default branch"
+  local rebase_words="if the repository's configured default branch has advanced, rebase onto it so the eventual merge stays a fast-forward"
   # shellcheck disable=SC2016
   local open_pr="open a PR with \`gh-axi\` that is ready for review, not a draft."
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
