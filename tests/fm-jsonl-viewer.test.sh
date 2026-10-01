@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Executable HTTP behavior for the read-only ShortTask and supervision-session
-# JSONL viewer, including auth, root confinement, record shapes, append recovery,
-# malformed/long lines, and explicit rotation/truncation signals.
+# Executable HTTP behavior for the read-only agent journal and task report
+# viewer, including auth, root confinement, record shapes, append recovery,
+# report changes, malformed/long lines, and explicit rotation/truncation signals.
 set -eu
 
 # shellcheck source=tests/lib.sh
@@ -12,11 +12,12 @@ HOME_FIXTURE="$TMP_ROOT/home"
 SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 SUPERVISOR_DIR="$HOME_FIXTURE/state/branch-session"
+REPORT_DIR="$HOME_FIXTURE/data/task-one"
 TOKEN=viewer-test-token-value
 TOKEN_FILE="$TMP_ROOT/viewer.token"
 PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR"
+mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR"
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 
@@ -35,6 +36,16 @@ cat > "$SUPERVISOR_DIR/session-one.jsonl" <<'JSONL'
 JSONL
 ln -s "$TMP_ROOT/outside.jsonl" "$SUPERVISOR_DIR/escaped.jsonl"
 printf '{"secret":true}\n' > "$TMP_ROOT/outside.jsonl"
+cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
+# Task one
+
+Visible report body.
+MARKDOWN
+printf 'not allowlisted\n' > "$REPORT_DIR/secret.md"
+mkdir -p "$HOME_FIXTURE/data/escaped"
+printf 'outside report\n' > "$TMP_ROOT/outside.md"
+ln -s "$TMP_ROOT/outside.md" "$HOME_FIXTURE/data/escaped/report.md"
+ln -s "$TMP_ROOT" "$HOME_FIXTURE/data/linked-task"
 
 node - "$SUPERVISOR_DIR/long.jsonl" <<'NODE'
 import fs from "node:fs";
@@ -71,16 +82,32 @@ status=$(curl -sS -o "$TMP_ROOT/denied.json" -w '%{http_code}' "$BASE/api/sessio
 [ "$status" = 401 ] || fail "unauthenticated discovery returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/wrong.json" -w '%{http_code}' -H 'Authorization: Bearer definitely-wrong' "$BASE/api/sessions")
 [ "$status" = 401 ] || fail "wrong-token discovery returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/report-denied.json" -w '%{http_code}' "$BASE/api/report?id=task-one")
+[ "$status" = 401 ] || fail "unauthenticated report read returned HTTP $status"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/sessions" > "$TMP_ROOT/sessions.json"
 jq -e --arg id "$SHORT_ID" '.sessions | any(.source == "short" and .id == $id)' "$TMP_ROOT/sessions.json" >/dev/null || fail "ShortTask journal was not discovered"
 jq -e '.sessions | any(.source == "supervisor" and .id == "session-one.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "supervisor session was not discovered"
 jq -e '.sessions | all(.id != "escaped.jsonl")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlink escape was discovered"
+jq -e '.reports | any(.source == "report" and .id == "task-one" and .label == "task-one")' "$TMP_ROOT/sessions.json" >/dev/null || fail "canonical task report was not discovered"
+jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 status=$(curl -sS -o "$TMP_ROOT/traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=..%2Foutside.jsonl&cursor=0")
 [ "$status" = 404 ] || fail "traversal selection returned HTTP $status"
 status=$(curl -sS -o "$TMP_ROOT/symlink.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=escaped.jsonl&cursor=0")
 [ "$status" = 404 ] || fail "symlink selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/report-traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=..%2F..%2Foutside")
+[ "$status" = 404 ] || fail "report traversal selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/report-symlink.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=escaped")
+[ "$status" = 404 ] || fail "symlinked report selection returned HTTP $status"
+status=$(curl -sS -o "$TMP_ROOT/report-arbitrary.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one%2Fsecret.md")
+[ "$status" = 404 ] || fail "non-canonical report file selection returned HTTP $status"
+
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report.json"
+jq -e '.source == "report" and .id == "task-one" and (.content | contains("Visible report body.")) and .size > 0 and (.identity | length) > 0' "$TMP_ROOT/report.json" >/dev/null || fail "canonical task report was not read intact"
+printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=task-one" > "$TMP_ROOT/report-changed.json"
+jq -e '(.content | contains("Changed report body.")) and .size > 0' "$TMP_ROOT/report-changed.json" >/dev/null || fail "changed task report was not refreshed"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$SHORT_ID&cursor=0" > "$TMP_ROOT/short-page.json"
 jq -e '.events | any(.value.message.role == "assistant" and (.value.message.content | any(.type == "toolCall")))' "$TMP_ROOT/short-page.json" >/dev/null || fail "nested ShortTask tool call was not preserved"
@@ -113,4 +140,4 @@ if grep -q 'onerror=alert' "$TMP_ROOT/index.html"; then fail "private log-derive
 content_type=$(curl -sS -D - -o /dev/null "$BASE/app.js" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type" {print $2}')
 case "$content_type" in text/javascript*) ;; *) fail "browser script has unsafe content type $content_type" ;; esac
 
-pass 'token-protected JSONL viewer confines roots and preserves supported, partial, malformed, long, rotated and appended records'
+pass 'token-protected agent viewer confines journal and report roots and preserves existing JSONL behavior'

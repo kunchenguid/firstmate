@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // fm-jsonl-viewer.mjs - token-protected, read-only browser viewer for the
-// current Firstmate home's ShortTask journals and supervision branch sessions.
+// current Firstmate home's ShortTask journals, supervision branch sessions,
+// and canonical task reports.
 //
 // Usage:
 //   FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file \
@@ -11,7 +12,8 @@
 // not a symlink, and grant no permissions to group or other users.
 // Static UI assets contain no private data; every discovery/read endpoint
 // requires Authorization: Bearer <token>. Only regular, non-symlink JSONL files
-// below state/short-agents and state/branch-session are eligible.
+// below state/short-agents and state/branch-session and data/<task>/report.md
+// files are eligible.
 
 import { timingSafeEqual } from "node:crypto";
 import { constants as fsConstants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, readFileSync, realpathSync } from "node:fs";
@@ -26,6 +28,7 @@ const TARGET_PAGE_BYTES = 1024 * 1024;
 const MAX_LINE_BYTES = 8 * 1024 * 1024;
 const TAIL_BYTES = 512 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
+const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -143,6 +146,17 @@ function safeFile(root, candidate) {
   }
 }
 
+function safeReportFile(root, candidate) {
+  if (!root || !regularNoSymlink(candidate)) return null;
+  try {
+    const canonical = realpathSync(candidate);
+    if (!inside(root, canonical) || extname(canonical) !== ".md") return null;
+    return canonical;
+  } catch {
+    return null;
+  }
+}
+
 function listSessions(roots) {
   const sessions = [];
   if (roots.short) {
@@ -176,6 +190,26 @@ function listSessions(roots) {
   return sessions.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
 }
 
+function listReports(root) {
+  if (!root) return [];
+  let ids = [];
+  try { ids = readdirSync(root).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return []; }
+  const reports = [];
+  for (const id of ids) {
+    const directory = join(root, id);
+    let directoryInfo;
+    try { directoryInfo = lstatSync(directory); } catch { continue; }
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) continue;
+    const file = safeReportFile(root, join(directory, "report.md"));
+    if (!file) continue;
+    let info;
+    try { info = lstatSync(file); } catch { continue; }
+    if (!info.isFile() || info.isSymbolicLink()) continue;
+    reports.push({ source: "report", id, label: id, bytes: info.size, modifiedAt: info.mtime.toISOString() });
+  }
+  return reports.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt));
+}
+
 function resolveSelection(roots, source, id) {
   if (source === "short" && /^short-[a-f0-9]{64}$/.test(id)) {
     const directory = join(roots.short || "", id);
@@ -193,16 +227,63 @@ function resolveSelection(roots, source, id) {
 
 function openVerified(file, root) {
   const before = lstatSync(file);
-  if (!before.isFile() || before.isSymbolicLink()) throw new Error("selected journal is not a regular file");
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("selected artifact is not a regular file");
   const canonical = realpathSync(file);
-  if (!inside(root, canonical)) throw new Error("selected journal escaped its allowed root");
+  if (!inside(root, canonical)) throw new Error("selected artifact escaped its allowed root");
   const fd = openSync(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
   const after = fstatSync(fd);
   if (!after.isFile() || before.dev !== after.dev || before.ino !== after.ino) {
     closeSync(fd);
-    throw new Error("selected journal changed during open");
+    throw new Error("selected artifact changed during open");
   }
   return { fd, info: after, identity: `${after.dev}:${after.ino}` };
+}
+
+function resolveReport(root, id) {
+  if (!root || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id)) return null;
+  const directory = join(root, id);
+  try {
+    const info = lstatSync(directory);
+    if (!info.isDirectory() || info.isSymbolicLink() || !inside(root, realpathSync(directory))) return null;
+  } catch { return null; }
+  return safeReportFile(root, join(directory, "report.md"));
+}
+
+function readReport(root, id) {
+  const file = resolveReport(root, id);
+  if (!file) return { status: 404, body: { error: "unknown or disallowed report" } };
+  let opened;
+  try { opened = openVerified(file, root); }
+  catch (error) { return { status: 409, body: { error: error.message } }; }
+  try {
+    if (opened.info.size > MAX_REPORT_BYTES) {
+      return { status: 413, body: { error: "report exceeds the 8 MiB display limit" } };
+    }
+    const content = Buffer.alloc(opened.info.size);
+    let offset = 0;
+    while (offset < content.length) {
+      const count = readSync(opened.fd, content, offset, content.length - offset, offset);
+      if (!count) break;
+      offset += count;
+    }
+    const after = fstatSync(opened.fd);
+    if (offset !== content.length || after.size !== opened.info.size || after.mtimeMs !== opened.info.mtimeMs) {
+      return { status: 409, body: { error: "selected report changed during read" } };
+    }
+    return {
+      status: 200,
+      body: {
+        source: "report",
+        id,
+        identity: opened.identity,
+        size: opened.info.size,
+        modifiedAt: opened.info.mtime.toISOString(),
+        content: content.toString("utf8"),
+      },
+    };
+  } finally {
+    closeSync(opened.fd);
+  }
 }
 
 function tailStart(fd, size) {
@@ -320,6 +401,7 @@ function serve() {
   const roots = {
     short: existingRoot(home, ["state", "short-agents"]),
     supervisor: existingRoot(home, ["state", "branch-session"]),
+    reports: existingRoot(home, ["data"]),
   };
   const assetRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../web/jsonl-viewer");
   const assets = {
@@ -341,9 +423,17 @@ function serve() {
       res.setHeader("WWW-Authenticate", 'Bearer realm="Firstmate JSONL viewer"');
       return json(res, 401, { error: "authorization required" });
     }
-    if (url.pathname === "/api/sessions") return json(res, 200, { sessions: listSessions(roots), roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor) } });
+    if (url.pathname === "/api/sessions") return json(res, 200, {
+      sessions: listSessions(roots),
+      reports: listReports(roots.reports),
+      roots: { short: Boolean(roots.short), supervisor: Boolean(roots.supervisor), reports: Boolean(roots.reports) },
+    });
     if (url.pathname === "/api/events") {
       const result = readEvents(roots, url.searchParams.get("source") || "", url.searchParams.get("id") || "", url.searchParams);
+      return json(res, result.status, result.body);
+    }
+    if (url.pathname === "/api/report") {
+      const result = readReport(roots.reports, url.searchParams.get("id") || "");
       return json(res, result.status, result.body);
     }
     return json(res, 404, { error: "not found" });
