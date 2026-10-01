@@ -52,6 +52,24 @@ lib_eval() {  # <fakebin> <expression>
   " "$LIB"
 }
 
+# A bundled node CLI names its harness only as one argv token's path component,
+# which the whole-args regex cannot anchor (^pi$ never matches a full args line),
+# while an unrelated node script must still never be taken for a harness.
+test_bare_interpreter_harness_token_is_identified() {
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node /home/u/.local/lib/node_modules/@mariozechner/pi/bin/pi --mode rpc" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 0 ]' \
+    || fail "a node process running a .../bin/pi script was not identified as a harness"
+  lib_eval "$FAKEBIN" '
+    fm_harness_process_matches node "node /home/u/.local/lib/node_modules/bin/claude --resume" \
+      && [ "$FM_HARNESS_IS_CLAUDE" = 1 ]' \
+    || fail "a node process running a .../bin/claude script was not identified as the claude harness"
+  if lib_eval "$FAKEBIN" 'fm_harness_process_matches node "node /opt/some-tool/index.js --port 8080"'; then
+    fail "a node process running an unrelated script was identified as a harness"
+  fi
+  pass "session-lock: a bare interpreter is identified by a harness path component in any argv token"
+}
+
 test_version_named_session_is_identified_on_both_platforms() {
   local dir fakebin shape got
   dir="$TMP_ROOT/version-named"
@@ -1104,6 +1122,7 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_bare_interpreter_harness_token_is_identified
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home
