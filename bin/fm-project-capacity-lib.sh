@@ -67,7 +67,8 @@
 # place needs no lock, because removing a record or adding pr= only ever lowers
 # the count.
 #
-# Requires bin/fm-wake-lib.sh (root home, local homes, project lock path) and
+# Requires bin/fm-wake-lib.sh (root home, local homes, project lock path),
+# bin/fm-secondmate-registry-lib.sh (which the local-homes walk reads), and
 # bin/fm-backend.sh (fm_meta_get) to be sourced first. No side effects on source.
 
 # Exit status of a spawn deferred because the project is at capacity: the
