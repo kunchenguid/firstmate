@@ -2438,14 +2438,64 @@ fm_backend_herdr_server_running_state() {  # <session>
 # on exactly the reads they refused on before. A server that is running, or
 # whose state cannot itself be read, still yields `unreadable` here too: absence
 # is claimed only from positive evidence of it.
-fm_backend_herdr_agent_state() {  # <target>
-  local target=$1
+# Native unknown may outlive a stopped agent. Only a task-bound recovery may
+# consult the existing process proof in that case; generic husk/close reads
+# remain unknown. Metadata must stay byte-identical across the read, including
+# spawn_gen, and both runtime records must agree with its endpoint topology
+# and cwd. Names and labels are display-only, never task ownership authority.
+# This proves durable incarnation stability, not runtime spawn_gen attestation.
+fm_backend_herdr_unknown_task_state() {  # <target> <meta> <task-id>
+  local target=$1 meta=$2 id=$3 prior session pane workspace tab worktree gen
+  local pane_out agent_out process_state
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  prior=$(cat "$meta") || return 1
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = herdr ] \
+    && [ "$FM_BACKEND_VALIDATED_TARGET" = "$target" ] || return 1
+  gen=$(fm_backend_meta_exact_value "$meta" spawn_gen) || return 1
+  [ -n "$gen" ] || return 1
+  session=$(fm_backend_meta_exact_value "$meta" herdr_session) || return 1
+  pane=$(fm_backend_meta_exact_value "$meta" herdr_pane_id) || return 1
+  workspace=$(fm_backend_meta_exact_value "$meta" herdr_workspace_id) || return 1
+  tab=$(fm_backend_meta_exact_value "$meta" herdr_tab_id) || return 1
+  worktree=$(fm_backend_meta_exact_value "$meta" worktree) || return 1
+  pane_out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+  agent_out=$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$pane_out" | jq -e --arg pane "$pane" --arg workspace "$workspace" \
+    --arg tab "$tab" --arg cwd "$worktree" '
+      .result.type == "pane_info" and .result.pane.pane_id == $pane
+      and .result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab
+      and .result.pane.foreground_cwd == $cwd and .result.pane.agent_status == "unknown"
+    ' >/dev/null 2>&1 || return 1
+  printf '%s' "$agent_out" | jq -e --arg pane "$pane" --arg workspace "$workspace" \
+    --arg tab "$tab" --arg cwd "$worktree" '
+      .result.type == "agent_info" and .result.agent.pane_id == $pane
+      and .result.agent.workspace_id == $workspace and .result.agent.tab_id == $tab
+      and .result.agent.foreground_cwd == $cwd and .result.agent.agent_status == "unknown"
+    ' >/dev/null 2>&1 || return 1
+  process_state=$(fm_backend_herdr_pane_process_state "$session" "$pane")
+  case "$process_state" in shell|agent) ;; *) return 1 ;; esac
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(cat "$meta")" = "$prior" ] || return 1
+  # Re-read ownership after the process proof; a moved/reused endpoint refuses.
+  [ "$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null)" = "$pane_out" ] || return 1
+  [ "$(fm_backend_herdr_cli "$session" agent get "$pane" 2>/dev/null)" = "$agent_out" ] || return 1
+  [ "$(cat "$meta")" = "$prior" ] || return 1
+  case "$process_state" in shell) printf 'dead' ;; agent) printf 'alive' ;; esac
+}
+
+fm_backend_herdr_agent_state() {  # <target> [<meta> <task-id>]
+  local target=$1 task_state
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent|stale-agent) printf 'dead' ;;
     live) printf 'alive' ;;
     *)
+      if [ -n "${2:-}" ] && [ -n "${3:-}" ] \
+        && task_state=$(fm_backend_herdr_unknown_task_state "$target" "$2" "$3"); then
+        printf '%s' "$task_state"
+        return 0
+      fi
       case "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" in
         stopped) printf 'missing' ;;
         *) printf 'unreadable' ;;

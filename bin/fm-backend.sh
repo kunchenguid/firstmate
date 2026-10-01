@@ -985,12 +985,12 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
 # empirically validated. Orca and cmux do not support secondmate spawns.
-fm_backend_agent_state() {  # <backend> <target>
+fm_backend_agent_state() {  # <backend> <target> [<meta> <task-id>]
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
-    herdr) fm_backend_herdr_agent_state "$target" ;;
+    herdr) fm_backend_herdr_agent_state "$target" "${3:-}" "${4:-}" ;;
     *) printf 'unverified' ;;
   esac
 }

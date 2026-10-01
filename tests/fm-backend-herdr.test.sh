@@ -612,6 +612,93 @@ test_registered_agent_with_a_live_foreground_process_stays_alive() {
   pass "herdr stale registration: a registered agent with a live Pi foreground process still reads alive"
 }
 
+# Captured Desklink unknown registrations have no agent label/session, but
+# preserve task name, topology and foreground cwd. Normalize volatile ids/pids
+# onto real local processes; retain the observed response shape.
+unknown_task_recovery_case() {  # <variant>
+  local dir="$TMP_ROOT/unknown-task-$1" variant=$1
+  mkdir -p "$dir"
+  cat > "$dir/task.meta" <<EOF
+window=fmtest:w1:p2
+endpoint_task_id=probe
+backend=herdr
+herdr_session=fmtest
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
+worktree=$dir
+project=$dir
+spawn_gen=s1
+EOF
+  jq -n --arg cwd "$dir" '{result:{type:"pane_info",pane:{pane_id:"w1:p2",workspace_id:"w1",tab_id:"w1:t2",foreground_cwd:$cwd,agent_status:"unknown"}}}' > "$dir/pane.json"
+  jq -n --arg cwd "$dir" '{result:{type:"agent_info",agent:{name:"probe",pane_id:"w1:p2",workspace_id:"w1",tab_id:"w1:t2",foreground_cwd:$cwd,agent_status:"unknown"}}}' > "$dir/agent.json"
+  shell_only_process_info "$$" > "$dir/process.json"
+  case "$variant" in
+    missing-name) jq 'del(.result.agent.name)' "$dir/agent.json" > "$dir/edit.json" ;;
+    foreign-name) jq '.result.agent.name="foreign"' "$dir/agent.json" > "$dir/edit.json" ;;
+    missing-pane) jq 'del(.result.agent.pane_id)' "$dir/agent.json" > "$dir/edit.json" ;;
+    foreign-pane) jq '.result.agent.pane_id="w9:p9"' "$dir/agent.json" > "$dir/edit.json" ;;
+    foreign-tab) jq '.result.agent.tab_id="w1:t9"' "$dir/agent.json" > "$dir/edit.json" ;;
+    foreign-workspace) jq '.result.agent.workspace_id="w9"' "$dir/agent.json" > "$dir/edit.json" ;;
+    foreign-cwd) jq '.result.agent.foreground_cwd="/elsewhere"' "$dir/agent.json" > "$dir/edit.json" ;;
+    missing-generation) sed '/^spawn_gen=/d' "$dir/task.meta" > "$dir/meta-edit"; mv "$dir/meta-edit" "$dir/task.meta" ;;
+    foreign-binding) sed 's/endpoint_task_id=probe/endpoint_task_id=foreign/' "$dir/task.meta" > "$dir/meta-edit"; mv "$dir/meta-edit" "$dir/task.meta" ;;
+    foreign-session) sed 's/herdr_session=fmtest/herdr_session=foreign/' "$dir/task.meta" > "$dir/meta-edit"; mv "$dir/meta-edit" "$dir/task.meta" ;;
+    absent-shell) jq '.result.process_info.shell_pid=99999999' "$dir/process.json" > "$dir/process-edit" ;;
+    live-agent) jq '.result.process_info.foreground_processes[0] |= (.name="codex" | .argv0="codex" | .argv=["codex"] | .cmdline="codex")' "$dir/process.json" > "$dir/process-edit" ;;
+    foreign-process) jq '.result.process_info.foreground_processes[0] |= (.name="sleep" | .argv0="sleep" | .argv=["sleep"] | .cmdline="sleep")' "$dir/process.json" > "$dir/process-edit" ;;
+    foreign-process-pane) jq '.result.process_info.pane_id="w9:p9"' "$dir/process.json" > "$dir/process-edit" ;;
+    missing-process) jq 'del(.result.process_info.foreground_processes)' "$dir/process.json" > "$dir/process-edit" ;;
+  esac
+  [ ! -f "$dir/edit.json" ] || mv "$dir/edit.json" "$dir/agent.json"
+  [ ! -f "$dir/process-edit" ] || mv "$dir/process-edit" "$dir/process.json"
+  FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_source herdr
+    dir=$2; variant=$3
+    fm_backend_herdr_cli() {
+      shift
+      case "$1 $2" in
+        "pane get") cat "$dir/pane.json" ;;
+        "agent get")
+          if [ "$variant" = changed-runtime ] && [ -e "$dir/sampled" ]; then
+            jq ".result.agent.tab_id=\"w1:t9\"" "$dir/agent.json"
+          else cat "$dir/agent.json"; fi ;;
+        "pane process-info")
+          case "$variant" in
+            unreachable) return 1 ;;
+            changed-generation) sed "s/spawn_gen=s1/spawn_gen=s2/" "$dir/task.meta" > "$dir/meta-edit"; mv "$dir/meta-edit" "$dir/task.meta" ;;
+            changed-endpoint) sed "s/herdr_tab_id=w1:t2/herdr_tab_id=w1:t9/" "$dir/task.meta" > "$dir/meta-edit"; mv "$dir/meta-edit" "$dir/task.meta" ;;
+          esac
+          : > "$dir/sampled"
+          cat "$dir/process.json" ;;
+        "status --json") printf "{\"server\":{\"running\":true}}" ;;
+        *) return 1 ;;
+      esac
+    }
+    printf "%s %s" "$(fm_backend_agent_state herdr fmtest:w1:p2 "$dir/task.meta" probe)" "$(fm_backend_herdr_pane_agent_state fmtest w1:p2)"
+  ' bash "$ROOT" "$dir" "$variant"
+}
+
+test_unknown_registration_requires_stable_task_and_shell_proof() {
+  local out variant
+  out=$(unknown_task_recovery_case stable)
+  [ "$out" = "dead unknown" ] || fail "task-bound unknown shell must recover, generic close classifier must refuse: $out"
+  for variant in missing-pane foreign-pane foreign-tab foreign-workspace foreign-cwd \
+    missing-generation foreign-binding foreign-session absent-shell foreign-process \
+    foreign-process-pane missing-process unreachable changed-generation changed-endpoint changed-runtime; do
+    out=$(unknown_task_recovery_case "$variant")
+    [ "$out" = "unreadable unknown" ] || fail "unknown recovery must refuse $variant: $out"
+  done
+  for variant in missing-name foreign-name; do
+    out=$(unknown_task_recovery_case "$variant")
+    [ "$out" = "dead unknown" ] || fail "display-only name must not change runtime ownership proof: $variant $out"
+  done
+  out=$(unknown_task_recovery_case live-agent)
+  [ "$out" = "alive unknown" ] || fail "unknown registration with a verified live agent must prohibit relaunch: $out"
+  pass "unknown registration: stable task-bound processes recover; identity, generation, process and transport failures refuse"
+}
+
 # --- the bound agent session reference (relaunch session continuity) --------
 #
 # Herdr applies only reports carrying the session identity it bound to a pane,
@@ -5899,6 +5986,7 @@ test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_pin_agent_name_scopes_spawn_rename_to_task_session
 test_pin_agent_name_relaunch_rename_failure_never_fails
 test_recovery_grade_read_widens_only_at_its_own_boundary
+test_unknown_registration_requires_stable_task_and_shell_proof
 test_stale_registration_over_a_shell_only_pane_is_agent_free
 test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
