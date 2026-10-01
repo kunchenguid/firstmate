@@ -313,8 +313,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
 # FM_TASK_INBOX_RING_REASON is left empty, except when the doorbell send fails
-# (return 2) on a composer the pane read cannot parse: it then names what could
-# not be read (fm_composer_unreadable_reason) for the caller's notice.
+# (return 2) on a pane that cannot be read (`pane unreadable`) or a composer the
+# pane read cannot parse: it then names what could not be read
+# (fm_composer_unreadable_reason) for the caller's notice.
 # shellcheck disable=SC2034 # FM_TASK_INBOX_RING_REASON is read by sourcing callers.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
@@ -352,13 +353,13 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Why a failed doorbell send met an unreadable composer, or nothing when the
-# pane's composer reads cleanly (the send failed for another reason).
+# Why a failed doorbell send met an unreadable pane or composer, or nothing when
+# the pane's composer reads cleanly (the send failed for another reason).
 _fm_task_inbox_ring_unreadable_reason() {  # <backend> <target> [expected-label]
   local cap
   if ! fm_backend_source "$1" \
     || ! cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${3:-}" 2>/dev/null); then
-    printf 'composer unreadable'
+    printf 'pane unreadable'
     return 0
   fi
   fm_composer_extract_selected_content styled=0 "$cap" >/dev/null 2>&1 && return 0

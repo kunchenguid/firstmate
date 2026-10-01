@@ -296,7 +296,8 @@ test_ring_skips_dead_agent() {
 # A doorbell whose send fails on a composer the pane read cannot parse names
 # the cause: a Claude composer under an unpinned titled top rule reports that
 # title, any other unreadable composer reports the generic cause, and a pane
-# whose composer reads cleanly adds nothing. The ring's return code and the
+# whose composer reads cleanly adds nothing; a pane that cannot be captured
+# reports the pane, never the composer. The ring's return code and the
 # durable record are unchanged by the diagnosis.
 ring_with_screen() {  # <state> <record> (screen in FM_FAKE_SCREEN) -> "<rc>|<reason>"
   FM_STATE_OVERRIDE="$1" bash -c '
@@ -304,7 +305,7 @@ ring_with_screen() {  # <state> <record> (screen in FM_FAKE_SCREEN) -> "<rc>|<re
     fm_backend_agent_state() { printf idle; }
     fm_backend_composer_state() { printf unknown; }
     fm_backend_send_text_submit() { printf send-failed; }
-    fm_backend_capture() { printf "%s\n" "$FM_FAKE_SCREEN"; }
+    fm_backend_capture() { [ -z "${FM_FAKE_CAPTURE_FAIL:-}" ] && printf "%s\n" "$FM_FAKE_SCREEN"; }
     rc=0
     fm_task_inbox_ring herdr fm-remote:w1:p2 "$2" fm-t1 || rc=$?
     printf "%s|%s" "$rc" "$FM_TASK_INBOX_RING_REASON"
@@ -329,6 +330,9 @@ test_ring_names_unreadable_composer_title() {
   out=$(FM_FAKE_SCREEN="transcript"$'\n'"$rule"$'\n'"❯ "$'\n'"$rule" \
     ring_with_screen "$state" "$rec")
   [ "$out" = "2|" ] || fail "a readable composer should add no reason, got '$out'"
+  out=$(FM_FAKE_SCREEN='' FM_FAKE_CAPTURE_FAIL=1 ring_with_screen "$state" "$rec")
+  [ "$out" = "2|pane unreadable" ] \
+    || fail "a failed pane capture should report the pane, not the composer, got '$out'"
   [ -f "$rec" ] || fail "a failed ring must leave the durable record in place"
   pass "inbox: a doorbell refused on an unreadable composer names what could not be read"
 }
