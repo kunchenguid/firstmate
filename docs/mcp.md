@@ -8,7 +8,9 @@ It uses only the Python standard library, so the `python3` a firstmate home alre
 
 The server never spawns, steers, merges, tears down, or edits backlog or state.
 `firstmate_send_note` is its only write: it queues an inbox note through `fm-inbox.sh note` and wakes firstmate, and firstmate's own rules decide what happens next.
-Every note it queues starts with the fixed first line `[via firstmate MCP]`, so firstmate can tell an MCP note from one the captain typed.
+Every note it queues starts with the first line `[via firstmate MCP from <client> <version>]`, naming the client from its MCP initialize handshake (or `unknown client`), so firstmate can tell an MCP note from one the captain typed.
+Claude Desktop identifies itself as `claude-ai` and Claude Code under its own name, so the two are distinguishable, but Desktop's chat, Cowork, and Code tabs share one client identity.
+Each reply names the note id it answers, so a session that passes its own note id to `firstmate_note_replies` sees only the answer to its own note.
 Every other tool is a read of status, readiness, receipts, the home summary, the backlog, a crew's current state, or a crew's report.
 A home file is never read through a symlink or from outside `FM_HOME`, so a symlinked `data/<id>/report.md` is refused.
 The script header lists each tool and the command or file it wraps.

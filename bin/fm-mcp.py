@@ -6,8 +6,10 @@ stdio server. It wraps firstmate's own scripts and published files and nothing
 else: no network listener, no credentials, and no direct writes to firstmate's
 files. It never spawns, steers, merges, tears down, or edits backlog or state.
 Every action request becomes an inbox note (fm-inbox.sh note), and firstmate's
-own rules decide what happens next. Each such note's body starts with the fixed
-line "[via firstmate MCP]" so firstmate can tell it from a note the captain typed.
+own rules decide what happens next. Each such note's body starts with the line
+"[via firstmate MCP from <client> <version>]", naming the client from its
+initialize handshake (or "unknown client"), so firstmate can tell it from a note
+the captain typed and tell Claude Desktop from Claude Code.
 
 Usage:
   fm-mcp.py            serve MCP over stdin/stdout (newline-delimited JSON-RPC)
@@ -44,7 +46,10 @@ BIN = Path(__file__).resolve().parent
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 TIMEOUT = 60
-MARKER = "[via firstmate MCP]"
+MARKER = "[via firstmate MCP from {client}]"
+# The client named in initialize's clientInfo, so firstmate can tell Claude Desktop
+# ("claude-ai") from Claude Code. Client-supplied, so it is flattened and capped.
+CLIENT = "unknown client"
 REPLIES = 20
 
 INSTRUCTIONS = (
@@ -102,7 +107,7 @@ def valid_id(value):
 def send_note(message, request_id):
     if not message.strip():
         raise ToolError("message is empty")
-    return run("fm-inbox.sh", "note", "--request-id", request_id, "--json", "-", stdin=f"{MARKER}\n{message}")
+    return run("fm-inbox.sh", "note", "--request-id", request_id, "--json", "-", stdin=MARKER.format(client=CLIENT) + "\n" + message)
 
 
 def note_replies(note_id=None, after=None):
@@ -183,8 +188,9 @@ TOOLS = {
     "firstmate_send_note": (
         send_note,
         "Send firstmate a message and wake it (fm-inbox.sh note).\n\n"
-        f"The queued note's body always starts with the line \"{MARKER}\", so firstmate can tell"
-        " it came through this server rather than from the captain directly.\n"
+        f"The queued note's body always starts with the line \"{MARKER.format(client='<client> <version>')}\","
+        " naming the MCP client from its initialize handshake, so firstmate can tell it came through"
+        " this server, and from which app, rather than from the captain directly.\n"
         "Use this for everything you want firstmate to do or know: questions, new work,"
         " approvals, steering a crew, merges, cancellations. The note is only a request;"
         " this tool itself never spawns, steers, merges, tears down, or edits backlog or state -"
@@ -202,10 +208,11 @@ TOOLS = {
         note_replies,
         "Read firstmate's replies to notes and whether each note is still pending (fm-inbox.sh receipts).\n\n"
         "With note_id: returns that note with acknowledged (firstmate has taken it) and"
-        " reply (firstmate's answer, or null while none is recorded yet)."
+        " reply (firstmate's answer, or null while none is recorded yet), so a session"
+        " that passes its own note ids sees only the answers to its own notes."
         " Without: returns recent pending and handled notes plus the newest replies (oldest"
         " first); pass the previous reply_cursor as `after` to see only newer replies, paged"
-        " oldest first." + NOTE_ONLY,
+        " oldest first. Each reply names the note id it answers." + NOTE_ONLY,
         {"note_id": param("Note id returned by firstmate_send_note"),
          "after": param("reply_cursor from a previous call")},
         [],
@@ -278,8 +285,12 @@ def call_tool(params):
 
 
 def handle(msg):
+    global CLIENT
     method, params = msg.get("method"), msg.get("params") or {}
     if method == "initialize":
+        info = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
+        label = " ".join(str(info[k]) for k in ("name", "version") if info.get(k))
+        CLIENT = re.sub(r"[^\w .:@/+-]", "", label)[:80].strip() or "unknown client"
         asked = params.get("protocolVersion")
         return {
             "protocolVersion": asked if asked in PROTOCOLS else PROTOCOLS[0],
