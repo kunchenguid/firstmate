@@ -1142,7 +1142,7 @@ else
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
-  if ! fm_task_inbox_focus_main "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "$TARGET_HARNESS"; then
+  if ! fm_task_inbox_selector_preflight "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "$TARGET_HARNESS"; then
     fm_send_known_undelivered_cleanup ||
       echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
     echo "error: text not sent to $T (Claude agent-selector preflight failed; tried $RESOLUTION_TRIED)" >&2

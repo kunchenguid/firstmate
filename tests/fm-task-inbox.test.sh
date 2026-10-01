@@ -396,15 +396,6 @@ test_ring_submits_its_own_stuck_doorbell() {
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
-# A fake tmux whose pane is a Claude worker with one background agent. The
-# view in FM_FAKE_VIEW renders as the matching screen captured live on Claude
-# Code 2.1.286, and each key moves it the way that release was observed to:
-# Down from a viewed subagent first focuses a footer pill that reads the same,
-# then the list with its cursor on main; Up from the subagent row reaches main;
-# Enter on main views main; Escape leaves a focused list. Typing while a
-# subagent is viewed delivers to that subagent (TO-SUBAGENT), Escape on main's
-# composer would interrupt main (INTERRUPT), and Left opens the dialog that
-# stops background tasks (LEFT). FM_FAKE_FROZEN ignores every key.
 make_selector_stub() {  # <dir>
   mkdir -p "$1/fakebin"
   cat > "$1/fakebin/tmux" <<'SH'
@@ -424,7 +415,7 @@ case "${1:-}" in
       esac
     done
     if [ "$literal" = 1 ]; then
-      if [ "$view" = main ]; then
+      if [ "$view" = main ] || [ "$view" = none ]; then
         printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
       else
         printf 'TO-SUBAGENT: %s\n' "$1" >> "$FM_SEND_LOG"
@@ -432,24 +423,14 @@ case "${1:-}" in
       exit 0
     fi
     printf 'KEY %s\n' "$1" >> "$FM_SEND_LOG"
-    [ -z "${FM_FAKE_FROZEN:-}" ] || exit 0
-    next=$view
     case "$view:$1" in
-      subagent:Down) next=pill ;;
-      pill:Down) next=list-main ;;
-      list-other:Up) next=list-main ;;
-      list-main:Enter) next=list-main-viewed ;;
-      list-main-viewed:Escape) next=main ;;
-      main:Escape) printf 'INTERRUPT\n' >> "$FM_SEND_LOG" ;;
-      *:Left) printf 'LEFT\n' >> "$FM_SEND_LOG" ;;
-      main:Enter)
+      main:Enter|none:Enter)
         if [ -s "$FM_FAKE_COMPOSER" ]; then
           printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
           : > "$FM_FAKE_COMPOSER"
         fi
         ;;
     esac
-    printf '%s\n' "$next" > "$FM_FAKE_VIEW"
     exit 0 ;;
   display-message)
     case "$*" in *cursor_y*) printf '1\n'; exit 0 ;; esac
@@ -461,7 +442,8 @@ case "${1:-}" in
     fi
     case "$view" in
       main) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } { print }' "$caps/main-tmux.txt" ;;
-      subagent|pill) cat "$caps/subagent-tmux.txt" ;;
+      none) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } NR <= 3 { print }' "$caps/main-tmux.txt" ;;
+      subagent) cat "$caps/subagent-tmux.txt" ;;
       list-main) cat "$caps/list-main-herdr.txt" ;;
       list-main-viewed) cat "$caps/list-main-viewed-tmux.txt" ;;
       list-other) cat "$caps/list-other-tmux.txt" ;;
@@ -476,12 +458,8 @@ SH
   chmod +x "$1/fakebin/sleep"
 }
 
-# Issue #6131: a doorbell rung while Claude's agent selector shows a subagent
-# reached that subagent and reported success. The ring now walks every
-# selector view back to main and submits there; a pane whose walk cannot prove
-# main is refused with nothing typed, after at most one Escape and no Left.
-test_ring_returns_claude_selector_to_main() {
-  local dir state rec doorbell log composer viewf start rc
+test_ring_refuses_claude_selector() {
+  local dir state rec doorbell log composer viewf start rc first second first_rc second_rc
   dir="$TMP_ROOT/ring-selector"
   state="$dir/state"
   mkdir -p "$state"
@@ -495,34 +473,37 @@ test_ring_returns_claude_selector_to_main() {
       inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 claude
   }
 
-  for start in subagent list-other list-main list-main-viewed main; do
+  for start in subagent list-other list-main list-main-viewed; do
     : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
     rc=0; ring || rc=$?
-    [ "$rc" = 0 ] || fail "a ring from the $start view should reach main, got rc $rc:"$'\n'"$(cat "$log")"
-    [ "$(cat "$viewf")" = main ] || fail "a ring from the $start view left the selector on $(cat "$viewf")"
-    grep -qxF "SUBMIT: $doorbell" "$log" \
-      || fail "a ring from the $start view did not submit the doorbell to main:"$'\n'"$(cat "$log")"
-    ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" \
-      || fail "a ring from the $start view misfired:"$'\n'"$(cat "$log")"
+    expect_code 2 "$rc" "a ring from $start should report undelivered"
+    [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a refused ring sent input: $(cat "$log")"
+    [ "$(cat "$viewf")" = "$start" ] || fail "a refused ring changed the selector"
+    [ -f "$rec" ] || fail "a refused ring lost the durable steer"
   done
 
-  : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
-  rc=0; FM_FAKE_FROZEN=1 ring || rc=$?
-  [ "$rc" = 2 ] || fail "a selector that never returns to main should report undelivered, got rc $rc"
-  ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a stuck selector was typed into:"$'\n'"$(cat "$log")"
-  [ "$(grep -c '^KEY' "$log")" -le 12 ] || fail "a stuck selector walk was not bounded:"$'\n'"$(cat "$log")"
-
   : > "$log"; : > "$composer"; printf 'list-main-viewed\n' > "$viewf"
-  rc=0; FM_FAKE_FROZEN=1 ring || rc=$?
-  [ "$rc" = 2 ] || fail "a list that ignores Escape should report undelivered, got rc $rc"
-  [ "$(grep -c '^KEY Escape' "$log")" = 1 ] \
-    || fail "the walk must send Escape at most once:"$'\n'"$(cat "$log")"
-  ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a stuck list was typed into:"$'\n'"$(cat "$log")"
-  pass "inbox: the ring walks a Claude agent selector back to main before ringing, and refuses when it cannot"
+  ring & first=$!
+  ring & second=$!
+  first_rc=0; wait "$first" || first_rc=$?
+  second_rc=0; wait "$second" || second_rc=$?
+  expect_code 2 "$first_rc" "the first concurrent ring should report undelivered"
+  expect_code 2 "$second_rc" "the second concurrent ring should report undelivered"
+  [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "concurrent rings sent input: $(cat "$log")"
+  [ "$(cat "$viewf")" = list-main-viewed ] || fail "concurrent rings changed the selector"
+
+  for start in main none; do
+    : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+    ring || fail "a ring from $start should reach the main composer"
+    [ "$(cat "$log")" = "KEY Enter"$'\n'"SUBMIT: $doorbell" ] \
+      || fail "a ring from $start sent unexpected input: $(cat "$log")"
+    [ ! -s "$composer" ] || fail "a successful ring left pending text"
+  done
+  pass "inbox: active Claude selectors refuse rings without input, including concurrent rings"
 }
 
 test_selector_capture_failure_leaves_ring_undelivered() {
-  local dir state rec log composer viewf failure rc fail_view
+  local dir state rec log composer viewf failure rc start
   dir="$TMP_ROOT/ring-selector-capture-failure"
   state="$dir/state"
   mkdir -p "$state"
@@ -535,28 +516,28 @@ test_selector_capture_failure_leaves_ring_undelivered() {
       FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
       inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 claude
   }
-  for fail_view in subagent pill; do
-    : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
-    printf '%s\n' "$fail_view" > "$failure"
+  for start in subagent main; do
+    : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+    printf '%s\n' "$start" > "$failure"
     rc=0; ring_capture_failure || rc=$?
-    expect_code 2 "$rc" "an unreadable $fail_view capture should report an undelivered ring"
-    [ ! -e "$failure" ] || fail "the $fail_view capture failure was not exercised"
-    [ ! -s "$composer" ] || fail "a capture failure left typed text"
-    ! grep -qE '^(TO-SUBAGENT|SUBMIT)' "$log" || fail "a capture failure allowed delivery: $(cat "$log")"
+    expect_code 2 "$rc" "an unreadable $start capture should report an undelivered ring"
+    [ ! -e "$failure" ] || fail "the $start capture failure was not exercised"
+    [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a capture failure allowed input: $(cat "$log")"
     [ -f "$rec" ] || fail "a capture failure lost the durable steer"
-    if [ "$fail_view" = subagent ]; then
-      [ ! -s "$log" ] || fail "a failed initial capture should not send keys"
+    if [ "$start" = subagent ]; then
+      rc=0; ring_capture_failure || rc=$?
+      expect_code 2 "$rc" "a readable subagent view should still refuse the retry"
+      [ ! -s "$log" ] || fail "a retry sent input to an active selector"
     fi
-    ring_capture_failure || fail "a later ring should recover after the transient capture failure"
-    [ "$(cat "$viewf")" = main ] || fail "the retry did not return to main"
+    printf 'main\n' > "$viewf"
+    ring_capture_failure || fail "a later ring should succeed once the main composer is readable"
     grep -q '^SUBMIT: ' "$log" || fail "the retry did not submit the doorbell"
-    ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" || fail "the retry misfired: $(cat "$log")"
   done
-  pass "inbox: initial and later selector capture failures refuse the ring until a readable retry"
+  pass "inbox: capture failure refuses input and a readable main composer permits retry"
 }
 
-test_typed_send_returns_claude_selector_to_main() {
-  local dir state log composer viewf err target message start failure rc submitted corr pending
+test_typed_send_refuses_claude_selector() {
+  local dir state log composer viewf err target message start rc submitted corr pending
   dir="$TMP_ROOT/typed-selector"
   state="$dir/state"
   mkdir -p "$state"
@@ -575,10 +556,10 @@ test_typed_send_returns_claude_selector_to_main() {
       *:*) message='please continue' ;;
       *) message='/help' ;;
     esac
-    for start in subagent list-other list-main list-main-viewed main; do
+    for start in main none; do
       : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
       typed_send || fail "typed send to $target from $start failed: $(cat "$err")"
-      [ "$(cat "$viewf")" = main ] || fail "typed send to $target from $start did not return to main"
+      [ "$(cat "$viewf")" = "$start" ] || fail "typed send to $target changed the view"
       [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "typed send should submit exactly once: $(cat "$log")"
       submitted=$(sed -n 's/^SUBMIT: //p' "$log")
       if [ "$target" = domain ]; then
@@ -591,32 +572,30 @@ test_typed_send_returns_claude_selector_to_main() {
         [ "$submitted" = "$message" ] || fail "typed send to $target changed the message: $submitted"
       fi
       [ ! -s "$composer" ] || fail "typed send left pending composer text"
-      ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)' "$log" || fail "typed send misfired: $(cat "$log")"
+      [ "$(cat "$log")" = "KEY Enter"$'\n'"SUBMIT: $submitted" ] || fail "typed send emitted unexpected input"
     done
-    for failure in frozen initial-capture later-capture; do
-      : > "$log"; : > "$composer"; printf 'subagent\n' > "$viewf"
+    for start in subagent list-other list-main list-main-viewed unreadable; do
+      : > "$log"; : > "$composer"
       rc=0
-      if [ "$failure" = frozen ]; then
-        FM_FAKE_FROZEN=1 typed_send || rc=$?
-      else
-        case "$failure" in initial-capture) printf 'subagent\n' ;; later-capture) printf 'pill\n' ;; esac > "$dir/capture-failure"
+      if [ "$start" = unreadable ]; then
+        printf 'main\n' > "$viewf"; printf 'main\n' > "$dir/capture-failure"
         FM_FAKE_CAPTURE_FAILURE="$dir/capture-failure" typed_send || rc=$?
-        [ ! -e "$dir/capture-failure" ] || fail "the $failure failure was not exercised"
+        [ ! -e "$dir/capture-failure" ] || fail "the capture failure was not exercised"
+      else
+        printf '%s\n' "$start" > "$viewf"
+        typed_send || rc=$?
+        [ "$(cat "$viewf")" = "$start" ] || fail "a refused typed send changed the selector"
       fi
-      expect_code 1 "$rc" "a $failure preflight should refuse typed delivery to $target"
+      expect_code 1 "$rc" "a $start preflight should refuse typed delivery to $target"
       assert_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "typed refusal should identify the failed preflight"
-      [ ! -s "$composer" ] || fail "a refused typed send left pending text"
-      ! grep -qE '^(TO-SUBAGENT|SUBMIT|INTERRUPT|LEFT)' "$log" || fail "a refused typed send misfired: $(cat "$log")"
-      if [ "$failure" = initial-capture ]; then
-        [ ! -s "$log" ] || fail "a failed initial capture should not send keys"
-      fi
+      [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a refused typed send emitted input: $(cat "$log")"
       for pending in "$state/pending-replies/"[a-f0-9]*; do
         [ ! -f "$pending" ] || fail "a refused typed send left a pending-reply expectation"
       done
     done
   done
   [ ! -d "$state/t1.inbox" ] && [ ! -d "$state/domain.inbox" ] || fail "typed delivery was rerouted to an inbox"
-  pass "fm-send: explicit targets and local slash invocations preflight the Claude selector before typing"
+  pass "fm-send: explicit targets and local slash invocations refuse active Claude selectors without input"
 }
 
 test_non_claude_delivery_ignores_selector_capture_failure() {
@@ -662,7 +641,7 @@ test_non_claude_delivery_ignores_selector_capture_failure() {
       [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "the $route delivery did not submit exactly once: $(cat "$log")"
       grep -qxF "SUBMIT: $expected" "$log" || fail "the $route delivery changed the submitted text: $(cat "$log")"
       [ ! -s "$composer" ] || fail "the $route delivery left pending text"
-      ! grep -qE '^(TO-SUBAGENT|INTERRUPT|LEFT)|^KEY (Up|Down|Escape)' "$log" \
+      ! grep -qE '^TO-SUBAGENT|^KEY (Up|Down|Left|Escape)' "$log" \
         || fail "the $route delivery navigated a non-Claude target: $(cat "$log")"
       assert_not_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "non-Claude delivery should not run the preflight"
     done
@@ -1236,9 +1215,9 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
-test_ring_returns_claude_selector_to_main
+test_ring_refuses_claude_selector
 test_selector_capture_failure_leaves_ring_undelivered
-test_typed_send_returns_claude_selector_to_main
+test_typed_send_refuses_claude_selector
 test_non_claude_delivery_ignores_selector_capture_failure
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack

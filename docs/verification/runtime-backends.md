@@ -846,21 +846,16 @@ Pi 0.87.1 was installed but not verified: its configured model returned an accou
 
 ### Claude agent selector
 
-A doorbell rung while Claude's agent selector shows a background subagent now reaches main, verified on 2026-10-01 with Claude Code 2.1.286 on tmux 3.6a and Herdr 0.9.1, macOS arm64.
-The guard launches Claude in an isolated tmux server, starts one background subagent, enters its view, and steers through the real `bin/fm-send.sh`:
+Claude targets with an active agent selector refuse inbox rings and local typed sends without emitting terminal input.
+Portable refusal, concurrent-ring, capture-failure, and ordinary main-composer behavior is covered by `tests/fm-task-inbox.test.sh`.
+The live guard starts one background subagent and drives the real `bin/fm-send.sh` from both the focused main entry and the subagent view, requiring refusal with no input and retaining the unhandled inbox record:
 
 ```sh
 FM_SEND_INBOX_SELECTOR_LIVE_E2E=1 tests/fm-send-inbox-claude-selector-live-e2e.test.sh
 ```
 
-```text
-# claude (2.1.286 (Claude Code)): the agent selector shows the subagent before the steer
-ok - claude (2.1.286 (Claude Code)): a steer rung while the agent selector showed a subagent reached main, which acted and acked
-```
-
-With `fm_task_inbox_focus_main` removed from the ring, the same guard reported `not ok - claude (2.1.286 (Claude Code)): the steer left the selector on subagent instead of main`.
-Before the walk, the same subagent view lost the doorbell on tmux, where the ring returned 0 and Claude queued the line to the subagent (`1 queued`); on Herdr, the ring returned 2 on every attempt with nothing to bring main back.
-The screens behind `fm_composer_claude_agent_view` are the captures in `tests/captures/claude-2.1.286-agent-selector`, taken from both backends.
+The refusal version of the live guard has not yet been rerun; the earlier automatic-navigation result does not verify this behavior.
+The screens behind `fm_composer_claude_agent_view` are the captures in `tests/captures/claude-2.1.286-agent-selector`, recorded on 2026-10-01 with Claude Code 2.1.286 on tmux 3.6a and Herdr 0.9.1, macOS arm64.
 On this release Escape does not leave a subagent's view, the first Down from a composer can focus a footer pill before the list, and Left from main's composer opens a "Background this session?" dialog whose default stops every background task.
 
 ## Waiting-worker command ceilings

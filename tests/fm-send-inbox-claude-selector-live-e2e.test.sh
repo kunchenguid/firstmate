@@ -3,20 +3,8 @@
 # steer rung while Claude Code's agent selector shows a background subagent
 # (issue #6131; live-harness-optin family).
 #
-# While a subagent is viewed, text submitted in the pane goes to that subagent,
-# so a doorbell rung there used to report success and never reach main.
-# bin/fm-task-inbox-lib.sh now walks the selector back to main first, reading
-# the view through fm_composer_claude_agent_view in bin/fm-composer-lib.sh.
-# Both read rendered Claude output and keys whose effect Claude defines, so per
-# .agents/skills/firstmate-coding-guidelines this is proven against the real
-# harness: Claude is launched idle in an isolated tmux server with
-# FM_TASK_INBOX exported as bin/fm-spawn.sh does, asked to start one long
-# background subagent, and driven into that subagent's view. The REAL
-# bin/fm-send.sh then steers it, and main must both ACT on the instruction and
-# ACKNOWLEDGE it with the mv into handled/. Any failure names the version.
-#
 # Run explicitly with FM_SEND_INBOX_SELECTOR_LIVE_E2E=1. It spends real model
-# tokens on two short main turns and one subagent turn. An absent claude is
+# tokens on one main turn and one subagent turn. An absent claude is
 # reported and fails rather than passing vacuously. Tune the waits with
 # FM_SEND_INBOX_SELECTOR_LIVE_TIMEOUT (seconds, default 240). Record the dated
 # result in docs/verification/runtime-backends.md ("Claude agent selector").
@@ -52,6 +40,9 @@ mkdir -p "$SHIM_DIR"
 REAL_TMUX=$(command -v tmux)
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
+if [ -n "\${FM_SELECTOR_INPUT_LOG:-}" ]; then
+  case "\${1:-}" in send-keys) printf '%s\n' "\$*" >> "\$FM_SELECTOR_INPUT_LOG" ;; esac
+fi
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
@@ -81,9 +72,35 @@ submit() {  # <text>
   tmux -L "$SOCKET" send-keys -t "$T" Enter
 }
 
+check_refusal() {
+  local start=$1 seq=$2 target rc rec
+  : > "$LAB/input.log"
+  FM_SELECTOR_INPUT_LOG="$LAB/input.log" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-send.sh" "$task" "Firstmate live check: reply REFUSAL_GUARD_RECEIVED." \
+    > "$LAB/send.out" 2> "$LAB/send.err" || die "fm-send failed to record the live steer"
+  grep -q 'doorbell did not reach' "$LAB/send.err" || die "the $start ring was not reported undelivered"
+  rec="$home/state/$task.inbox/$seq.msg"
+  [ -f "$rec" ] && [ ! -e "$home/state/$task.inbox/handled/$seq.msg" ] \
+    || die "the $start refusal did not retain the unhandled steer"
+  [ ! -s "$LAB/input.log" ] || die "the $start ring sent terminal input"
+  [ "$(view)" = "$start" ] || die "the $start ring changed the selector"
+  for target in "$T" "$task"; do
+    rc=0
+    FM_SELECTOR_INPUT_LOG="$LAB/input.log" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+      "$ROOT/bin/fm-send.sh" "$target" /help > "$LAB/send.out" 2> "$LAB/send.err" || rc=$?
+    [ "$rc" = 1 ] || die "the $start typed send to $target was not refused (exit $rc)"
+    grep -q 'Claude agent-selector preflight failed' "$LAB/send.err" \
+      || die "the $start typed send failed outside the selector preflight"
+    [ ! -s "$LAB/input.log" ] || die "the $start typed send emitted terminal input"
+    [ "$(view)" = "$start" ] || die "the $start typed send changed the selector"
+  done
+  pass "claude ($VERSION): $start refuses inbox rings and typed sends without terminal input"
+}
+
 home="$LAB/home"
 task="selector"
 mkdir -p "$home/state"
+printf 'window=%s\nkind=ship\nharness=claude\n' "$T" > "$home/state/$task.meta"
 tmux -L "$SOCKET" new-session -d -s "$SESSION" -n "$WIN" -x 160 -y 50 -c "$ROOT" \
   -- bash -lc "export FM_TASK_INBOX=$(printf '%q' "$home/state/$task.inbox"); CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 $(printf '%q' "$CLAUDE_BIN") --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\"}'" \
   || die "could not launch in the isolated tmux server"
@@ -103,6 +120,15 @@ until [ "$(view)" = main ]; do
   sleep 1
 done
 
+i=0
+until [ "$(view)" = list-main-viewed ]; do
+  i=$((i + 1))
+  [ "$i" -le 4 ] || die "Down never focused the main entry (view $(view))"
+  tmux -L "$SOCKET" send-keys -t "$T" Down
+  sleep 1.5
+done
+check_refusal list-main-viewed 001
+
 # Enter the subagent's view the way a person does: focus the list, move to the
 # subagent, view it, then leave the list.
 i=0
@@ -117,21 +143,4 @@ sleep 1.5
 tmux -L "$SOCKET" send-keys -t "$T" Escape
 sleep 1.5
 [ "$(view)" = subagent ] || die "the pane did not settle in the subagent's view (view $(view))"
-printf '# claude (%s): the agent selector shows the subagent before the steer\n' "$VERSION"
-
-acted="$LAB/acted"
-printf 'window=%s\nkind=ship\nharness=claude\n' "$T" > "$home/state/$task.meta"
-FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
-  "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
-  >/dev/null 2>&1 || die "fm-send refused the live steer"
-[ "$(view)" = main ] || die "the steer left the selector on $(view) instead of main"
-
-handled="$home/state/$task.inbox/handled/001.msg"
-i=0
-until [ -f "$handled" ] && [ -e "$acted" ]; do
-  i=$((i + 1))
-  [ "$i" -lt "$TIMEOUT" ] \
-    || die "main did not honor the doorbell within ${TIMEOUT}s (acted=$([ -e "$acted" ] && echo yes || echo no) acked=$([ -f "$handled" ] && echo yes || echo no))"
-  sleep 1
-done
-pass "claude ($VERSION): a steer rung while the agent selector showed a subagent reached main, which acted and acked"
+check_refusal subagent 002

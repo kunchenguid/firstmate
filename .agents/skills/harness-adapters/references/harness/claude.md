@@ -30,7 +30,7 @@ Both flags `false` is Claude Code's default entry for a project never asked, not
 The why-two-entries mechanism and the consent-gating logic live in the script's own header comment, which is the one owner for that contract; the fact worth repeating here is that `../../../bin/fm-spawn.sh` refuses the spawn when the trust flag fails to land, rather than launching a worker that would wedge on that dialog.
 
 Never try to answer either dialog with a key.
-Outside the agent-selector walk below, Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and both dialogs render with the cursor on their declining option, which means a sent Enter ends the session instead of accepting.
+Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so it cannot move a dialog's selection at all, and both dialogs render with the cursor on their declining option, which means a sent Enter ends the session instead of accepting.
 A visible trust dialog means pre-registration did not take effect (or the project entry already carries an explicit decline) - inspect the store and the spawn's error output rather than sending keys.
 A visible external-imports dialog is expected, not a failure signal, whenever the project entry has no prior explicit approval on record - the common first-spawn case.
 `fm-control.sh <id> interrupt` delivers Escape, which is the safe way to clear a wedged workspace-trust dialog for inspection without answering it.
@@ -59,7 +59,7 @@ Styled capture stays internal to the boolean detector; `fm-peek` and model-facin
 
 While background agents run, Claude draws an agent list below its footer, `main` first, where `⏺` marks the agent the composer talks to; with a subagent viewed the composer reads `Message @<name>` and submitted text goes to that subagent, not main.
 On 2.1.286 Escape does not leave a subagent's view, and Left from main's composer opens a "Background this session?" dialog whose default stops every background task, so never send Left to a Claude pane.
-`fm_task_inbox_focus_main` in `../../../../../bin/fm-task-inbox-lib.sh` walks the view back to main before every doorbell and refuses delivery when it cannot; `fm_composer_claude_agent_view` in `../../../../../bin/fm-composer-lib.sh` owns the shape, and `../../../../../tests/fm-send-inbox-claude-selector-live-e2e.test.sh` re-proves both.
+`fm_task_inbox_selector_preflight` in `../../../../../bin/fm-task-inbox-lib.sh` refuses inbox rings and local typed sends without sending any input when a Claude target shows an active selector or its capture fails; `fm_composer_claude_agent_view` in `../../../../../bin/fm-composer-lib.sh` owns the shape, and `../../../../../tests/fm-send-inbox-claude-selector-live-e2e.test.sh` is the live refusal guard.
 
 ## Feedback drafts
 

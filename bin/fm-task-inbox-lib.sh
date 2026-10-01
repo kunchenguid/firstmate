@@ -312,9 +312,6 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # whose Enter never landed, so on an agent not reported busy it is submitted
 # rather than skipped; skipping it would block every later ring. On both paths
 # a lost first Enter gets one confirmed retry.
-# Before any of that, a Claude agent selector pointing away from main is walked
-# back to main (fm_task_inbox_focus_main); a walk that cannot prove main
-# returns 2 with nothing typed.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
   local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -323,7 +320,7 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
     return 2
   fi
-  fm_task_inbox_focus_main "$backend" "$target" "$label" "$harness" || return 2
+  fm_task_inbox_selector_preflight "$backend" "$target" "$label" "$harness" || return 2
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
     pending)
@@ -358,47 +355,11 @@ fm_task_inbox_agent_view() {  # <backend> <target> [expected-label]
   fm_composer_claude_agent_view "$cap"
 }
 
-# Return a Claude worker's composer to main before a doorbell is typed (issue
-# #6131): text submitted while a subagent is viewed goes to that subagent, so a
-# doorbell rung there reports success and never reaches main. Each step reads
-# the view, sends the one key whose effect on that view was verified live on
-# Claude Code 2.1.286, and reads again: Down from a viewed subagent (the first
-# Down may only focus a footer pill, which reads the same, so it repeats),
-# Up toward main at the top of a focused list, Enter to view main, and Escape
-# to leave a focused list with main viewed. Escape is sent at most once, since
-# a second one on main's composer would interrupt a busy turn. Left is never
-# sent: from main's composer it opens a dialog whose default stops every
-# background task. Fails when the walk cannot prove main within the step budget.
-fm_task_inbox_focus_main() {  # <backend> <target> [expected-label] [harness]
-  local backend=$1 target=$2 label=${3:-} view next key steps=0 polls escaped=0
+fm_task_inbox_selector_preflight() {  # <backend> <target> [expected-label] [harness]
+  local view
   case "${4:-}" in claude*) ;; *) return 0 ;; esac
-  view=$(fm_task_inbox_agent_view "$backend" "$target" "$label") || return 1
-  while :; do
-    case "$view" in
-      none|main) return 0 ;;
-      subagent) key=Down ;;
-      list-other) key=Up ;;
-      list-main) key=Enter ;;
-      list-main-viewed)
-        [ "$escaped" = 0 ] || return 1
-        escaped=1
-        key=Escape
-        ;;
-      *) return 1 ;;
-    esac
-    steps=$((steps + 1))
-    [ "$steps" -le 12 ] || return 1
-    fm_backend_send_key "$backend" "$target" "$key" "$label" >/dev/null 2>&1 || return 1
-    polls=0
-    while :; do
-      sleep 0.25
-      next=$(fm_task_inbox_agent_view "$backend" "$target" "$label") || return 1
-      [ "$next" = "$view" ] || break
-      polls=$((polls + 1))
-      [ "$polls" -lt 6 ] || break
-    done
-    view=$next
-  done
+  view=$(fm_task_inbox_agent_view "$1" "$2" "${3:-}") || return 1
+  case "$view" in none|main) return 0 ;; *) return 1 ;; esac
 }
 
 # Whether the composer's content, ignoring line wrapping, is exactly <line>.
