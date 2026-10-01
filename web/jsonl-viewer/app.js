@@ -6,7 +6,10 @@ const state = {
   cursor: "tail",
   identity: "",
   eof: false,
+  partialBytes: 0,
   loading: false,
+  selectionGeneration: 0,
+  requestGeneration: 0,
   timer: null,
 };
 
@@ -163,8 +166,18 @@ function showNotice(message = "") {
   elements.notice.textContent = message;
 }
 
+function requestIsCurrent(selectionGeneration, requestGeneration, source, id) {
+  return state.selectionGeneration === selectionGeneration
+    && state.requestGeneration === requestGeneration
+    && state.selected?.source === source
+    && state.selected?.id === id;
+}
+
 async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
-  if (!state.selected || state.loading) return;
+  if (!state.selected || (state.loading && !resetDisplay)) return;
+  const { source, id } = state.selected;
+  const selectionGeneration = state.selectionGeneration;
+  const requestGeneration = ++state.requestGeneration;
   state.loading = true;
   elements.loadMore.disabled = true;
   try {
@@ -172,12 +185,14 @@ async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
       state.entries = [];
       state.cursor = fromStart ? 0 : "tail";
       state.identity = "";
+      state.partialBytes = 0;
       elements.events.replaceChildren();
       showNotice();
     }
-    const query = new URLSearchParams({ source: state.selected.source, id: state.selected.id, cursor: String(state.cursor) });
+    const query = new URLSearchParams({ source, id, cursor: String(state.cursor) });
     if (state.identity) query.set("identity", state.identity);
     const body = await api(`/api/events?${query}`);
+    if (!requestIsCurrent(selectionGeneration, requestGeneration, source, id)) return;
     if (body.reset) addBoundary(`The journal was ${body.reset}. Previously displayed events are retained; the replacement continues below.`);
     if (body.omittedPrefixBytes) showNotice(`Showing the live tail. ${body.omittedPrefixBytes.toLocaleString()} earlier bytes are not loaded; use “Load from start” for the complete file.`);
     if (body.partialBytes) showNotice(`Waiting for a newline: the final ${body.partialBytes.toLocaleString()} bytes are incomplete and have not been presented as an event.`);
@@ -186,13 +201,16 @@ async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
     state.cursor = body.nextCursor;
     state.identity = body.identity;
     state.eof = body.eof;
+    state.partialBytes = body.partialBytes;
     setStatus(`${state.entries.length.toLocaleString()} events shown · ${body.size.toLocaleString()} bytes · ${body.eof ? "at file end" : "more available"}`);
   } catch (error) {
-    setStatus(error.message, true);
+    if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) setStatus(error.message, true);
   } finally {
-    state.loading = false;
-    elements.loadMore.disabled = !state.selected || state.eof;
-    elements.fromStart.disabled = !state.selected;
+    if (requestIsCurrent(selectionGeneration, requestGeneration, source, id)) {
+      state.loading = false;
+      elements.loadMore.disabled = !state.selected || state.eof;
+      elements.fromStart.disabled = !state.selected;
+    }
   }
 }
 
@@ -223,6 +241,7 @@ function renderSessions() {
 }
 
 async function selectSession(session) {
+  state.selectionGeneration += 1;
   state.selected = session;
   elements.sessionTitle.textContent = session.label;
   renderSessions();
@@ -256,5 +275,5 @@ elements.loadMore.addEventListener("click", () => loadEvents());
 elements.fromStart.addEventListener("click", () => loadEvents({ resetDisplay: true, fromStart: true }));
 
 state.timer = window.setInterval(() => {
-  if (state.selected && state.eof && elements.follow.checked) loadEvents();
+  if (state.selected && (state.eof || state.partialBytes > 0) && elements.follow.checked) loadEvents();
 }, 1000);
