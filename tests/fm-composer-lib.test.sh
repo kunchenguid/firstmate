@@ -1145,3 +1145,35 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+
+test_extraction_refusal_diagnostics_are_opt_in_fixed_and_content_free() {
+  local predicate screen out err rc dir
+  dir=$(fm_test_tmproot fm-composer-extract-refusal)
+  err="$dir/refusal.err"
+  for predicate in lower-incomplete-box lower-unmatched-rule lower-shell-prompt stale-envelope no-composer-shape; do
+    case "$predicate" in
+      lower-incomplete-box) screen=$'❯\n╭────────────────────────╮\n│ ❯ PRIVATE_UNCLOSED_DRAFT' ;;
+      lower-unmatched-rule) screen=$'❯ PRIVATE_PAYLOAD\n────────' ;;
+      lower-shell-prompt) screen=$'❯ PRIVATE_PAYLOAD\n$ PRIVATE_SHELL' ;;
+      stale-envelope) screen=$'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nPRIVATE_ACTIVITY' ;;
+      no-composer-shape) screen='PRIVATE_TRANSCRIPT_NO_COMPOSER' ;;
+    esac
+    rc=0
+    out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$screen" 1 2> "$err") || rc=$?
+    [ "$rc" = 1 ] && [ -z "$out" ] || fail "$predicate must retain failed extraction and empty stdout"
+    grep -qF "fm-composer-extract: refused predicate=$predicate " "$err" || fail "$predicate must name the actual selector predicate"
+    if grep -q 'PRIVATE_' "$err"; then fail "$predicate diagnostics leaked captured content"; fi
+    grep -Eq '^fm-composer-extract: refused predicate=[a-z-]+ rows=[0-9]+ bare=-?[0-9]+ rule=-?[0-9]+ pair=[01] incomplete=-?[0-9]+ shell=-?[0-9]+ box-bottom=-?[0-9]+ leftbar-end=-?[0-9]+ selected-first=-?[0-9]+ selected-last=-?[0-9]+$' "$err" \
+      || fail "$predicate diagnostic must contain fixed labels and numeric geometry only"
+    rc=0
+    out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$screen" 2> "$err") || rc=$?
+    [ "$rc" = 1 ] && [ -z "$out" ] && [ ! -s "$err" ] || fail "default extraction must remain silent on $predicate"
+  done
+  screen=$'PRIVATE_TRANSCRIPT\n────────\n❯ /exit\n────────'
+  out=$(fm_composer_extract_selected_content "$CAPS_PLAIN" "$screen" 1 2> "$err")
+  [ "$out" = /exit ] && [ ! -s "$err" ] || fail "successful full payload proof must remain unchanged and silent"
+  pass "extraction diagnostics are opt-in, name actual refusal predicates, and never print captured text"
+}
+
+test_extraction_refusal_diagnostics_are_opt_in_fixed_and_content_free
