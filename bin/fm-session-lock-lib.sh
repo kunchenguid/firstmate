@@ -65,7 +65,9 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python): each argv token via fm_harness_path_name
+#      (so node .../bin/pi or .../pi/cli.js matches), then the existing full-args
+#      FM_HARNESS_RE fallback.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
