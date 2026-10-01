@@ -86,6 +86,11 @@ SH
 
   git clone -q "$w/origin.git" "$w/main"
   git -C "$w/main" remote set-head origin main >/dev/null 2>&1 || true
+  # Fork layout: the primary carries both remotes. `origin` is the fleet's
+  # fork and `upstream` is the official source the primary advances from;
+  # the fixture points both at the same bare repo so one bump is visible to
+  # either name.
+  git -C "$w/main" remote add upstream "$w/origin.git"
 
   printf '%s\n' "$w"
 }
