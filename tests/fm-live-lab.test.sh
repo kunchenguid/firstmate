@@ -495,6 +495,33 @@ kill -0 "$REUSED" 2>/dev/null || fail "down killed a reused PID"
 kill -0 "$REUSED_CHILD" 2>/dev/null || fail "down killed the reused PID's child"
 pass "down ignores roots with mismatched start times"
 
+# The root check and the process tree must come from one snapshot. The ps shim
+# answers a per-pid lstart query for the root with its recorded start, as if
+# the recorded root were still alive at that check; the process table then
+# holds a replacement with a different start under that pid, plus its child.
+RACE=$(make_lab race claude)
+# shellcheck disable=SC2016 # Positional parameters expand in the launched shell.
+start_group bash -c 'sleep 600 & echo $! > "$1"; wait' _ "$TMP_ROOT/race-child"; RACE_ROOT=$!
+until [ -s "$TMP_ROOT/race-child" ]; do sleep 0.1; done
+RACE_CHILD=$(cat "$TMP_ROOT/race-child")
+printf '%s\n%s\n' "$RACE_ROOT" "$RACE_CHILD" >> "$TMP_ROOT/pids"
+printf 'launch_pid=%s\nlaunch_start_utc=Mon Jan 1 00:00:00 1990\n' "$RACE_ROOT" >> "$RACE/.fm-live-lab"
+mkdir -p "$TMP_ROOT/race-ps-bin"
+cat > "$TMP_ROOT/race-ps-bin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -o ] && [ "${2:-}" = lstart= ] && [ "${3:-}" = -p ] && [ "${4:-}" = "$PS_RACE_ROOT" ]; then
+  echo 'Mon Jan 1 00:00:00 1990'
+else
+  "$REAL_PS" "$@"
+fi
+SH
+chmod +x "$TMP_ROOT/race-ps-bin/ps"
+out=$(REAL_PS="$(command -v ps)" PS_RACE_ROOT="$RACE_ROOT" PATH="$TMP_ROOT/race-ps-bin:$PATH" "$LIVE_LAB" down "$RACE" 2>&1)
+expect_code 0 "$?" "down skips a root replaced before its tree snapshot: $out"
+kill -0 "$RACE_ROOT" 2>/dev/null || fail "down killed the process that reused a checked root's PID"
+kill -0 "$RACE_CHILD" 2>/dev/null || fail "down killed the child of the process that reused a checked root's PID"
+pass "down checks recorded roots against the snapshot that selects their descendants"
+
 # A lab that a build before the UTC pin started recorded its launch start in
 # the host's local time. Down from another host time zone still stops it.
 LEGACY=$(make_lab legacy claude)

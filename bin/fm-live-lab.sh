@@ -610,17 +610,18 @@ record_launch_pid() {
   printf 'launch_pid=%s\nlaunch_start_utc=%s\n' "$1" "$start" >> "$ROOT/$RECORD_NAME"
 }
 
-# Print the recorded launch PIDs whose start time still matches. A
-# launch_start_utc record must match exactly; a bare launch_start record is a
-# pre-upgrade local-time rendering, checked by fm_pid_identity_legacy_matches.
-lab_roots() {
+# Print the recorded launch PIDs whose start time in <snapshot> (pid= ppid=
+# lstart= rows read under TZ=UTC0) still matches. A launch_start_utc record
+# must match exactly; a bare launch_start record is a pre-upgrade local-time
+# rendering, checked by fm_pid_identity_legacy_matches.
+lab_roots() {  # <snapshot>
   local line root="" start
   while IFS= read -r line; do
     case "$line" in
       launch_pid=*) root=${line#launch_pid=}; case "$root" in ''|*[!0-9]*) root="" ;; esac ;;
       launch_start_utc=*|launch_start=*)
         [ -n "$root" ] || continue
-        start=$(TZ=UTC0 ps -o lstart= -p "$root" 2>/dev/null | awk '{$1=$1; print}')
+        start=$(printf '%s\n' "$1" | awk -v pid="$root" '$1 == pid { print $3, $4, $5, $6, $7 }')
         case "$line" in
           launch_start_utc=*) [ -n "$start" ] && [ "${line#launch_start_utc=}" = "$start" ] && echo "$root" ;;
           *) fm_pid_identity_legacy_matches "${line#launch_start=}" "$start" && echo "$root" ;;
@@ -631,11 +632,13 @@ lab_roots() {
 }
 
 # Resolve recorded roots only while their start times match, before tmux
-# reparents their descendants.
+# reparents their descendants. The root check and the tree walk read one
+# snapshot, so a root PID reused between them cannot adopt a new tree.
 lab_pids() {
-  local roots
-  roots=$(lab_roots | tr '\n' ' ')
-  ps -axo pid=,ppid= | awk -v matched="$roots" '
+  local snapshot roots
+  snapshot=$(TZ=UTC0 ps -axo pid=,ppid=,lstart=)
+  roots=$(lab_roots "$snapshot" | tr '\n' ' ')
+  printf '%s\n' "$snapshot" | awk -v matched="$roots" '
     BEGIN { split(matched, ids, /[[:space:]]+/); for (i in ids) if (ids[i] != "") roots[ids[i]]=1 }
     { pid[NR]=$1; ppid[$1]=$2 }
     END {
