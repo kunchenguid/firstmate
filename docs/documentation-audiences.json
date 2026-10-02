@@ -337,6 +337,14 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/ledger-freshness.md",
+      "audience": "maintainer-architecture"
+    },
+    {
+      "path": "data/fm-ledger-stale-premise-sweep/report.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
