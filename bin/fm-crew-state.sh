@@ -18,7 +18,9 @@
 # with no heuristics and no LLM.
 # For a terminal passed no-mistakes run, a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
-# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
+# FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips that forge fallback,
+# and also keeps the ship-done gate in step 4 offline (FM_DONE_GUARD_NO_FORGE,
+# bin/fm-done-guard-lib.sh), so an offline read makes no forge call at all.
 # An absent or unreadable PR identity yields an honest unknown, never an
 # optimistic merged claim.
 # Output is one stable, parseable, token-tight line firstmate can read every
@@ -147,7 +149,11 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A `done:` declaration from
+#      a PR-requiring ship reads blocked while its named head is unpublished
+#      (bin/fm-dod-lib.sh) and unknown while the ship-done gate cannot confirm
+#      an open PR (bin/fm-done-guard-lib.sh), so an unpushed branch or an
+#      unconfirmed PR is never reported here as a completed ship.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -181,6 +187,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-done-guard-lib.sh
+. "$SCRIPT_DIR/fm-done-guard-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 
@@ -191,6 +199,8 @@ ID=${1:-}
 # state read resolves the same task generation selected by that snapshot.
 META=${FM_CREW_STATE_META_OVERRIDE:-"$STATE/$ID.meta"}
 LOG=${FM_CREW_STATE_STATUS_OVERRIDE:-"$STATE/$ID.status"}
+FM_DONE_GUARD_STATE_DIR=$STATE
+[ "${FM_CREW_STATE_NO_FORGE:-}" != 1 ] || FM_DONE_GUARD_NO_FORGE=1
 NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
 case "$NM_TIMEOUT" in ''|*[!0-9]*) NM_TIMEOUT=10 ;; esac
 # How many of the most recent `no-mistakes runs` rows each ledger read
@@ -241,13 +251,19 @@ fi
 # and its reason rather than a wedge-suspect idle.
 # A ship `done:` is not current-state done while bin/fm-dod-lib.sh refuses the
 # named-head reachability gate: that claim is blocked so a disposable copy is
-# not treated as finished-and-safe.
+# not treated as finished-and-safe. Otherwise the claim reads unknown, never
+# done, while the ship-done gate cannot confirm an open PR or a recorded merge
+# (bin/fm-done-guard-lib.sh). Every `done` emission in this reader goes through
+# here, so both gates are consulted before any `done`.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
-  if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
-    emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
+  if ! reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$STATE" "$ID" "$META"); then
+    emit blocked status-log "$reason"
   fi
-  emit blocked status-log "$reason"
+  if ! fm_done_guard_accepts_status_line "$LOG" "$LOG_LINE"; then
+    emit unknown none "no current-state source available"
+  fi
+  emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
 }
 
 map_log_state() {  # <line>

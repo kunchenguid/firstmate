@@ -8,7 +8,9 @@ metadata:
 
 # Validation supervision
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+For a no-mistakes ship, the task worker starts validation itself, immediately after its own implementation commit, using the harness invocation owned by `harness-adapters`; `bin/fm-dod-lib.sh` states that contract to the worker and is authoritative.
+The firstmate-triggered path is retired: firstmate no longer instructs a worker to start `/no-mistakes`, and no worker waits for such an instruction, so the pipeline cannot be started twice or left unstarted.
+A worker that reports `done:` before its branch is pushed with an open PR has that completion refused and is steered to push (`bin/fm-done-guard-lib.sh`); the refusal, not a firstmate trigger, is the only thing firstmate sends about starting validation.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
 `bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.

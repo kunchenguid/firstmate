@@ -23,6 +23,11 @@ SCRIPT_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# The ship-done gate, consulted offline below: an unpushed ship `done:` stays
+# out of the captain-facing outcome backstop, as it stays out of the watcher's
+# wake queue (bin/fm-done-guard-lib.sh).
+# shellcheck source=bin/fm-done-guard-lib.sh
+. "$SCRIPT_DIR/fm-done-guard-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
@@ -362,6 +367,11 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
     [ "$receipt" -lt "$event_endpoint" ] || continue
     status_is_captain_relevant "$event" || continue
+    # Offline under the presentation lock: no forge read per completion. A ship
+    # completion is presented only on a merge receipt or a cached accepted
+    # verdict; every refusal is held until an online check accepts it.
+    FM_DONE_GUARD_NO_FORGE=1 fm_done_guard_accepts_status_line "$STATE/$task.status" "$event" \
+      || continue
     verb=$(status_line_verb "$event")
     case "$verb" in
       needs-decision|blocked)

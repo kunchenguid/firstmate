@@ -98,6 +98,17 @@ write_child() { # <home> <id> <status> [spawn-gen]
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
 }
 
+# write_child for a local-only ship: that mode requires no PR, so the offline
+# ship-done gate skips its rows while the named-head check in fm-dod-lib still
+# runs, letting a ledger-mechanism case pin delivery rather than the withhold.
+write_local_child() { # <home> <id> <status>
+  write_child "$1" "$2" "$3"
+  awk '{ sub(/^mode=no-mistakes$/, "mode=local-only"); print }' \
+    "$1/state/$2.meta" > "$1/state/$2.meta.tmp"
+  mv "$1/state/$2.meta.tmp" "$1/state/$2.meta"
+  age "$1/state/$2.meta"
+}
+
 write_mate_meta() {
   fm_write_secondmate_meta "$MAIN/state/mate.meta" "$MATE"
   printf 'working: delegated scope\n' > "$MAIN/state/mate.status"
@@ -237,12 +248,44 @@ test_unpushed_ci_ready_done_is_not_published() {
   pass "unpushed CI-ready ship done: is not published upstream"
 }
 
+# Offline, the ledger path cannot confirm a pushed ship's open PR. That is a
+# pending verification, not nothing owed: teardown's report entry point keeps
+# the obligation, and once an online check accepts the done, the next report
+# delivers it.
+test_unverified_ship_done_stays_owed_until_verified() {
+  local wt fake
+  make_world pending-verify; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://github.com/owner/repo/pull/1 checks green'
+  wt="$MATE/projects/child"
+  git -C "$wt" branch -M fm/child
+  git -C "$wt" update-ref refs/remotes/origin/fm/child HEAD
+  git -C "$wt" remote add origin https://github.com/owner/repo.git
+  sed -i.bak 's#^pr=.*#pr=https://github.com/owner/repo/pull/1#' "$MATE/state/child.meta"
+  rm -f "$MATE/state/child.meta.bak"
+  if run_report "$MATE" child; then
+    fail "an unverified ship done let teardown's report entry point succeed"
+  fi
+  [ ! -s "$MAIN/state/mate.status" ] || fail "an unverified ship done was published upstream"
+  [ ! -s "$WORLD/forge.log" ] || fail "the ledger path reached the forge: $(cat "$WORLD/forge.log")"
+  fake="$WORLD/verify-bin"
+  mkdir -p "$fake"
+  printf '#!/usr/bin/env bash\nprintf "OPEN fm/child\\n"\n' > "$fake/gh"
+  chmod +x "$fake/gh"
+  PATH="$fake:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" \
+    "$ROOT/bin/fm-done-guard.sh" check child >/dev/null \
+    || fail "the online check did not accept the pushed ship's open PR"
+  run_report "$MATE" child || fail "a verified ship done was not delivered"
+  grep -Fq 'child child done: PR https://github.com/owner/repo/pull/1 checks green' "$MAIN/state/mate.status" \
+    || fail "the verified ship done did not reach the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  pass "an offline-unverified ship done stays owed until a later check verifies it"
+}
+
 # The ledger pass runs on every poll, so a ship done: already delivered does
 # not pay for the git reachability check again.
 test_delivered_ledger_done_skips_git_gate() {
   local real_git
   make_world gate-once; bind_secondmate local
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  write_local_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
   real_git=$(command -v git)
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' \
     "$WORLD/git.log" "$real_git" > "$WORLD/fakebin/git"
@@ -267,10 +310,10 @@ test_delivered_ledger_done_skips_git_gate() {
 test_local_secondmate_delivers_terminal_ledger_line() {
   local expected key
   make_world local; bind_secondmate local
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  write_local_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "ledger receipt did not retain its collision-resistant key"
-  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=local-only yolo=off"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "$expected" \
     || fail "secondmate did not deliver the child's ledger line on a plain poll: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "ledger delivery receipt was not durable"
@@ -294,7 +337,7 @@ test_secondmate_multiline_terminal_outcome_is_delivered_once() {
   for terminal in 'done' failed; do
     for timing in before during; do
       make_world "multiline-$terminal-$timing"; bind_secondmate local
-      write_child "$MATE" child 'working: finishing validation'
+      write_local_child "$MATE" child 'working: finishing validation'
       if [ "$timing" = before ]; then
         printf '%s: validation finished\nSee the report for details.\n\n' "$terminal" >> "$MATE/state/child.status"
         age "$MATE/state/child.status"
@@ -371,8 +414,8 @@ test_inactive_receipt_ignores_later_status_prose() {
 test_busy_child_does_not_starve_later_ledger_outcomes() {
   local holder i delivered=0
   make_world busy-ledger; bind_secondmate local
-  write_child "$MATE" a-busy 'done: busy child finished'
-  write_child "$MATE" b-ready 'done: later child finished'
+  write_local_child "$MATE" a-busy 'done: busy child finished'
+  write_local_child "$MATE" b-ready 'done: later child finished'
   printf 'epoch=%s\ncursor=\n' "$(date +%s)" > "$MATE/state/.inactive-outcome-reconcile"
   FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" bash -c '
     . "$1/bin/fm-wake-lib.sh"
@@ -405,22 +448,22 @@ test_busy_child_does_not_starve_later_ledger_outcomes() {
 test_secondmate_ledger_delivery_carries_report_and_failure() {
   local scout_key boom_key replaced_key
   make_world ledger-shapes; bind_secondmate local
-  write_child "$MATE" scout 'done: report written'
+  write_local_child "$MATE" scout 'done: report written'
   mkdir -p "$MATE/data/scout"
   printf '# findings\n' > "$MATE/data/scout/report.md"
-  write_child "$MATE" boom 'failed: build broke'
-  write_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
+  write_local_child "$MATE" boom 'failed: build broke'
+  write_local_child "$MATE" replaced-pr $'working: old PR https://example.test/owner/repo/pull/11\ndone: PR https://example.test/owner/repo/pull/22'
   awk '$0 !~ /^pr=/' "$MATE/state/replaced-pr.meta" > "$MATE/state/replaced-pr.meta.tmp"
   mv "$MATE/state/replaced-pr.meta.tmp" "$MATE/state/replaced-pr.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   scout_key=$(reported_outcome_key "$MATE" scout 'done') || fail "scout receipt key missing"
   boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
   replaced_key=$(reported_outcome_key "$MATE" replaced-pr 'done') || fail "replacement PR receipt key missing"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=local-only yolo=off report=data/scout/report.md" \
     || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=local-only yolo=off" \
     || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=local-only yolo=off" \
     || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -438,11 +481,11 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
 test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   local id prose_key ready_key stamped_key placeholder_key scout_key
   make_world pr-provenance; bind_secondmate local
-  write_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
-  write_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
-  write_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
-  write_child "$MATE" placeholder 'done [at=<epoch>]: PR https://example.test/owner/repo/pull/77 checks green'
-  write_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
+  write_local_child "$MATE" prose $'working: context in https://example.test/other/repo/pull/33\ndone: cleanup finished'
+  write_local_child "$MATE" ready 'done: PR https://example.test/owner/repo/pull/44 checks green'
+  write_local_child "$MATE" stamped 'done [at=1788576000]: PR https://example.test/owner/repo/pull/66 checks green'
+  write_local_child "$MATE" placeholder 'done [at=<epoch>]: PR https://example.test/owner/repo/pull/77 checks green'
+  write_local_child "$MATE" lookout 'done: PR https://example.test/owner/repo/pull/55'
   for id in prose ready stamped placeholder; do
     awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
     mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
@@ -457,15 +500,15 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   placeholder_key=$(reported_outcome_key "$MATE" placeholder 'done') \
     || fail "unsubstituted-stamp ready receipt key missing"
   scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=local-only yolo=off" \
     || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=local-only yolo=off" \
     || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://example.test/owner/repo/pull/66 checks green pr=https://example.test/owner/repo/pull/66 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$stamped_key]: child stamped done: PR https://example.test/owner/repo/pull/66 checks green pr=https://example.test/owner/repo/pull/66 mode=local-only yolo=off" \
     || fail "a stamped ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://example.test/owner/repo/pull/77 checks green pr=https://example.test/owner/repo/pull/77 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$placeholder_key]: child placeholder done: PR https://example.test/owner/repo/pull/77 checks green pr=https://example.test/owner/repo/pull/77 mode=local-only yolo=off" \
     || fail "a ready-signal line whose stamp was left unsubstituted lost its PR: $(cat "$MAIN/state/mate.status")"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=local-only yolo=off" \
     || fail "a scout's ready-looking line carried a PR claim: $(cat "$MAIN/state/mate.status")"
   pass "pr= requires the recorded PR or a ready-signal terminal line, whatever its stamp, and never a scout"
 }
@@ -474,7 +517,7 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
 # flight, the ledger path remains the single owner on the next poll.
 test_terminal_line_during_state_read_yields_to_ledger_delivery() {
   make_world state-ledger-race; bind_secondmate local
-  write_child "$MATE" child 'working: finishing now'
+  write_local_child "$MATE" child 'working: finishing now'
   cat > "$WORLD/fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'done: completed during state read\n' >> "$FM_STATE_OVERRIDE/$1.status"
@@ -499,7 +542,7 @@ SH
 # same-state completion remains independently deliverable.
 test_terminal_line_after_inactive_delivery_is_not_reported_twice() {
   make_world inactive-ledger-race; bind_secondmate local
-  write_child "$MATE" child 'working: finishing now'
+  write_local_child "$MATE" child 'working: finishing now'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   [ "$(grep -c 'inactive-outcome-mate-child-done' "$MAIN/state/mate.status")" = 1 ] \
     || fail "inactive fallback did not publish exactly once"
@@ -524,7 +567,7 @@ test_terminal_line_after_inactive_delivery_is_not_reported_twice() {
 # not a late ledger rendering of the inactive fallback.
 test_progress_after_inactive_delivery_starts_a_new_event() {
   make_world inactive-recovery; bind_secondmate local
-  write_child "$MATE" child 'working: first attempt finishing'
+  write_local_child "$MATE" child 'working: first attempt finishing'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   printf 'working: retry started\ndone: retry completed\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
@@ -556,7 +599,7 @@ test_long_terminal_lines_have_distinct_receipts() {
 test_secondmate_partial_ledger_line_waits_for_newline() {
   local key
   make_world partial; bind_secondmate local
-  write_child "$MATE" child 'working: nearly there'
+  write_local_child "$MATE" child 'working: nearly there'
   printf 'done: half writ' >> "$MATE/state/child.status"
   age "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
@@ -577,7 +620,7 @@ test_secondmate_partial_ledger_line_waits_for_newline() {
 # input, once.
 test_secondmate_remote_route_ledger_delivery() {
   make_world remote-ledger; bind_secondmate remote
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  write_local_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   [ "$(grep -c 'child-outcome-child-done' "$MATE/state/parent-replies.status")" = 1 ] \
@@ -591,7 +634,7 @@ test_secondmate_remote_route_ledger_delivery() {
 test_pending_ledger_done_is_delivered_after_worktree_removal() {
   local key
   make_world pending-retry; bind_secondmate local
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  write_local_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
   cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
   printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -610,7 +653,7 @@ test_pending_ledger_done_is_delivered_after_worktree_removal() {
 test_report_subcommand_delivers_and_refuses() {
   local rc key
   make_world report; bind_secondmate local
-  write_child "$MATE" child 'done: final word'
+  write_local_child "$MATE" child 'done: final word'
   run_report "$MATE" child || fail "report refused a deliverable ledger line"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "report receipt key missing"
   sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fq "done [key=$key]: child child done: final word" \
@@ -890,7 +933,7 @@ test_watcher_hook_and_idle_secondmate_exemption() {
 test_watcher_poll_delivers_child_ledger_line_to_parent() {
   local pid i key
   make_world watcher-ledger; bind_secondmate local
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  write_local_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   prime_seen "$MATE/state" "$MATE/state/child.status"
   PATH="$WORLD/fakebin:$PATH" FM_HOME="$MATE" FM_STATE_OVERRIDE="$MATE/state" FM_DATA_OVERRIDE="$MATE/data" \
     FM_CONFIG_OVERRIDE="$MATE/config" FM_INACTIVE_RECONCILE_SECS=60 \
@@ -907,7 +950,7 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   done
   reap "$pid"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "watcher ledger receipt key missing"
-  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=local-only yolo=off" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
   [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
@@ -974,7 +1017,7 @@ test_missing_parent_binding_names_itself() {
   local out
   make_world missing-binding
   printf 'mate\n' > "$MATE/.fm-secondmate-home"
-  write_child "$MATE" child 'done: PR merged'
+  write_local_child "$MATE" child 'done: PR merged'
   write_child "$MATE" quiet 'working: quiet since'
   out=$(FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup)
   case "$out" in
@@ -1042,6 +1085,7 @@ test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
 test_delivered_ledger_done_skips_git_gate
+test_unverified_ship_done_stays_owed_until_verified
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome

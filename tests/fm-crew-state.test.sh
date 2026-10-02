@@ -2400,7 +2400,62 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
-test_no_mistakes_prevalidation_done_stays_done() {
+test_merged_pr_reads_done_under_captured_status() {
+  reset_fakes
+  local d out
+  d=$(new_case merged-captured-status)
+  make_repo_on_branch "$d/wt" fm/merged
+  git -C "$d/wt" commit -q --allow-empty -m 'squash-merged fix, branch pruned'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/merged.meta" \
+    "window=fm:fm-merged" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude" "pr=https://github.com/o/r/pull/7"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com o/r 7 \
+    > "$d/state/merged.pr-poll-merge-notified"
+  chmod 600 "$d/state/merged.pr-poll-merge-notified"
+  printf 'done: PR https://github.com/o/r/pull/7 checks green\n' > "$d/state/merged.status"
+  mkdir -p "$d/captured"
+  cp "$d/state/merged.meta" "$d/captured/merged.meta"
+  cp "$d/state/merged.status" "$d/captured/merged.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" merged
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/captured/merged.meta" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$d/captured/merged.status" run_crew_state "$d" merged)
+  assert_contains "$out" "state: done" "recorded merged PR must read done under a captured status copy"
+  pass "recorded merged PR reads done under the fleet snapshot's captured status"
+}
+
+# The inactive reconciler reads crew state with FM_CREW_STATE_NO_FORGE=1 inside
+# an aggregate budget. That flag keeps the ship-done gate offline too, so a
+# pushed ship's done line costs no forge call and cannot stall the scan.
+test_no_forge_read_keeps_ship_done_gate_offline() {
+  reset_fakes
+  local d out
+  d=$(new_case offline-done)
+  make_repo_on_branch "$d/wt" fm/offline
+  git -C "$d/wt" update-ref refs/remotes/origin/fm/offline HEAD
+  git -C "$d/wt" remote add origin https://github.com/o/r.git
+  make_fakebin "$d" >/dev/null
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nexit 1\n' "$d/forge.log" > "$d/fakebin/gh"
+  fm_write_meta "$d/state/offline.meta" \
+    "window=fm:fm-offline" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: PR https://github.com/o/r/pull/9 checks green\n' > "$d/state/offline.status"
+  arm_idle_record "$d/state" offline
+  out=$(FM_CREW_STATE_NO_FORGE=1 run_crew_state "$d" offline)
+  [ ! -s "$d/forge.log" ] || fail "an offline crew-state read reached the forge: $(cat "$d/forge.log")"
+  assert_not_contains "$out" "state: done" "an unverified ship done read done offline"
+  pass "FM_CREW_STATE_NO_FORGE keeps the ship-done gate offline"
+}
+
+# A pre-validation `done:` from a no-mistakes ship whose branch was never
+# pushed is the false completion the ship-done gate refuses: the named-head
+# gate does not gate a non-CI-ready note, so the ship-done gate owns the
+# verdict and the claim reads unknown - never done, and never blocked, because
+# the named-head question is never reached.
+test_no_mistakes_prevalidation_done_reads_unknown() {
   reset_fakes
   local d out
   d=$(new_case preval-done)
@@ -2416,9 +2471,10 @@ test_no_mistakes_prevalidation_done_stays_done() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
-  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
-  pass "no-mistakes pre-validation done: stays current-state done"
+  assert_contains "$out" "state: unknown" "an unpushed pre-validation done: reads unknown"
+  assert_not_contains "$out" "state: done" "pre-validation done: from an unpushed ship must not read as done"
+  assert_not_contains "$out" "state: blocked" "the named-head gate does not gate a non-CI-ready note"
+  pass "no-mistakes pre-validation done: from an unpushed ship reads unknown"
 }
 
 test_moved_remote_branch_without_named_head_is_blocked() {
@@ -5576,7 +5632,9 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
-test_no_mistakes_prevalidation_done_stays_done
+test_merged_pr_reads_done_under_captured_status
+test_no_mistakes_prevalidation_done_reads_unknown
+test_no_forge_read_keeps_ship_done_gate_offline
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_launch_prompt_parked_is_not_working
