@@ -2596,6 +2596,46 @@ EOF
   pass "Underway rows carry the durable task name and gates carry their filed date"
 }
 
+test_gate_text_carries_the_full_gate_title_and_reason() {
+  local home fakebin json full_json toon long_title blockers
+  home=$(make_home gate-text)
+  : > "$home/data/secondmates.md"
+  long_title="Make the Already packed with serial pack-screen warning readable on the smallest handheld scanner"
+  blockers="blocker-alpha-123456789012345678901234567890,blocker-beta-123456789012345678901234567890,blocker-gamma-123456789012345678901234567890"
+  cat > "$home/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] long-gate - $long_title (repo: firstmate) (kind: ship) (since 2026-07-10)
+- [ ] long-hold - Choose the scanner warning route blocked-by: $blockers (repo: firstmate) (kind: captain) (hold: waiting on the scanner vendor to confirm which firmware ships next quarter) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg title "$long_title" '
+    (.gates | any(.id == "long-gate" and (.title | endswith("…"))
+      and (.title | length) < ($title | length)))
+      and (.gates | any(.id == "long-hold" and (.reason | endswith("…"))))
+      and all(.gates[]; has("title_full") | not)
+      and all(.gates[]; has("reason_full") | not)
+      and (.omitted | any(.reveal == "--fields gate-text"))
+  ' >/dev/null || fail "the default digest gates lost their compact bounds: $json"
+
+  full_json=$(run "$home" "$fakebin" --json --fields gate-text)
+  printf '%s' "$full_json" | jq -e --arg title "$long_title" --arg blockers "$blockers" '
+    (.gates | any(.id == "long-gate" and .title_full == $title
+      and (.title | endswith("…"))))
+      and (.gates | any(.id == "long-hold"
+        and .reason_full == ("blocked-by " + $blockers
+          + ": waiting on the scanner vendor to confirm which firmware ships next quarter")))
+      and (.omitted | any(.reveal == "--fields gate-text") | not)
+  ' >/dev/null || fail "--fields gate-text did not carry the full gate title and reason: $full_json"
+  toon=$(run "$home" "$fakebin" --fields gate-text)
+  assert_contains "$toon" "$long_title" "TOON did not carry the full gate title"
+  pass "--fields gate-text carries each gate's full title and reason while the digest stays bounded"
+}
+
 test_mixed_secondmate_roles_partial_state_and_captain_readiness() {
   local home fakebin hibit wheel sshhip ha canonical json
   home=$(make_home mixed-domain-regressions)
@@ -3497,6 +3537,7 @@ fm_test_run \
   test_nameless_legacy_summary_uses_its_durable_identifier \
   test_newest_filed_gates_are_selected_before_snapshot_bounds \
   test_underway_and_gate_rows_carry_the_durable_name_and_filed_date \
+  test_gate_text_carries_the_full_gate_title_and_reason \
   test_mixed_secondmate_roles_partial_state_and_captain_readiness \
   test_main_captain_readiness_matches_secondmate_projection \
   test_completed_scout_report_not_pending \
