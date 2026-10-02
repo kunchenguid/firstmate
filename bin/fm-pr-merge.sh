@@ -333,19 +333,20 @@ reject_repo_overrides() {
 }
 
 # twg addresses Bitbucket by workspace and repository slug rather than by a
-# single --repo, so the workspace flag needs its own refusal alongside
+# single --repo, so the workspace, -r and pull-request flags need their own refusal alongside
 # reject_repo_overrides above.
 reject_bitbucket_workspace_overrides() {
   local arg
   [ "$PROVIDER" = bitbucket ] || return 0
   for arg in "$@"; do
     case "$arg" in
-      --workspace|--workspace=*|-w)
-        echo "error: extra merge arguments must not override the workspace" >&2
+      --workspace|--workspace=*|--pull-request|--pull-request=*)
+        echo "error: extra merge arguments must not override the workspace or pull request" >&2
         return 1
         ;;
-      -*w*)
-        echo "error: extra merge arguments must not override the workspace" >&2
+      --*) ;;
+      -*[wr]*)
+        echo "error: extra merge arguments must not override the workspace, repository, or pull request" >&2
         return 1
         ;;
     esac
