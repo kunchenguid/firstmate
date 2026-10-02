@@ -399,6 +399,8 @@ INVALID_URLS=(
   'https://github.com/-owner/r/pull/1'
   'https://github.com/owner-/r/pull/1'
   'https://github.com/owner--name/r/pull/1'
+  'https://github.com/_owner/r/pull/1'
+  'https://github.com/owner_/r/pull/1'
   'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r/pull/1'
   'https://github.com/o/./pull/1'
   'https://github.com/o/../pull/1'
@@ -486,6 +488,7 @@ test_parser_matrix() {
 https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
+https://github.com/Owner_name/repo/pull/7|Owner_name|repo|7
 EOF
   while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
@@ -1001,6 +1004,35 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+# The poll revalidates the GitHub owner from the sidecar before querying, and
+# that owner character set must match fm_pr_url_parse exactly: an underscore is
+# accepted inside the name but a leading or trailing separator stays rejected,
+# or an underscore-owner PR is armed by the parser yet never polled to merge.
+test_poll_owner_character_set_matches_parser() {
+  local dir owner url out
+  dir=$(make_case poll-owner-charset)
+  cp "$POLL" "$dir/home/state/task-a.check.sh"
+  chmod 0600 "$dir/home/state/task-a.check.sh"
+
+  poll_owner_state() {
+    local o=$1 u="https://github.com/$1/repo/pull/1"
+    printf '%s\n%s\n%s\n%s\n%s\n' github "$u" github.com "$o/repo" 1 \
+      > "$dir/home/state/task-a.pr-poll"
+    chmod 0600 "$dir/home/state/task-a.pr-poll"
+    FM_TEST_GH_STATE=MERGED run_poll "$dir"
+  }
+
+  out=$(poll_owner_state Owner_name)
+  [ "$out" = merged ] || fail "poll rejected merged underscore owner the parser accepts"
+  out=$(poll_owner_state _owner)
+  [ -z "$out" ] || fail "poll accepted leading-underscore owner the parser rejects"
+  out=$(poll_owner_state owner_)
+  [ -z "$out" ] || fail "poll accepted trailing-underscore owner the parser rejects"
+
+  unset -f poll_owner_state
+  pass "poll owner validation accepts interior underscores but rejects a leading or trailing separator"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -3471,6 +3503,7 @@ test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_poll_owner_character_set_matches_parser
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations

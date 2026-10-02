@@ -208,7 +208,7 @@ fm_pr_url_parse() {
   FM_PR_OWNER=
   FM_PR_REPO=
   FM_PR_NUMBER=
-  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  pattern='^https://github\.com/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9_-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
   if [[ "$raw" =~ $pattern ]]; then
     [[ "${BASH_REMATCH[1]}" != *--* ]] || return 1
     [ "${BASH_REMATCH[2]}" != . ] && [ "${BASH_REMATCH[2]}" != .. ] || return 1
