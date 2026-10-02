@@ -208,6 +208,21 @@ test_runtime_rejects_supplied_settings_for_every_consumer() {
   pass "runtime configuration rejection propagates through probe, prefix, and exec"
 }
 
+test_masked_and_failed_denied_reads_both_preserve_readiness() {
+  local home srt out status read_exit
+  home=$(new_home denied-read-modes)
+  enable_sandbox "$home"
+  write_settings "$home"
+  srt=$(install_srt "$home")
+  for read_exit in 0 1; do
+    out=$(FM_FAKE_SRT_DENY_READ_EXIT="$read_exit" run_sandbox "$home" "$srt" probe 2>&1)
+    status=$?
+    expect_code 0 "$status" "hidden contents must pass readiness with read exit $read_exit: $out"
+    assert_contains "$out" "worker sandbox ready" "readiness must accept both denied-read representations"
+  done
+  pass "empty successful reads and failed reads both preserve sandbox readiness"
+}
+
 test_enabled_exec_runs_the_command_through_the_runtime() {
   local home srt log out status
   home=$(new_home enabled-exec)
@@ -250,6 +265,7 @@ test_enabled_missing_settings_refuses
 test_enabled_empty_settings_refuses
 test_enabled_invalid_settings_refuses
 test_runtime_rejects_supplied_settings_for_every_consumer
+test_masked_and_failed_denied_reads_both_preserve_readiness
 test_enabled_probe_reports_ready_and_prefix_is_exact
 test_enabled_exec_runs_the_command_through_the_runtime
 test_enabled_unenforced_isolation_refuses

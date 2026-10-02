@@ -303,9 +303,15 @@ if [ -n "\$settings" ] && [ -n "\$cmd" ] && [ -f "\$settings" ] && command -v jq
   while IFS= read -r deny; do
     [ -n "\$deny" ] || continue
     case "\$cmd" in
+      *"\$deny"*) exit "\${FM_FAKE_SRT_DENY_READ_EXIT:-0}" ;;
+    esac
+  done < <(jq -r '.filesystem.denyRead[]?' "\$settings" 2>/dev/null)
+  while IFS= read -r deny; do
+    [ -n "\$deny" ] || continue
+    case "\$cmd" in
       *"\$deny"*) printf 'fake srt: blocked by settings\n' >&2; exit 1 ;;
     esac
-  done < <(jq -r '.filesystem.denyRead[]?, .filesystem.denyWrite[]?' "\$settings" 2>/dev/null)
+  done < <(jq -r '.filesystem.denyWrite[]?' "\$settings" 2>/dev/null)
 fi
 [ -n "\$cmd" ] || exit 0
 exec /bin/bash -c "\$cmd"

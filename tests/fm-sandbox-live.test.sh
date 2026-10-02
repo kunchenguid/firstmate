@@ -41,8 +41,7 @@ if FM_HOME="$home" "$SANDBOX" exec -- /bin/sh -c "printf x > '$denied_dir/denied
 fi
 assert_absent "$denied_dir/denied.txt" "a denied write must not create its file"
 
-if FM_HOME="$home" "$SANDBOX" exec -- /bin/sh -c "cat '$secret'" >/dev/null 2>&1; then
-  fail "the live sandbox must deny a read its settings deny"
-fi
+out=$(FM_HOME="$home" "$SANDBOX" exec -- /bin/sh -c "cat '$secret'" 2>/dev/null) || true
+assert_equals "" "$out" "the live sandbox must hide denied file contents"
 
 pass "live worker sandbox: the real runtime permits an allowlisted write and denies a denied read and write"

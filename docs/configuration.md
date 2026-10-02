@@ -1012,14 +1012,15 @@ The wrapper is pinned to `@anthropic-ai/sandbox-runtime` `0.0.78`, the release i
 Install it with `npm install -g @anthropic-ai/sandbox-runtime@0.0.78`, or point `FM_SANDBOX_SRT_BIN` at an existing executable.
 
 The settings file is the local, gitignored `config/worker-sandbox-settings.json`, or `FM_SANDBOX_SETTINGS` when set.
-It must exist, be readable and non-empty, and be a JSON object; the wrapper passes it to the runtime unchanged, so the filesystem read, write, and network rules are the captain's to author.
+It must exist, be readable and non-empty, and be a JSON object accepted by the pinned runtime; the wrapper validates it by running `true` through that runtime before readiness, and passes it unchanged, so the filesystem read, write, and network rules are the captain's to author.
 The runtime's own secure-by-default behavior applies: reads are allowed except where denied, writes are denied except where allowed, and network is denied except for allowed domains.
 An unreadable, empty, or invalid settings file refuses rather than falling back to the runtime's built-in defaults, which are a different configuration, not a weaker one.
 
 ### Capability probe
 
 `bin/fm-sandbox.sh probe` validates the runtime, the settings, and a live capability probe in a disposable fixture, and exits nonzero with the failing reason.
-The probe requires a permitted write to succeed and a denied read and a denied write to fail, so a runtime that does not actually enforce its settings is rejected.
+The probe requires a permitted write to succeed, a denied write to fail, and a denied read to return no file contents, so a runtime that does not actually enforce its settings is rejected.
+On Linux the pinned runtime masks denied files with `/dev/null`, so reading a denied file may succeed with empty output.
 It uses no real secrets and resolves no credentials.
 
 On Linux the runtime needs working unprivileged user namespaces (bubblewrap).

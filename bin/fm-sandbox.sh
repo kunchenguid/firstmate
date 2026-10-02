@@ -135,9 +135,9 @@ sandbox_probe_must_pass() {  # <settings> <command> <what>
 # Prove the pinned runtime actually enforces isolation on this host, using a
 # disposable fixture and no real secrets. Reads stay permitted by default and
 # writes stay denied except where allowed, so a permitted write must succeed
-# while a denied read and a denied write must both fail.
+# while denied contents stay hidden and a denied write must fail.
 sandbox_live_probe() {
-  local secret denied
+  local secret denied read_output
   command -v jq >/dev/null 2>&1 || sandbox_refuse "jq is required to build the capability probe fixture"
   PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-worker-sandbox-probe.XXXXXX") ||
     sandbox_refuse "could not create a private probe directory under ${TMPDIR:-/tmp}"
@@ -152,7 +152,8 @@ sandbox_live_probe() {
   sandbox_probe_must_pass "$PROBE_DIR/settings.json" \
     "touch $(sandbox_squote "$PROBE_DIR/allow/ok")" \
     "the runtime did not permit a write its settings allow"
-  if "$SANDBOX_SRT" --settings "$PROBE_DIR/settings.json" -c "cat $(sandbox_squote "$secret")" >/dev/null 2>&1; then
+  read_output=$("$SANDBOX_SRT" --settings "$PROBE_DIR/settings.json" -c "cat $(sandbox_squote "$secret")" 2>/dev/null) || true
+  if [ -n "$read_output" ]; then
     sandbox_refuse "the runtime permitted a read its settings deny; refusing to trust unenforced isolation"
   fi
   if "$SANDBOX_SRT" --settings "$PROBE_DIR/settings.json" -c "touch $(sandbox_squote "$denied/x")" >/dev/null 2>&1; then
