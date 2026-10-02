@@ -653,8 +653,8 @@ case "$fault:$*" in
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   # One wave read per mode reaches a distinct end: the per-read bound, the two
-  # statuses an outer bound reports when it stops a running read, and a crash
-  # of the client itself.
+  # statuses a signal aimed at the read alone leaves behind, and a crash of the
+  # client itself.
   cut-bound:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   cut-kill:'api repos/o/r/pulls/8/reviews?'*) exit 137 ;;
   cut-term:'api repos/o/r/pulls/8/reviews?'*) exit 143 ;;
@@ -882,7 +882,7 @@ test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain() {
     && fail 'a later PR began without the fifteen-second observation reservation'
   jq -e '.records[0].checked_at == "2026-09-15T08:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a later PR record changed when the poll deferred it for budget'
-  pass 'a later URL waits when fewer than three default per-read bounds remain for its observation'
+  pass 'a later URL waits when fewer than fifteen seconds remain for its observation'
 }
 
 test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 sequential > 20s budget, parallel waves fit
@@ -916,7 +916,7 @@ test_slow_read_deadline_kill_is_budget_refusal() {
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail 'a deadline-killed slow read rewrote the prior record'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
-  pass 'a read killed at the default per-read bound is unmeasured and stays silent'
+  pass 'a read killed at the five-second bound is unmeasured and stays silent'
 }
 
 test_unmeasured_url_does_not_starve_the_tail() {
@@ -1140,73 +1140,6 @@ test_read_outcome_classification() {
   pass 'a read a bound stopped stays unmeasured while a forge failure, a client crash and a head change each record and wake'
 }
 
-# The per-read bound is the lever a home on a slow link has, so prove it moves
-# the outcome in both directions against one unchanged read latency.
-test_configured_read_bound_moves_the_outcome() {
-  local home out
-  home=$(new_home read-bound-below)
-  forge_home "$home"
-  wrap_forge "$home"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  printf 'latency\n' > "$home/forge/fault"
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FM_CONTRIBUTIONS_READ_TIMEOUT=2 FORGE_LATENCY=3 \
-    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed under a lowered per-read bound'
-  [ -z "$out" ] || fail "a read past a lowered per-read bound printed an unavailable wake: $out"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail 'a read past a lowered per-read bound rewrote the prior record'
-  [ ! -s "$home/state/.wake-queue" ] || fail 'a read past a lowered per-read bound enqueued a wake'
-
-  home=$(new_home read-bound-above)
-  forge_home "$home"
-  wrap_forge "$home"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  printf 'latency\n' > "$home/forge/fault"
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FM_CONTRIBUTIONS_READ_TIMEOUT=4 FORGE_LATENCY=3 \
-    "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed under a raised per-read bound'
-  [ -z "$out" ] || fail "a read inside a raised per-read bound printed an unavailable wake: $out"
-  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
-    "$home/data/delivery/contributions.json" >/dev/null \
-    || fail 'a read inside a raised per-read bound was not observed'
-
-  with_home "$home" env FM_CONTRIBUTIONS_READ_TIMEOUT=0 "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
-    && fail 'a zero per-read bound was accepted'
-  with_home "$home" env FM_CONTRIBUTIONS_READ_TIMEOUT=later "$ROOT/bin/fm-contributions.sh" poll >/dev/null 2>&1 \
-    && fail 'a non-numeric per-read bound was accepted'
-  pass 'the configured per-read bound decides one latency both ways and refuses an invalid value'
-}
-
-test_arm_plumbs_a_configured_read_bound_into_the_check_shim() {
-  local home out
-  home=$(new_home arm-read-bound)
-  forge_home "$home"
-  wrap_forge "$home"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  printf 'latency\n' > "$home/forge/fault"
-  with_home "$home" env FM_CONTRIBUTIONS_READ_TIMEOUT=1 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
-    || fail 'arm with a configured per-read bound failed'
-  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_READ_TIMEOUT FORGE_LATENCY=3 bash "$home/state/contributions.check.sh") \
-    || fail 'check shim with a configured per-read bound failed'
-  [ -z "$out" ] || fail "a shim-bounded read printed an unavailable wake: $out"
-  grep -Fxq 'api repos/o/r/pulls/8' "$home/forge/calls" || fail 'generated check did not attempt a read'
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail 'generated check failed to preserve the configured one-second per-read bound'
-
-  # The same latency must be observable once the shim no longer carries the
-  # bound, or the assertion above would hold for any reason at all.
-  : > "$home/forge/calls"
-  with_home "$home" env -u FM_CONTRIBUTIONS_READ_TIMEOUT "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
-    || fail 'arm without a configured per-read bound failed'
-  out=$(with_home "$home" env -u FM_CONTRIBUTIONS_READ_TIMEOUT FORGE_LATENCY=3 bash "$home/state/contributions.check.sh") \
-    || fail 'default-bound check shim failed'
-  [ -z "$out" ] || fail "a default-bounded read printed an unavailable wake: $out"
-  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
-    "$home/data/delivery/contributions.json" >/dev/null \
-    || fail 'the default per-read bound did not observe a three-second read'
-  pass 'generated checks carry a configured per-read bound and fall back to the default without one'
-}
-
 # The script header promises an unsupported forge stays visibly unmeasured, and
 # poll never reads one, so it has no forge evidence to record either.
 test_unsupported_forge_url_is_never_recorded_as_a_failure() {
@@ -1229,7 +1162,7 @@ test_unsupported_forge_url_is_never_recorded_as_a_failure() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_read_outcome_classification test_configured_read_bound_moves_the_outcome test_arm_plumbs_a_configured_read_bound_into_the_check_shim test_unsupported_forge_url_is_never_recorded_as_a_failure test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_read_outcome_classification test_unsupported_forge_url_is_never_recorded_as_a_failure test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
