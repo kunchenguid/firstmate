@@ -771,16 +771,22 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   # unpinned or absent pi keeps refusing.
   # Hermetic PATH: a private dir holding only the fake Pi executables plus the
   # host tools the classifier needs, so no host pi or pi-signed is ever found.
-  local fakebin tool src pi_v signed_v want n case_
+  local fakebin tool src pi_v signed_v exe want n case_
   fakebin=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-version.XXXXXX")
   for tool in head tr sed awk grep cat wc cut env dirname basename sort uniq; do
     src=$(command -v "$tool" 2>/dev/null) || continue
     case "$src" in /*) ln -s "$src" "$fakebin/$tool" ;; esac
   done
-  for case_ in "0.87.1 absent empty" "1.0.0 absent empty" "9.9.9 absent unknown" \
-    "absent 0.99.2 empty" "absent 9.9.9 unknown" "0.99.2 9.9.9 unknown" \
-    "9.9.9 0.99.2 unknown" "0.85.1 1.0.0 empty" "absent absent unknown"; do
-    read -r pi_v signed_v want <<< "$case_"
+  # Fields: installed pi version, installed pi-signed version, the executable a
+  # caller that knows the task names in FM_COMPOSER_PI_EXECUTABLE ('-' = unset,
+  # the all-installed-pinned fallback), and the expected verdict.
+  for case_ in "0.87.1 absent - empty" "1.0.0 absent - empty" "9.9.9 absent - unknown" \
+    "absent 0.99.2 - empty" "absent 9.9.9 - unknown" "0.99.2 9.9.9 - unknown" \
+    "9.9.9 0.99.2 - unknown" "0.85.1 1.0.0 - empty" "absent absent - unknown" \
+    "9.9.9 0.99.2 pi-signed empty" "0.99.2 9.9.9 pi empty" \
+    "0.99.2 9.9.9 pi-signed unknown" "9.9.9 0.99.2 pi unknown" \
+    "0.99.2 absent pi-signed unknown" "absent 1.0.0 pi-signed empty"; do
+    read -r pi_v signed_v exe want <<< "$case_"
     rm -f "$fakebin/pi" "$fakebin/pi-signed" "$fakebin/count"
     if [ "$pi_v" != absent ]; then
       printf '#!/bin/sh\necho pi >> "%s/count"\nprintf "%%s\\n" %s\n' "$fakebin" "$pi_v" > "$fakebin/pi"
@@ -791,16 +797,20 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
       chmod +x "$fakebin/pi-signed"
     fi
     out=$(
-      unset FM_COMPOSER_PI_ADAPTER_VERSION _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      # shellcheck disable=SC2030 # each case runs in its own subshell on purpose
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
       PATH="$fakebin"
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
     )
     [ "$out" = "$want" ] \
-      || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v with no override must read '$want', got '$out'"; }
+      || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v executable=$exe must read '$want', got '$out'"; }
     # Each executable runs once per process across two classifications.
     rm -f "$fakebin/count"
     (
-      unset FM_COMPOSER_PI_ADAPTER_VERSION _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      # shellcheck disable=SC2031 # each case runs in its own subshell on purpose
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
       PATH="$fakebin"
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
@@ -810,7 +820,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
       || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v: each Pi executable must run at most once per process"; }
   done
   rm -rf "$fakebin"
-  pass 'pi codex banner adapter requires a pinned version, read from the installed pi when no override is set'
+  pass 'pi codex banner adapter requires a pinned version: only the named Pi executable when the caller knows it, every installed one otherwise'
 }
 
 test_matrix_opencode_leftbar_signals() {
