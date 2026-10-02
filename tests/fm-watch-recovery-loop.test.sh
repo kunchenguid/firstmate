@@ -66,20 +66,6 @@ try {
   if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 3) {
     throw new Error("unexpected extra successor");
   }
-  // Replay a terminal-service HUP of the arm, without killing the plugin host.
-  const predecessor = pid;
-  process.kill(predecessor, "SIGHUP");
-  const retryDeadline = Date.now() + 5000;
-  while (Date.now() < retryDeadline) {
-    pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
-    if (pid !== predecessor) break;
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  if (pid === predecessor) throw new Error("HUP did not start a replacement arm");
-  process.kill(pid, 0);
-  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 4 || prompts.length !== 2) {
-    throw new Error("HUP retry duplicated delivery or successor launches");
-  }
   console.log("two overlapping wakes delivered in order; third arm alive");
 } catch (error) {
   console.error(error);
@@ -92,7 +78,92 @@ JS
   )
   status=$?
   expect_code 0 "$status" "OpenCode must retain overlapping actionable closes: $out"
-  pass "OpenCode delivers consecutive wakes and keeps one live successor, including after HUP"
+  pass "OpenCode delivers consecutive wakes and keeps one live successor"
+}
+
+test_opencode_failed_successor_during_delivery_rearms() {
+  local repo out status
+  repo="$TMP_ROOT/opencode-failed-successor"
+  mkdir -p "$repo/bin" "$repo/state" "$repo/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$repo/state/crew.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "$FM_HOME/state/arm-count" ] || read -r count < "$FM_HOME/state/arm-count"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_HOME/state/arm-count"
+printf 'watcher: started pid=%s\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'check: delivery-blocked\n'
+else
+  printf '%s\n' "$$" > "$FM_HOME/state/successor-pid"
+  exec sleep 60
+fi
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" \
+    FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$repo/state" \
+    FM_WATCH_REARM_RETRY_BASE_MS=10 node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+let releaseDelivery;
+const deliveryBlocked = new Promise(resolve => { releaseDelivery = resolve; });
+let deliveryStarted = false;
+const prompts = [];
+const client = { session: { promptAsync: async ({ body }) => {
+  deliveryStarted = true;
+  await deliveryBlocked;
+  prompts.push(body.parts[0].text);
+} } };
+const mod = await import(pathToFileURL(process.env.PLUGIN));
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: home, worktree: home });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "fixture" } } });
+const blockedDeadline = Date.now() + 5000;
+while (Date.now() < blockedDeadline && (!deliveryStarted || !existsSync(`${home}/state/successor-pid`))) {
+  await new Promise(resolve => setTimeout(resolve, 20));
+}
+let pid;
+try {
+  if (!deliveryStarted) throw new Error("wake delivery did not block");
+  pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
+  const failedPid = pid;
+  process.kill(failedPid, "SIGHUP");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 2) {
+    throw new Error("failure recovery ran before blocked delivery completed");
+  }
+  releaseDelivery();
+  const retryDeadline = Date.now() + 5000;
+  while (Date.now() < retryDeadline) {
+    pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
+    if (pid !== failedPid) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (pid === failedPid) throw new Error("failed successor was not replaced after delivery");
+  process.kill(pid, 0);
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 3 || prompts.length !== 1) {
+    throw new Error("failure retry duplicated delivery or successor launches");
+  }
+  console.log("failed successor rearmed after blocked delivery");
+} catch (error) {
+  releaseDelivery();
+  console.error(error);
+  process.exitCode = 1;
+} finally {
+  if (pid) {
+    try { process.kill(pid, "SIGTERM"); } catch {}
+  }
+  process.exit(process.exitCode ?? 0);
+}
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must queue failed-successor recovery behind wake delivery: $out"
+  pass "OpenCode rearms a failed successor after blocked wake delivery"
 }
 
 install_pi_watch_extension_fixture() {
@@ -309,4 +380,5 @@ test_handling_successor_does_not_go_blind() {
 
 test_handling_successor_does_not_go_blind
 test_opencode_consecutive_wakes_keep_successor
+test_opencode_failed_successor_during_delivery_rearms
 test_unacknowledged_recovery_is_announced_once_per_generation
