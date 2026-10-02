@@ -13,7 +13,7 @@ as descriptive. The existing busy-gen and busy-state.lock serialize reads with
 arm/retire. No vendor file is written.
 The optional process_binding records the original terminal, native PID/start,
 shell PID/start and kernel boot identity after in-place recovery. Every later
-read/text/key guard verifies that seal against Herdr and Linux /proc. Recovery
+evidence read or recovery guard verifies that seal against Herdr and Linux /proc. Recovery
 restores the original gen only, under fm-busy-event's writer authority; its
 shell owner also holds lease/control/meta locks and reconciles the backlog.
 The check command writes no records. Apply must receive its exact receipt and
