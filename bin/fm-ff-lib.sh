@@ -23,7 +23,14 @@
 # path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
-# secondmate's backlog, projects, or in-flight work.
+# secondmate's backlog, projects, or in-flight work. Release-update and remote-home
+# sync convergence best-effort refresh the home's remote-tracking refs, including
+# already-current homes; linked worktrees share those refs with the primary and
+# sibling worktrees.
+# The refresh only refreshes the home's own default branch and never retargets
+# origin/HEAD; an upstream default-branch rename is an explicit operator
+# migration outside this refresh.
+# The local-HEAD spawn/bootstrap sync remains network-free.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
@@ -40,6 +47,8 @@
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -207,6 +216,7 @@ validate_secondmate_home() {
 # each distinct git-common-dir at most once. Used ONLY by the origin base mode;
 # the local-HEAD sync never fetches.
 FETCHED=""
+FF_TRACKING_REFRESHED=""
 fetch_once() {
   local dir=$1 common
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
@@ -220,6 +230,42 @@ fetch_once() {
     return 0
   fi
   return 1
+}
+
+# Best-effort refresh of a converged secondmate home's origin/<default> and
+# origin/HEAD tracking refs. Origin-mode targets already ran fetch_once, so only
+# remote HEAD needs repair; a sync with refresh-origin=yes (the remote-home sync)
+# also fetches the home's own default branch; any other sync stays network-free.
+# Runs at most once per git-common-dir, and separate hard bounds keep either
+# network operation from delaying convergence. Always returns 0.
+ff_refresh_tracking() { # <dir> <default-branch> <secondmate-id> <base-mode> <refresh-origin>
+  local dir=$1 branch=$2 secondmate_id=$3 base_mode=$4 refresh_origin=$5 common
+  local -a git_env
+  [ -n "$secondmate_id" ] || return 0
+  [ "$base_mode" = origin ] || [ "$refresh_origin" = yes ] || return 0
+  git -C "$dir" remote get-url origin >/dev/null 2>&1 || return 0
+  common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  if [ -n "$common" ]; then
+    case " $FF_TRACKING_REFRESHED " in
+      *" $common "*) return 0 ;;
+    esac
+    FF_TRACKING_REFRESHED="${FF_TRACKING_REFRESHED}${FF_TRACKING_REFRESHED:+ }$common"
+  fi
+  # Configured transports run unchanged; no prompt can reach an operator:
+  # no askpass and no stdin, and fm_run_timed kills a hung prompt at its bound.
+  git_env=(env GIT_TERMINAL_PROMPT=0 SSH_ASKPASS_REQUIRE=never)
+  if [ -z "${GIT_SSH_COMMAND:-}${GIT_SSH:-}" ] && ! git -C "$dir" config --get core.sshCommand >/dev/null 2>&1; then
+    git_env+=("GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+  fi
+  if [ "$base_mode" != origin ]; then
+    fm_run_timed 5 "${git_env[@]}" \
+      git -C "$dir" fetch --quiet --no-tags --no-recurse-submodules origin \
+      "+refs/heads/$branch:refs/remotes/origin/$branch" </dev/null >/dev/null 2>&1 || true
+  fi
+  # Point origin/HEAD at the home's own default branch, never at a branch the
+  # remote renamed its default to (see the usage header).
+  fm_run_timed 5 git -C "$dir" remote set-head origin "$branch" >/dev/null 2>&1 || true
+  return 0
 }
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).
@@ -379,11 +425,20 @@ live_secondmate_meta_records() {
 # wrong-branch target and leave its work untouched. An optional secondmate id
 # enables the content-equivalent divergence proof and durable marker described
 # in this file's header.
+#
+# Positional arguments:
+#   ff_target <dir> <label> <base_mode> [allow_detached] [ignore_seed_marker]
+#             [secondmate_id] [reconciliation_state] [refresh_origin]
+#   allow_detached, ignore_seed_marker - yes|no (default no).
+#   reconciliation_state - state dir holding the divergence marker.
+#   refresh_origin - yes lets a <commit-ish> secondmate sync fetch its origin
+#                    during the tracking-ref refresh (ff_refresh_tracking);
+#                    default no keeps that sync network-free.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
-  local secondmate_id=${6:-} reconciliation_state=${7:-}
+  local secondmate_id=${6:-} reconciliation_state=${7:-} refresh_origin=${8:-no}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -448,6 +503,7 @@ ff_target() {
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
     [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+    ff_refresh_tracking "$dir" "$default" "$secondmate_id" "$base_mode" "$refresh_origin"
     echo "$label: already current"
     return 0
   fi
@@ -461,6 +517,7 @@ ff_target() {
         FF_STATUS="updated"
         FF_INSTR="$instr"
         secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+        ff_refresh_tracking "$dir" "$default" "$secondmate_id" "$base_mode" "$refresh_origin"
         if [ -n "$instr" ]; then
           echo "$label: reconciled redundant divergence $before..$after (instructions changed: $instr)"
         else
@@ -494,6 +551,7 @@ ff_target() {
   FF_STATUS="updated"
   FF_INSTR="$instr"
   [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+  ff_refresh_tracking "$dir" "$default" "$secondmate_id" "$base_mode" "$refresh_origin"
   if [ -n "$instr" ]; then
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
