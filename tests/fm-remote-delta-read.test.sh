@@ -125,44 +125,55 @@ assert_contains "$OUT" 'reason=prefix-changed' 'the same-size rewrite was not na
 assert_contains "$OUT" 'to_offset=11' 'the break did not report the current size'
 pass 'a same-size in-place rewrite breaks continuity as prefix-changed'
 
-# A same-size rewrite of the same inode within the snapshot's own second leaves
-# size, inode, device, and whole-second mtime and ctime unchanged: only the
-# subsecond stat key can tell it moved. Each attempt starts on a second
-# boundary, rewrites once the first capture ran, and is retried only if the
-# rewrite still crossed into the next ctime second.
-ctime_second() { perl -e 'print +(stat shift)[10]' "$1"; }
-SAME_SECOND=
-for _ in 1 2 3; do
-  perl -MTime::HiRes=time,sleep -e 'sleep(1 - (time - int(time)))'
-  printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
-  BEFORE_SECOND=$(ctime_second "$DELTA_HOME/$DELTA_LOG_REL")
-  : > "$EXEC_LOG"
-  FM_TEST_EXEC_LOG="$EXEC_LOG" PATH="$DELTA_SHIM:/usr/bin:/bin" \
-    run_reader 11 "$PREFIX_SHA" 2 > "$TMP_ROOT/same-second.out" &
-  READER_PID=$!
-  for _ in $(seq 1 50); do grep -qx perl "$EXEC_LOG" && break; sleep 0.01; done
-  sleep 0.15
-  printf 'OMEGA\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
-  AFTER_SECOND=$(ctime_second "$DELTA_HOME/$DELTA_LOG_REL")
-  RC=0
-  wait "$READER_PID" || RC=$?
-  [ "$BEFORE_SECOND" = "$AFTER_SECOND" ] || continue
-  SAME_SECOND=1
-  [ "$RC" -eq 0 ] || fail "the same-second rewrite read exited $RC instead of 0"
-  OUT=$(<"$TMP_ROOT/same-second.out")
-  assert_contains "$OUT" 'reason=prefix-changed' 'a same-second same-size rewrite was not detected'
-  break
-done
-[ -n "$SAME_SECOND" ] || fail 'no attempt landed the rewrite in the same ctime second'
+# Model a same-second same-size rewrite at the stat executable boundary:
+# size, inode, device, and whole-second timestamps stay fixed; only the
+# fractions change. Rewrite the real log after the initial snapshot's prefix
+# has been hashed, so scheduler load cannot move the test across a second.
+SUBSECOND_SHIM="$TMP_ROOT/subsecond-shim"
+mkdir -p "$SUBSECOND_SHIM"
+cat > "$SUBSECOND_SHIM/stat" <<'SH'
+#!/bin/sh
+fraction=111111111
+[ ! -e "$FM_TEST_REWRITE_DONE" ] || fraction=222222222
+printf '11:100.%s:100.%s:123:456\n' "$fraction" "$fraction"
+SH
+REAL_SHASUM=$(PATH=/usr/bin:/bin command -v shasum)
+cat > "$SUBSECOND_SHIM/shasum" <<SH
+#!/bin/sh
+"$REAL_SHASUM" "\$@" || exit \$?
+case "\$3" in
+*/prefix)
+  if [ ! -e "\$FM_TEST_REWRITE_DONE" ]; then
+    if [ "\${FM_TEST_REMOVE_LOG:-0}" = 1 ]; then
+      rm -- "\$FM_TEST_REWRITE_LOG"
+    else
+      printf 'OMEGA\\nbeta\\n' > "\$FM_TEST_REWRITE_LOG"
+    fi
+    : > "\$FM_TEST_REWRITE_DONE"
+  fi
+  ;;
+esac
+SH
+chmod +x "$SUBSECOND_SHIM/stat" "$SUBSECOND_SHIM/shasum"
+printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+FM_TEST_REWRITE_LOG="$DELTA_HOME/$DELTA_LOG_REL" \
+  FM_TEST_REWRITE_DONE="$TMP_ROOT/rewrite-done" \
+  PATH="$SUBSECOND_SHIM:/usr/bin:/bin" \
+  run_reader 11 "$PREFIX_SHA" 10 > "$TMP_ROOT/same-second.out" \
+  || fail 'the same-second rewrite read did not exit 0'
+[ -e "$TMP_ROOT/rewrite-done" ] || fail 'the initial prefix hash did not trigger the rewrite'
+OUT=$(<"$TMP_ROOT/same-second.out")
+assert_contains "$OUT" 'status=continuity-broken' 'the subsecond change did not break continuity'
+assert_contains "$OUT" 'reason=prefix-changed' 'a same-second same-size rewrite was not detected'
 pass 'a same-second same-size rewrite of the same inode breaks continuity'
 
 # A log that disappears mid-wait breaks as missing only for a nonzero cursor.
 printf 'alpha\nbeta\n' > "$DELTA_HOME/$DELTA_LOG_REL"
-run_reader 11 "$PREFIX_SHA" 4 > "$TMP_ROOT/missing.out" &
-READER_PID=$!
-sleep 0.3
-rm -f -- "$DELTA_HOME/$DELTA_LOG_REL"
-wait "$READER_PID" || fail 'the missing-file read did not exit 0'
+FM_TEST_REWRITE_LOG="$DELTA_HOME/$DELTA_LOG_REL" \
+  FM_TEST_REWRITE_DONE="$TMP_ROOT/remove-done" FM_TEST_REMOVE_LOG=1 \
+  PATH="$SUBSECOND_SHIM:/usr/bin:/bin" \
+  run_reader 11 "$PREFIX_SHA" 10 > "$TMP_ROOT/missing.out" \
+  || fail 'the missing-file read did not exit 0'
 OUT=$(<"$TMP_ROOT/missing.out")
 assert_contains "$OUT" 'status=continuity-broken' 'a removed log did not produce a break'
 assert_contains "$OUT" 'reason=missing' 'the removed log was not named missing'
