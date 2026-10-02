@@ -327,6 +327,7 @@ The ledger is `state/.claude-autoarm-epoch`:
 - Its epoch sequence is a monotonic claim generation.
 - Line 1 records the claim and terminal outcome.
 - Line 2 records the claiming process's mandatory pid-identity.
+- Line 3, on an arming entry that recorded `owner_session_id`, records the pid-identity of the session-lock holder the claim was taken under.
 
 `fm_autoarm_claim_open` and `fm_autoarm_claim_next` in `bin/fm-wake-lib.sh` own the format contract.
 
@@ -335,13 +336,20 @@ A claim is open while all of these hold:
 - Its outcome is `arming`.
 - Its owner pid is alive.
 - Its recorded identity successfully recomputes and matches that pid.
+- Its owner is still reachable by its session: it descends from the numeric pid in `state/.lock`, or its recorded `owner_session_id` matches the trusted session id in `state/.lock-session` while the lock-holder pid-identity recorded on entry line 3 still recomputes from that lock's holder pid.
 - It is not stuck.
 
 Stuck means the entry and the watcher beacon are both older than the guard grace, which proves the owner hung mid-arm.
 A healthy hours-long foregrounded cycle keeps the beacon beating, and every arming phase with no watcher is bounded in seconds.
+A missing or malformed lock means no session can receive a rewake, so such a claim is never open.
+The reachability test is what makes an open claim deliverable: a hook whose session exited mid-cycle stays alive with no parent to receive its exit 2, so deferring to it would leave the replacement session deaf until a captain turn.
+The session-id signal is the second one the claiming hook's own admission accepts, so a background session whose bridge is recycled mid-cycle - breaking the ancestry to its still-live lock owner - keeps its live claim instead of being double-armed.
+Pinning that signal to the lock holder's pid-identity recorded at claim time is what keeps a resumed session, which carries the same conversation id in a new process, from reading its own dead predecessor's orphan as open - a reused pid number is a different identity, so it does not match.
+An orphan fails both signals: it no longer descends from the replacement's lock pid, and its recorded lock-holder identity is the dead session's.
+An entry from a build before these fields existed records neither and falls back to descent alone.
 
 Anything else lets the next Stop-owned firing take the next generation and arm.
-That covers a finished outcome, a dead or identity-mismatched owner, a stuck owner, an identityless entry, or no entry.
+That covers a finished outcome, a dead or identity-mismatched owner, an owner orphaned by its session's exit, a stuck owner, an identityless entry, or no entry.
 Taking a newer generation is the reclaim, and a steady-state predecessor is never signalled or revoked.
 
 No mutex is held across arming or output.

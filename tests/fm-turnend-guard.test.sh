@@ -1487,12 +1487,13 @@ test_hook_claude_mode_blocks_on_stuck_arming_claim() {
 }
 
 # The generation model's ownership proof: a live open ledger claim (two-line
-# entry, identity-matched owner, watcher still beating) owns recovery with no
-# lock held at all.
+# entry, identity-matched owner descending from the session-lock pid, watcher
+# still beating) owns recovery with no owner lock held at all.
 test_hook_claude_mode_allows_on_open_generation_claim() {
   local dir out status pid identity
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-open-generation")
   : > "$dir/state/task1.meta"
+  printf '%s\n' "$$" > "$dir/state/.lock"
   sleep 60 &
   pid=$!
   identity=$(fm_test_pid_identity "$pid") || fail "could not compute a claim pid-identity"
