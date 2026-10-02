@@ -975,6 +975,93 @@ test_handle_wake_paused_records_pause_marker() {
   pass "handle_wake on a paused stale records a pause marker, drops the wedge marker, and does not escalate"
 }
 
+# The away-mode half of the parked-lane deferral. A lane whose newest status event
+# parks it - a blocker, an open decision, or a working: note declaring a hold - is
+# the worker's own account of its own silence, so the away supervisor owes it the
+# treatment the interactive watcher already gives it (docs/architecture.md): no
+# possible-wedge alarm, and one bounded recheck per PAUSE_RESURFACE_SECS instead.
+test_away_parked_lane_uses_pause_cadence_not_wedge() {
+  local case_name dir state fakebin task win pane key status_line escalations age
+  for case_name in blocker decision working-hold; do
+    dir=$(make_supercase "away-parked-$case_name")
+    state="$dir/state"; fakebin="$dir/fakebin"
+    task="parked-$case_name"; win="sess:fm-$task"; pane="$dir/pane.txt"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    case "$case_name" in
+      blocker) status_line='blocked: PR needs review' ;;
+      decision) status_line='needs-decision: pick the migration order' ;;
+      working-hold) status_line='working: waiting for CI to go green' ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    printf 'idle prompt $\n' > "$pane"
+    fm_write_meta "$state/$task.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
+    # A blocker and a decision each woke their reporter when they landed, so the
+    # daemon has already classified through them; what is left to decide is the
+    # lane's quiet, not the event.
+    seen_through "$state" "$task"
+
+    case "$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")" in
+      pause\|*) ;;
+      *) fail "a parked lane ($case_name) did not classify as a declared wait" ;;
+    esac
+
+    # A wedge marker left over from before the lane parked is dropped, not aged.
+    date +%s > "$state/.subsuper-stale-$key"
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+    [ -e "$state/.subsuper-paused-$key" ] \
+      || fail "a parked lane ($case_name) got no pause marker to age on"
+    [ ! -e "$state/.subsuper-stale-$key" ] \
+      || fail "a parked lane ($case_name) kept possible-wedge aging"
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a parked lane ($case_name) escalated on the wake itself: $(cat "$state/.subsuper-escalations")"
+
+    # Past the wedge bound, the aged marker still does not become an alarm.
+    date +%s > "$state/.subsuper-last-scan"
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 \
+      housekeeping "$state"
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a parked lane ($case_name) aged into a wedge alarm: $(cat "$state/.subsuper-escalations")"
+
+    # The wait still re-surfaces: exactly one parked recheck past the cadence,
+    # never labeled a wedge, with the window reset so it repeats.
+    echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+      housekeeping "$state"
+    escalations=0
+    [ -s "$state/.subsuper-escalations" ] \
+      && escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+    [ "$escalations" = 1 ] \
+      || fail "a parked lane ($case_name) produced $escalations escalations past its window, expected one recheck"
+    grep -F "parked " "$state/.subsuper-escalations" >/dev/null \
+      || fail "a parked lane ($case_name) was not re-surfaced as a parked recheck: $(cat "$state/.subsuper-escalations")"
+    grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+      && fail "a parked lane ($case_name) recheck was mislabeled a possible wedge"
+    age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+    [ "$age" -lt 60 ] \
+      || fail "a parked lane ($case_name) did not reset its recheck window (age ${age}s)"
+
+    # The lane resumes: a new stale wake returns it to the wedge ladder it had
+    # before it parked.
+    : > "$state/.subsuper-escalations"
+    printf 'working: CI is green, resuming\n' >> "$state/$task.status"
+    FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
+    [ -e "$state/.subsuper-stale-$key" ] \
+      || fail "a resumed lane ($case_name) did not return to possible-wedge aging"
+    [ ! -e "$state/.subsuper-paused-$key" ] \
+      || fail "a resumed lane ($case_name) kept pause tracking after its park"
+    echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 \
+      housekeeping "$state"
+    grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+      || fail "a resumed lane ($case_name) lost wedge escalation after its park: $(cat "$state/.subsuper-escalations")"
+  done
+  pass "a parked lane defers the away daemon's wedge alarm onto one bounded recheck and restores wedge aging on resume"
+}
+
 test_handle_wake_paused_signal_records_pause_marker() {
   local dir state key win
   dir=$(make_supercase handle-paused-signal)
@@ -3162,6 +3249,7 @@ test_stale_paused_classifies_pause
 test_stale_pause_survives_a_foreign_resolved_line
 test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
+test_away_parked_lane_uses_pause_cadence_not_wedge
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
 test_housekeeping_migrates_watcher_pause_marker

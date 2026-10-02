@@ -3541,21 +3541,225 @@ resolved [key=nm-01RUNGATE-review]: firstmate chose the second fix' 2000)
   grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
     || fail "a human-owed gate nobody was told about did not take the unchanged ladder: $(cat "$out")"
 
-  # An open `blocked` record is not an unanswered question: it is an obstacle the
-  # crew reported, and a different action clears it. A `blocked:` last line is
-  # captain-relevant, so this lane reaches the wedge timer through the
+  # An open `blocked` record is not an unanswered gate question: it is an
+  # obstacle the crew reported, and a different action clears it. A newest
+  # `blocked:` line is still the worker's own declared wait, so it is deferred -
+  # but as the blocker it is, never as a parked-gate decision. A `blocked:` last
+  # line is captain-relevant, so this lane reaches the wedge timer through the
   # overridden-terminal-status branch instead, which only ever sees a hash whose
   # timer is already running - hence the fixture's fourth argument.
   dir=$(wedge_threshold_fixture parked-gate-blocked \
     'blocked [key=nm-01RUNGATE-review]: the fixture cannot reach its dependency' 2000 600)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
-    || fail "a human-owed gate with only a blocker open never escalated: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the blocked-gate escalation"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "an open blocker was accepted as an unanswered gate decision: $(cat "$out")"
-  pass "a parked human-owed gate is deferred only while its decision is still open, so an answered-but-unrelayed gate, an unescalated one, and one holding only a blocker all keep the unchanged ladder"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$human" exit \
+    || fail "a human-owed gate with only a blocker open was never rechecked: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the blocked-gate recheck"
+  grep -F 'declared blocker' "$out" >/dev/null \
+    || fail "an open blocker was not named as the blocker it is: $(cat "$out")"
+  grep -F 'verified wait at a parked gate' "$out" >/dev/null \
+    && fail "an open blocker was accepted as an unanswered gate decision: $(cat "$out")"
+  pass "a parked human-owed gate is deferred as a gate only while its decision is still open, so an answered-but-unrelayed gate and an unescalated one keep the unchanged ladder, and one holding only a blocker is rechecked as a blocker"
+}
+
+# --- a lane whose newest status says it is waiting is not a wedge -------------
+# The worker's newest status event is its own account of its quiet. A `working:`
+# line with an explicit hold declaration (the release lane that wrote "Holding the
+# build per 002 ... tell me which PR"), or a newest `blocked:` or
+# `needs-decision:` line that already woke firstmate, is deferred onto the
+# bounded recheck instead of climbing "possible wedge, escalation N" once per
+# threshold. Both directions are pinned: the same lane whose newest line has
+# moved on, or never said it was waiting, keeps the unchanged ladder.
+test_wedge_threshold_defers_to_a_newest_status_that_declares_a_wait() {
+  local dir state fakebin out capture window key n case_name log label timer phrase_index
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  for case_name in hold qualified-hold blocked decision; do
+    timer=''
+    case "$case_name" in
+      hold)
+        log='working [at=1]: permanent key generated. Holding the build per 002: tell me which PR is the third'
+        label='declared hold' ;;
+      qualified-hold)
+        log='working: Currently waiting for CI'
+        label='declared hold' ;;
+      blocked)
+        log='blocked [at=1]: the signing host refuses the key upload'
+        label='declared blocker'; timer=600 ;;
+      decision)
+        log='needs-decision [at=1] [key=release-key]: option A or option B'
+        label='declared decision'; timer=600 ;;
+    esac
+    dir=$(wedge_threshold_fixture "newest-wait-$case_name" "$log" 0 $timer)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    n=1
+    while [ "$n" -le 3 ]; do
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+        || fail "a $case_name newest status wedge-escalated at threshold $n: $(cat "$out")"
+      n=$((n + 1))
+    done
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+      || fail "a $case_name newest status queued a wedge wake: $(cat "$state/.wake-queue")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "a $case_name newest status was reported as a possible wedge: $(cat "$out")"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "a $case_name newest status climbed the escalation count to $(cat "$state/.wedge-escalations-$key")"
+
+    # Past the recheck cadence the wait is surfaced once, named as what it is.
+    dir=$(wedge_threshold_fixture "newest-wait-$case_name-aged" "$log" 2000 $timer)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "a $case_name newest status was never rechecked past its cadence: $(cat "$out")"
+    grep -F "$label" "$out" >/dev/null \
+      || fail "the $case_name recheck did not name its evidence as '$label': $(cat "$out")"
+    grep -F 'rechecked on a long cadence not a wedge' "$out" >/dev/null \
+      || fail "the $case_name recheck was not worded as a bounded wait: $(cat "$out")"
+  done
+
+  # Each accepted phrase must work through the watcher, not merely match a
+  # classifier regex in isolation. The reported "Holding" form is covered by
+  # the repeated-threshold case above.
+  phrase_index=0
+  for log in 'working: on hold for review' \
+    'working: waiting on the third PR' \
+    'working: waiting for the build' \
+    'working: awaiting a decision' \
+    'working: standing by for release' \
+    'working: not holding the build; waiting for review' \
+    'working: awaiting review; no longer holding the build'; do
+    phrase_index=$((phrase_index + 1))
+    dir=$(wedge_threshold_fixture "newest-wait-phrase-$phrase_index" "$log" 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a newest status declaring '$log' wedge-escalated: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+      || fail "a newest status declaring '$log' queued a wedge wake"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "a newest status declaring '$log' climbed the escalation count"
+  done
+
+  # Controls: a working line with no hold words, and a hold the worker has since
+  # moved past, both keep the unchanged schedule, count, and wording.
+  for log in 'working: still compiling the release build' \
+    'working: no longer holding the build; building now' \
+    'working: not holding the build; building now' \
+    'working: no longer on hold; building now' \
+    'working: not on hold; building now' \
+    'working: no longer waiting on the third PR; building now' \
+    'working: not waiting on the third PR; building now' \
+    'working: no longer waiting for the build; building now' \
+    'working: not waiting for the build; building now' \
+    'working: no longer awaiting a decision; building now' \
+    'working: not awaiting a decision; building now' \
+    'working: no longer standing by; building now' \
+    'working: not standing by; building now' \
+    'working: not currently awaiting review; no longer still holding the build' \
+    'working: still parked at that gate' \
+    'working: [key=holding] compiling the release build' \
+    'working [at=holding]: compiling the release build' \
+    'working: editing holding_lease' \
+    'working: Holding the build for the third PR
+working: third PR landed, building now'; do
+    dir=$(wedge_threshold_fixture newest-wait-control "$log" 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    n=1
+    while [ "$n" -le 3 ]; do
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+        || fail "a lane that declared no current wait stopped escalating at threshold $n: $(cat "$out")"
+      ack_stopped_cycle "$state" || fail "could not acknowledge control escalation $n"
+      grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+        || fail "a lane that declared no current wait did not reach escalation $n: $(cat "$out")"
+      n=$((n + 1))
+    done
+    grep -F 'demand-deep-inspection' "$out" >/dev/null \
+      || fail "a lane that declared no current wait lost the demand-deep-inspection wording: $(cat "$out")"
+    rm -rf "$dir"
+  done
+  pass "a newest status that declares a hold, a blocker, or a decision defers the wedge timer without climbing its count, while a lane that never said it was waiting or has moved on keeps the unchanged ladder"
+}
+
+test_wedge_working_prose_is_not_a_hold_declaration() {
+  local case_name log mode dir state fakebin out capture phrase prefix
+  local window='test:fm-wedge' key='test_fm-wedge'
+  local working='state: working · source: run-step · ci running'
+  for case_name in prose declaration qualified-declaration; do
+    case "$case_name" in
+      prose) log='working: investigating why the build is waiting for input'; mode='exit' ;;
+      declaration) log='working: waiting for input'; mode=absorb ;;
+      qualified-declaration) log='working: Currently waiting for CI'; mode=absorb ;;
+    esac
+    dir=$(wedge_threshold_fixture "working-hold-$case_name" "$log" 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" "$mode" \
+      || fail "the $case_name note took the wrong wedge path: $(cat "$out")"
+    if [ "$case_name" = prose ]; then
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+        || fail "working prose did not queue its wedge escalation"
+      grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+        || fail "working prose lost the wedge escalation reason: $(cat "$out")"
+      [ "$(cat "$state/.wedge-escalations-$key")" = 1 ] \
+        || fail "working prose did not advance the escalation count"
+    else
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+        || fail "an explicit working hold queued a wedge escalation"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "an explicit working hold advanced the escalation count"
+    fi
+  done
+  for phrase in 'holding the build' 'on hold for review' 'waiting on input' \
+    'waiting for CI' 'awaiting review' 'standing by for release'; do
+    for prefix in 'working: Currently ' \
+      'working [at=1] [key=ci]: build finished. Currently ' \
+      'working: build finished; currently '; do
+      status_is_working_hold "$prefix$phrase" \
+        || fail "a qualified working declaration was not classified as a hold: $prefix$phrase"
+    done
+    for prefix in 'working: not currently ' 'working: no longer currently ' \
+      'working: investigating why the build is currently '; do
+      status_is_working_hold "$prefix$phrase" \
+        && fail "working prose was classified as a qualified hold: $prefix$phrase"
+    done
+  done
+  for log in 'working: investigating why the build is holding a lock' \
+    'working: checking whether the build is on hold' \
+    'working: investigating why the build is waiting on input' \
+    'working: investigating why the build is waiting for input' \
+    'working: checking which build is awaiting input' \
+    'working: checking why the build is standing by' \
+    'working: build started. investigating why the build is waiting for input' \
+    'working: editing build.holding'; do
+    status_is_working_hold "$log" && fail "ordinary working prose was classified as a hold: $log"
+  done
+  pass "working prose keeps wedge escalation while explicit and qualified working holds defer it"
+}
+
+test_wedge_hold_recheck_uses_configured_pause_verb() {
+  local pause dir state fakebin out capture guidance window='test:fm-wedge'
+  local working='state: working · source: run-step · ci running'
+  local FM_CLASSIFY_PAUSED_VERB=''
+  export FM_CLASSIFY_PAUSED_VERB
+  for pause in paused holding; do
+    FM_CLASSIFY_PAUSED_VERB=''
+    if [ "$pause" != paused ]; then FM_CLASSIFY_PAUSED_VERB=$pause; fi
+    dir=$(wedge_threshold_fixture "hold-recheck-$pause" 'working: holding the build' 2000)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "a held lane did not emit its $pause recheck: $(cat "$out")"
+    guidance=$(sed -n 's/.*a holding lane should write \([^:]*:\) or needs-decision:.*/\1/p' "$out")
+    [ "$guidance" = "$pause:" ] \
+      || fail "the $pause recheck advised '$guidance': $(cat "$out")"
+    status_is_paused "$guidance waiting for the build" \
+      || fail "the classifier rejected the emitted $pause guidance"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $pause recheck"
+    printf '%s waiting for the build\n' "$guidance" >> "$state/wedge.status"
+    printf '%s' "$(seen_sig "$state/wedge.status")" > "$state/.seen-wedge_status"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "following the $pause guidance restored wedge escalation: $(cat "$out")"
+    [ ! -e "$state/.wedge-escalations-test_fm-wedge" ] \
+      || fail "following the $pause guidance counted a wedge escalation"
+  done
+  pass "default and configured pause guidance declares a wait recognized by the classifier and watcher"
 }
 
 # --- a wait record that does not carry every field is refused ----------------
@@ -6709,6 +6913,9 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
+test_wedge_threshold_defers_to_a_newest_status_that_declares_a_wait
+test_wedge_working_prose_is_not_a_hold_declaration
+test_wedge_hold_recheck_uses_configured_pause_verb
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms

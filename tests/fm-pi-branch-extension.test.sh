@@ -15,9 +15,8 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-pi-branch-extension)
 EXT="$ROOT/.pi/extensions/fm-branch-supervision.ts"
 export NODE_NO_WARNINGS=1
-# The Pi release whose stock renderer stopped supplying an implicit reset at
-# multiline boundaries, which is the contract this file's renderer cases
-# compare against.
+# The stock collapsed-preview contract exercised by the real consumer fixture.
+# The portable fixture also covers legacy all-line output.
 PI_STOCK_RENDER_FLOOR=0.84.4
 
 # Semantic-version floor for a version string this file already holds (Pi's
@@ -78,18 +77,17 @@ export function getMarkdownTheme() {
   return {};
 }
 
-export function keyHint(_keybinding, description) {
-  return `ctrl+o ${description}`;
-}
-
 export class ToolExecutionComponent {
+  constructor(name, _id, args) { this.name = name; this.args = args; }
+  setExpanded(expanded) { this.expanded = expanded; }
+  invalidate() {}
   updateResult(result) {
     this.result = result;
   }
   render() {
-    return (this.result?.content ?? [])
+    return ["", this.name, ...(this.result?.content ?? [])
       .filter((item) => item.type === "text")
-      .flatMap((item) => item.text.split("\n"));
+      .flatMap((item) => item.text.split("\n"))];
   }
 }
 
@@ -314,18 +312,6 @@ export class Container {
   }
   render() {
     return this.children.flatMap((child) => child.render?.() ?? []);
-  }
-}
-
-export class Box extends Container {
-  constructor(paddingX, paddingY, bgFn) {
-    super();
-    this.paddingX = paddingX;
-    this.paddingY = paddingY;
-    this.bgFn = bgFn;
-  }
-  setBgFn(bgFn) {
-    this.bgFn = bgFn;
   }
 }
 
@@ -803,10 +789,7 @@ const renderContext = { state: {}, isError: false, isPartial: false };
 const stockResult = { content: [{ type: "text", text: "OUTCOME_DUMP" }] };
 const calmOffCall = outcomesTool.renderCall({}, renderTheme, renderContext);
 const calmOffResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
-if (calmOffCall.constructor.name !== "Box" || calmOffCall.paddingX !== 1 || calmOffCall.paddingY !== 1) {
-  throw new Error("fm_branch_outcomes changed its ordinary shell rendering");
-}
-if (calmOffResult.constructor.name !== "Container" || calmOffCall.children[0]?.text !== "fm_branch_outcomes" || calmOffCall.children[1]?.text !== "OUTCOME_DUMP") {
+if (calmOffResult.render(100).length !== 0 || calmOffCall.render(100).join("\n") !== "fm_branch_outcomes\nOUTCOME_DUMP") {
   throw new Error("fm_branch_outcomes changed its ordinary call or result rendering");
 }
 const legacyStockResult = {
@@ -818,12 +801,12 @@ const legacyStockResult = {
 const legacyRenderContext = { state: {}, isError: false, isPartial: false };
 const legacyCall = outcomesTool.renderCall({}, renderTheme, legacyRenderContext);
 outcomesTool.renderResult(legacyStockResult, { expanded: false, isPartial: false }, renderTheme, legacyRenderContext);
-const collapsedLegacyText = legacyCall.children[1]?.text;
+const collapsedLegacyText = legacyCall.render(100).join("\n");
 if (!collapsedLegacyText?.includes("LEGACY_OUTCOME_12") || collapsedLegacyText.includes("more lines")) {
   throw new Error("legacy all-line stock capability did not preserve collapsed Calm-off output");
 }
 outcomesTool.renderResult(legacyStockResult, { expanded: true, isPartial: false }, renderTheme, legacyRenderContext);
-if (legacyCall.children[1]?.text !== collapsedLegacyText) {
+if (legacyCall.render(100).join("\n") !== collapsedLegacyText) {
   throw new Error("legacy all-line stock capability changed expanded Calm-off output");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
@@ -833,8 +816,23 @@ if (calmOnCall.constructor.name !== "Container" || calmOnCall.render(100).length
   throw new Error("fm_branch_outcomes remained visible while Calm was on");
 }
 pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
-if (outcomesTool.renderCall({}, renderTheme, renderContext).constructor.name !== "Box" || outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext).constructor.name !== "Container") {
+const restoredCall = outcomesTool.renderCall({}, renderTheme, renderContext);
+outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, renderContext);
+if (restoredCall.render(100).join("\n") !== calmOffCall.render(100).join("\n")) {
   throw new Error("fm_branch_outcomes did not restore ordinary rendering when Calm was turned off");
+}
+// A call Calm hid stores no stock row, and a call's visibility class is not
+// required to stay coupled to its result's: a result render that finds no stored
+// row must yield an empty row, not throw inside Pi's render of that transcript.
+pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+const hiddenCall = outcomesTool.renderCall({}, renderTheme, { state: {}, isError: false, isPartial: false });
+pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+if (hiddenCall.constructor.name !== "Container" || hiddenCall.render(100).length !== 0) {
+  throw new Error("a Calm-hidden fm_branch_outcomes call stopped rendering as an empty container");
+}
+const unpairedResult = outcomesTool.renderResult(stockResult, { expanded: false, isPartial: false }, renderTheme, { state: {}, isError: false, isPartial: false });
+if (unpairedResult.constructor.name !== "Container" || unpairedResult.render(100).length !== 0) {
+  throw new Error("a result render with no stored stock row did not degrade to an empty container");
 }
 pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
 let exportCallFellBack = false;
@@ -4995,64 +4993,6 @@ JS
   pass "the installed Pi still bounds the picker's list and ranks its search"
 }
 
-# Pi's stock call header gained arguments in 0.99: before it, the header is
-# the bold title alone; from 0.99 a collapsed call appends `key=json` and an
-# expanded call lists `key: value` under the title. Both supervision tools
-# must match the header of whichever Pi version loaded them.
-test_outcomes_tool_call_headers_follow_the_loaded_pi_version() {
-  local repo version status out
-  repo="$TMP_ROOT/call-header-versions"
-  install_pi_branch_extension_fixture "$repo"
-  for version in 0.87.0 0.99.0; do
-    FM_STUB_PI_VERSION="$version" EXT="$repo/.pi/extensions/fm-branch-supervision.ts" \
-      node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'JS'
-import { pathToFileURL } from "node:url";
-
-const version = process.env.FM_STUB_PI_VERSION;
-const tools = [];
-const pi = {
-  events: { on() {}, emit() {} },
-  on() {},
-  registerCommand() {},
-  registerMessageRenderer() {},
-  registerTool(tool) { tools.push(tool); },
-  sendMessage() {},
-  sendUserMessage() {},
-};
-const extension = await import(pathToFileURL(process.env.EXT).href);
-extension.default(pi);
-const theme = {
-  fg(color, text) { return `<${color}>${text}</${color}>`; },
-  bg(_color, text) { return text; },
-  bold(text) { return `**${text}**`; },
-};
-const showsArgs = version === "0.99.0";
-for (const [name, key, value] of [["fm_branch_outcomes", "recent", 2], ["fm_branch_processed", "through", 1]]) {
-  const tool = tools.find((candidate) => candidate.name === name);
-  if (!tool) throw new Error(`${name} was not registered`);
-  const title = `<toolTitle>**${name}**</toolTitle>`;
-  for (const expanded of [false, true]) {
-    const stock = !showsArgs
-      ? title
-      : expanded
-        ? `${title}\n<muted>  ${key}: ${value}</muted>`
-        : `${title} <muted>${key}=${value}</muted>`;
-    const shell = tool.renderCall({ [key]: value }, theme, { state: {}, expanded, isError: false, isPartial: false });
-    const header = shell.children[0]?.text;
-    if (header !== stock) {
-      throw new Error(`Pi ${version} ${expanded ? "expanded" : "collapsed"} ${name} header ${JSON.stringify(header)} is not stock ${JSON.stringify(stock)}`);
-    }
-  }
-}
-JS
-    status=$?
-    out=$(cat "$TMP_ROOT/node-output")
-    expect_code 0 "$status" "Pi $version supervision tool call headers must match that version's stock header: $out"
-    [ -z "$out" ] || fail "Pi $version call header test printed output: $out"
-  done
-  pass "fm_branch_outcomes and fm_branch_processed call headers match stock on Pi before and from 0.99"
-}
-
 test_outcomes_tool_uses_stock_execution_and_export_consumers() {
   if ! command -v node >/dev/null 2>&1; then
     echo "skip: node not found for Pi outcomes rendering test"
@@ -5064,17 +5004,12 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
     echo "skip: installed @earendil-works/pi-coding-agent package not found"
     return
   fi
-  # This case compares the extension's own renderers against Pi's stock
-  # rendering, so its verdict is only meaningful against the vendor contract
-  # those renderers target: since Pi 0.84.4 the stock renderer no longer
-  # supplies an implicit reset at multiline boundaries, and the extension
-  # emits that reset itself. An older installed Pi still supplies it, so the
-  # two legitimately differ there and a comparison would report a defect that
-  # is really a version skew. Name the version and skip rather than degrade
-  # quietly; a package whose version cannot be read at all is still a failure.
   package_version=$(node -p 'require(process.argv[1]).version || ""' "$package_dir/package.json" 2>/dev/null || printf '')
   [ -n "$package_version" ] \
     || fail "installed @earendil-works/pi-coding-agent has no readable version at $package_dir"
+  # The fixture below must exercise both preview truncation and expansion.
+  # Older Pi renders all lines instead; the adapter still delegates to that
+  # stock behavior, which the portable all-line fixture covers.
   if ! pi_version_at_least "$package_version" "$PI_STOCK_RENDER_FLOOR"; then
     echo "skip: installed Pi $package_version predates the stock renderer contract $PI_STOCK_RENDER_FLOOR this case compares against"
     return
@@ -5124,111 +5059,109 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?consumer=${Date.now()}`);
 extension.default(pi);
-const actualDefinition = tools.find((tool) => tool.name === "fm_branch_outcomes");
-if (!actualDefinition) throw new Error("fm_branch_outcomes was not registered");
-const stockDefinition = { ...actualDefinition };
-delete stockDefinition.renderShell;
-delete stockDefinition.renderCall;
-delete stockDefinition.renderResult;
+for (const [name, args] of [
+  ["fm_branch_outcomes", { recent: 2 }],
+  ["fm_branch_processed", { through: 2 }],
+]) {
+  const actualDefinition = tools.find((tool) => tool.name === name);
+  if (!actualDefinition) throw new Error(`${name} was not registered`);
+  const stockDefinition = { ...actualDefinition };
+  delete stockDefinition.renderShell;
+  delete stockDefinition.renderCall;
+  delete stockDefinition.renderResult;
 
-const args = { recent: 2 };
-const result = {
-  content: [{
-    type: "text",
-    text: [
-      "\x1b[31mOUTCOME_ONE\x1b[0m",
-      "OUT\u0000COME_TWO\uFFF9",
-      "OUTCOME_THREE",
-      "OUTCOME_FOUR",
-      "OUTCOME_FIVE",
-      "OUTCOME_SIX",
-      "OUTCOME_SEVEN",
-      "OUTCOME_EIGHT",
-      "OUTCOME_NINE",
-      "OUTCOME_TEN",
-      "OUTCOME_ELEVEN",
-      "OUTCOME_TWELVE",
-    ].join("\r\n"),
-  }],
-  details: { ok: true },
-  isError: false,
-};
-const ui = { requestRender() {} };
-const stockRow = new ToolExecutionComponent("fm_branch_outcomes", "stock", args, { showImages: false }, stockDefinition, ui, process.cwd());
-const actualRow = new ToolExecutionComponent("fm_branch_outcomes", "actual", args, { showImages: false }, actualDefinition, ui, process.cwd());
-for (const row of [stockRow, actualRow]) {
-  row.markExecutionStarted();
-  row.setArgsComplete();
-  row.updateResult(result);
-}
-const collapsedStock = stockRow.render(100);
-const collapsedActual = actualRow.render(100);
-if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
-  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
-}
-const collapsedText = collapsedStock.join("\n");
-if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
-  throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
-}
-stockRow.setExpanded(true);
-actualRow.setExpanded(true);
-const expandedStock = stockRow.render(100);
-const expandedActual = actualRow.render(100);
-if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
-  throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
-}
-if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
-  throw new Error("stock rendering fixture did not exercise expanded output");
-}
-const processedDefinition = tools.find((tool) => tool.name === "fm_branch_processed");
-if (!processedDefinition) throw new Error("fm_branch_processed was not registered");
-const stockProcessedDefinition = { ...processedDefinition };
-delete stockProcessedDefinition.renderShell;
-delete stockProcessedDefinition.renderCall;
-delete stockProcessedDefinition.renderResult;
-const processedArgs = { through: 1 };
-const processedResult = { content: [{ type: "text", text: "acknowledged through 1" }], details: undefined, isError: false };
-const stockProcessed = new ToolExecutionComponent("fm_branch_processed", "stock-processed", processedArgs, { showImages: false }, stockProcessedDefinition, ui, process.cwd());
-const actualProcessed = new ToolExecutionComponent("fm_branch_processed", "actual-processed", processedArgs, { showImages: false }, processedDefinition, ui, process.cwd());
-for (const row of [stockProcessed, actualProcessed]) {
-  row.markExecutionStarted();
-  row.setArgsComplete();
-  row.updateResult(processedResult);
-}
-for (const expanded of [false, true]) {
-  stockProcessed.setExpanded(expanded);
-  actualProcessed.setExpanded(expanded);
-  if (JSON.stringify(actualProcessed.render(100)) !== JSON.stringify(stockProcessed.render(100))) {
-    throw new Error(`${expanded ? "expanded" : "collapsed"} Calm-off fm_branch_processed rendering differs from Pi stock`);
+  const result = {
+    content: [{
+      type: "text",
+      text: [
+        "\x1b[31mOUTCOME_ONE\x1b[0m",
+        "OUT\u0000COME_TWO\uFFF9",
+        "OUTCOME_THREE",
+        "OUTCOME_FOUR",
+        "OUTCOME_FIVE",
+        "OUTCOME_SIX",
+        "OUTCOME_SEVEN",
+        "OUTCOME_EIGHT",
+        "OUTCOME_NINE",
+        "OUTCOME_TEN",
+        "OUTCOME_ELEVEN",
+        "OUTCOME_TWELVE",
+      ].join("\r\n"),
+    }],
+    details: { ok: true },
+    isError: false,
+  };
+  const ui = { requestRender() {} };
+  const stockRow = new ToolExecutionComponent(name, "stock", args, { showImages: false }, stockDefinition, ui, process.cwd());
+  const actualRow = new ToolExecutionComponent(name, "actual", args, { showImages: false }, actualDefinition, ui, process.cwd());
+  for (const row of [stockRow, actualRow]) {
+    row.markExecutionStarted();
+    row.setArgsComplete();
+    row.updateResult(result);
   }
-}
-pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
-actualRow.invalidate();
-if (actualRow.render(100).length !== 0) {
-  throw new Error("Calm-on ToolExecutionComponent row remained visible");
-}
-pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
-actualRow.invalidate();
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
-  throw new Error("ToolExecutionComponent rendering did not restore after live toggle");
-}
+  const collapsedStock = stockRow.render(100);
+  const collapsedActual = actualRow.render(100);
+  if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
+    throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+  }
+  const collapsedText = collapsedStock.join("\n");
+  if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
+    throw new Error("stock rendering fixture did not exercise its collapsed preview and expansion hint");
+  }
+  stockRow.setExpanded(true);
+  actualRow.setExpanded(true);
+  const expandedStock = stockRow.render(100);
+  const expandedActual = actualRow.render(100);
+  if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+    throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
+  }
+  if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
+    throw new Error("stock rendering fixture did not exercise expanded output");
+  }
+  pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: false });
+  actualRow.invalidate();
+  if (actualRow.render(100).length !== 0) {
+    throw new Error("Calm-on ToolExecutionComponent row remained visible");
+  }
+  pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+  actualRow.invalidate();
+  if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+    throw new Error("ToolExecutionComponent rendering did not restore after live toggle");
+  }
 
-pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
-const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, theme, cwd: process.cwd() });
-const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, theme, cwd: process.cwd() });
-const stockCall = stockHtml.renderCall("stock-html", "fm_branch_outcomes", args);
-const actualCall = actualHtml.renderCall("actual-html", "fm_branch_outcomes", args);
-const stockResult = stockHtml.renderResult("stock-html", "fm_branch_outcomes", result.content, result.details, false);
-const actualResult = actualHtml.renderResult("actual-html", "fm_branch_outcomes", result.content, result.details, false);
-if (actualCall !== undefined || actualResult !== undefined || stockCall !== undefined || stockResult !== undefined) {
-  throw new Error("stock export rendering did not delegate to Pi's structured fallback");
+  pi.events.emit("firstmate:calm-presentation", { active: true, stockExportRendering: true });
+  const stockHtml = createToolHtmlRenderer({ getToolDefinition: () => stockDefinition, theme, cwd: process.cwd() });
+  const actualHtml = createToolHtmlRenderer({ getToolDefinition: () => actualDefinition, theme, cwd: process.cwd() });
+  const stockCall = stockHtml.renderCall("stock-html", name, args);
+  const actualCall = actualHtml.renderCall("actual-html", name, args);
+  const stockResult = stockHtml.renderResult("stock-html", name, result.content, result.details, false);
+  const actualResult = actualHtml.renderResult("actual-html", name, result.content, result.details, false);
+  if (actualCall !== undefined || actualResult !== undefined || stockCall !== undefined || stockResult !== undefined) {
+    throw new Error("stock export rendering did not delegate to Pi's structured fallback");
+  }
+  pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
+  for (const expanded of [false, true]) {
+    for (const isError of [false, true]) {
+      for (const isPartial of [false, true]) {
+        for (const row of [stockRow, actualRow]) {
+          row.setExpanded(expanded);
+          row.updateResult({ ...result, isError }, isPartial);
+        }
+        for (const width of [40, 100]) {
+          if (JSON.stringify(actualRow.render(width)) !== JSON.stringify(stockRow.render(width))) {
+            throw new Error(`${name} differs from stock at width=${width}, expanded=${expanded}, error=${isError}, partial=${isPartial}`);
+          }
+        }
+      }
+    }
+  }
 }
 JS
   )
   status=$?
   expect_code 0 "$status" "Pi outcomes rendering consumers must preserve stock behavior: $out"
   [ -z "$out" ] || fail "Pi outcomes rendering consumer test printed output: $out"
-  pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
+  pass "both supervision tools hide through ToolExecutionComponent while Calm-off calls, results, expansion, partial/error rows, and HTML export stay stock"
 }
 
 # The delivery path runs on Pi's single JS thread, so a delivery that blocks
@@ -5797,7 +5730,6 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
-test_outcomes_tool_call_headers_follow_the_loaded_pi_version
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract

@@ -41,8 +41,9 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active. A pane about to escalate
 #                          that can account for its quiet - a `paused:` external
-#                          wait or a verified `captain-held` transfer its worker
-#                          declared, or, where config/wedge-defer-parked-gate
+#                          wait, a verified `captain-held` transfer, or a
+#                          newest `blocked:`, `needs-decision:`, or holding
+#                          `working:` line its worker declared, or, where config/wedge-defer-parked-gate
 #                          arms it, a validation gate of its own awaiting a
 #                          supervisor decision nobody has answered yet - is
 #                          deferred to that same long recheck cadence instead
@@ -1227,9 +1228,22 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
 # read at the one moment it decides anything: when an escalation is about to
 # fire. Two records answer it, and they are independent: the worker's own status
-# line - a declared `paused:` external wait, or a verified `captain-held`
-# transfer - and, when that line explains nothing, the crew's authoritative
-# current state.
+# line - a declared `paused:` external wait, a verified `captain-held`
+# transfer, or a latest event that parks the lane
+# (status_is_parked_lane in fm-classify-lib.sh, which admits a `blocked:` or
+# `needs-decision:` line and a `working:` line with an explicit hold
+# declaration) - and, when that line explains
+# nothing, the crew's authoritative current state.
+#
+# Each of those latest events is the worker saying it is parked, and a
+# `blocked:` or `needs-decision:` line already woke firstmate when it landed, so
+# re-escalating the same quiet as a possible wedge re-proves a stated fact and
+# climbs the escalation count on nothing new. Only the LATEST event counts: any
+# later line - a `resolved` for any key, a `working:` without a hold declaration -
+# means the worker moved on, and the pane keeps the unchanged schedule. The
+# working hold is the weakest of these; like the others it only defers
+# onto the bounded recheck, and `paused:` stays the declaration workers should
+# write.
 #
 # The generated brief promises that declaring one buys the long recheck cadence
 # instead of a wedge, and the wedge timer is reachable while that declaration
@@ -1250,9 +1264,9 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # The second record is OFF unless the home creates config/wedge-defer-parked-gate,
 # and that one guard is what makes an unconfigured home's behaviour identical to
 # having no second record at all: it is read before the fold, so no fold or
-# crew-state read is spent, no wait record exists to defer on, no recheck wording
-# is reachable, and the lane keeps the unchanged escalation schedule, reason and
-# demand-deep-inspection wording. Unlike the status line, which is the worker's
+# crew-state read is spent for gate evidence. The first record can still defer
+# independently; docs/architecture.md owns the shared wait-evidence contract.
+# Unlike the status line, which is the worker's
 # own declaration about its own silence, this record is derived from a pipeline's
 # gate state, so which lanes lose the ladder for it is a home's choice to make
 # rather than a default every fleet inherits - the same reason
@@ -1282,8 +1296,9 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 #     crewmate's OWN next move;
 #   - the crewmate parked at a human-owed gate and went quiet before escalating
 #     it at all: nobody was ever told, so there is no wait to defer to.
-# A `blocked` record does not count: a blocker is not an unanswered gate decision
-# and a different action clears it. A gate awaiting the CREWMATE's own answer is
+# A `blocked` record does not count as this second record: a blocker is not an
+# unanswered gate decision and a different action clears it (a blocker that is
+# still the latest event is caught by the first record above). A gate awaiting the CREWMATE's own answer is
 # deliberately NOT evidence either: a crewmate that goes quiet before answering
 # its own gate is exactly the wedge this ladder exists to catch, so those keep
 # the unchanged schedule, reason and demand-deep-inspection wording.
@@ -1297,7 +1312,7 @@ wait_record() {  # <kind> <subject> <whom> <action> <age-record>
 # `needs-decision` at all, and only in the at-threshold branch - at most once per
 # window per STALE_ESCALATE_SECS, never on an ordinary poll.
 wedge_wait_evidence() {  # <task> -> one wait_record on stdout
-  local task=$1 last until statusf run
+  local task=$1 last until statusf run verb latest
   [ -n "$task" ] || return 1
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
@@ -1312,6 +1327,25 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
     fi
     wait_record 'declared wait' 'awaiting external' \
       external 'confirm the wait still holds' "$statusf"
+    return 0
+  fi
+  latest=$(last_status_line "$statusf")
+  status_line_verb "$latest" verb
+  if status_is_parked_lane "$latest"; then
+    case "$verb" in
+      working)
+        wait_record 'declared hold' 'holding per its own newest working: line' \
+          supervisor "confirm what it is holding for; a holding lane should write ${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}: or needs-decision:" "$statusf"
+        ;;
+      blocked)
+        wait_record 'declared blocker' 'awaiting firstmate - its blocker was already reported' \
+          supervisor 'clear the reported blocker and resolve it with fm-send --resolve-key' "$statusf"
+        ;;
+      needs-decision)
+        wait_record 'declared decision' 'awaiting firstmate - its decision was already reported' \
+          supervisor 'answer the reported decision with fm-send --resolve-key' "$statusf"
+        ;;
+    esac
     return 0
   fi
   [ -e "$CONFIG/wedge-defer-parked-gate" ] || return 1
@@ -1644,13 +1678,10 @@ handle_paused_stale() {  # <window> <task> <hash>
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
-# A pane that declared nothing falls through to the shared wedge timer, which,
-# in a home that armed config/wedge-defer-parked-gate, applies the same rule to
-# the one wait a busy pane cannot declare: a validation gate of its own awaiting
-# a supervisor decision that is still open also takes the bounded recheck rather
-# than the ladder, because who owes that answer does not depend on what the pane
-# is rendering, and the recheck names that supervisor and the action that clears
-# it. An unconfigured home keeps the unchanged ladder there.
+# A pane without either declaration falls through to the shared wedge timer.
+# wedge_wait_evidence owns the remaining evidence reads, including newest-status
+# waits without a flag and gate-derived waits only in an armed home; the pane's
+# rendering cannot identify who owes a gate answer.
 # Away mode remains daemon-owned and receives the undecorated wake identity for
 # its own classification, which is why the declaration is read before the afk
 # branch rather than after it.

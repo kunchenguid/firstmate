@@ -355,20 +355,65 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# 0 if a `working:` note declares a hold at its start or after a period or
+# semicolon followed by whitespace - "Holding the build per 002", "waiting on the third PR",
+# "standing by", optionally prefixed by "currently". Embedded prose and
+# negated phrases are not declarations.
+# Weaker than a `paused:` verb, this only lets a supervisor DEFER a wedge
+# escalation onto the bounded recheck cadence, never drop one.
+status_is_working_hold() {  # <status-line>
+  local line=$1 verb note hold_re='(holding|on hold|waiting (on|for)|awaiting|standing by)'
+  [ -n "$line" ] || return 1
+  status_line_verb "$line" verb
+  [ "$verb" = working ] || return 1
+  note=$(status_line_note "$line")
+  _fm_classify_matches "$note" "(^|[.;][[:space:]]+)(currently[[:space:]]+)?$hold_re([^[:alnum:]_]|$)"
+}
+
+# 0 if a status line is the worker parking itself rather than reporting progress:
+# a `blocked:` or `needs-decision:` line that already woke its reporter, or a
+# `working:` note declaring a hold. Each is the worker's own account of its own
+# silence, so both supervisors treat it the same way: no wedge alarm, one bounded
+# recheck. Only the LATEST event parks a lane - any later line means the worker
+# moved on - so callers read this from the raw newest line.
+status_is_parked_lane() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    blocked|needs-decision) return 0 ;;
+    working) status_is_working_hold "$line" ;;
+    *) return 1 ;;
+  esac
+}
+
+# 0 for every declaration that makes an idle pane expected rather than suspect: a
+# `paused:` external wait, a verified `captain-held` transfer, or a parked-lane
+# newest event. This is the one question a supervisor asks before it ages a quiet
+# lane into a possible wedge; what differs per kind is only who the recheck names,
+# which a caller reads off the line's own verb.
+status_is_declared_wait() {  # <status-line>
+  local line=$1
+  status_is_paused_or_captain_held "$line" || status_is_parked_lane "$line"
+}
+
 # The status line that holds a crew in a declared wait, or nothing when it is in
-# none. Supervisors decide the wait from this line, never from the raw latest
-# event: a resolved line is also how firstmate answers a decision (fm-send
+# none. Supervisors read paused and captain-held declarations from this line,
+# rather than the raw latest event: a resolved line also answers a decision (fm-send
 # --resolve-key), and one that lands after a pause for a different phase key -
 # including the stated default key a keyless decision shares - does not end the
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
 # does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
-# resolved events widens the read to the whole file.
+# latest event. A parked-lane declaration is the raw latest event rather than a
+# folded one: the worker rewrote that line about itself, so any later event -
+# including a resolved line for any key - ends that wait. Bounded like
+# last_status_line: only a tail window made wholly of resolved events widens the
+# read to the whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
-  if status_is_paused_or_captain_held "$last"; then
+  if status_is_declared_wait "$last"; then
     printf '%s\n' "$last"
     return 0
   fi

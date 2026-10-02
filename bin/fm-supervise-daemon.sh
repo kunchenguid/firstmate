@@ -52,8 +52,9 @@
 #     only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
-#     fm-classify-lib.sh's combined predicate - instead gets its own longer
+#     paused: external wait, a verified captain-held transfer, or a lane the
+#     worker parked with blocked:, needs-decision:, or a holding working: line,
+#     per fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
 #     ends that routing. A captain-held transfer is not rechecked at all while
@@ -443,14 +444,19 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     return
   fi
   declared=$(status_declared_wait_line "$state/$task.status")
-  if [ -n "$declared" ] && status_is_paused_or_captain_held "$declared"; then
-    # A DECLARED external-wait pause or a verified captain-held transfer
-    # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
-    # EXPECTED, so this is not a wedge. The caller records a pause marker (long
-    # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
-    # a status-file read, no fm-crew-state.sh call, mirroring the
+  if status_is_declared_wait "$declared"; then
+    # A DECLARED wait: an external-wait pause, a verified captain-held transfer,
+    # or the crew parking itself on a blocker, an open decision, or a holding
+    # working: line (fm-classify-lib.sh owns which declarations qualify). An
+    # idle pane is EXPECTED, so this is not a wedge. The caller records a pause
+    # marker (long re-surface cadence in housekeeping) rather than a wedge stale
+    # marker. Cheap: a status-file read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
-    printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$declared"
+    if status_is_parked_lane "$declared"; then
+      printf 'pause|parked lane, rechecked on a long cadence: %s' "$declared"
+    else
+      printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$declared"
+    fi
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -579,7 +585,7 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
-  if status_is_paused_or_captain_held "$last"; then
+  if status_is_declared_wait "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
@@ -597,7 +603,7 @@ migrate_watcher_pause_markers() {  # <state>
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
     last=$(status_declared_wait_line "$state/$task.status")
-    if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
+    if status_is_declared_wait "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
   done
@@ -1235,7 +1241,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
-    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+    if status_is_declared_wait "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1251,8 +1257,10 @@ housekeeping() {  # <state>
     esac
   done
 
-  # (2b) pause re-surface recheck. A declared wait is waiting, not wedged (fm-classify-lib.sh's
-  # status_is_paused_or_captain_held owns which declarations qualify), so it is
+  # (2b) pause re-surface recheck. A declared wait - a paused external wait, a
+  # verified captain-held transfer, or a lane the worker parked with blocked:,
+  # needs-decision:, or a holding working: line (fm-classify-lib.sh's
+  # status_is_declared_wait owns which declarations qualify), so it is
   # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
   # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
   # forgotten captain hold can rot invisibly. Past the window: gone -> drop; still
@@ -1276,7 +1284,7 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(status_declared_wait_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
+    if ! status_is_declared_wait "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1326,6 +1334,10 @@ housekeeping() {  # <state>
             if [ -n "$until" ] && [ "$now" -ge "$until" ]; then
               printf '%s\n' "$until" > "$due"
             fi
+          fi
+        elif [ -n "$last" ] && status_is_parked_lane "$last"; then
+          if escalate_add "$state" "parked ${age}s (its own newest status parks it, recheck whether the wait still holds): $win"; then
+            _now > "$marker"
           fi
         else
           rm -f "$marker"
@@ -1607,7 +1619,7 @@ handle_wake() {  # <reason> <state>
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
+                       status_is_declared_wait "$last" \
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;

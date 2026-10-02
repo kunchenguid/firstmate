@@ -152,6 +152,7 @@ IFS= read -r -d '' CREWMATE_PAUSE_INSTRUCTIONS <<EOF || true
    When you know when the wait clears, include \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) for a recheck at that time.
    Follow the resolution rule below when the wait clears, then resume the task.
    Use \`blocked:\` when you are stuck and need help.
+   Whenever you park, make \`$PAUSED_VERB:\`, \`blocked:\`, or \`needs-decision:\` your newest status line rather than a \`working:\` line that only mentions holding.
 EOF
 
 resolve_directory_input() {
