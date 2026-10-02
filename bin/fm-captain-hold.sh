@@ -156,7 +156,9 @@
 # Both gates read the active home's backlog first; an entry absent there is
 # durable only when a local secondmate home registered in data/secondmates.md
 # holds that exact task id for the captain or records its captain answer, and
-# `complete` names that mate beside the entry. A remote route is never read.
+# `complete` names that mate beside the entry. A registered home is read only
+# while its .fm-secondmate-home marker is a regular file, not a symlink, naming
+# that registered id. A remote route is never read.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -550,11 +552,13 @@ verify_hold_durable() {  # <task-id>
 # home's backlog, not this one's. Look the exact task id up in each local home
 # data/secondmates.md registers and accept the first row that is durably
 # captain-held or answered there. A remote route has no local backlog to read,
-# so it is never consulted. Prints the mate id on its first line and that
-# row's full show output after it, so the caller applies the same identity and
-# origin checks as a row in this home; returns 1 when no registered home
-# durably carries it. Callers run it in a command substitution, so rebinding
-# DATA to each home cannot leak into this shell.
+# so it is never consulted, and neither is a registered path that is not still
+# the seeded home of that mate: its .fm-secondmate-home marker must be a
+# regular file, not a symlink, naming the registered id. Prints the mate id on
+# its first line and that row's full show output after it, so the caller
+# applies the same identity and origin checks as a row in this home; returns 1
+# when no registered home durably carries it. Callers run it in a command
+# substitution, so rebinding DATA to each home cannot leak into this shell.
 resolve_entry_in_secondmate_home() {  # <entry>
   local entry=$1 reg="$DATA/secondmates.md" line own mate_data
   [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
@@ -564,6 +568,7 @@ resolve_entry_in_secondmate_home() {  # <entry>
     secondmate_registry_parse_line "$line" || continue
     [ "$SECONDMATE_REGISTRY_REMOTE" = 0 ] || continue
     case "$SECONDMATE_REGISTRY_HOME" in /*) ;; *) continue ;; esac
+    [ "$(fm_parent_channel_home_id "$SECONDMATE_REGISTRY_HOME")" = "$SECONDMATE_REGISTRY_ID" ] || continue
     mate_data=$(fm_backlog_data_absolute "$SECONDMATE_REGISTRY_HOME/data" 2>/dev/null) || continue
     [ "$mate_data" != "$own" ] || continue
     DATA=$mate_data

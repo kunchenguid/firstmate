@@ -1386,11 +1386,15 @@ EOF
 # A scout's captain call can be handed to a registered secondmate home and held
 # there, so the main home's completion gate accepts an attested entry that is
 # durably held or answered in a registered secondmate home's backlog, and still
-# refuses one held nowhere or in a home the registry does not name.
+# refuses one held nowhere, in a home the registry does not name, or in a
+# registered path that is no longer that mate's seeded home.
 test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home() {
   local parent mate origin err out rc
   parent=$(make_home main-cross-home)
   mate=$(make_home mate-cross-home)
+  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
   origin=sample-cross-home-proposal
   tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
   write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call
@@ -1411,6 +1415,23 @@ test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home() {
 
   printf -- '- sample-mate - synthetic scope (home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
     "$mate" > "$parent/data/secondmates.md"
+  rm -f "$mate/.fm-secondmate-home"
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify read a registered home that carries no secondmate marker"
+  assert_contains "$err" "sample-provider-call" "the unmarked-home refusal did not name the entry"
+  printf 'other-mate\n' > "$mate/.fm-secondmate-home"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a registered home marked for another secondmate"
+  fi
+  rm -f "$mate/.fm-secondmate-home"
+  printf 'sample-mate\n' > "$mate/marker-source"
+  ln -s "$mate/marker-source" "$mate/.fm-secondmate-home"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a registered home whose secondmate marker is a symlink"
+  fi
+  rm -f "$mate/.fm-secondmate-home"
+  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
   run_captain "$parent" verify "$origin" >/dev/null \
     || fail "verify refused a call durably held in a registered secondmate home"
   out=$(run_captain "$parent" complete "$origin" sample-provider-call) \
