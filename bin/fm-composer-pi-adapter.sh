@@ -10,13 +10,16 @@
 # and docs/verification/runtime-backends.md "Pi Codex usage-limit banner"):
 #   - pi 0.85.1: banner alone above the separator pair
 #   - pi 0.87.1: banner plus one fixed "/bug sends a report" hint row
+#   - pi 0.99.2, 1.0.0: same banner plus hint-row shape as 0.87.1
 #
-# Callers set FM_COMPOSER_PI_ADAPTER_VERSION to the installed `pi --version`
-# text (or a test fixture pin). Outside the pin set the adapter refuses the
-# banner-as-empty verdict so an unpinned Pi rendering cannot become a shared
-# empty proof. The portable byte fixtures set the pin explicitly; the live
-# guard fails naming pi and its version when the installed release is outside
-# the set or respells the banner.
+# The adapter reads the installed release from the first line of
+# `pi --version` once per process; FM_COMPOSER_PI_ADAPTER_VERSION overrides it
+# (test fixtures pin it explicitly). Outside the pin set, or when no version can
+# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
+# rendering cannot become a shared empty proof and the classifier keeps its
+# ordinary unknown answer. The live guard proves the pinned shape on a pinned
+# install, and on an unpinned install proves that refusal and names the release
+# whose pin needs refreshing.
 #
 # Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
 
@@ -24,7 +27,7 @@
 
 # Pinned releases whose rendered banner shape has a live guard record.
 # Space-separated exact `pi --version` first-line values (no "pi " prefix).
-FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1'}
+FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1 0.99.2 1.0.0'}
 
 # Fixed banner Pi draws once a turn ended on Codex's usage limit.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
@@ -36,21 +39,32 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   local v=${1:-} pin
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
-  # Accept "0.85.1" or "pi 0.85.1" or longer first lines that start with the pin.
+  # Accept "0.85.1" or "pi 0.85.1"; anything after the version word is ignored,
+  # but the version itself must equal a pin exactly (1.0.0 never admits 1.0.01).
   v=${v#pi }
   v=${v#Pi }
   [ -n "$v" ] || return 1
+  v=${v%%[[:space:]]*}
   for pin in $FM_COMPOSER_PI_BANNER_PINNED_VERSIONS; do
-    case "$v" in
-      "$pin"|"$pin"*) return 0 ;;
-    esac
+    [ "$v" = "$pin" ] && return 0
   done
   return 1
 }
 
-# Resolve the adapter version: explicit override, else empty (unpinned).
+# Resolve the adapter version: the explicit override, else the installed
+# `pi --version` first line, read once and cached for the process. Empty when
+# neither is available, which the pin check treats as unpinned.
 fm_composer_pi_adapter_resolved_version() {
   local v=${FM_COMPOSER_PI_ADAPTER_VERSION:-}
+  if [ -z "$v" ]; then
+    if [ -z "${_FM_COMPOSER_PI_INSTALLED_VERSION+x}" ]; then
+      _FM_COMPOSER_PI_INSTALLED_VERSION=
+      if command -v pi >/dev/null 2>&1; then
+        _FM_COMPOSER_PI_INSTALLED_VERSION=$(pi --version 2>/dev/null | head -1) || _FM_COMPOSER_PI_INSTALLED_VERSION=
+      fi
+    fi
+    v=$_FM_COMPOSER_PI_INSTALLED_VERSION
+  fi
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
