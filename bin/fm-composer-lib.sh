@@ -55,6 +55,10 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
+#                An aligned title may contain U+00B7 before a mode badge
+#                (`Grok 4.7 (high) · always-approve`). Grok's status-line
+#                failure row and its shortcuts bar sit flush under that box
+#                and are footer furniture, not a second composer.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -508,6 +512,18 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # Consulted only as the dead-shell exception below, never as composer content,
 # so the same string typed between the separator pair still reads pending.
 FM_COMPOSER_PI_STATUS_RE_DEFAULT='^\$[0-9]+(\.[0-9]+)?([[:space:]]|$)'
+# Grok draws an optional status-line row flush under its bordered composer,
+# directly above the shortcuts bar, with no blank row between either of them
+# and the box (user guide "status line"; captured live on grok 1.0.30, the
+# border title reading Grok 4.7). A script that prints nothing and fails is
+# painted as `[status line: exit N]`; the same row shows the other failures
+# Grok itself renders (`timed out`, `killed by signal`, `could not start the
+# script`). Successful script stdout is whatever the script printed and is
+# NOT this pattern: it stays unclaimed activity so an arbitrary footer cannot
+# prove the composer empty. The shortcuts bar under that row (or flush under
+# the box when no status line is configured) is `Shift+Tab:mode │ Ctrl+…`.
+FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT='^\[status line: (exit [0-9]+|timed out|killed by signal|could not start the script:.*)\]$'
+FM_COMPOSER_GROK_SHORTCUTS_RE_DEFAULT='^Shift\+Tab:mode[[:space:]]+│[[:space:]]+Ctrl\+'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
@@ -1078,6 +1094,13 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  # Grok's mode badge sits inside an otherwise aligned title, separated by
+  # U+00B7 (`Grok 4.7 (high) · always-approve`). One column, two UTF-8 bytes.
+  # Blank it the same way ASCII title text is blanked, or the residue check
+  # below rejects a border whose column width already matches. The overhang
+  # path further down still requires the typed model/effort title, so a wider
+  # badge does not become proof.
+  spaces=${spaces//·/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -1395,6 +1418,21 @@ _fm_composer_row_is_composer_furniture() {  # <trimmed-row> <proof-glyph>
   [ -n "$proof" ] && [ "$glyph" != "$proof" ]
 }
 
+# _fm_composer_row_is_grok_footer: 0 when <trimmed-row> is Grok's own footer
+# furniture drawn flush under the bordered composer (see
+# FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT). One row of either kind is not
+# typed input and is not a second composer. Anything else, including a
+# status-line script's own stdout, is not furniture.
+_fm_composer_row_is_grok_footer() {  # <trimmed-row>
+  local row=$1
+  [ -n "$row" ] || return 1
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_GROK_STATUS_ERROR_RE:-$FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT}" sensitive \
+    && return 0
+  fm_composer_idle_matches "$row" \
+    "${FM_COMPOSER_GROK_SHORTCUTS_RE:-$FM_COMPOSER_GROK_SHORTCUTS_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_locate_footer_zone: THE composer footer zone of <plain> (see THE
 # COMPOSER FOOTER ZONE in this file's header). Records the bottom-most
 # glyph-PROVEN envelope in FM_COMPOSER_FOOTER_AFTER (its closing row, including
@@ -1584,13 +1622,25 @@ _fm_composer_select_cursorless() {
     if [ "$footer" = 1 ] && [ "$FM_COMPOSER_FOOTER_AFTER" = "$boundary" ]; then
       next=$((FM_COMPOSER_FOOTER_LAST + 1))
     fi
-    raw=$(_fm_composer_screen_row "$next" "$plain")
-    trimmed=$raw
-    fm_composer_normalize_trim_var trimmed
-    if [ -n "$trimmed" ] && ! fm_composer_row_has_edge "$trimmed"; then
+    # A blank or edge row still ends the probe, as before. Grok's status-line
+    # failure and shortcuts bar are a contiguous furniture run in that same
+    # slot: skip the run, and refuse on the first row that is neither
+    # furniture nor a blank or edge. One unclaimed row (`Working on
+    # request...`, a script's own status text, a dialog) keeps the box stale.
+    while :; do
+      raw=$(_fm_composer_screen_row "$next" "$plain")
+      trimmed=$raw
+      fm_composer_normalize_trim_var trimmed
+      if [ -z "$trimmed" ] || fm_composer_row_has_edge "$trimmed"; then
+        break
+      fi
+      if _fm_composer_row_is_grok_footer "$trimmed"; then
+        next=$((next + 1))
+        continue
+      fi
       FM_COMPOSER_SELECTED_KIND=
       return 1
-    fi
+    done
   fi
   [ -n "$FM_COMPOSER_SELECTED_KIND" ]
 }
