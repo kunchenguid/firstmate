@@ -844,7 +844,11 @@ test_opencode_v2_launch_pins_model_and_submits_pointer() {
 printf '%s\\n' "\$OPENCODE_CONFIG_CONTENT" > '$CASE_DIR/config.json'
 SH
   chmod +x "$FAKEBIN_DIR/opencode"
-  launch=$(rg -m1 'OPENCODE_CONFIG_CONTENT=' "$LAUNCH_LOG")
+  # Extract with a coreutil: ripgrep is not a repository test dependency, so a
+  # host without `rg` made this assignment empty and the executed command a
+  # no-op. The launch is the first literal the pane receives, so line one is it.
+  launch=$(head -n 1 "$LAUNCH_LOG")
+  [ -n "$launch" ] || fail "OpenCode v2 launch was not logged; nothing to execute"
   PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
   jq -e '.model == "nvidia/z-ai/glm-5.3" and .agent.build.model == .model' "$CASE_DIR/config.json" >/dev/null \
     || fail "executed v2 launch did not retain exact root and agent model selection"
@@ -951,7 +955,8 @@ SH
   status=$?
   expect_code 0 "$status" "OpenCode spawn with a divergent pane PATH should succeed: $out"
   assert_contains "$(cat "$LAUNCH_LOG")" "'$FAKEBIN_DIR/opencode'" "the launch did not name the probed OpenCode executable"
-  launch=$(rg -m1 'OPENCODE_CONFIG_CONTENT=' "$LAUNCH_LOG")
+  launch=$(head -n 1 "$LAUNCH_LOG")
+  [ -n "$launch" ] || fail "OpenCode launch was not logged; nothing to execute"
   PATH="$other:$PATH" bash -c "$launch"
   [ -f "$CASE_DIR/probed-executed.json" ] || fail "the pane PATH did not start the probed OpenCode executable"
   [ ! -f "$CASE_DIR/other-executed.json" ] || fail "the pane PATH started an executable the probe never checked"
