@@ -1886,13 +1886,8 @@ test_seeded_module_boundary_parity() {
     pass "SKIP (ShellCheck $REQUIRED not resolved): seeded source-boundary parity check"
     return
   fi
-  local tmp rel adapter dispatcher dep owner test_root out rc
-  tmp=$(mktemp -d "$ROOT/.fm-lint-parity.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$tmp")
-  rel=${tmp#"$ROOT/"}
+  local tmp adapter dispatcher dep owner test_root out rc
+  tmp=$(fm_test_tmproot fm-lint-parity)
   adapter="$tmp/adapter.sh"
   dispatcher="$tmp/dispatcher.sh"
   dep="$tmp/owner-dep.sh"
@@ -1920,7 +1915,7 @@ owner_dependency_value=ok
 SH
   cat > "$owner" <<SH
 #!/usr/bin/env bash
-# shellcheck source=$rel/owner-dep.sh
+# shellcheck source=$dep
 . "$dep"
 owner_bad() {
   printf '%s\n' "\$owner_dependency_value"
