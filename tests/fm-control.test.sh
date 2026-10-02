@@ -778,23 +778,35 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
-test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
-  local dir out rc
+test_missing_tmux_endpoint_reports_gone_only_when_no_agent_works_there() {
+  local dir out rc agent
+  fm_proc_scan_available || { echo "skip - the tmux absence proof reads /proc"; return 0; }
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"
+  # `missing` on tmux is not on its own a finding about the endpoint: a task
+  # record carries no socket identity, so a window merely on a server this seat
+  # cannot reach reads the same as one that was destroyed. The absence proof
+  # asks what a duplicate agent would collide with instead - an agent process
+  # still working in the recorded worktree (docs/agent-control.md "Reclaiming a
+  # task whose endpoint is gone").
+  (cd "$dir/wt-t1" && exec -a claude /bin/sleep 60) &
+  agent=$!
+  fm_wait_for_agent_argv0 "$agent" \
+    || fail "the planted agent never reported a harness argv[0], so the refusal below would prove nothing"
   out=$(run_control "$dir" t1 exit); rc=$?
-  # `missing` on tmux is not a finding about the endpoint. A task record carries
-  # no socket identity for it, and any inventory describes only the tmux server
-  # this process addresses, so a window that is merely on a server this seat
-  # cannot reach is indistinguishable from one that was destroyed. exit refuses
-  # rather than claim a stop it cannot see, and sends nothing to an address it
-  # cannot trust. Reclaim of a destroyed endpoint is Herdr-only
-  # (docs/agent-control.md "Reclaiming a task whose endpoint is gone").
-  expect_code 1 "$rc" "a tmux endpoint whose absence cannot be proven must refuse"
+  kill "$agent" 2>/dev/null || true
+  wait "$agent" 2>/dev/null || true
+  expect_code 1 "$rc" "a tmux endpoint whose absence cannot be proven must refuse"$'\n'"$out"
   assert_not_contains "$out" "endpoint-gone" "exit must not report a stop it could not prove"
+  assert_contains "$out" "agent process $agent" "the refusal must name the agent it found"
   [ -z "$(literals "$dir")" ] || fail "nothing may be sent into an endpoint exit cannot trust"
-  pass "fm-control exit: an unprovable tmux endpoint refuses instead of claiming the agent stopped"
+
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a gone tmux endpoint with no agent in its worktree is proven gone"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone t1" "exit must say the endpoint did not survive"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be sent when there is no endpoint"
+  pass "fm-control exit: a gone tmux endpoint reports endpoint-gone only once no agent works in its worktree"
 }
 
 test_interrupt_refuses_when_no_agent_runs() {
@@ -817,8 +829,18 @@ test_ambiguous_endpoint_refuses() {
   out=$(run_control "$dir" t1 exit); rc=$?
   expect_code 1 "$rc" "an unattributed endpoint should refuse"
   assert_contains "$out" "positively classified" "the refusal should name the missing attribution"
+  assert_contains "$out" "retry bin/fm-control.sh t1 exit" \
+    "the refusal must name the verb the operator invoked"
+  assert_not_contains "$out" "bin/fm-control.sh t1 relaunch" \
+    "an exit refusal must not send the operator to the verb that launches a replacement"
   [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
-  pass "fm-control exit: an endpoint whose process cannot be attributed refuses"
+
+  out=$(run_control "$dir" t1 relaunch --note "the pane holds something unattributable"); rc=$?
+  expect_code 1 "$rc" "the same unattributed endpoint must refuse a relaunch too"
+  assert_contains "$out" 'retry bin/fm-control.sh t1 relaunch --note "<why>"' \
+    "a relaunch refusal must still name relaunch, with the note it requires"
+  [ -z "$(literals "$dir")" ] || fail "an unattributed endpoint must receive no bytes"
+  pass "fm-control: an endpoint whose process cannot be attributed refuses and names the invoked verb"
 }
 
 test_busy_agent_is_interrupted_before_the_exit_command() {
@@ -1095,7 +1117,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
-test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
+test_missing_tmux_endpoint_reports_gone_only_when_no_agent_works_there
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
