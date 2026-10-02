@@ -771,8 +771,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   # unpinned or absent pi keeps refusing.
   # Hermetic PATH: a private dir holding only the fake Pi executables plus the
   # host tools the classifier needs, so no host pi or pi-signed is ever found.
-  local fakebin tool src pi_v signed_v exe want n case_
-  fakebin=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-version.XXXXXX")
+  local fakebin tool src pi_v signed_v exe want n case_  fakebin=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-version.XXXXXX")
   for tool in head tr sed awk grep cat wc cut env dirname basename sort uniq; do
     src=$(command -v "$tool" 2>/dev/null) || continue
     case "$src" in /*) ln -s "$src" "$fakebin/$tool" ;; esac
@@ -786,8 +785,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     "9.9.9 0.99.2 pi-signed empty" "0.99.2 9.9.9 pi empty" \
     "0.99.2 9.9.9 pi-signed unknown" "9.9.9 0.99.2 pi unknown" \
     "0.99.2 absent pi-signed unknown" "absent 1.0.0 pi-signed empty"; do
-    read -r pi_v signed_v exe want <<< "$case_"
-    rm -f "$fakebin/pi" "$fakebin/pi-signed" "$fakebin/count"
+    read -r pi_v signed_v exe want <<< "$case_"    rm -f "$fakebin/pi" "$fakebin/pi-signed" "$fakebin/count"
     if [ "$pi_v" != absent ]; then
       printf '#!/bin/sh\necho pi >> "%s/count"\nprintf "%%s\\n" %s\n' "$fakebin" "$pi_v" > "$fakebin/pi"
       chmod +x "$fakebin/pi"
@@ -799,8 +797,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     out=$(
       unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
       # shellcheck disable=SC2030 # each case runs in its own subshell on purpose
-      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
-      PATH="$fakebin"
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"      PATH="$fakebin"
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
     )
     [ "$out" = "$want" ] \
@@ -810,8 +807,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     (
       unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
       # shellcheck disable=SC2031 # each case runs in its own subshell on purpose
-      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
-      PATH="$fakebin"
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"      PATH="$fakebin"
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
       fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
     )
