@@ -513,6 +513,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/session-lock-reason-306.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/stow-memory.md",
       "audience": "maintainer-verification"
     },

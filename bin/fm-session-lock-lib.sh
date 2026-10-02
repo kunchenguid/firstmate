@@ -163,6 +163,34 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# True when `ps` can inspect a process that is alive by construction: the
+# invoking shell itself, the very process running this code. A false verdict
+# is the one honest signal that process inspection itself failed or was
+# denied - the shape a Codex sandbox produces - and is never evidence about
+# any other process, live or dead.
+fm_harness_ps_inspects_live_shell() {
+  ps -o comm= -p $$ >/dev/null 2>&1
+}
+
+# Classify why an ancestry walk that found no verified harness failed. The
+# walk's own first inspection target is that same live invoking shell, so one
+# probe of it separates the two honest causes: `ps` failing there is process
+# inspection itself failing or being denied (ps-unavailable), while a probe
+# that succeeds means the walk really ran and completed without finding a
+# verified harness (harness-detect-failed), which covers both a sandboxed PID
+# namespace that hides the harness above its pid 1 and a plain shell with no
+# harness above it at all - no walk can tell those apart, and the label does
+# not pretend to. bin/fm-lock.sh prints this verdict as its stable
+# FM_LOCK_REASON classification for callers that must never conflate either
+# with another live session holding the lock.
+fm_harness_walk_fail_reason() {
+  if fm_harness_ps_inspects_live_shell; then
+    printf '%s\n' harness-detect-failed
+  else
+    printf '%s\n' ps-unavailable
+  fi
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
@@ -380,6 +408,14 @@ fm_session_lock_inspect() {  # <state>
     FM_LOCK_INSPECT_STATE=unknown
     return 0
   fi
+  # A `ps` that cannot inspect even this live invoking shell cannot prove the
+  # recorded pid dead either, so the honest verdict stays unknown; stale is
+  # reserved for a pid a working inspection itself could not find.
+  fm_harness_ps_inspects_live_shell || {
+    # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+    FM_LOCK_INSPECT_STATE=unknown
+    return 0
+  }
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=stale
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.

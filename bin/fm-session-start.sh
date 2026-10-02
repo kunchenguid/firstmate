@@ -682,21 +682,62 @@ stage lock
 subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
 LOCK_RC=$?
-printf '%s\n' "$LOCK_OUT"
+# fm-lock.sh classifies its identity-relevant acquire failures with a stable
+# FM_LOCK_REASON=<reason> stderr line (its header owns the reasons). Parse it
+# for the banner branch below, and keep the machine-readable line itself out
+# of the digest text the banner quotes: the banner names the class in plain
+# words instead.
+LOCK_REASON=$(printf '%s\n' "$LOCK_OUT" | sed -n 's/^FM_LOCK_REASON=//p' | head -1)
+LOCK_MSG=$(printf '%s\n' "$LOCK_OUT" | grep -v '^FM_LOCK_REASON=')
+printf '%s\n' "$LOCK_MSG"
 READ_ONLY=0
 if [ "$LOCK_RC" -ne 0 ]; then
   READ_ONLY=1
   BAR='●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '%s\n' "$BAR"
-    printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
-    printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
-    printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
-    printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
-    printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
-    printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
-    printf '●  otherwise mutate fleet state from this session.\n'
+    case "$LOCK_REASON" in
+      lock-held)
+        printf '●  READ-ONLY SESSION - ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK\n'
+        printf '●  %s\n' "$LOCK_MSG"
+        printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
+        printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+        printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+        printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+        printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
+        printf '●  otherwise mutate fleet state from this session.\n'
+        ;;
+      ps-unavailable|harness-detect-failed)
+        printf "●  READ-ONLY SESSION - UNABLE TO VERIFY THIS SESSION'S IDENTITY\n"
+        printf "●  This session cannot identify its own harness process, so it cannot verify\n"
+        printf '●  its identity and did not take the fleet lock. This is NOT a claim that\n'
+        printf '●  another live session holds the fleet lock. Firstmate refuses to mutate\n'
+        printf '●  fleet state whenever it cannot verify its own identity, so it stays\n'
+        printf '●  read-only by design. %s\n' "$LOCK_MSG"
+        printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
+        printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+        printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+        printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+        printf '●  Determine the true state before acting:\n'
+        printf '●    bin/fm-lock.sh status\n'
+        printf '●    tmux list-sessions\n'
+        printf '●    tmux list-panes -a\n'
+        printf '●    ps -axo pid,ppid,stat,lstart,command\n'
+        printf '●  A Codex sandbox may require approval for process inspection.\n'
+        printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
+        printf '●  otherwise mutate fleet state from this session.\n'
+        ;;
+      *)
+        printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
+        printf '●  %s\n' "$LOCK_MSG"
+        printf '●  Skipping every mutating step: stale Herdr child cleanup,\n'
+        printf '●  secondmate convergence, secondmate liveness, pending remote handoff retry,\n'
+        printf '●  X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
+        printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
+        printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
+        printf '●  otherwise mutate fleet state from this session.\n'
+        ;;
+    esac
     printf '%s\n' "$BAR"
   }
 fi
@@ -1022,12 +1063,30 @@ print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then
-  cat <<'EOF'
+  if [ "$LOCK_REASON" = lock-held ]; then
+    cat <<'EOF'
+This session did not acquire the fleet lock: another live session holds it.
+Stay read-only: do not arm, drain, spawn, steer, merge, or repair fleet state
+from here. The session holding the lock owns mutable follow-up.
+
+EOF
+  elif [ "$LOCK_REASON" = ps-unavailable ] || [ "$LOCK_REASON" = harness-detect-failed ]; then
+    cat <<'EOF'
+This session could not verify its own identity, so it did not take the fleet
+lock. Stay read-only: do not arm, drain, spawn, steer, merge, or repair fleet
+state from here. Run bin/fm-lock.sh status and the session and process
+discovery commands in the banner above to determine the true state before
+acting; a Codex sandbox may require approval for process inspection.
+
+EOF
+  else
+    cat <<'EOF'
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
 
 EOF
+  fi
 elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
   cat <<'EOF'
 Quiet mode is active. Follow the supervision operating instructions block
