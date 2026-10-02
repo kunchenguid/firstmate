@@ -958,6 +958,40 @@ test_socket_refusal_override_expires_when_the_crew_moves_on() {
   pass "socket-down evidence outranks a live run only while it is the log's latest event"
 }
 
+# A working run whose active step's client-reported last_activity is quiet
+# carries the run-stall evidence components the watcher's stall alert parses
+# (fm-watch.sh run_stall_tick via crew_run_stall): the quiet duration parsed
+# to seconds and the quietest step named. Fresh activity emits none, and a
+# parked gate or a green ci monitor (both waits, not stalls) never mints them.
+test_run_stall_components_follow_quiet_activity() {
+  reset_fakes
+  local d out
+  d=$(new_case run-stall-quiet)
+  make_repo_on_branch "$d/wt" fm/feat-stall
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stall.meta" "window=fm:fm-feat-stall" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-stall)"
+  out=$(run_crew_state "$d" feat-stall)
+  assert_contains "$out" "state: working" "a quiet fixing run still reads working"
+  assert_contains "$out" "stall-secs: 1862" "quiet 31m2s parsed to seconds"
+  assert_contains "$out" "stall-step: review" "the quiet step is named"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-stall)"
+  out=$(run_crew_state "$d" feat-stall)
+  assert_not_contains "$out" "stall-secs:" "fresh activity emits no stall evidence"
+
+  FM_FAKE_AXI_STATUS="$(run_top_level_ci fm/feat-stall)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  out=$(run_crew_state "$d" feat-stall)
+  assert_contains "$out" "state: done" "green ci monitor reads done"
+  assert_not_contains "$out" "stall-secs:" "a green ci monitor never mints stall evidence"
+
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-stall)"
+  out=$(run_crew_state "$d" feat-stall)
+  assert_not_contains "$out" "stall-secs:" "a parked gate never mints stall evidence"
+  pass "run-stall components follow client-quiet activity and nothing else"
+}
+
 # And the claim half: an ordinary blocked line over the same live run keeps the
 # generic reading, so the sharper one cannot fire on every superseded block.
 test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
@@ -5516,6 +5550,7 @@ test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
+test_run_stall_components_follow_quiet_activity
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
 test_socket_refusal_override_expires_when_the_crew_moves_on

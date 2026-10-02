@@ -83,6 +83,23 @@
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
+#   stale: <window> (run stalled: run <id> step <step> shows no activity for
+#                          <secs>s ...)
+#                          the run-stall alert (CI lead-time investigation,
+#                          recommendation 6): a running no-mistakes validation
+#                          shows no step activity - the client's own quiet
+#                          last_activity prefix - and no parked gate for
+#                          FM_RUN_STALL_SECS (default 900s). That is the shape a
+#                          live worker sits idle in after a provider error (e.g.
+#                          pi/Fireworks "Retry failed after 3 attempts: Request
+#                          timed out") while the run record still says running
+#                          and no stale wake raised. Fired once per stall episode
+#                          pane-independently (a pane that keeps looking busy
+#                          cannot hide a stalled run), never for a run parked at
+#                          a gate and never for a declared paused: or
+#                          captain-held wait; resumed activity clears the episode,
+#                          so a re-stall fires again. Evidence only: no automatic
+#                          recovery, steering, or restart.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -328,6 +345,23 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
 # wake) and never double-triages - and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
+# Run-stall alert threshold (run_stall_tick below): a running no-mistakes run
+# whose step activity has been client-reported quiet this long, with no parked
+# gate and no declared wait, fires the existing stale wake kind once per stall
+# episode. The client prefixes last_activity with `quiet` only after its own
+# quiet warning, so effective detection is max(client warning, this).
+RUN_STALL_SECS=${FM_RUN_STALL_SECS:-900}
+case "$RUN_STALL_SECS" in ''|*[!0-9]*|0) RUN_STALL_SECS=900 ;; esac
+# Cadence bound on the per-task current-state read the stall tick pays (one
+# fm-crew-state.sh run, several bounded no-mistakes calls). Detection adds at
+# most one cadence to RUN_STALL_SECS.
+RUN_STALL_CHECK_SECS=${FM_RUN_STALL_CHECK_SECS:-300}
+case "$RUN_STALL_CHECK_SECS" in ''|*[!0-9]*|0) RUN_STALL_CHECK_SECS=300 ;; esac
+# Crew-state reads per run_stall_tick: each read makes several separately
+# bounded queries, so a fleet-wide tick must not run past the beacon grace.
+# Unread tasks keep their due throttle and are served by the next tick.
+RUN_STALL_MAX_READS=${FM_RUN_STALL_MAX_READS:-3}
+case "$RUN_STALL_MAX_READS" in ''|*[!0-9]*|0) RUN_STALL_MAX_READS=3 ;; esac
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
@@ -1964,6 +1998,77 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# The run-stall alert (CI lead-time investigation, recommendation 6): a live
+# worker's no-mistakes run can sit with NO step activity for a long window - a
+# provider error (pi/Fireworks "Retry failed after 3 attempts: Request timed
+# out") leaves the worker idle mid-task while the run record still says
+# running and no stale wake raised, because the run-step verdict outranks the
+# idle pane and a busy-looking pane hides behind the busy-turn bound for an
+# hour. run_stall_tick fires the existing stale wake kind once per stall
+# episode, pane-independent: crew_run_stall's evidence is already gate- and
+# wait-aware (fm-crew-state.sh mints the stall components only for a working
+# run's client-reported quiet active step, never for a parked gate or a green
+# ci monitor), the declared-wait gate below is a pure status read, and resumed
+# activity clears the episode so a re-stall fires again. The per-task
+# current-state read is throttled to one per RUN_STALL_CHECK_SECS; the
+# threshold comparison reads the client's own quiet duration, so detection
+# adds at most one cadence to RUN_STALL_SECS. Evidence only: this never
+# interrupts, steers, or restarts anything.
+run_stall_tick() {
+  local meta task kind w last throttle evidence secs step run mins marker episode reads=0 order
+  # Oldest-last-checked first (a missing throttle file ages as never checked),
+  # so the read cap below cannot starve tasks late in the glob order.
+  order=$(for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    task=${meta##*/}; task=${task%.meta}
+    printf '%s\t%s\n' "$(age_of "$STATE/.run-stall-check-$task")" "$meta"
+  done | sort -s -rn -k1,1 | cut -f2-)
+  while IFS= read -r meta; do
+    [ -e "$meta" ] || continue
+    task=${meta##*/}; task=${task%.meta}
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = ship ] || continue
+    # A declared pause or verified captain-held transfer is expected idling,
+    # never a stall - and the costly crew-state read must not run for one.
+    last=$(status_declared_wait_line "$STATE/$task.status")
+    if status_is_paused_or_captain_held "$last"; then
+      rm -f "$STATE/.run-stall-$task" "$STATE/.run-stall-check-$task"
+      continue
+    fi
+    throttle="$STATE/.run-stall-check-$task"
+    [ "$(age_of "$throttle")" -ge "$RUN_STALL_CHECK_SECS" ] || continue
+    [ "$reads" -lt "$RUN_STALL_MAX_READS" ] || break
+    reads=$((reads + 1))
+    date +%s > "$throttle"
+    if ! evidence=$(crew_run_stall "$task"); then
+      # No stall evidence: activity resumed, the run ended or parked, or the
+      # crew state is unreadable. Either way the episode is over, so a
+      # subsequent stall starts a fresh one.
+      rm -f "$STATE/.run-stall-$task"
+      continue
+    fi
+    secs=${evidence%%$'\t'*}
+    evidence=${evidence#*$'\t'}
+    step=${evidence%%$'\t'*}
+    run=${evidence#*$'\t'}
+    [ "$secs" -ge "$RUN_STALL_SECS" ] || { rm -f "$STATE/.run-stall-$task"; continue; }
+    mins=$((secs / 60))
+    marker="$STATE/.run-stall-$task"
+    episode="run:${run:-unknown}:step:${step}"
+    [ "$(cat "$marker" 2>/dev/null || true)" = "$episode" ] && continue
+    w=$(fm_meta_get "$meta" window)
+    [ -n "$w" ] || w="fm-$task"
+    reason="stale: $w (run stalled: run ${run:-unknown} step $step shows no activity for ${secs}s (~${mins}m) with no parked gate and no declared wait - recover or steer the worker)"
+    fm_wake_append stale "$w" "$reason" || exit 1
+    # Mark the episode only once the wake is durably queued, so a failed
+    # publication leaves the next cycle to retry it.
+    printf '%s' "$episode" > "$marker" \
+      || triage_log "run-stall marker unwritable for $task; stall may re-fire"
+    wake "$reason"
+  done <<< "$order"
+  return 0
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -2703,6 +2808,12 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+
+  # Run-stall alert: a running no-mistakes validation with no step activity and
+  # no parked gate for RUN_STALL_SECS fires the existing stale wake kind once
+  # per stall episode (run_stall_tick above). Pane-independent by design, so a
+  # worker stuck after a provider error surfaces even while its pane looks busy.
+  run_stall_tick || true
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

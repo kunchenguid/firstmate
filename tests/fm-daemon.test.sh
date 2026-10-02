@@ -716,6 +716,21 @@ test_stale_transient_self_records_marker() {
   pass "transient stale self-handles and records a persistence marker"
 }
 
+test_run_stall_stale_wake_escalates() {
+  local dir state task win
+  dir=$(make_supercase run-stall-escalate)
+  state="$dir/state"; task=stalled; win="sess:fm-$task"
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: implementing\n' > "$state/$task.status"
+  (
+    LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+      handle_wake "stale: $win (run stalled: run 01RUN step review shows no activity for 1200s (~20m))" "$state"
+  )
+  grep -F "run stalled" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a run-stall wake under a routine working: status was self-handled, not escalated"
+  pass "a run-stall stale wake escalates to the supervisor instead of self-handling"
+}
+
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   local case_name dir state fakebin key task win pane reason status_line action_log
   for case_name in working prior-terminal paused; do
@@ -3154,6 +3169,7 @@ test_classify_check_and_unknown_escalate
 test_unknown_wake_ack_suppresses_handled_identity
 test_unknown_wake_ack_failure_still_clears_delivered_digest
 test_stale_transient_self_records_marker
+test_run_stall_stale_wake_escalates
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates

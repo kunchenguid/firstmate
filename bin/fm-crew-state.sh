@@ -700,6 +700,84 @@ nm_steps_rows() {
   '
 }
 
+# The run-stall evidence the watcher's stall alert (fm-watch.sh run_stall_tick,
+# via crew_run_stall in bin/fm-classify-lib.sh) parses out of this line: a
+# working run whose active step's client-reported last_activity is prefixed
+# `quiet` - the client's own recency verdict - is where a live worker's
+# provider-error stall (e.g. pi/Fireworks "Retry failed after 3 attempts:
+# Request timed out") shows up while the run record still says running. Appends
+# `stall-secs: <n>` and `stall-step: <step>` components for the MOST-quiet
+# active step, so the consumer applies its own stall threshold. A parked run (a
+# gate awaiting a decision is a wait, not a stall) and a green ci monitor
+# (already read done above) never reach the working branch, so neither can mint
+# these components.
+nm_run_stall_detail() {  # -> " · stall-secs: <n> · stall-step: <step>" or empty
+  local header cols idx=0 i rows row rest last quiet d
+  local secs best_secs=0 best_step=''
+  header=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*active_steps\[[0-9]+\]\{[^}]*\}:' | head -1)
+  [ -n "$header" ] || return 0
+  cols=$(printf '%s' "$header" | sed -n 's/^[^{]*{\([^}]*\)}.*/\1/p')
+  [ -n "$cols" ] || return 0
+  # Column order is read from the header rather than assumed; the columns
+  # before last_activity are short comma-free scalars in every observed
+  # capture, so a raw comma walk reaches it (the same residual risk
+  # nm_gate_awaits_human_decision accepts for its own table).
+  i=0
+  while [ -n "$cols" ]; do
+    i=$((i + 1))
+    if [ "$(trim "${cols%%,*}")" = last_activity ]; then idx=$i; break; fi
+    case "$cols" in *,*) cols=${cols#*,} ;; *) cols='' ;; esac
+  done
+  [ "$idx" -gt 0 ] || return 0
+  rows=$(nm_active_steps_rows)
+  [ -n "$rows" ] || return 0
+  while IFS= read -r row; do
+    row=$(trim "$row")
+    [ -n "$row" ] || continue
+    rest=$row
+    i=1
+    while [ "$i" -lt "$idx" ]; do
+      case "$rest" in *,*) rest=${rest#*,} ;; *) rest=''; break ;; esac
+      i=$((i + 1))
+    done
+    [ -n "$rest" ] || continue
+    last=$(strip_quotes "$(trim "${rest%%,*}")")
+    case "$last" in
+      quiet\ [0-9]*) ;;
+      *) continue ;;
+    esac
+    quiet=${last#quiet }
+    quiet=${quiet%% *}
+    secs=0
+    while :; do
+      case "$quiet" in
+        [0-9]*h*) d=${quiet%%h*}; case "$d" in *[!0-9]*) break ;; esac; secs=$((secs + d * 3600)); quiet=${quiet#*h} ;;
+        *) break ;;
+      esac
+    done
+    while :; do
+      case "$quiet" in
+        [0-9]*m*) d=${quiet%%m*}; case "$d" in *[!0-9]*) break ;; esac; secs=$((secs + d * 60)); quiet=${quiet#*m} ;;
+        *) break ;;
+      esac
+    done
+    while :; do
+      case "$quiet" in
+        [0-9]*s*) d=${quiet%%s*}; case "$d" in *[!0-9]*) break ;; esac; secs=$((secs + d)); quiet=${quiet#*s} ;;
+        *) break ;;
+      esac
+    done
+    if [ "$secs" -gt "$best_secs" ]; then
+      best_secs=$secs
+      best_step=$(trim "${row%%,*}")
+    fi
+  done <<EOF
+$rows
+EOF
+  [ "$best_secs" -gt 0 ] || return 0
+  printf '%sstall-secs: %s%sstall-step: %s' "$SEP" "$best_secs" "$SEP" "$best_step"
+}
+
 # 0 when the pipeline itself reports RECENT activity on an actively running or
 # fixing step. The client prefixes a step's `last_activity` with `quiet` once no
 # step log or native-agent lifecycle event has arrived for longer than its
@@ -1221,6 +1299,11 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # The stall components ride only a genuinely working full-detail run: never a
+  # parked gate, never the coarse fallback, never a reclassified green monitor.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ]; then
+    RUN_DETAIL="$RUN_DETAIL$(nm_run_stall_detail)"
+  fi
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

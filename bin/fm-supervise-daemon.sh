@@ -1592,6 +1592,8 @@ handle_wake() {  # <reason> <state>
               else
                 decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
               fi
+              # A run-stall reason (fm-watch.sh run_stall_tick) is likewise
+              # already-aged evidence from the run record, never transient.
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
               # so it outranks this daemon's cheaper status-log absorption - EXCEPT
@@ -1605,7 +1607,7 @@ handle_wake() {  # <reason> <state>
               case "${decision%%|*}" in
                 pause) : ;;
                 *) case "$stale_detail" in
-                     idle\ *s,\ possible\ wedge,\ escalation\ *)
+                     idle\ *s,\ possible\ wedge,\ escalation\ *|run\ stalled:\ *)
                        last=$(status_declared_wait_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
                          || decision="escalate|${reason#stale: }"

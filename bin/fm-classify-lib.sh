@@ -2564,6 +2564,42 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   printf '%s\n' "$run"
 }
 
+# The run-stall evidence read behind the watcher's stall alert (fm-watch.sh
+# run_stall_tick). One fm-crew-state.sh read - the same cost class as
+# crew_absorb_class, and the same caveat: it may make a bounded no-mistakes
+# call, so a caller throttles it itself. Prints
+# "<quiet-secs>\t<step>\t<run-id>" only when the crew's authoritative current
+# state is WORKING via the run-step source AND the line carries the stall
+# components fm-crew-state.sh mints for a client-reported quiet active step.
+# Everything else - a parked gate, a declared wait's log state, a pane verdict,
+# a green ci monitor (read done), an unknown or dead crew - is evidence-free
+# and returns non-zero, so a wait can never read as a stall. The run id is
+# empty when the line names none.
+crew_run_stall() {  # <id>
+  local id=$1 line state src rest part secs='' step='' run=''
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      "stall-secs: "?*) secs=${part#stall-secs: } ;;
+      "stall-step: "?*) step=${part#stall-step: } ;;
+      "run: "?*) run=${part#run: } ;;
+    esac
+  done
+  case "$secs" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$step" ] || return 1
+  case "$run" in ''|*[[:space:]]*) run='' ;; esac
+  printf '%s\t%s\t%s\n' "$secs" "$step" "$run"
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
