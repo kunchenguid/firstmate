@@ -269,6 +269,20 @@ try:
     move.unlink()
     apply()
     print('ok - interruption after restoring the original generation converges without losing the process seal')
+    reset()
+    next_ordinal = len(records)
+    padding = 'x' * 65536
+    with log.open('a') as stream:
+        while stream.tell() <= 32 * 1024 * 1024 + 65536:
+            stream.write(json.dumps({'type': 'response_item', 'ordinal': next_ordinal,
+                'payload': {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': padding}]}}) + '\n')
+            next_ordinal += 1
+    assert log.stat().st_size > 32 * 1024 * 1024
+    long_proof = json.loads(check())
+    assert long_proof['process']['terminal'] == 'term_original'
+    assert long_proof['process']['pid'] == process.pid
+    print('ok - legitimate long transcript recovery retains original terminal and native PID provenance')
+    log.write_text(''.join(json.dumps(dict(row, ordinal=i)) + '\n' for i, row in enumerate(records)))
     # A later replacement may preserve all disk evidence. Input still rechecks
     # the actual process and terminal immediately before ordinary transport.
     process.terminate(); process.wait()

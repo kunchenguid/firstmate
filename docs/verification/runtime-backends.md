@@ -227,6 +227,38 @@ Portable coverage demonstrates that nonempty future `cli_version` values do not 
 The accounting, structural transcript admission, bounded refusal categories and conservative legacy-input limits belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
 Portable coverage in `tests/fm-busy-state.test.sh` additionally separates partial and complete reads, unmatched and duplicate inputs, append-only compaction, unsupported replacement/rotation, malformed records and wrong identity.
 
+### Long transcript steering and recovery
+
+Verified on 2026-10-02 with the portable suite and a named isolated Herdr lab.
+A valid append-only transcript above 32 MiB remains bound, accepts an ordinary inbox doorbell, and becomes idle only after the exact typed `UserMessage` and handled inbox record are both present.
+The same fixture reads successfully under a 64 MiB address-space ceiling, while an individual JSONL record above 32 MiB refuses as `record-too-large`.
+The recovery fixture accepts the long transcript only with its retained original terminal and native PID provenance; the existing missing, conflicting, replacement-process, prefix-rewrite, truncation, ordering, duplicate and unconsumed-input refusals remain covered in the same suite.
+
+```sh
+bin/fm-test-run.sh tests/fm-busy-state.test.sh
+```
+
+```text
+ok - codex ordinary inbox receipt settles above 32 MiB
+ok - codex long transcript read stays within a 64 MiB address-space ceiling
+ok - traex ordinary inbox receipt settles above 32 MiB
+ok - traex long transcript read stays within a 64 MiB address-space ceiling
+ok - legitimate long transcript recovery retains original terminal and native PID provenance
+all fm-busy-state tests passed
+```
+
+The live guard used Codex 0.159.1, TraeX 0.207.1 internal edition and Herdr 0.8.0.
+Both installed TUIs passed task-bound startup, original-generation recovery, actual durable inbox acknowledgement, exact in-turn receipt accounting, interruption and endpoint-death checks.
+The guard's separate final TraeX normal-launch probe did not pass: `fm-spawn` reported that the launch identity did not belong to the isolated task copy.
+That baseline-only failure is outside transcript parsing and is not counted as a long-transcript pass.
+
+```sh
+HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
+  FM_BUSY_TRANSCRIPT_LAB_TASK=fix-long-transcript-steering-limit-20261002 \
+  FM_BUSY_TRANSCRIPT_LIVE_E2E=1 \
+  bin/fm-test-run.sh tests/fm-busy-transcript-live-e2e.test.sh
+```
+
 ### TraeX thin worker adapter
 
 The fresh-directory trust path was verified on 2026-09-24 with traecli 0.207.1 internal edition and Herdr 0.8.0.

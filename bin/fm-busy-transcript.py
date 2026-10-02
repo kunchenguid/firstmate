@@ -40,7 +40,9 @@ and remains unknown. A failed pre-input read now refuses transport; a complete
 retry can observe state without inventing an input. No timeout clears a fence.
 last_refusal retains only a bounded stage/category, never exception or input
 text; stderr exposes the same categories even when identity prevents writing.
-Unreadable/corrupt evidence, malformed metadata and logs over 32 MiB fail closed.
+Unreadable/corrupt evidence, malformed metadata and individual records over 32
+MiB fail closed. Transcript length is not an admission boundary: records are
+validated and hashed incrementally without retaining the whole log in memory.
 This is a pull source, not a busy-state event writer or turn-end notifier.
 """
 
@@ -67,6 +69,7 @@ class BrokenBinding(Unknown):
 
 
 REFUSALS = {"identity-mismatch", "malformed-record", "partial-record",
+            "record-too-large",
             "transient-read", "missing-evidence", "lock-busy",
             "unconsumed-input", "legacy-unaccounted-input", "pending-capacity"}
 
@@ -312,11 +315,12 @@ def identity(payload, data):
     )
 
 
-def inspect(path, data):
+def inspect(path, data, prefix_size=0):
     # Reject unrelated sessions using only their first record. In particular,
     # child transcripts and other tasks never contribute lifecycle evidence.
     with path.open("rb") as stream:
         first = stream.readline(LIMIT + 1)
+        require(len(first) <= LIMIT, "record-too-large")
         try:
             head = json.loads(first)
         except (ValueError, UnicodeError):
@@ -324,75 +328,81 @@ def inspect(path, data):
         if head.get("type") != "session_meta" or not identity(head.get("payload", {}), data):
             return None
         stat = os.fstat(stream.fileno())
-        require(stat.st_size <= LIMIT)
         stream.seek(0)
-        raw = stream.read(LIMIT + 1)
-    require(len(raw) <= LIMIT, "malformed-record")
-    require(raw.endswith(b"\n"), "partial-record")
-    records = [json.loads(line) for line in raw.splitlines()]
-    sid = head["payload"]["id"]
-    marker = "FIRSTMATE_BUSY_GENERATION=" + data["gen"]
-    first_user = None
-    for record in records:
-        payload = record.get("payload", {})
-        if record.get("type") == "event_msg" and payload.get("type") == "item_completed":
-            item = payload.get("item", {})
-            if item.get("type") == "UserMessage":
-                first_user = payload
+        digest = hashlib.sha256()
+        prefix_digest = hashlib.sha256()
+        prefix_remaining = prefix_size
+        sid = head["payload"]["id"]
+        marker = "FIRSTMATE_BUSY_GENERATION=" + data["gen"]
+        first_user_turn = None
+        turn = None
+        seen = set()
+        state = "unknown"
+        previous = -1
+        users = []
+        user_ids = set()
+        size = 0
+        while True:
+            raw = stream.readline(LIMIT + 1)
+            if not raw:
                 break
-    if first_user is None:
+            require(len(raw) <= LIMIT, "record-too-large")
+            require(raw.endswith(b"\n"), "partial-record")
+            digest.update(raw)
+            if prefix_remaining:
+                part = raw[:prefix_remaining]
+                prefix_digest.update(part)
+                prefix_remaining -= len(part)
+            size += len(raw)
+            record = json.loads(raw)
+            ordinal = record.get("ordinal")
+            require(type(ordinal) is int and ordinal > previous, "malformed-record")
+            previous = ordinal
+            payload = record.get("payload", {})
+            if record.get("type") == "session_meta":
+                require(identity(payload, data) and payload["id"] == sid)
+            if record.get("type") != "event_msg":
+                continue
+            event = payload.get("type")
+            if event == "item_completed" and payload.get("item", {}).get("type") == "UserMessage":
+                content = payload["item"].get("content", [])
+                if first_user_turn is None:
+                    text = "\n".join(part.get("text", "") for part in content
+                                     if part.get("type") == "text")
+                    if marker not in text.splitlines():
+                        return None
+                    first_user_turn = payload.get("turn_id")
+                require(payload.get("thread_id") == sid and payload.get("turn_id") == turn
+                        and state == "busy", "identity-mismatch")
+                item_id = payload["item"].get("id")
+                require(isinstance(item_id, str) and bool(item_id) and item_id not in user_ids,
+                        "malformed-record")
+                user_ids.add(item_id)
+                require(isinstance(content, list), "malformed-record")
+                # Non-text inputs cannot prove consumption of a text submission.
+                if all(part.get("type") == "text" and isinstance(part.get("text"), str) for part in content):
+                    text = "\n".join(part["text"] for part in content)
+                    users.append({"ordinal": ordinal, "digest": hashlib.sha256(text.encode()).hexdigest()})
+            if event not in ("task_started", "task_complete", "turn_aborted"):
+                continue
+            tid = payload.get("turn_id")
+            require(isinstance(tid, str) and bool(tid))
+            require(payload.get("thread_id", sid) == sid)
+            if event == "task_started":
+                require(payload.get("root_turn_id") == tid and tid not in seen)
+                require(state != "busy")
+                seen.add(tid)
+                turn, state = tid, "busy"
+            else:
+                require(tid == turn)
+                state = "idle"
+    if first_user_turn is None:
         return None
-    text = "\n".join(part.get("text", "") for part in first_user["item"].get("content", [])
-                     if part.get("type") == "text")
-    if marker not in text.splitlines():
-        return None
-    require(first_user.get("thread_id") == sid)
-    turn = None
-    seen = set()
-    state = "unknown"
-    previous = -1
-    users = []
-    user_ids = set()
-    for record in records:
-        ordinal = record.get("ordinal")
-        require(type(ordinal) is int and ordinal > previous, "malformed-record")
-        previous = ordinal
-        payload = record.get("payload", {})
-        if record.get("type") == "session_meta":
-            require(identity(payload, data) and payload["id"] == sid)
-        if record.get("type") != "event_msg":
-            continue
-        event = payload.get("type")
-        if event == "item_completed" and payload.get("item", {}).get("type") == "UserMessage":
-            require(payload.get("thread_id") == sid and payload.get("turn_id") == turn
-                    and state == "busy", "identity-mismatch")
-            item_id = payload["item"].get("id")
-            require(isinstance(item_id, str) and bool(item_id) and item_id not in user_ids,
-                    "malformed-record")
-            user_ids.add(item_id)
-            content = payload["item"]["content"]
-            require(isinstance(content, list), "malformed-record")
-            # Non-text inputs cannot prove consumption of a text submission.
-            if all(part.get("type") == "text" and isinstance(part.get("text"), str) for part in content):
-                text = "\n".join(part["text"] for part in content)
-                users.append({"ordinal": ordinal, "digest": hashlib.sha256(text.encode()).hexdigest()})
-        if event not in ("task_started", "task_complete", "turn_aborted"):
-            continue
-        tid = payload.get("turn_id")
-        require(isinstance(tid, str) and bool(tid))
-        require(payload.get("thread_id", sid) == sid)
-        if event == "task_started":
-            require(payload.get("root_turn_id") == tid and tid not in seen)
-            require(state != "busy")
-            seen.add(tid)
-            turn, state = tid, "busy"
-        else:
-            require(tid == turn)
-            state = "idle"
-    require(first_user.get("turn_id") in seen)
+    require(first_user_turn in seen)
     return {"path": str(path), "sid": sid, "dev": stat.st_dev, "ino": stat.st_ino,
-            "size": len(raw), "digest": hashlib.sha256(raw).hexdigest(),
-            "raw": raw, "starts": len(seen), "state": state,
+            "size": size, "digest": digest.hexdigest(),
+            "prefix_digest": prefix_digest.hexdigest() if not prefix_remaining else None,
+            "starts": len(seen), "state": state,
             "ordinal": previous, "users": users}
 
 
@@ -408,10 +418,10 @@ def observe(data):
             raise BrokenBinding() from error
         if stat.st_ino != old["ino"] or stat.st_dev != old["dev"] or stat.st_size < old["size"]:
             raise BrokenBinding()
-        current = inspect(path, data)
+        current = inspect(path, data, old["size"])
         if not current or any(current[key] != old[key] for key in ("sid", "dev", "ino")):
             raise BrokenBinding()
-        if hashlib.sha256(current["raw"][:old["size"]]).hexdigest() != old["digest"]:
+        if current["prefix_digest"] != old["digest"]:
             raise BrokenBinding()
     else:
         root = Path(data["sessions"])
