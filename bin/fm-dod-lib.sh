@@ -171,9 +171,9 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
 
 fm_brief_base_branch() {  # <brief>
   awk '
-    /^# Setup$/ { setup = 1; next }
-    setup && /^# / { exit }
-    setup && sub(/^Base branch: /, "") { print; exit }
+    anchor && sub(/^Base branch: /, "") { base = $0 }
+    { anchor = /^You are in a disposable git worktree of .*, at a detached HEAD on a clean copy of its base branch\.$/ }
+    END { if (base != "") print base }
   ' "$1"
 }
 

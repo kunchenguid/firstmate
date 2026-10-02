@@ -753,7 +753,7 @@ publish_feature_branch() { # <branch>
 
 brief_with_base() { # <id> <base>
   fm_test_spawn_brief "$HOME_DIR" "$1"
-  printf '\n# Setup\nYou are in a disposable git worktree.\nBase branch: %s\n\n# Rules\nBase branch: ignored\n' "$2" \
+  printf '\n# Setup\nYou are in a disposable git worktree of repo, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n\n# Rules\nBase branch: ignored\n' "$2" \
     >> "$HOME_DIR/data/$1/brief.md"
 }
 

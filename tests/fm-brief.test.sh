@@ -1191,6 +1191,11 @@ test_base_branch_is_rendered_and_bounded() {
   brief="$home/data/brief-base-dp-b1/brief.md"
   base=$(fm_brief_base_branch "$brief")
   [ "$base" = feature/hub ] || fail "the direct-PR brief recorded base '$base', not feature/hub"
+  awk '{ if ($0 == "{TASK}") { print "# Setup"; print "Run npm i"; print "Base branch: decoy"; print "You are in a disposable git worktree of x, at a detached HEAD on a clean copy of its base branch."; print "Base branch: decoy2" } else print }' \
+    "$brief" >"$brief.tmp" && mv "$brief.tmp" "$brief"
+  assert_grep 'Base branch: decoy2' "$brief" "the decoy intent was not written into the brief"
+  base=$(fm_brief_base_branch "$brief")
+  [ "$base" = feature/hub ] || fail "task prose redirected the brief base to '$base', not feature/hub"
   # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
   assert_grep 'open a PR with `gh-axi` against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
     "the direct-PR definition of done does not target the base branch"
