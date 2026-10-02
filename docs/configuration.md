@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [captain decision enforcement](#captain-decision-enforcement-configcaptain-decides-findings), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -127,6 +127,24 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).
 Edit it like any prompt when the fleet is empty.
 While tasks are in flight, dispatch shared-repo edits to a crewmate.
+
+## Captain decision enforcement (config/captain-decides-findings)
+
+The optional local, gitignored `config/captain-decides-findings` flag applies one rule: a decision is answered only by a captain-hold answer record for that exact decision, written through `bin/fm-captain-hold.sh answer`.
+Every `needs-decision` key the task ever opened, and every captain-held inventory entry, stays open until that record exists.
+A worker `resolved`, `done`, or `failed` line, a status note, or a captain-hold transfer that omitted the key does not settle it.
+A missing or unreadable task, a closed task without an answer, or a migrated record that cannot be authoritatively resolved all stay open; uncertainty is not treated as an empty inventory.
+While any decision is open, a plain steer is refused; use `--no-decision` only for a steer that does not answer any open decision, and it does not close or answer that decision.
+
+A `needs-decision` still open in the status log is closed by an answer send naming `--resolve-key <key>` and the matching `--captain-answer <task-id>`.
+That task id is the decision key or its legacy `<target>-decision-<key>` identity; for a migrated hold, pass the canonical task id that `bin/fm-captain-hold.sh resolve-entry <target> <key>` prints.
+`--resolve-key` for a key not open in the status log is refused: `fm-captain-hold answer` itself settles a held decision, after which the captain's answer can go out as a plain steer.
+For a secondmate's parent-channel key `captain-hold-<task>-<n>`, the answer record is read from that secondmate's own home.
+`answer-recorded` is a firstmate attestation, not proof that the captain authored the answer; the existing record store retains who wrote it and when.
+
+Steer wording is not inspected.
+The flag is local to this home and is not inherited by secondmate homes.
+When the flag is absent, send behavior is unchanged.
 
 ## Calm preference (config/calm)
 

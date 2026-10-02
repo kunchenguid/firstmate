@@ -31,6 +31,8 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh answer-recorded <task-id>
+#   fm-captain-hold.sh resolve-entry <origin-id> <inventory-entry>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -166,6 +168,14 @@
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
 #
+# `answer-recorded` is the read-only predicate for a completed captain answer.
+# It succeeds only when the task body carries a current `answer`, `answer
+# --release`, repaired answer record, or recognized legacy `declined` record,
+# with no active hold stamp left in front of it. An old answer beneath a
+# re-held task's new stamp is not evidence for the current call. This record is
+# attested by firstmate, not proof that the captain authored it; the existing
+# record store retains who wrote it and when.
+#
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
 # is (not Done, hold kind captain), 1 means it is not, and 2 means the answer
@@ -194,8 +204,8 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# decision digest, and a `Resolution mode:` of answered, released, repaired,
+# routed, or reconciled. Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #
@@ -737,17 +747,37 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
+  local origin=$1 entry=$2 legacy migrated rc show resolved exact_show='' exact_id='' exact_active=0
+  local legacy_show='' legacy_id='' legacy_active=0
   if task_show "$entry"; then
-    printf '%s exact' "$entry"
-    return 0
+    exact_show=$TASK_SHOW_OUTPUT
+    exact_id=$(show_field "$exact_show" id)
+    [ -n "$exact_id" ] || fail "the backlog did not return a task id for $entry"
+    [ "$(show_field "$exact_show" state)" != "done" ] &&
+      [ "$(show_field_value "$exact_show" hold_kind)" = captain ] && exact_active=1
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     if task_show "$legacy"; then
-      printf '%s legacy' "$legacy"
-      return 0
+      legacy_show=$TASK_SHOW_OUTPUT
+      legacy_id=$(show_field "$legacy_show" id)
+      [ -n "$legacy_id" ] || fail "the backlog did not return a task id for $legacy"
+      [ "$(show_field "$legacy_show" state)" != "done" ] &&
+        [ "$(show_field_value "$legacy_show" hold_kind)" = captain ] && legacy_active=1
     fi
+  fi
+  if [ "${FM_PREFER_ORIGIN_HOLD:-0}" = 1 ] &&
+    [ "$legacy_active" = 1 ] && [ "$exact_active" != 1 ]; then
+    printf '%s legacy' "$legacy_id"
+    return 0
+  fi
+  if [ -n "$exact_id" ]; then
+    printf '%s exact' "$exact_id"
+    return 0
+  fi
+  if [ -n "$legacy_id" ]; then
+    printf '%s legacy' "$legacy_id"
+    return 0
   fi
   rc=0
   migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?
@@ -761,6 +791,17 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
   fi
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
+}
+
+command_resolve_entry() {  # <origin-id> <inventory-entry>
+  local origin=${1:-} entry=${2:-} resolved resolve_rc=0
+  [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  validate_slug inventory-entry "$entry"
+  require_tasks_axi
+  resolved=$(resolve_entry "$origin" "$entry") || resolve_rc=$?
+  [ "$resolve_rc" -eq 0 ] || return "$resolve_rc"
+  printf '%s\n' "${resolved%% *}"
 }
 
 body_hold_set_timestamp() {  # <decoded-task-body>
@@ -1966,6 +2007,25 @@ EOF
   done
 }
 
+# Has this captain-held task recorded an answer in the current hold lifecycle?
+command_answer_recorded() {  # <task-id>
+  local id=${1:-} show body decoded mode
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$id"
+  require_tasks_axi
+  task_show "$id" || return $?
+  show=$TASK_SHOW_OUTPUT
+  body=$(show_field "$show" body)
+  decoded=$(decode_shown_value "$body") || fail "could not decode the captain-held task body for $id"
+  [ -z "$(body_hold_set_timestamp "$decoded")" ] || return 1
+  body_has_resolution_record "$body" || return 1
+  mode=$(recorded_resolution_mode "$body" || true)
+  case "$mode" in
+    answered|released|repaired|routed|declined) printf 'recorded: %s\n' "$id" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -2049,6 +2109,8 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  answer-recorded) shift; command_answer_recorded "$@" ;;
+  resolve-entry) shift; command_resolve_entry "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
