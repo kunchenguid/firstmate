@@ -91,6 +91,10 @@
 #   model through root model plus agent.build.model in inline config, start with
 #   --standalone --auto so no shared service must reload, then submit a durable
 #   brief pointer after the backend proves an empty composer.
+#   The detected major is probed on the exact executable the pane launches
+#   (resolved from PATH once and substituted as __OPENCODEBIN__), so a differing
+#   spawning/pane PATH cannot select one version and start another; a
+#   caller-supplied raw OpenCode command bypasses detection and runs as given.
 #   V2 primary/secondmate hooks are not verified and
 #   secondmate launches refuse before endpoint publication.
 #   --backend <name> is the explicit runtime session-provider backend for this
@@ -2056,9 +2060,9 @@ launch_template() {
     ;;
   opencode)
     if [ "${OPENCODE_V2:-0}" = 1 ]; then
-      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode --standalone --auto'
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' __OPENCODEBIN__ --standalone --auto'
     else
-      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   pi | pi-signed)
@@ -2285,11 +2289,22 @@ case "$ARG3" in
 esac
 
 # OpenCode v2 removed the root --model flag and stopped auto-submitting
-# --prompt. Resolve the installed CLI before staging any launch; never select a
-# different model or a legacy command after a failed version probe.
-if [ "$HARNESS" = opencode ]; then
-  OPENCODE_VERSION=$(opencode --version) || {
-    echo "error: could not query OpenCode version; refusing an unverified launch" >&2
+# --prompt, so a normal launch is re-composed for the detected major.
+# A caller-supplied raw command is the unverified-adapter escape hatch and is
+# launched exactly as given: it skips this detection entirely, so it is never
+# replaced by the stock template and never receives the v2 post-launch pointer.
+# For a normal launch, resolve the installed CLI ONCE and probe that exact
+# executable, then launch the same resolved binary through __OPENCODEBIN__.
+# A bare `opencode` here would probe the spawning process's PATH while the pane
+# launched its own, so a differing PATH could select v1 at spawn and start v2 in
+# the pane (or the reverse); the resolved path makes probe and pane agree.
+if [ "$HARNESS" = opencode ] && [ "$RAW_LAUNCH" = 0 ]; then
+  OPENCODE_BIN=$(resolve_pi_executable opencode) || {
+    echo "error: opencode executable not found on PATH; install it or select a different verified harness" >&2
+    exit 1
+  }
+  OPENCODE_VERSION=$("$OPENCODE_BIN" --version) || {
+    echo "error: could not query OpenCode version from '$OPENCODE_BIN'; refusing an unverified launch" >&2
     exit 1
   }
   case "$OPENCODE_VERSION" in
@@ -2304,9 +2319,10 @@ if [ "$HARNESS" = opencode ]; then
     echo "error: OpenCode v2 primary hooks are not verified; worker launch support does not authorize a secondmate" >&2
     exit 1
   fi
-fi
-if [ "$OPENCODE_V2" = 1 ]; then
-  LAUNCH=$(launch_template "$HARNESS" "$KIND") || exit 1
+  if [ "$OPENCODE_V2" = 1 ]; then
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || exit 1
+  fi
+  LAUNCH=${LAUNCH//__OPENCODEBIN__/$(shell_quote "$OPENCODE_BIN")}
 fi
 
 # muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
