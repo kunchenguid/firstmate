@@ -738,6 +738,27 @@ expect_phase_foreign() {  # <dir> <n> <expected-arms> <owner-pid> <label>
   [ "$(phase_value "$dir" "$n" lock-after)" = "$owner" ] || fail "$label: a non-owner rewrote the lock"
 }
 
+# Orphan reaping is host-shaped: a live host runs `systemd --user` as a
+# PR_SET_CHILD_SUB_REAPER, so a process orphaned inside this suite's own tree is
+# adopted there - one hop below init - instead of being reparented to pid 1
+# itself (tests/fm-remote-job-orphan-reap.test.sh reads it the same way). True
+# when <pid>'s parent chain roots at pid 1 without passing back through
+# <old-parent>, the fixture parent whose death is what must break the chain:
+# pid 1 itself, an adoption chain ending there, and nothing else. A <pid> that
+# is gone has no parent chain and is never an answer.
+reparented_to_reaper() {  # <pid> <old-parent>
+  local pid=$1 stop=$2 hops=0
+  pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  while [ "$pid" != 1 ]; do
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$pid" != "$stop" ] || return 1
+    [ "$hops" -lt 8 ] || return 1
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    hops=$((hops + 1))
+  done
+  return 0
+}
+
 test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   local dir frontend daemon ptyhost spare i
   dir="$TMP_ROOT/e2e-background-session"
@@ -765,15 +786,18 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   grep -qx "$frontend" "$dir/state/phase-1/ancestry" || fail "the healthy chain did not reach the front-end"
   expect_phase_owned "$dir" 1 2 "$frontend" "healthy chain"
 
-  # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
-  # the front-end that holds the lock stays alive.
+  # Recycle the bridge: the daemon ends, the pty-host is reparented to an orphan
+  # reaper (pid 1 itself, or the subreaper a live host registers below it), and
+  # the front-end that holds the lock stays alive. While the daemon lives the
+  # pty-host is still its child, so this stays false until the chain really broke.
   kill -TERM "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && ! reparented_to_reaper "$ptyhost" "$daemon"; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+  reparented_to_reaper "$ptyhost" "$daemon" \
+    || fail "the pty-host was not reparented to an orphan reaper after the daemon ended"
   kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phase 2: the same session id over the broken chain - the reported drift.
