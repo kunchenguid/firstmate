@@ -573,6 +573,16 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
+## Escalated pending-reply re-surfacing (config/pending-reply-resurface)
+
+The optional local, gitignored `config/pending-reply-resurface` presence flag opts this home into a later reminder for an unresolved escalated pending reply.
+
+With the file absent, an escalation is surfaced once, on the status line written when it escalates. Later sessions do not remind, and Bearings does not add a row.
+
+With the file present, `bin/fm-pending-reply-remind.sh` enqueues one check wake per later live session until the correlated reply arrives or the operator closes that escalation with `fm-send --resolve-key`. Bearings lists the open escalation until then.
+
+The flag is not inherited by secondmate homes. `bin/fm-pending-reply-remind.sh` owns the reminder, and `bin/fm-pending-reply-resurface-lib.sh` owns the dismissal scan.
+
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.

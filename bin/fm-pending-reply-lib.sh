@@ -17,10 +17,12 @@
 # escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement. An escalated record that is still unresolved is reminded
-# once per later live session by bin/fm-pending-reply-remind.sh: one check
-# wake, no second recovery, and no second status injection. Bearings lists
-# that record until it resolves.
+# acknowledgement. A later reminder for an unresolved escalation is opt-in
+# (config/pending-reply-resurface; docs/configuration.md). When that flag is
+# absent, the escalation is surfaced once and later sessions do not remind.
+# When it is present, bin/fm-pending-reply-remind.sh enqueues one check wake
+# per later live session, with no second recovery and no second status
+# injection, and Bearings lists that record until it resolves.
 # Only the operator's keyed close of the escalation (fm-send --resolve-key
 # pending-reply-<corr>) ends the reminder and the Bearings row early.
 # The same-session escalation wake is the first surface, so the reminder
@@ -1207,59 +1209,16 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
-# Read the parent status log once and print open or dismissed.
-_fm_pending_reply_scan_dismissal() {  # <status-file> <key>
-  local parent_status=$1 key=$2 line untimed seen=''
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *"[key=$key]"*) ;; *) continue ;; esac
-    _fm_status_untimed "$line" untimed
-    case "$untimed" in
-      "blocked [key=$key]: "*) seen=open ;;
-      "resolved [key=$key]: pending-reply-resolved: "*) [ -z "$seen" ] || seen=dismissed ;;
-    esac
-  done < "$parent_status"
-  # The resolved line only dismisses after the escalation opened.
-  if [ "$seen" = dismissed ]; then
-    printf 'dismissed'
+# True when this home opted into a later reminder for an unresolved escalation.
+# Absent means escalate once, which is the behaviour without the flag.
+fm_pending_reply_resurface_enabled() {  # <state-dir>
+  local state=$1 config
+  if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+    config=$FM_CONFIG_OVERRIDE
   else
-    printf 'open'
+    config="$(dirname "$state")/config"
   fi
-}
-
-# 0 when the operator dismissed this record's escalation: the parent channel
-# holds the resolved [key=pending-reply-<corr>] close fm-send --resolve-key
-# writes, after the escalation opened under that key. Nothing else dismisses,
-# so a legacy unkeyed escalation, any other resolved line, or a terminal line
-# that clears the whole fold leaves it unresolved and visible. An unchanged
-# log keeps the previous escalation_dismiss_scan answer, so a later poll does
-# not read it again. Never writes the record: after a fresh scan it stores the
-# value for escalation_dismiss_scan in <scan-var>, for a caller holding the
-# record's lock to save.
-fm_pending_reply_escalation_dismissed() {  # <record-path> [<scan-var>]
-  local rec=$1 parent_status key signature cached seen
-  [ -z "${2:-}" ] || printf -v "$2" '%s' ''
-  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || return 0
-  parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  [ -n "$parent_status" ] && [ -f "$parent_status" ] || return 1
-  key=$(fm_pending_reply_escalation_key "$(fm_pending_reply_get "$rec" corr_id)")
-  # An unchanged file signature means the log has not changed.
-  signature=$(fm_pending_reply_file_signature "$parent_status")
-  cached=$(fm_pending_reply_get "$rec" escalation_dismiss_scan)
-  case "$signature" in
-    missing|unreadable) ;;
-    *)
-      case "$cached" in
-        "$signature open") return 1 ;;
-        "$signature dismissed") return 0 ;;
-      esac
-      ;;
-  esac
-  seen=$(_fm_pending_reply_scan_dismissal "$parent_status" "$key")
-  case "$signature" in
-    missing|unreadable) ;;
-    *) [ -z "${2:-}" ] || printf -v "$2" '%s' "$signature $seen" ;;
-  esac
-  [ "$seen" = dismissed ]
+  [ -e "$config/pending-reply-resurface" ]
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
@@ -1401,10 +1360,13 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
-  fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
-  # This session already receives the status wake. A later session reminds.
-  fm_pending_reply_set "$rec" surfaced_session \
-    "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
+  # This session already receives the status wake. A later session reminds
+  # only when the home opted in.
+  if fm_pending_reply_resurface_enabled "$state"; then
+    fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
+    fm_pending_reply_set "$rec" surfaced_session \
+      "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
+  fi
   return 0
 }
 
@@ -1497,30 +1459,6 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   # traversal.
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
   fm_parent_channel_append_once "$parent_status" "$line"
-}
-
-# JSON array of unresolved escalated records for bearings decisions_open.
-# Prints [] when none are escalated. Does not wake or mutate.
-fm_pending_reply_escalated_decisions_json() {  # <state-dir>
-  local state=$1 dir rec corr task summary key item out=''
-  dir=$(fm_pending_reply_dir "$state")
-  [ -d "$dir" ] || { printf '[]'; return 0; }
-  for rec in "$dir"/*; do
-    [ -f "$rec" ] || continue
-    case "$(basename "$rec")" in .*) continue ;; esac
-    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
-    fm_pending_reply_escalation_dismissed "$rec" && continue
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    task=$(fm_pending_reply_get "$rec" task_id)
-    summary=$(fm_pending_reply_get "$rec" request_summary)
-    [ -n "$corr" ] && [ -n "$task" ] || continue
-    key=$(fm_pending_reply_escalation_key "$corr")
-    item=$(jq -nc --arg id "$task" --arg key "$key" \
-      --arg summary "pending-reply escalated: task=$task pending-reply-id=$corr request=$summary" \
-      '{id:$id,key:$key,verb:"blocked",summary:$summary,owner:"(main)"}') || return 1
-    if [ -n "$out" ]; then out="$out,$item"; else out=$item; fi
-  done
-  printf '[%s]' "$out"
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
@@ -1750,12 +1688,14 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
-  for rec in ${live[@]+"${live[@]}"}; do
-    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
-    [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
-    "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
-    break
-  done
+  if fm_pending_reply_resurface_enabled "$state"; then
+    for rec in ${live[@]+"${live[@]}"}; do
+      [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+      [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
+      "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+      break
+    done
+  fi
   return 0
 }
 

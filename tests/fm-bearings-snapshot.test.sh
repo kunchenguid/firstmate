@@ -2120,6 +2120,8 @@ test_live_blocker_is_not_charted_queue_work() {
 test_escalated_pending_reply_stays_in_decisions_until_resolved() {
   local home fakebin json dir corr
   home=$(make_home escalated-reply); write_fixture "$home"
+  mkdir -p "$home/config"
+  : > "$home/config/pending-reply-resurface"
   fakebin=$(make_fakebin "$home")
   dir="$home/state/pending-replies"
   mkdir -p "$dir"
@@ -2175,6 +2177,8 @@ EOF
 test_escalated_pending_replies_are_exempt_from_decision_limit() {
   local home fakebin json dir i corr
   home=$(make_home escalated-limit); write_large_fixture "$home" 3
+  mkdir -p "$home/config"
+  : > "$home/config/pending-reply-resurface"
   fakebin=$(make_fakebin "$home")
   dir="$home/state/pending-replies"
   mkdir -p "$dir"

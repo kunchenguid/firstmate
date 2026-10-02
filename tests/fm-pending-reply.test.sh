@@ -40,6 +40,8 @@ set -u
 . "$ROOT/bin/fm-marker-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$ROOT/bin/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-pending-reply-resurface-lib.sh
+. "$ROOT/bin/fm-pending-reply-resurface-lib.sh"
 
 SEND="$ROOT/bin/fm-send.sh"
 REPORT="$ROOT/bin/fm-secondmate-report.sh"
@@ -92,6 +94,11 @@ setup_parent() {  # <name> -> home
   local home="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$home/state"
   printf '%s\n' "$home"
+}
+
+opt_in_resurface() {  # <home>
+  mkdir -p "$1/config"
+  : > "$1/config/pending-reply-resurface"
 }
 
 # Seed a local secondmate home bound to <parent> with identity <id>.
@@ -2001,6 +2008,7 @@ test_escalated_undelivered_correlation_stays_retryable() {
 test_escalated_record_is_reminded_once_per_later_session() {
   local home state corr rec other wakes blocked
   home=$(setup_parent remind-later)
+  opt_in_resurface "$home"
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
   export FM_PENDING_REPLY_SESSION=s1
@@ -2084,6 +2092,7 @@ test_operator_closed_escalation_is_not_reminded() {
   dir="$TMP_ROOT/operator-close"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent operator-close)
+  opt_in_resurface "$home"
   state="$home/state"
   fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
   export FM_PENDING_REPLY_NOW=1000
@@ -2133,6 +2142,7 @@ test_operator_closed_escalation_is_not_reminded() {
 test_other_closes_do_not_dismiss_escalation() {
   local home state legacy keyed json
   home=$(setup_parent other-closes)
+  opt_in_resurface "$home"
   state="$home/state"
   fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
   export FM_PENDING_REPLY_NOW=1000
@@ -2171,6 +2181,7 @@ test_same_session_operator_close_is_recorded() {
   dir="$TMP_ROOT/same-session-close"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_parent same-session-close)
+  opt_in_resurface "$home"
   state="$home/state"
   fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
   export FM_PENDING_REPLY_NOW=1000
@@ -2197,6 +2208,7 @@ test_same_session_operator_close_is_recorded() {
 test_queued_reminder_does_not_mark_unnamed_record() {
   local home state first second rec
   home=$(setup_parent queued-reminder)
+  opt_in_resurface "$home"
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
   export FM_PENDING_REPLY_SEND_HOOK='true'
@@ -2229,6 +2241,7 @@ test_queued_reminder_does_not_mark_unnamed_record() {
 test_reminder_leaves_state_alone_without_escalations() {
   local home state corr rec before
   home=$(setup_parent no-escalation)
+  opt_in_resurface "$home"
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
   corr=$(fm_pending_reply_create "$home" "$state" mate "still waiting")
@@ -2253,6 +2266,7 @@ test_reminder_leaves_state_alone_without_escalations() {
 test_tick_starts_reminder_only_for_escalated_records() {
   local home state corr stub
   home=$(setup_parent tick-remind)
+  opt_in_resurface "$home"
   state="$home/state"
   stub="$TMP_ROOT/remind-stub-$RANDOM"
   mkdir -p "$stub"
@@ -2283,6 +2297,7 @@ test_tick_starts_reminder_only_for_escalated_records() {
 test_new_session_in_same_harness_process_is_reminded() {
   local home state corr holder same_wakes new_wakes repeat_wakes
   home=$(setup_parent same-process)
+  opt_in_resurface "$home"
   state="$home/state"
   ( exec -a "$home/agent-bin/claude" bash -c 'trap "kill \$!; exit 0" TERM; sleep 300 & wait' ) \
     </dev/null >/dev/null 2>&1 &
@@ -2352,6 +2367,7 @@ test_unchanged_status_log_is_not_reread_for_dismissal() {
 test_dismissal_scan_is_saved_under_record_lock() {
   local home state corr rec before holder remind_pid lib
   home=$(setup_parent scan-lock)
+  opt_in_resurface "$home"
   state="$home/state"
   export FM_PENDING_REPLY_NOW=1000
   export FM_PENDING_REPLY_SEND_HOOK='true'
@@ -2386,6 +2402,59 @@ test_dismissal_scan_is_saved_under_record_lock() {
   pass "the dismissal scan is saved only under the record lock"
 }
 
+# Without the config flag, an escalation is surfaced once and then stays quiet.
+test_resurface_stays_off_without_the_flag() {
+  local home state corr rec
+  home=$(setup_parent resurface-off)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(escalate_new "$home" "$state" "once only")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -z "$(fm_pending_reply_get "$rec" surfaced_session)" ] \
+    || fail "an opted-out escalation recorded a later-session surface"
+  export FM_PENDING_REPLY_SESSION=s2
+  fm_pending_reply_tick "$state" || fail "tick failed"
+  grep -F $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" >/dev/null \
+    && fail "an opted-out home was reminded"
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "remind failed"
+  grep -F $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" >/dev/null \
+    && fail "remind ran without the flag"
+  [ "$("$ROOT/bin/fm-pending-reply-remind.sh" --decisions "$state")" = '[]' ] \
+    || fail "bearings input listed an escalation the home did not opt into"
+  unset FM_PENDING_REPLY_SESSION
+  pass "an escalated pending reply is not re-surfaced unless the home opts in"
+}
+
+# A status log that cannot be read is not remembered as still open.
+test_failed_dismissal_read_is_not_cached_as_open() {
+  local home state corr rec status scan
+  home=$(setup_parent failed-read)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(escalate_new "$home" "$state" "unreadable log")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  fm_pending_reply_set "$rec" escalation_dismiss_scan ""
+  chmod 000 "$status" || fail "could not make the status log unreadable"
+  scan=cached
+  if fm_pending_reply_escalation_dismissed "$rec" scan; then
+    chmod 644 "$status" || true
+    fail "an unreadable status log dismissed the escalation"
+  fi
+  [ -z "$scan" ] || { chmod 644 "$status" || true; fail "a failed read produced a cache value"; }
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismiss_scan)" ] \
+    || { chmod 644 "$status" || true; fail "a failed read was stored on the record"; }
+  chmod 644 "$status" || fail "could not restore the status log"
+  printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
+  fm_pending_reply_escalation_dismissed "$rec" scan \
+    || fail "a readable dismissal was hidden by the failed read"
+  [ -n "$scan" ] || fail "the readable dismissal was not offered to save"
+  pass "a failed dismissal read is not cached as open"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -2405,6 +2474,8 @@ test_other_closes_do_not_dismiss_escalation
 test_same_session_operator_close_is_recorded
 test_unchanged_status_log_is_not_reread_for_dismissal
 test_dismissal_scan_is_saved_under_record_lock
+test_resurface_stays_off_without_the_flag
+test_failed_dismissal_read_is_not_cached_as_open
 test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations
 test_tick_starts_reminder_only_for_escalated_records

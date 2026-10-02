@@ -791,10 +791,13 @@ else
       printf '%s\n' "$BRANCH_REPLAY_OUT"
     fi
   fi
-  # One reminder for escalations a previous session left unresolved. The same
-  # session token and an empty token do not enqueue. This drain presents it.
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-pending-reply-remind.sh" "$STATE" || true
+  # One reminder for escalations a previous session left unresolved, only
+  # when this home opted in. The same session token and an empty token do not
+  # enqueue. This drain presents it.
+  if [ -e "$CONFIG/pending-reply-resurface" ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-pending-reply-remind.sh" "$STATE" || true
+  fi
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

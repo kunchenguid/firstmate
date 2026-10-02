@@ -5,10 +5,12 @@
 #        fm-pending-reply-remind.sh --token <state-dir>
 #
 # The reminder is one check wake per later live session, with no second recovery
-# and no second status line. --token prints the live session token and does not
-# wake. An empty token and an unchanged token are no-ops. The library stays free
-# of these wake and session-lock calls so every script that sources it does not
-# re-analyse them.
+# and no second status line. It runs only when config/pending-reply-resurface
+# is present (docs/configuration.md). --token prints the live session token
+# and does not wake. --decisions prints the Bearings JSON, or [] when the home
+# has not opted in. An empty token and an unchanged token are no-ops. The
+# library stays free of these wake and session-lock calls so every script that
+# sources it does not re-analyse them.
 
 set -u
 
@@ -19,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)" || SCRIPT
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-pending-reply-resurface-lib.sh
+. "$SCRIPT_DIR/fm-pending-reply-resurface-lib.sh"
 
 # Live session token. FM_PENDING_REPLY_SESSION, when set, is the token (tests).
 # Otherwise a held session lock's pid, joined with the recorded session id.
@@ -52,6 +56,7 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   local state=$1 token dir rec corr task summary payload key queued scan appended=0 rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  fm_pending_reply_resurface_enabled "$state" || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -108,6 +113,15 @@ $key
 if [ "${1:-}" = --token ]; then
   [ -n "${2:-}" ] || exit 2
   fm_pending_reply_session_token "$2"
+  exit $?
+fi
+if [ "${1:-}" = --decisions ]; then
+  [ -n "${2:-}" ] || exit 2
+  if fm_pending_reply_resurface_enabled "$2"; then
+    fm_pending_reply_escalated_decisions_json "$2"
+  else
+    printf '[]'
+  fi
   exit $?
 fi
 [ -n "${1:-}" ] || exit 2

@@ -355,12 +355,12 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
-# Unresolved escalated pending replies stay in decisions until they resolve.
-# Failure to read them leaves the rest of the projection intact.
+# Unresolved escalated pending replies stay in decisions until they resolve,
+# only when the home opted in. Failure to read them leaves the rest intact.
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 BEARINGS_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
-ESCALATED_REPLIES=$(bash -c '. "$1"; fm_pending_reply_escalated_decisions_json "$2"' _ \
-  "$SCRIPT_DIR/fm-pending-reply-lib.sh" "$BEARINGS_STATE" 2>/dev/null) || ESCALATED_REPLIES='[]'
+ESCALATED_REPLIES=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pending-reply-remind.sh" \
+  --decisions "$BEARINGS_STATE" 2>/dev/null) || ESCALATED_REPLIES='[]'
 case "$ESCALATED_REPLIES" in
   \[*\]) ;;
   *) ESCALATED_REPLIES='[]' ;;
