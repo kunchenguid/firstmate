@@ -43,3 +43,39 @@ Keep one term for one concept across the whole board.
 A card, its options, and the chat message then name the same thing the same way.
 Write an option label as a short name for the outcome.
 Write an option hint as one sentence that states what that option does.
+
+## Worked examples
+
+Each example below follows the rules above.
+Check a draft against these examples.
+
+### Example A: a final reply
+
+Captain, the password reset fix is complete.
+The change is ready for your review at https://example.com/pull/42.
+This fix stops an attacker from resetting another person's password.
+Do you want me to merge this pull request?
+
+### Example B: a Lavish board card
+
+Card title: Choose the password reset fix
+
+About: The password reset fix is ready for your review at https://example.com/pull/42. It stops an attacker from resetting another person's password.
+
+Decide: Do you want me to merge the fix, or wait for more work?
+
+Option label: Merge the fix now
+Option hint: This choice accepts the fix and puts it in the live product.
+
+Option label: Wait for more work
+Option hint: This choice keeps the fix out of the live product until you ask for more work on it.
+
+### Example C: an unsolicited warning
+
+Captain, I found a security problem during routine work on the billing project.
+An attacker can read any customer's saved payment card number.
+The attacker needs no password.
+Every customer who saved a card is at risk now.
+The problem is in the live product.
+I have not changed anything yet.
+Do you want me to stop other work and fix this problem now, or do you want a written report first?
