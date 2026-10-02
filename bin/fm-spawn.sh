@@ -41,9 +41,10 @@
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
-#   origin or origin lacks that branch. It must agree with every "Base branch:"
-#   line in the brief (bin/fm-brief.sh --base-branch writes one), and a brief
-#   with such a line refuses a spawn without the flag. The spawn records it as
+#   origin or origin lacks that branch, or when the project's registered forge
+#   cannot carry it. It must agree with every Setup "Base branch:" line in the
+#   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
+#   and a brief with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
@@ -3093,7 +3094,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       echo "error: --base-branch requires a branch name" >&2
       exit 1
     }
-    fm_base_branch_valid "$BASE_BRANCH" "$MODE" none "fm-spawn.sh --base-branch" || exit 1
+    BASE_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$(basename "$PROJ_ABS")") || exit 1
+    fm_base_branch_valid "$BASE_BRANCH" "$MODE" "${BASE_FORGE:-none}" "fm-spawn.sh --base-branch" || exit 1
     if ! fm_brief_base_branches "$BRIEF" >/dev/null || fm_brief_base_branches "$BRIEF" | grep -vxF -- "$BASE_BRANCH" >/dev/null; then
       echo "error: $BRIEF must record Base branch: $BASE_BRANCH and no other Base branch line to spawn with --base-branch $BASE_BRANCH; scaffold it with bin/fm-brief.sh --base-branch $BASE_BRANCH" >&2
       exit 1

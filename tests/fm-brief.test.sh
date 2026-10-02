@@ -1180,7 +1180,7 @@ test_home_brief_include_is_appended_last() {
 # recorded as a Base branch line under # Setup, which fm-spawn reads back, and is
 # refused where no pull request carries the work.
 test_base_branch_is_rendered_and_bounded() {
-  local home out rc brief base
+  local home out rc brief base meta_base
   home="$TMP_ROOT/base-branch-home"
   mkdir -p "$home/data"
   # shellcheck source=bin/fm-dod-lib.sh
@@ -1192,7 +1192,7 @@ test_base_branch_is_rendered_and_bounded() {
   base=$(fm_brief_base_branches "$brief")
   [ "$base" = feature/hub ] || fail "the direct-PR brief recorded base '$base', not feature/hub"
   # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
-  assert_grep 'open a PR with `gh-axi` against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
+  assert_grep 'open a PR with `gh-axi` that is ready for review, not a draft, against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
     "the direct-PR definition of done does not target the base branch"
   # shellcheck disable=SC2016
   assert_grep 'Never push to the base branch `feature/hub` or the default branch' "$brief" \
@@ -1204,6 +1204,23 @@ test_base_branch_is_rendered_and_bounded() {
   # shellcheck disable=SC2016
   assert_grep 'pass `--base-branch release/1.2` on every `no-mistakes axi run`' "$brief" \
     "the no-mistakes definition of done does not pass the base branch to the pipeline"
+
+  # A base git accepts but the shell would expand is quoted in worker commands.
+  # shellcheck disable=SC2016  # the literal $HOTFIX is the point
+  meta_base='release/$HOTFIX'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-meta-b8 some-proj --mode no-mistakes --base-branch "$meta_base" >/dev/null 2>&1 \
+    || fail "no-mistakes --base-branch with a shell metacharacter should scaffold"
+  brief="$home/data/brief-base-meta-b8/brief.md"
+  base=$(fm_brief_base_branches "$brief")
+  [ "$base" = "$meta_base" ] || fail "the brief recorded base '$base', not $meta_base"
+  # shellcheck disable=SC2016
+  assert_grep 'pass `--base-branch release/\$HOTFIX` on every' "$brief" \
+    "the no-mistakes command did not shell-quote the base branch"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-meta-b9 some-proj --mode direct-PR --base-branch "$meta_base" >/dev/null 2>&1 \
+    || fail "direct-PR --base-branch with a shell metacharacter should scaffold"
+  # shellcheck disable=SC2016
+  assert_grep '(`--base release/\$HOTFIX`)' "$home/data/brief-base-meta-b9/brief.md" \
+    "the direct-PR command did not shell-quote the base branch"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-b3 some-proj --scout --base-branch feature/hub >/dev/null 2>&1 \
     || fail "scout --base-branch should scaffold"
