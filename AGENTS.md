@@ -49,6 +49,7 @@ This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `pro
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 Never add an agent name as a commit co-author.
 Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
+Prefer existing CLI/API paths for delivery; reserve browsers for visual verification or browser-only work.
 
 ## 2. Layout and state
 
@@ -172,7 +173,10 @@ Keep `local-only` work in the main home.
 Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
-Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+Firstmate decides routine safe implementation and delivery choices within accepted intent without repeatedly asking for approval; unresolved product or scope choices and protected actions still require the captain's authority.
+Keep general platform improvements, tool repairs, wrappers, control planes, policy layers, custom verifiers, and automation separate unless concrete evidence shows the smallest such change is necessary for the requested delivery.
+After two equivalent failures of a delivery method - the same method and failure cause without new evidence - use an existing supported alternative within current authority or report the exact blocker and preserved progress.
+Healthy waiting and prescribed validation rounds are not failed delivery attempts; alternatives must satisfy the same required validation and delivery criteria, and existing merge, production, credential, destructive-action, and unlanded-work safeguards still apply.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
@@ -195,7 +199,7 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
-Write the task-specific brief under section 11 before spawning.
+Write the task-specific brief under section 11 before spawning, defining completion against the requested deliverable and selected delivery path, including required verification and recipient access to delivered artifacts.
 Fill the task subsections according to section 11.
 
 ### Dispatch and supervision handoff
@@ -203,7 +207,7 @@ Fill the task subsections according to section 11.
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
-After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
+After spawning, verify task processing under `harness-adapters`' completion postcondition and handle supported folder trust there; load `stuck-crewmate-recovery` if processing cannot be established.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
@@ -349,7 +353,8 @@ Reach the captain immediately for:
 - In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 - Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 - Reply exactly `Captain, shipshape.` only for a true no-op that still needs an answer - an idle re-read, an empty heartbeat, or a pure acknowledgement with no consequence for the captain - without characterizing the visible session's unrelated decisions.
-- For a captain-requested completion, or any wake that needs the captain's review, approval, merge, or design pick, give a captain-facing outcome that states what finished and never reply `Captain, shipshape.`; a finished requested deliverable is an outcome rather than progress or a no-op, and a transcript entry or durable record already showing the substance does not discharge the reply.
+- For a captain-requested completion, or any wake that needs the captain's review, approval, merge, or design pick, report the verified outcome promptly and never reply `Captain, shipshape.`; name any unmet delivery or verification requirement rather than claiming completion, and a transcript entry or durable record already showing the substance does not discharge the reply.
+- Disclose optional screenshot/report failures separately rather than delaying verified delivery; capture is optional only when neither the requested deliverable nor its required verification depends on it, and unverified rendering or inaccessible artifacts remain incomplete.
 - Ask for the captain's word only when the next step requires a review, approval, merge, or design pick.
 - Batch non-urgent updates into the next natural reply.
 - Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
