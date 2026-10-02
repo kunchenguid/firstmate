@@ -242,6 +242,9 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   FM_SPAWN_ISOLATION_WAIT_SECS (integer of at least 2, default 60) bounds that
+#   wait in seconds; any other value, including empty, refuses before anything
+#   is launched.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -489,6 +492,14 @@ case "${1:-}" in
 -h | --help)
   usage
   exit 0
+  ;;
+esac
+
+ISOLATION_WAIT_SECS=${FM_SPAWN_ISOLATION_WAIT_SECS-60}
+case "$ISOLATION_WAIT_SECS" in
+'' | *[!0-9]* | 0* | 1)
+  echo "error: FM_SPAWN_ISOLATION_WAIT_SECS must be an integer number of seconds of at least 2 (isolation needs two matching pane readings), got '$ISOLATION_WAIT_SECS'" >&2
+  exit 2
   ;;
 esac
 
@@ -4286,7 +4297,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$ISOLATION_WAIT_SECS"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4304,7 +4315,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${ISOLATION_WAIT_SECS}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
