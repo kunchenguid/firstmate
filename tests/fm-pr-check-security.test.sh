@@ -139,6 +139,9 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+emit_page() {
+  case " $* " in *" --slurp "*) printf '[%s]\n' "$1" ;; *) printf '%s\n' "$1" ;; esac
+}
 case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' \
@@ -171,13 +174,13 @@ case "${1:-} ${2:-}" in
 esac
 case " $* " in
   *" api repos/"*"/issues/"*"/comments?per_page=100 "*|*" api repos/"*"/pulls/"*"/reviews?per_page=100 "*|*" api repos/"*"/pulls/"*"/comments?per_page=100 "*)
-    printf '%s\n' '[[]]'
+    emit_page '[]' "$@"
     ;;
   *" api repos/"*"/commits/"*"/check-runs?filter=all&per_page=100 "*)
-    printf '%s\n' '[{"check_runs":[]}]'
+    emit_page '{"check_runs":[]}' "$@"
     ;;
   *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
-    printf '%s\n' '[[]]'
+    emit_page '[]' "$@"
     ;;
   *" api --paginate repos/"*"/rules/branches/"*merge_queue*)
     ;;
@@ -2298,6 +2301,10 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*z-stop.check.sh:*stop-cycle) ;;
+    *) fail "merge-outcome-committed: watcher stopped before retiring the poll: $(cat "$dir/watch.out")" ;;
+  esac
   [ "$(sed -E 's/ \[at=[0-9]+\]//' "$replies" | grep -c -F "done [key=merged-task-a]: merged task-a $url")" -eq 1 ] \
     || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \

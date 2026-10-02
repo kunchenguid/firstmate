@@ -5124,6 +5124,32 @@ const pi = {
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?consumer=${Date.now()}`);
 extension.default(pi);
+// Both outcome tools use the same Calm shell and must keep stock argument
+// presentation through pending, successful, denied, and expanded states.
+for (const [name, args] of [["fm_branch_outcomes", { recent: 2 }], ["fm_branch_processed", { through: 2 }]]) {
+  const definition = tools.find(tool => tool.name === name);
+  if (!definition) throw new Error(`${name} was not registered`);
+  const stock = { ...definition };
+  delete stock.renderShell;
+  delete stock.renderCall;
+  delete stock.renderResult;
+  const ui = { requestRender() {} };
+  const actualRow = new ToolExecutionComponent(name, "actual", args, { showImages: false }, definition, ui, process.cwd());
+  const stockRow = new ToolExecutionComponent(name, "stock", args, { showImages: false }, stock, ui, process.cwd());
+  for (const expanded of [false, true]) {
+    for (const state of ["pending", "success", "denied"]) {
+      for (const row of [actualRow, stockRow]) {
+        row.markExecutionStarted();
+        row.setArgsComplete();
+        row.setExpanded(expanded);
+        row.updateResult({ content: [{ type: "text", text: state }], isError: state === "denied" }, state === "pending");
+      }
+      if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+        throw new Error(`${name} differs from stock: expanded=${expanded}, state=${state}`);
+      }
+    }
+  }
+}
 const actualDefinition = tools.find((tool) => tool.name === "fm_branch_outcomes");
 if (!actualDefinition) throw new Error("fm_branch_outcomes was not registered");
 const stockDefinition = { ...actualDefinition };

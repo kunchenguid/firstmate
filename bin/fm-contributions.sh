@@ -36,9 +36,10 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# a direct child) with a three-second margin. Every read, including retrieval
+# and local page assembly, is capped at five seconds. A read killed at that
+# bound or at the deadline is budget refusal, never a read failure.
+# A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -52,10 +53,12 @@
 # A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
-# next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
-# API failure leaves error evidence; an expired or absent observation is not
-# silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# next URL that still has a full observation reserve; only a genuine retrieval
+# or assembly failure or head change records an error.
+# An expired or absent observation is not silence.
+# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# Every paginated read is assembled as one array-of-pages document from the
+# back-to-back JSON pages printed by gh api --paginate, including on gh 2.45.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and every owner's saved row converges on that
 # observation, with a stale error beside it cleared.
@@ -201,16 +204,15 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
+forge_read() { # command and arguments, including local page assembly
   local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
   [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
+  fm_run_timed "$remaining" "$@" 2> "$forge_err" || rc=$?
+  # A kill at the read bound or the deadline is budget refusal too.
+  # Other nonzero exits from retrieval or assembly are unavailable evidence.
   if [ "$rc" -eq 124 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
@@ -218,6 +220,10 @@ forge() {
     : > "$TMP/forge-unavailable"
   fi
   return "$rc"
+}
+
+forge() {
+  forge_read env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
 }
 
 wait_forges() { # background forge pids from one independent read wave
@@ -228,6 +234,18 @@ wait_forges() { # background forge pids from one independent read wave
   if [ ! -e "$TMP/forge-unavailable" ] && [ -e "$TMP/budget-exhausted" ]; then
     BUDGET_EXHAUSTED=1
   fi
+  return "$rc"
+}
+
+forge_pages() { # paginated endpoint -> one array-of-pages document on stdout
+  local endpoint=$1 raw rc=0
+  # Retrieval and assembly share one read bound and one failure classification.
+  raw=$(mktemp "$TMP/pages.XXXXXX") || return 1
+  # shellcheck disable=SC2016 # Arguments are expanded by the bounded shell.
+  forge_read bash -c '
+    GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh api "$1" --paginate > "$2" && jq -s . "$2"
+  ' _ "$endpoint" "$raw" || rc=$?
+  rm -f -- "$raw"
   return "$rc"
 }
 
@@ -242,15 +260,15 @@ observe() { # canonical GitHub URL -> normalized JSON
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    FORGE_ERR="$TMP/comments.err" forge_pages "repos/$part/issues/$number/comments?per_page=100" > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
+    FORGE_ERR="$TMP/reviews.err" forge_pages "$endpoint/reviews?per_page=100" > "$TMP/reviews.json" &
     local reviews_pid=$!
-    FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
+    FORGE_ERR="$TMP/inline.err" forge_pages "$endpoint/comments?per_page=100" > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    FORGE_ERR="$TMP/checks.err" forge_pages "repos/$part/commits/$head/check-runs?filter=all&per_page=100" > "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
+    FORGE_ERR="$TMP/statuses.err" forge_pages "repos/$part/commits/$head/statuses?per_page=100" > "$TMP/statuses.json" &
     local statuses_pid=$!
     FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
@@ -280,9 +298,9 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    FORGE_ERR="$TMP/comments.err" forge_pages "repos/$part/issues/$number/comments?per_page=100" > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
+    FORGE_ERR="$TMP/issue-events.err" forge_pages "repos/$part/issues/$number/events?per_page=100" > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
