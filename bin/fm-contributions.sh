@@ -36,8 +36,8 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
+# a direct child) with a three-second margin. Every read attempt is capped at
+# five seconds, and a read killed at that bound or at the deadline is budget
 # refusal, never a forge failure. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
@@ -46,6 +46,14 @@
 # modulo their count, without stored scheduling state or freshness-based
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
+# A read that fails for any reason other than the budget is retried once, two
+# attempts in total, because one transient GitHub API failure is not evidence
+# that the contribution is unobservable. The remaining budget bounds both
+# attempts, so a retry can push an observation past its reserve but never past
+# the poll budget. Budget refusal is never retried. A retry the budget stops
+# cannot erase a failure already seen: that genuine failure is what gets
+# recorded. A head that changed during the read is a fact, not a blip, and is
+# never retried either.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # attempted at most once per poll and its observation applied to every owner.
@@ -101,6 +109,8 @@ NOW=${FM_CONTRIBUTIONS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 EPOCH=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601') || fail 'invalid observation clock'
 MAX_AGE=${FM_CONTRIBUTIONS_MAX_AGE:-900}
 BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
+# Total attempts per forge read, retries included; not operator-configurable.
+FORGE_ATTEMPTS=2
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
@@ -202,22 +212,42 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
-  fi
-  return "$rc"
+  local remaining rc attempt=1 failed_rc=0 out forge_err=${FORGE_ERR:-$TMP/forge.err}
+  # Each attempt writes its output here first. A retry then replaces a partial
+  # read instead of adding to it.
+  out=$(mktemp "$TMP/forge-out.XXXXXX")
+  while :; do
+    rc=0
+    remaining=$((DEADLINE - $(date +%s)))
+    if [ "$remaining" -le 0 ]; then
+      # A failure that already happened outlives the budget that stopped its
+      # retry. Only a read that did not fail is a budget refusal.
+      if [ "$failed_rc" -ne 0 ]; then
+        : > "$TMP/forge-unavailable"; rm -f -- "$out"; return "$failed_rc"
+      fi
+      # The budget, not the forge, refused this read.
+      BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; rm -f -- "$out"; return 1
+    fi
+    [ "$remaining" -le 5 ] || remaining=5
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    if [ "$rc" -eq 0 ]; then cat "$out"; rm -f -- "$out"; return 0; fi
+    # A kill at the read bound or the deadline is budget refusal too. Never
+    # retry it. Only the forge's own nonzero exit is unavailable evidence.
+    if [ "$rc" -eq 124 ]; then
+      if [ "$failed_rc" -ne 0 ]; then
+        : > "$TMP/forge-unavailable"; rm -f -- "$out"; return "$failed_rc"
+      fi
+      BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; rm -f -- "$out"; return "$rc"
+    fi
+    # One transient failure does not prove that this read is unavailable. The
+    # unavailable marker waits until all attempts are spent.
+    failed_rc=$rc
+    if [ "$attempt" -ge "$FORGE_ATTEMPTS" ]; then
+      : > "$TMP/forge-unavailable"; rm -f -- "$out"; return "$rc"
+    fi
+    attempt=$((attempt + 1))
+  done
 }
 
 wait_forges() { # background forge pids from one independent read wave
