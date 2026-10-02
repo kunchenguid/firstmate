@@ -34,7 +34,7 @@ The shell guard does not supply that proof.
 The worker guard runs `opencode run --pure --format json --model <exact catalog identifier>` through `fm-sandbox.sh exec` in a disposable Git fixture under the current worktree.
 It uses an empty HOME, empty XDG directories, a cleared environment, synthetic secrets, and an unauthenticated loopback model endpoint; it never loads real provider credentials.
 Before launching, it refreshes the actual OpenCode catalog and requires the supplied provider identifier to contain `glm-5.3`, without adding a model definition or substituting another model.
-It checks completed bash tool events, successful allowed writes, nonzero denied-write exits, and denied reads that either fail or return empty tool output, as well as the allowed file contents, absence of the denied file, and absence of the synthetic secret in the transcript.
+It checks completed bash tool events, successful allowed writes, nonzero denied-write exits, and denied reads that either fail or return the pinned consumer's `(no output)` representation, as well as the allowed file contents, absence of the denied file, and absence of the synthetic secret in the transcript.
 An agent declining to attempt a denied operation fails the guard rather than counting as enforcement evidence.
 
 Prerequisites are the pinned `srt` 0.0.78, a working bubblewrap executable, OpenCode 1.18.32, and an operator-provided unauthenticated OpenAI-compatible endpoint serving real GLM 5.3 at `http://127.0.0.1:<port>/v1`.

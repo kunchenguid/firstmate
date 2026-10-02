@@ -76,7 +76,7 @@ run_case() {
       (.part.state.metadata.exit | type == "number") and
       (if $expected == "0" then .part.state.metadata.exit == 0
        elif $expected == "1" then .part.state.metadata.exit != 0
-       else .part.state.metadata.exit != 0 or .part.state.output == "" end))
+       else .part.state.metadata.exit != 0 or .part.state.output == "(no output)" end))
   ' "$transcript" >/dev/null || fail "$label: OpenCode must execute the command with the expected tool exit status"
   if grep -Fq "$secret_value" "$transcript"; then
     fail "$label: denied fixture secret leaked into the OpenCode transcript"

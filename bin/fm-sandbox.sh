@@ -96,6 +96,10 @@ sandbox_resolve_srt() {
     bin=$(command -v srt 2>/dev/null) || bin=
   fi
   [ -n "$bin" ] || sandbox_refuse "the pinned sandbox runtime 'srt' is not on PATH"
+  case "$bin" in
+    /*) ;;
+    *) bin="$(pwd -P)/$bin" ;;
+  esac
   [ -x "$bin" ] || sandbox_refuse "sandbox runtime '$bin' is not an executable file"
   SANDBOX_SRT=$bin
 }
@@ -113,6 +117,10 @@ sandbox_check_version() {
 sandbox_check_settings() {
   local settings
   settings=${FM_SANDBOX_SETTINGS:-$CONFIG/worker-sandbox-settings.json}
+  case "$settings" in
+    /*) ;;
+    *) settings="$(pwd -P)/$settings" ;;
+  esac
   [ -e "$settings" ] || sandbox_refuse "settings file $settings does not exist (set FM_SANDBOX_SETTINGS or create it)"
   [ -f "$settings" ] || sandbox_refuse "settings file $settings is not a regular file"
   [ -r "$settings" ] || sandbox_refuse "settings file $settings is not readable"

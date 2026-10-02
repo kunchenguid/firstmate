@@ -245,6 +245,103 @@ SH
   pass "OpenCode proof refuses incompatible versions before catalog discovery or worker execution"
 }
 
+test_relative_paths_preserve_validated_runtime_and_settings() {
+  local home worker mode prefix out status
+  home=$(new_home relative-paths)
+  enable_sandbox "$home"
+  write_settings "$home"
+  install_srt "$home" >/dev/null
+  worker="$home/worker"
+  mkdir -p "$worker/config" "$worker/fakebin"
+  printf '{}' > "$worker/config/worker-sandbox-settings.json"
+  fm_test_fake_srt "$worker/fakebin" 9.9.9
+  for mode in override discovery; do
+    prefix=$(
+      cd "$home" || exit 1
+      if [ "$mode" = override ]; then
+        FM_HOME=. FM_SANDBOX_SRT_BIN=./fakebin/srt FM_SANDBOX_SETTINGS=config/worker-sandbox-settings.json "$SANDBOX" prefix
+      else
+        PATH="fakebin:$PATH" FM_HOME=. "$SANDBOX" prefix
+      fi
+    ) || fail "relative $mode must pass preflight"
+    out=$(cd "$worker" && /bin/sh -c "$prefix 'printf anchored > marker'")
+    status=$?
+    expect_code 0 "$status" "the emitted prefix must keep the supervisor's validated paths after changing directory: $out"
+    assert_equals anchored "$(cat "$worker/marker")" "the original runtime and settings must execute the worker"
+    rm "$worker/marker"
+    out=$(cd "$home" && FM_HOME=. FM_SANDBOX_SRT_BIN=./fakebin/srt FM_SANDBOX_SETTINGS=config/worker-sandbox-settings.json \
+      "$SANDBOX" exec -- /bin/sh -c 'printf anchored-exec')
+    expect_code 0 "$?" "relative-path exec must remain usable: $out"
+    assert_equals anchored-exec "$out" "exec must preserve its ordinary command behavior"
+  done
+  pass "relative override and PATH/default-config discovery stay anchored across worker directory changes"
+}
+
+test_opencode_proof_accepts_masked_output_and_rejects_secret_leaks() {
+  local home fakebin out status mode
+  home=$(new_home opencode-output)
+  fakebin=$(fm_fakebin "$home")
+  cat > "$fakebin/srt" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then printf '0.0.78\n'; exit 0; fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --settings) export FIXTURE_SETTINGS=$2; shift 2 ;;
+    -c) command=$2; shift 2 ;;
+    *) exit 1 ;;
+  esac
+done
+case "$command" in
+  cat*) exit 0 ;;
+  touch*denied*) exit 1 ;;
+esac
+exec /bin/sh -c "$command"
+SH
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+printf '{"data":[{"id":"glm-5.3"}]}\n'
+SH
+  cat > "$fakebin/opencode" <<SH
+#!/usr/bin/env python3
+import json, pathlib, subprocess, sys, os
+if sys.argv[1] == '--version':
+    print('1.18.32')
+elif sys.argv[1] == 'models':
+    print('zai/glm-5.3')
+else:
+    command = sys.argv[-1].split('this exact command: ', 1)[1].split(' . Do not', 1)[0]
+    policy = json.loads(pathlib.Path(os.environ['FIXTURE_SETTINGS']).read_text())['filesystem']
+    output, status = '(no output)', 0
+    if command.startswith('cat '):
+        if pathlib.Path('$home/leak').exists():
+            output = pathlib.Path(policy['denyRead'][0]).read_text()
+            status = 1
+    elif any(path in command for path in policy['denyWrite']):
+        output, status = 'Permission denied', 1
+    else:
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        output, status = result.stdout or '(no output)', result.returncode
+    print(json.dumps({'type':'tool_use','part':{'tool':'bash','state':{'status':'completed',
+          'input':{'command':command},'metadata':{'exit':status},'output':output}}}))
+SH
+  chmod +x "$fakebin/srt" "$fakebin/curl" "$fakebin/opencode"
+  for mode in masked leak; do
+    [ "$mode" != leak ] || touch "$home/leak"
+    out=$(PATH="$fakebin:$PATH" FM_LIVE_SANDBOX_OPENCODE=1 \
+      FM_SANDBOX_OPENCODE_MODEL=zai/glm-5.3 FM_SANDBOX_OPENCODE_URL=http://127.0.0.1:8000/v1 \
+      bash "$ROOT/tests/fm-sandbox-opencode-live-e2e.test.sh" 2>&1)
+    status=$?
+    if [ "$mode" = masked ]; then
+      expect_code 0 "$status" "the proof must accept the pinned empty-output protocol: $out"
+      assert_contains "$out" "allowed write, denied write, denied read" "every proof assertion must complete"
+    else
+      expect_code 1 "$status" "the proof must reject leaked contents even on a failed read: $out"
+      assert_contains "$out" "secret leaked" "the transcript must retain its leak check"
+    fi
+  done
+  pass "OpenCode proof consumes the pinned empty-output protocol and rejects synthetic secret leaks"
+}
+
 test_enabled_exec_runs_the_command_through_the_runtime() {
   local home srt log out status
   home=$(new_home enabled-exec)
@@ -289,6 +386,8 @@ test_enabled_invalid_settings_refuses
 test_runtime_rejects_supplied_settings_for_every_consumer
 test_masked_and_failed_denied_reads_both_preserve_readiness
 test_opencode_proof_refuses_an_incompatible_cli_before_discovery
+test_relative_paths_preserve_validated_runtime_and_settings
+test_opencode_proof_accepts_masked_output_and_rejects_secret_leaks
 test_enabled_probe_reports_ready_and_prefix_is_exact
 test_enabled_exec_runs_the_command_through_the_runtime
 test_enabled_unenforced_isolation_refuses
