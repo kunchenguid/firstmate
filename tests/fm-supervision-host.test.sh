@@ -1223,9 +1223,9 @@ test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
   pass "host+hook: a successor closed before exit_to_main does not suppress the branch-outcome rewake"
 }
 
-test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails() {
-  local home real_mktemp successor
-  home=$(make_primary_home hook-successor-restore-fails)
+assert_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails() {
+  local status=$1 home real_mktemp successor
+  home=$(make_primary_home "hook-successor-restore-fails-$status")
   ln -s "$ROOT/.agents" "$home/.agents"
   echo captain-held > "$home/stub-mode"
   mkfifo "$home/stub-release"
@@ -1250,7 +1250,12 @@ SH
   FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_begin_handling "$2"' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
     || fail "fixture: could not model the queued successor wake entering handling"
-  assert_re '^pending:handling:' "$home/state/.watcher-down" \
+  if [ "$status" = announced ]; then
+    FM_HOME="$home" bash -c '. "$1"; fm_recovery_marker_read "$2" && _fm_recovery_marker_write_locked "$2" handling "${FM_RECOVERY_MARKER_TOKEN##*:}" announced' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$home/state/.watcher-down" \
+      || fail "fixture: could not model the handling episode as announced"
+  fi
+  assert_re "^$status:handling:" "$home/state/.watcher-down" \
     "fixture: the closed handling successor must leave the marker in handling before the host hands back"
   : > "$home/fail-downtime-write"
   printf 'continue\n' > "$home/stub-release"
@@ -1259,7 +1264,16 @@ SH
   assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "the refused rewake must turn into a delivered failure notice"
   assert_re '^epoch=[0-9]+ owner_pid=[0-9]+ outcome=failed ' "$home/state/.claude-autoarm-epoch" \
     "the failed hand-back must be committed"
+}
+
+test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails() {
+  assert_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails pending
   pass "host+hook: a refused hand-back becomes a delivered failure notice"
+}
+
+test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails() {
+  assert_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails announced
+  pass "host+hook: a refused hand-back on an announced handling marker becomes a delivered failure notice"
 }
 
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn() {
@@ -2877,6 +2891,7 @@ test_superseded_host_leaves_the_owner_untouched() {
 test_claude_stop_hook_restores_handoff_when_successor_closed_before_exit_to_main
 test_claude_stop_hook_restores_handoff_when_successor_closed_mid_engine_turn
 test_claude_stop_hook_notifies_when_closed_successor_downtime_restore_fails
+test_claude_stop_hook_notifies_when_closed_announced_successor_downtime_restore_fails
 test_park_exit_probe_uses_half_second_child_sleeps
 test_report_surface_enforces_actor_turn_and_scope
 test_report_after_the_return_is_queued_for_main

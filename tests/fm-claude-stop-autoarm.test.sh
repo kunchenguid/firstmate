@@ -1411,9 +1411,11 @@ write_host_fixture() {
       stood-down)
         printf "printf 'supervision-host stood down: this session no longer owns supervision\\n'\n"
         ;;
-      lost-handback)
+      lost-handback|lost-announced-handback)
+        local marker=pending
+        [ "$kind" = lost-handback ] || marker=announced
+        printf "printf '%s:handling:fixture-generation\\\\n' > \"\$FM_HOME/state/.watcher-down\"\\n" "$marker"
         cat <<'SH'
-printf 'pending:handling:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 printf 'signal: fixture.status\n'
 printf 'supervision-host: branch-outcome: fixture\n'
 printf 'supervision-host: watcher downtime could not be restored for the main hand-back\n'
@@ -1604,16 +1606,16 @@ test_host_benign_rewake_refusal_opens_no_failure_episode() {
   pass "auto-arm: a host rewake refused on an acknowledged marker opens no failure episode"
 }
 
-# The host handed a wake back but left the marker in handling with no live
-# successor, so no rewake can commit: the hook delivers the failure notice once
-# per episode and keeps exiting 2 without repeating it.
-test_host_lost_handback_notifies_once_per_episode() {
-  local dir out status
-  dir=$(make_primary_dir "$TMP_ROOT/host-lost-handback")
+# The host handed a wake back but left the marker in handling (pending or
+# announced) with no live successor, so no rewake can commit: the hook delivers
+# the failure notice once per episode and keeps exiting 2 without repeating it.
+assert_host_lost_handback_notifies_once_per_episode() {
+  local kind=$1 dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/host-$kind")
   mkdir -p "$dir/config"
   rm -f "$dir/config/supervision-host-off"
   : > "$dir/state/task.meta"
-  write_host_fixture "$dir" lost-handback
+  write_host_fixture "$dir" "$kind"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a lost hand-back must reach main"
   assert_contains "$out" "auto-arm FAILED - the supervision host returned an actionable wake" "a lost hand-back must deliver the failure notice"
@@ -1624,7 +1626,16 @@ test_host_lost_handback_notifies_once_per_episode() {
   assert_not_contains "$out" "auto-arm FAILED" "a repeated lost hand-back must not repeat the failure notice"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] \
     || fail "a repeated lost hand-back must record outcome=failed-suppressed, got: $(epoch_outcome "$dir")"
+}
+
+test_host_lost_handback_notifies_once_per_episode() {
+  assert_host_lost_handback_notifies_once_per_episode lost-handback
   pass "auto-arm: a lost host hand-back notifies once per failure episode"
+}
+
+test_host_lost_announced_handback_notifies_once_per_episode() {
+  assert_host_lost_handback_notifies_once_per_episode lost-announced-handback
+  pass "auto-arm: a lost host hand-back on an announced marker notifies once per failure episode"
 }
 
 test_host_crash_is_retried_then_reported() {
@@ -1751,6 +1762,7 @@ test_host_handback_carries_every_host_line
 test_host_stand_down_is_silent
 test_host_benign_rewake_refusal_opens_no_failure_episode
 test_host_lost_handback_notifies_once_per_episode
+test_host_lost_announced_handback_notifies_once_per_episode
 test_host_crash_is_retried_then_reported
 test_arguments_never_arm
 test_fm_lock_status_still_works_with_shared_lib
