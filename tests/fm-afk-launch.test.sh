@@ -1558,10 +1558,10 @@ start_daemon_standin() {  # <script>
   fail "daemon stand-in did not start: $(ps -o command= -p "$STANDIN_PID" 2>/dev/null)"
 }
 
-# The ps process identity pins its start time to UTC, so a host whose time
-# zone changes still sees the same identity for the same live process. Two
-# fixed POSIX zones drive that change without tzdata, and an empty proc root
-# forces the same ps rendering on a Linux runner.
+# The macOS process identity renders the start time in the local time zone, so
+# a host whose time zone changes sees a different identity for the same live
+# process. Two fixed POSIX zones drive that drift without tzdata, and an empty
+# proc root forces the same ps rendering on a Linux runner.
 TZ_BEFORE=AAA8
 TZ_AFTER=BBB7
 identity_under() {  # <tz> <pid>
@@ -1585,14 +1585,14 @@ unit_start_keeps_a_live_daemon_lock_across_a_time_zone_shift() {
   mkdir -p "$lock"
   printf '%s' "$daemon_pid" > "$lock/pid"
   identity_under "$TZ_BEFORE" "$daemon_pid" > "$lock/pid-identity"
-  if [ "$(identity_under "$TZ_BEFORE" "$daemon_pid")" != "$(identity_under "$TZ_AFTER" "$daemon_pid")" ]; then
-    fail "time-zone start: the recorded identity varied with the time zone"
+  if [ "$(identity_under "$TZ_BEFORE" "$daemon_pid")" = "$(identity_under "$TZ_AFTER" "$daemon_pid")" ]; then
+    fail "time-zone start: the fixture could not shift the recorded identity"
   fi
   out=$(FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_AFTER FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
     FM_SUPERVISOR_BACKEND=unsupported "$START" 2>&1)
   if [ "$(cat "$lock/pid" 2>/dev/null)" = "$daemon_pid" ] \
     && printf '%s\n' "$out" | grep -Fq "afk: daemon already running pid=$daemon_pid"; then
-    pass "time-zone start: a live daemon keeps its lock across a time-zone change, and no second daemon starts"
+    pass "time-zone start: a live daemon whose identity drifted keeps its lock, and no second daemon starts"
   else
     fail "time-zone start: the live daemon's lock was taken over (output: $out)"
   fi
@@ -1621,7 +1621,6 @@ while [ "$(date +%s)" -lt "$end" ]; do
 done
 SH
   chmod +x "$home/bin/fm-supervise-daemon.sh"
-  fm_test_track_watcher_state "$home/state"
   FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$2 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_TEST_WATCH="$ROOT/bin/fm-watch.sh" "$home/bin/fm-supervise-daemon.sh" &
@@ -1640,8 +1639,8 @@ SH
   fail "daemon stand-in's watcher never took the lock"
 }
 
-# The daemon recorded its lock identity before the time-zone change, and the
-# watcher it runs started after it.
+# The daemon recorded its lock identity before the time-zone change; the
+# watcher it runs now started after it, so the watcher proof still names it.
 unit_stop_reaches_a_daemon_across_a_time_zone_shift() {
   local st daemon_pid lock
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-stop.XXXXXX")
@@ -1654,13 +1653,13 @@ unit_stop_reaches_a_daemon_across_a_time_zone_shift() {
   mkdir -p "$lock"
   printf '%s' "$daemon_pid" > "$lock/pid"
   identity_under "$TZ_BEFORE" "$daemon_pid" > "$lock/pid-identity"
-  if [ "$(identity_under "$TZ_BEFORE" "$daemon_pid")" != "$(identity_under "$TZ_AFTER" "$daemon_pid")" ]; then
-    fail "time-zone stop: the recorded identity varied with the time zone"
+  if [ "$(identity_under "$TZ_BEFORE" "$daemon_pid")" = "$(identity_under "$TZ_AFTER" "$daemon_pid")" ]; then
+    fail "time-zone stop: the fixture could not shift the recorded identity"
   fi
   FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_AFTER FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
     "$LAUNCH" stop >/dev/null 2>&1
   if wait_pid_gone "$daemon_pid" && wait_pid_gone "$STANDIN_WATCHER" && [ ! -e "$st/state/.afk" ]; then
-    pass "time-zone stop: the return stops a daemon that recorded its lock before a time-zone change"
+    pass "time-zone stop: the return stops a daemon whose lock identity drifted, through the watcher it runs"
   else
     fail "time-zone stop: the daemon outlived away mode after the time zone changed"
   fi
@@ -1683,6 +1682,57 @@ unit_stop_finds_a_lockless_daemon_by_its_watcher() {
     pass "lockless stop: the return stops a live daemon that lost its lock, through the watcher it runs"
   else
     fail "lockless stop: a live daemon without its lock outlived the return"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# The watcher recorded its identity before the time-zone change, so neither
+# lock matches the daemon any more; the watcher proof still names it.
+unit_stop_finds_a_lockless_daemon_whose_watcher_identity_drifted() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-watcher.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  start_watcher_standin "$st" "$TZ_BEFORE"
+  daemon_pid=$STANDIN_PID
+  [ ! -e "$st/state/.supervise-daemon.lock" ] || fail "drifted watcher stop: fixture unexpectedly has a lock"
+  if [ "$(cat "$st/state/.watch.lock/pid-identity")" = "$(identity_under "$TZ_AFTER" "$STANDIN_WATCHER")" ]; then
+    fail "drifted watcher stop: the fixture could not shift the watcher's recorded identity"
+  fi
+  FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_AFTER FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    "$LAUNCH" stop >/dev/null 2>&1
+  if wait_pid_gone "$daemon_pid" && wait_pid_gone "$STANDIN_WATCHER" && [ ! -e "$st/state/.afk" ]; then
+    pass "drifted watcher stop: the return stops a lockless daemon whose watcher identity drifted"
+  else
+    fail "drifted watcher stop: a lockless daemon outlived the return after its watcher identity drifted"
+  fi
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
+# A watcher-lock pid that started after the lock's pid-identity was written is
+# not the process that wrote it, so a drifted identity does not prove it.
+unit_stop_rejects_a_watcher_lock_pid_newer_than_its_identity() {
+  local st daemon_pid
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-newer.XXXXXX")
+  mkdir -p "$st/state"
+  : > "$st/state/.afk"
+  printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+  start_watcher_standin "$st" "$TZ_BEFORE"
+  daemon_pid=$STANDIN_PID
+  printf 'an identity no live process has\n' > "$st/state/.watch.lock/pid-identity"
+  touch -t 202001010000 "$st/state/.watch.lock/pid-identity"
+  FM_PROC_ROOT_OVERRIDE=/nonexistent TZ=$TZ_BEFORE FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" \
+    "$LAUNCH" stop >/dev/null 2>&1
+  sleep 1
+  if kill -0 "$daemon_pid" 2>/dev/null && kill -0 "$STANDIN_WATCHER" 2>/dev/null; then
+    pass "newer watcher stop: the return signals nothing for a watcher-lock pid that started after its identity was written"
+  else
+    fail "newer watcher stop: the return signalled a watcher-lock pid that started after its identity was written"
   fi
   kill "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
@@ -1936,6 +1986,8 @@ unit_stop_confirms_daemon_exit
 unit_start_keeps_a_live_daemon_lock_across_a_time_zone_shift
 unit_stop_reaches_a_daemon_across_a_time_zone_shift
 unit_stop_finds_a_lockless_daemon_by_its_watcher
+unit_stop_finds_a_lockless_daemon_whose_watcher_identity_drifted
+unit_stop_rejects_a_watcher_lock_pid_newer_than_its_identity
 unit_refresh_validates_record
 unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds

@@ -4,19 +4,26 @@
 # parent link of the watcher a daemon runs. Sourced by the daemon,
 # bin/fm-afk-start.sh, bin/fm-afk-launch.sh, bin/fm-watch-arm.sh, and
 # bin/fm-watch-checkpoint.sh, each after bin/fm-wake-lib.sh, whose fm_pid_alive,
-# fm_pid_identity, and fm_watcher_lock_matches_pid it calls. Only
-# fm_afk_daemon_stop signals anything.
+# fm_pid_identity, fm_watcher_lock_matches_pid, fm_path_mtime, and
+# fm_epoch_seconds_to it calls. Only fm_afk_daemon_stop signals anything.
 #
-# The lock alone cannot find every live daemon: a daemon can outlive its lock.
-# The watcher proof finds such a daemon while it still runs this home's
-# watcher; a daemon that runs neither exits on its own once state/.afk is gone
-# or its lock is lost.
+# The lock alone cannot find every live daemon: a daemon can outlive its lock,
+# and the lock's recorded identity is fm_pid_identity, whose ps form renders the
+# start time in the local time zone, so a host time-zone change makes a live
+# daemon no longer match it, and its watcher no longer match the watcher lock.
+# The watcher proof finds such a daemon while it still runs this home's watcher;
+# a daemon that runs neither exits on its own once state/.afk is gone or its
+# lock is lost.
 #
 # Proofs that a pid is a live daemon of this home, strongest first:
 #   lock     the lock names a live pid whose recorded identity still matches,
 #            or that recorded no identity and runs the daemon script.
-#   watcher  this home's identity-verified watcher's live parent process runs
-#            the daemon script, which also names a daemon without its lock.
+#   watcher  this home's watcher's live parent process runs the daemon script,
+#            which also names a daemon without its lock. The watcher is the
+#            watcher lock's pid, verified by its recorded identity or, once that
+#            identity drifted, by the lock's home and watch path, a live command
+#            line that runs the watch path, and a start no later than the lock's
+#            pid-identity file was written.
 #   command  the lock names a live pid that runs the daemon script although its
 #            recorded identity no longer matches. That keeps the lock and stops a
 #            second daemon from starting; it is never enough to signal the pid.
@@ -113,13 +120,46 @@ fm_afk_daemon_lock_holder_live() {  # <state>
   fm_afk_daemon_pid_runs_daemon "$pid"
 }
 
+# Print <pid>'s start time in epoch seconds: now minus its ps elapsed time,
+# which, unlike lstart, does not depend on the time zone. Reading now first
+# can only move the start earlier.
+fm_afk_daemon_pid_start_epoch() {  # <pid>
+  local pid=$1 etime days=0 hours=0 minutes=0 seconds now
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  fm_epoch_seconds_to now
+  etime=$(LC_ALL=C ps -p "$pid" -o etime= 2>/dev/null | tr -d '[:space:]')
+  case "$etime" in *-*) days=${etime%%-*}; etime=${etime#*-} ;; esac
+  case "$etime" in *:*:*) hours=${etime%%:*}; etime=${etime#*:} ;; esac
+  case "$etime" in *:*) minutes=${etime%%:*}; seconds=${etime#*:} ;; *) return 1 ;; esac
+  case "$days$hours$minutes$seconds" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' $(( now - ((10#$days * 24 + 10#$hours) * 60 + 10#$minutes) * 60 - 10#$seconds ))
+}
+
+# True when <pid> is the watcher lock's pid for <home> and <watch-path> although
+# its recorded identity no longer matches: its live command line runs the watch
+# path, and it started no later than the lock's pid-identity file was written,
+# with two seconds of slack for the elapsed-time rounding, so a later process
+# that reused the pid does not pass.
+fm_afk_daemon_watcher_drifted() {  # <state> <watch-path> <pid> <home>
+  local lockdir="$1/.watch.lock" watch_path=$2 pid=$3 home=$4 command written started
+  [ "$(cat "$lockdir/fm-home" 2>/dev/null || true)" = "$home" ] || return 1
+  [ "$(cat "$lockdir/watcher-path" 2>/dev/null || true)" = "$watch_path" ] || return 1
+  command=$(fm_afk_daemon_pid_command "$pid") || return 1
+  case " $command " in *" $watch_path "*) ;; *) return 1 ;; esac
+  written=$(fm_path_mtime "$lockdir/pid-identity") || return 1
+  started=$(fm_afk_daemon_pid_start_epoch "$pid") || return 1
+  [ "$started" -le $(( written + 2 )) ]
+}
+
 # The watcher proof (header): print the pid of the daemon whose child is this
 # home's live watcher.
 fm_afk_daemon_watcher_owner() {  # <state> <watch-path> <home>
   local state=$1 watch_path=$2 home=$3 watcher parent
   watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   fm_pid_alive "$watcher" || return 1
-  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher" "$home" || return 1
+  fm_watcher_lock_matches_pid "$state" "$watch_path" "$watcher" "$home" \
+    || fm_afk_daemon_watcher_drifted "$state" "$watch_path" "$watcher" "$home" \
+    || return 1
   parent=$(fm_afk_daemon_pid_parent "$watcher") || return 1
   case "$parent" in 0|1) return 1 ;; esac
   fm_afk_daemon_pid_runs_daemon "$parent" || return 1
