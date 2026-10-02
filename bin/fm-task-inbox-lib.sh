@@ -12,14 +12,14 @@
 # none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
-# payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line. While the endpoint remains available, that
-# line does not need to be reliable because ringing it again is free. A
-# duplicated doorbell is a no-op by construction (the worker finds the inbox
-# empty or already handled), and a swallowed doorbell is detected by the
-# absence of the worker's acknowledgement and re-rung on a bounded schedule.
-# A positively dead or missing endpoint bypasses that schedule without being
-# typed into, and its unhandled record surfaces through the ordinary stale wake
+# payload moves to the filesystem, which is reliable; the native prompt carries
+# only a short constant doorbell line. While the endpoint remains available, that
+# line does not need to be reliable because a definitely unaccepted or
+# unacknowledged prompt can be rung again safely. A duplicated doorbell is a
+# no-op by construction (the worker finds the inbox empty or already handled),
+# while an uncertain API outcome is surfaced and withheld from blind replay.
+# A positively dead or missing endpoint bypasses that schedule without a prompt
+# submission, and its unhandled record surfaces through the ordinary stale wake
 # into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
@@ -46,10 +46,9 @@
 # on .seq.lock; the worst racing outcome is ordering, never loss.
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
-# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
-# FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period.
+# After FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates.
+# The caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
 # escalates directly. This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
@@ -317,11 +316,11 @@ fm_task_inbox_body() {  # <record-path>
 
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
-# still receives the complete instruction in the line itself. The leading `: `
-# is the POSIX shell no-op, so the same line typed into a pane whose agent has
-# exited (a bare shell) runs nothing; see the dead-pane note in the header.
-# A non-printable path fails without output so terminal controls never reach
-# the pane's line discipline.
+# still receives the complete instruction in the line itself.
+# The leading `: ` is retained as a shell-safe no-op for historical clients and
+# defense in depth; the current native prompt path does not type into a shell.
+# A non-printable path fails without output so control bytes never enter the
+# prompt payload.
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
@@ -337,7 +336,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # native backend submission. Composer and transcript state are not transport
 # prerequisites.
 # Returns 0 submitted, 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
+# the endpoint is positively dead or missing (nothing submitted; recovery owns the
 # record), or 4 when transport acceptance is uncertain and must not be replayed
 # blindly. Submission is not a handled receipt; only the acknowledgement move
 # proves that the worker processed the durable record.
@@ -471,9 +470,8 @@ EOF
   printf 'ring %s' "$oldest"
 }
 
-# Advance the ladder after a delivery attempt. A failed ring or a composer-
-# protected skip still consumes budget so neither an unreadable pane nor a
-# permanently blocked composer can retry silently forever. A positively dead or
+# Advance the ladder after a delivery attempt. A failed ring consumes budget so
+# an unavailable native prompt cannot retry silently forever. A positively dead or
 # missing endpoint never enters the ladder: the watcher escalates it directly.
 # A concurrently removed inbox is a successful no-op; otherwise failure means
 # the caller must surface the unwritable ladder while the record remains

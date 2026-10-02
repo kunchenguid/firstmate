@@ -18,7 +18,7 @@
 # authorized by the harness-dependent-checks rule. An absent harness is
 # reported explicitly and skipped; a run that verified nothing fails rather
 # than passing vacuously. Restrict with
-# FM_SEND_INBOX_LIVE_HARNESSES="pi codex" when needed, and tune the
+# FM_SEND_INBOX_LIVE_HARNESSES="codex traex" when needed, and tune the
 # per-harness wait with FM_SEND_INBOX_LIVE_TIMEOUT (seconds, default 240).
 # Record the dated per-harness result in
 # docs/verification/runtime-backends.md ("Steering-inbox doorbell").
@@ -83,13 +83,9 @@ launch_cmd() {  # <name> <home> <play>
   esac
 }
 
-# Wait for the harness to look steerable. 0 = the composer classified a
-# proven empty; 2 = the readiness budget expired without an empty verdict but
-# also without a pending one. The caller proceeds on 2 with a note, because
-# that mirrors production exactly: the send path's composer check is ADVISORY
-# and skips only on visibly pending text, so a harness whose idle screen the
-# classifier cannot positively identify still gets its doorbell (the composer
-# matrix guard, not this one, owns re-proving the classifier per release).
+# Wait for the lab harness to look steerable before the measurement.
+# This fixture-only readiness observation is not a production send gate; the
+# native prompt path itself does not read the composer.
 wait_ready() {  # <window>
   local win=$1 i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do

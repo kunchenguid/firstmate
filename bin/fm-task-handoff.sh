@@ -44,7 +44,7 @@
 # inbox and backend doorbell. Historical persistent-home and remote-home
 # records are refused here.
 # Harness-native parser invocations are also refused because they belong to
-# fm-send's typed plane, not a durable cross-task command.
+# fm-send's direct native-prompt plane, not a durable cross-task command.
 #
 # Exit codes: 0 delivered/already delivered/no matching retry-task work;
 # 2 usage; 6 retryable supervision-ownership refusal; 7 durable terminal

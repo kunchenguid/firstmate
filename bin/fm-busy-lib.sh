@@ -3,10 +3,11 @@
 #
 # Design source: the captain-approved semantic busy-state redesign
 # (2026-07-28): each harness adapter reports turn lifecycle through a
-# machine-readable semantic source it owns, classification always exposes
-# which source produced it, and missing, malformed, stale, unsupported, or
-# unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
+# machine-readable semantic source it owns, and classification always exposes
+# which source produced it. Missing, malformed, stale, unsupported, or
+# unverified evidence stays unknown. The one deliberate exception is a native
+# unknown status for Codex or TraeX paired with exact live-process proof, which
+# is idle. Endpoint death yields dead, never busy. Child processes, CPU,
 # process sleep state, marker mtimes, and the old global UI-regex OR are not
 # state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
@@ -58,8 +59,8 @@ fm_busy_codex_hooks_verified() {
   return 1
 }
 
-# fm_busy_codex_semantic_source: reserved push-source gate. The verified
-# transcript pull source does not use this record-writer trust table.
+# fm_busy_codex_semantic_source: reserved push-source gate. The ordinary native
+# Herdr path and retained recovery transcript reader do not use this table.
 fm_busy_codex_semantic_source() {
   fm_busy_codex_hooks_verified
 }
@@ -176,8 +177,8 @@ fm_busy_record_read() {  # <state-dir> <id>
 # busy|idle|unknown|dead plus the producing source (see header). Codex and
 # TraeX require structural process liveness before trusting Herdr's native
 # status.
-# A legacy optional capture argument is ignored; rendered output
-# never substitutes for the retained adapters' semantic lifecycle evidence.
+# A legacy optional capture argument is ignored; rendered output never
+# substitutes for native or generation-bound semantic lifecycle evidence.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5
   local out rc r_state r_source native process_state

@@ -403,6 +403,8 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # API without consulting vendor transcripts. Echoes submitted|unknown|send-failed.
 # `submitted` is transport acceptance only, never proof that the worker read or
 # completed the instruction. `unknown` forbids blind replay.
+# The retry, sleep, and settle arguments remain only for source compatibility;
+# the sole supported backend ignores them and submits once.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift

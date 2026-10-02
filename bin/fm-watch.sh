@@ -389,13 +389,12 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # durable and the worker will reach a turn boundary - an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
-# or missing skips the ladder altogether: it is never typed into and surfaces
+# or missing skips the ladder altogether: it receives no prompt and surfaces
 # as that same stale wake exactly once. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking.
+# still makes the race quiet. A definite prompt refusal consumes one attempt;
+# an uncertain acceptance surfaces immediately and is never replayed blindly.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0

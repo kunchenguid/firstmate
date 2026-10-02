@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task-bound Codex/TraeX rollout reader; called by fm-busy-lib and fm-spawn.
+"""Task-bound Codex/TraeX lifecycle and recovery evidence reader.
 
 Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        activate STATE ID
@@ -27,7 +27,8 @@ are unknown at discovery; after binding only that exact file is read. No timesta
 Metadata comments, including indented history, are ignored; duplicate effective
 assignments still refuse identity verification.
 
-This reader observes worker lifecycle only. Message submission does not call it,
+Spawn and bounded recovery paths call this reader; ordinary busy classification
+and message submission do not. This reader observes retained lifecycle evidence,
 and transcript identity, launch history, typed UserMessage matching and old
 pending-input fields are not transport prerequisites or delivery receipts.
 last_refusal retains only a bounded stage/category, never exception or input

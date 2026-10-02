@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# fm-send typed-plane post-submit settle pause (FM_SEND_SETTLE).
+# fm-send direct native-prompt post-submit settle pause (FM_SEND_SETTLE).
 #
-# A typed-plane fm-send success only proves the composer cleared - the Enter
-# landed and the text was submitted. The harness then takes a beat to spin up the
+# A direct fm-send success proves only native API acceptance. The harness then takes a beat to spin up the
 # turn before its busy footer appears, so an immediate peek after fm-send returns
 # would see the stale idle pane. fm-send therefore pauses FM_SEND_SETTLE seconds
-# (default 1, 0 disables) after a successful typed submit, so the receiving turn
+# (default 1, 0 disables) after a successful native submit, so the receiving turn
 # has time to visibly start. These tests use an explicit backend target to stay on
-# that plane and pin the behavior hermetically (stubbed Herdr + sleep, no real
+# that direct plane and pin the behavior hermetically (stubbed Herdr + sleep, no real
 # agent):
-#   1. A successful typed text send pauses for the FM_SEND_SETTLE value (default 1).
+#   1. A successful native text send pauses for the FM_SEND_SETTLE value (default 1).
 #   2. FM_SEND_SETTLE=0 produces no pause at all (sleep is never invoked for it).
 #   3. The pause is tunable (FM_SEND_SETTLE=7 pauses 7).
 #   4. The --key path never pauses (it bypasses the submit/settle path entirely).
@@ -26,10 +25,8 @@ SEND="$ROOT/bin/fm-send.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-settle)
 
-# A fake Herdr CLI that lets fm-send's submit path reach a clean "empty" verdict, plus a
-# fake sleep that records every requested duration (one per line) instead of
-# sleeping. Pane sends succeed, and pane read returns an empty bordered composer
-# so the shared classifier reads "empty" (submit landed) on the first Enter.
+# A fake Herdr CLI that accepts the native prompt, plus a fake sleep that records
+# every requested duration (one per line) instead of sleeping.
 # The sleep log path comes from
 # FM_SLEEP_LOG.
 make_stubs() {  # <dir> -> echoes fakebin dir
@@ -76,8 +73,7 @@ test_zero_disables_pause() {
   fb=$(make_stubs "$dir"); log="$dir/sleep.log"
   run_send "$fb" "$log" FM_SEND_SETTLE=0; rc=$?
   expect_code 0 "$rc" "FM_SEND_SETTLE=0 send should succeed"
-  # The disable path must not invoke sleep with 0 at all - the only sleeps left are
-  # the submit core's own settle/enter waits, none of which is "0".
+  # The disable path must not invoke sleep at all.
   if grep -qx '0' "$log"; then
     fail "FM_SEND_SETTLE=0 still paused (a sleep 0 was recorded)"$'\n'"--- sleeps ---"$'\n'"$(cat "$log")"
   fi

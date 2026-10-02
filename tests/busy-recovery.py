@@ -105,6 +105,7 @@ try:
                    'if args[:2]==["pane","get"]:\n print(dump({"result":{"pane":data["pane"]}}))\n'
                    'elif args[:2]==["pane","process-info"]:\n print(dump({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
                    'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":data["pane"]["agent"],"agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
+                   'elif args[:2]==["agent","--help"]:\n print("Commands:\\n  prompt  Submit a prompt to an agent")\n'
                    'elif args[:2]==["pane","read"]:\n print("╭────╮\\n│    │\\n╰────╯")\n'
                    'elif args[:2]==["agent","prompt"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n"); print(json.dumps({"result":{"type":"agent_prompted"}}))\n'
                    'elif args[:2]==["pane","send-text"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n")\n'

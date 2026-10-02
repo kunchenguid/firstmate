@@ -13,8 +13,9 @@
 #   4. Composer rendering is not read before native prompt submission.
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
 #      watcher's re-ring ladder owns delivery from the record on.
-#   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
-#      "$" to codex, an explicit backend target, and the --key path.
+#   6. Carve-outs use direct native prompts: a leading "/" (any harness), a
+#      leading "$" to codex, and an explicit backend target; --key remains a
+#      separate literal-key path.
 #   7. An unwritable inbox is a real local failure: nonzero exit and nothing
 #      typed.
 #   8. An empty or whitespace-only text steer is refused before anything is

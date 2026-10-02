@@ -60,6 +60,7 @@ make_watch_stubs() {  # <dir> -> echoes fakebin dir
 set -u
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get')
     if [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ]; then
       echo '{"error":{"code":"pane_not_found"}}'

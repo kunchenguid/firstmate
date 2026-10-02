@@ -205,6 +205,7 @@ set -u
 [ -z "${FM_HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_HERDR_LOG"
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
   'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"codex",argv0:"codex"}]}}}';;
   'agent get') jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;

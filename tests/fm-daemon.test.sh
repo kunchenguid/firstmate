@@ -3,8 +3,8 @@
 # status-phrase matrix (a product contract), escalation batching/dedupe,
 # decision-owned queued-row suppression, afk presence-gating, and the
 # injection-hardening units that an e2e cannot deterministically reach
-# (persistent-Enter-swallow, max-defer wedge alarms, fm-send typed-plane swallow
-# reporting, composer-pending ANSI parsing). The operator-visible inject flow
+# (native-prompt uncertainty, max-defer wedge alarms, and composer-pending ANSI
+# parsing). The operator-visible inject flow
 # lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
 

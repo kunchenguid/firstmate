@@ -90,7 +90,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-classify-lib.sh`     | Shared wake classification, durable keyed-decision folds and scans, unread status selection, and bounded latest-event snapshots |
-| `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |
+| `fm-send.sh`             | Steer a task via a durable inbox record plus native-prompt doorbell, or send a supported key or direct harness invocation through the recorded backend |
 | `fm-branch-prompt.sh`    | Emit the Pi supervision branch's byte-stable system prompt ([pi-supervision-branch.md](pi-supervision-branch.md)) |
 | `fm-branch-outcome.sh`   | Own the supervision branch's append-only outcome store, cursors, bounded status-coverage indexes, and session-start replay |
 | `fm-lease.sh`            | Claim, release, inspect, and sweep per-task supervision leases                       |
@@ -100,7 +100,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-busy-lib.sh`         | Single owner of the semantic busy-state contract: verdicts, source attribution, and per-harness sources |
 | `fm-busy-event.sh`       | Public writer and recovery entrypoint for semantic busy state; arms, applies, retires, and restores only a provenance-verified original generation |
 | `fm-busy-recover.sh`     | Lifecycle-locked reconciliation behind `fm-busy-event.sh recover`; never invoke it as a separate recovery interface |
-| `fm-busy-transcript.py`  | Bind and classify an eligible Codex or TraeX transcript, and verify live-process provenance for bounded recovery |
+| `fm-busy-transcript.py`  | Bind and read retained Codex or TraeX lifecycle evidence, and verify provenance for bounded recovery |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |

@@ -57,7 +57,7 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if native prompt submission still cannot be accepted.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -99,7 +99,7 @@
 #                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
-#                                   if that cannot confirm a submit, a wedge
+#                                   if that cannot obtain prompt acceptance, a wedge
 #                                   alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
@@ -120,16 +120,10 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
-#          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
-#                                   (default 3); the digest is typed once, only
-#                                   Enter is retried. Composer-empty detection is
-#                                   structural and style-aware (bin/fm-composer-lib.sh):
-#                                   it drops dim/faint ghost text and strips the
-#                                   harness's box borders before deciding, so a
-#                                   ghost-only or bordered-but-empty composer is
-#                                   not misread as pending input.
-#          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
-#                                   (default 0.5)
+#          Composer-empty detection is structural and style-aware
+#          (bin/fm-composer-lib.sh): it drops dim/faint ghost text and strips
+#          the harness's box borders before deciding, so a ghost-only or
+#          bordered-but-empty composer is not misread as pending input.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -186,7 +180,7 @@ ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
-# the normal flush path and, if that cannot confirm a submit, raises a loud wedge
+# the normal flush path and, if that cannot obtain prompt acceptance, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
@@ -195,9 +189,10 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection, submit acknowledgement, and the harness-scoped
-# supervisor-pane busy guard live in bin/fm-composer-lib.sh.
+# Composer-empty detection and the harness-scoped supervisor-pane busy guard
+# live in bin/fm-composer-lib.sh; native prompt acceptance belongs to the backend.
 INJECT_FAIL_SLEEP_DEFAULT=30
+# Retained only for the shared submit call shape; Herdr native prompts ignore them.
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 CRASH_THRESHOLD_DEFAULT=10
@@ -302,8 +297,7 @@ strip_injection_marker() {  # <message-text>
 }
 
 # Collapse all newlines to a literal " - " separator so the injected digest is
-# a single line. Submission via send-keys + Enter is then unambiguous regardless
-# of how the target TUI handles embedded newlines in its composer.
+# one compact operational-input envelope across native prompt implementations.
 _collapse_newlines() {  # <text>
   local s=$1
   s=${s//$'\n'/ - }
@@ -936,8 +930,8 @@ wedge_alarm_notify() {  # <summary> <marker>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
+# max-defer (the supervisor pane is genuinely busy/wedged, its composer guard
+# defers, or the native prompt is definitely refused). The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
 # is lost - the buffer and the
@@ -1205,10 +1199,10 @@ window_for_task() {  # <task-key> [state]
 #     terminal or retry an uncertain result.
 #   - `submitted` means only that the API accepted the prompt. The supervisor's
 #     later behavior is not inferred from transport success.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
+#   - COMPOSER GUARD before submission: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
+#     line, or a previous injection's unsent text), defer entirely so lifecycle
+#     escalation cannot overtake an operator draft.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
@@ -1216,9 +1210,9 @@ inject_msg() {  # <message> [state]
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
-  # (2) Single-line digest: collapse any embedded newlines so submission via
-  # send-keys + Enter is unambiguous regardless of how the TUI composer treats
-  # them. Then use the canonical typed envelope so downstream consumers retain
+  # (2) Single-line digest: collapse embedded newlines to retain the stable
+  # operational-input envelope and compact rendering across harnesses.
+  # Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
   fm_operational_input_encode away-supervisor "$msg" encoded || return 1

@@ -8,8 +8,8 @@
 # herdr or jq is not installed.
 #
 # The daemon receives an explicit Herdr backend and a session-qualified pane.
-# A local shim models one swallowed Enter for Scenario B; all other input
-# reaches the same isolated test session.
+# Its ordinary escalation submission uses Herdr's native prompt API; literal
+# pane input below exists only to exercise the separate overwrite guard.
 
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
@@ -17,14 +17,10 @@
 # bordered branch of fm_backend_herdr_composer_state, and logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its supervisor pane, so this
-# test asserts on submitted CONTENT, not pane appearance. It ALSO registers
-# itself as a real herdr agent via `herdr pane report-agent` and reports an
-# idle/working/idle cycle around each submission, because
-# fm_backend_herdr_send_text_submit's confirmation is native agent-state
-# (agent get), not composer content, since the 2026-07-07 incident fix
-# (docs/herdr-backend.md "Native agent-state submit confirmation") - a pane
-# that only draws composer text without being a registered agent would read
-# agent_not_found forever and never confirm a submission.
+# test asserts on submitted CONTENT, not pane appearance. It also registers
+# itself as a real Herdr agent via `herdr pane report-agent` so the native
+# prompt API has an agent endpoint. Its reported idle/working/idle cycle is
+# fixture behavior, not a submission receipt consumed by firstmate.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -130,22 +126,11 @@ EOF
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws the
 # shared classifier's positively identified bare-agent shape (`❯ <buf>`). This
 # remains readable under the strict blank-row posture without pretending that
-# one side-bordered row is a complete composer box. ALSO registers itself as a
-# real herdr agent via `herdr pane report-agent` and reports idle/working
-# transitions around each
-# submission: fm_backend_herdr_send_text_submit's confirmation is now native
-# agent-state (agent get), not composer content (docs/herdr-backend.md
-# "Native agent-state submit confirmation"), so a synthetic pane that only
-# draws composer TEXT but is never registered as an agent would report
-# agent_not_found forever - every confirmation attempt would read 'unknown',
-# never 'empty', and the daemon would treat every injection as unconfirmed and
-# keep retyping it on every housekeeping tick (the exact duplicate-send
-# failure mode this whole change exists to prevent) - discovered by this very
-# test regressing when the composer-only version of this fixture was run
-# against the new confirmation code. `herdr pane report-agent` is herdr's own
-# documented integration-protocol primitive for a non-built-in-harness process
-# to report its own agent state, verified empirically against real herdr 0.7.1
-# in an isolated session.
+# one side-bordered row is a complete composer box. The loop registers itself
+# through `herdr pane report-agent`, Herdr's documented integration primitive
+# for a non-built-in harness, so native prompts have a registered destination.
+# The composer and state transitions remain useful fixture observations, but
+# ordinary submission does not inspect either one as a prerequisite or receipt.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
@@ -199,11 +184,8 @@ submit_line() {
   _buf=
   printf '\r\033[K\n'
   redraw
-  # Report a real idle->working->idle cycle around the submission, exactly
-  # like a real harness's agent_status - this is the signal
-  # fm_backend_herdr_send_text_submit now confirms against. The 0.6s "working"
-  # window comfortably covers the daemon's FM_INJECT_CONFIRM_SLEEP=0.5
-  # per-attempt budget used by the scenarios below.
+  # Model a real harness's idle->working->idle cycle after receipt. Firstmate
+  # does not wait for this transition to confirm native prompt submission.
   report_agent_state working
   sleep 0.6
   report_agent_state idle
@@ -228,7 +210,7 @@ fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 
-# --- herdr shim: forwards to the real binary, optionally swallows one Enter --
+# --- Herdr shim: forwards to the real binary -------------------------------
 REAL_HERDR=$(command -v herdr)
 HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
 cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
@@ -390,7 +372,7 @@ test_scenario_a() {
   pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
 }
 
-# --- Scenario B: swallowed-Enter --------------------------------------------
+# --- Scenario B: native prompt remains independent of terminal Enter --------
 
 test_scenario_b() {
   reset_state

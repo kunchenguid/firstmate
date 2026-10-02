@@ -3453,8 +3453,9 @@ fm_backend_herdr_endpoint_confirmed_gone() {  # <target>
 # busy (actively generating); idle/done -> idle; blocked/waiting -> idle (an
 # agent waiting on the human is not grinding - the watcher should
 # treat it like a stale pane needing attention, not suppress it as busy);
-# unknown/unparseable/empty -> unknown, the caller's cue to fall back to
-# pane-regex detection.
+# unknown/unparseable/empty -> unknown. Ordinary Codex/TraeX classification
+# combines that verdict with exact process liveness; supervisor guards may use
+# their separate rendered fallback.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
@@ -3484,7 +3485,8 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # mid-turn, issue #4115) reads `unknown`, never busy, so the recovery classifier
 # cannot report a shell-only pane as working. Only the busy case pays the extra
 # process read; an unreadable process view also reads unknown, never proof of
-# work. Idle and unknown are never trusted as busy by any consumer.
+# work. Idle and unknown are never trusted as busy by any consumer; the ordinary
+# Codex/TraeX classifier separately maps native unknown plus exact liveness to idle.
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }

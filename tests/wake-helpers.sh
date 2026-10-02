@@ -69,6 +69,7 @@ write_composer() {
 }
 case "$1 ${2:-}" in
   'status --json') echo '{"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get')
     [ "${FM_FAKE_HERDR_PANE_ALIVE:-1}" = 1 ] || { echo '{"error":{"code":"pane_not_found"}}'; exit 1; }
     jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;

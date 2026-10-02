@@ -4,9 +4,10 @@
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
-# slash commands and Codex CLI $skill invocations, which use the typed plane.
-# Explicit backend targets use the typed plane. --resolve-key closes a matching
-# local task decision only after durable enqueue or confirmed typed submission.
+# slash commands and Codex CLI $skill invocations, which use direct native
+# prompt submission. Explicit backend targets use that same direct path.
+# --resolve-key closes a matching local task decision only after durable enqueue
+# or native API acceptance.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -451,10 +452,10 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # forms are native harness invocations rather than ordinary inbox text. The
 # target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-# Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: Herdr routes through its session-aware target_ready path
-# before sending. A failed backend send is still surfaced below as a hard
-# error with the attempted resolution attached.
+# Do not add a separate passive liveness preflight here.
+# The native Herdr prompt request itself reports target availability; a definite
+# failure is surfaced below with the attempted resolution attached, while a
+# timeout-like result stays uncertain and forbids blind replay.
 
 if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
   echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
@@ -484,7 +485,8 @@ else
   RESOLVE_ANSWER_TEXT=$MESSAGE
   # Text addressed to a task selector rides the inbox unless it is a
   # harness-native invocation: a leading slash, or a leading dollar sign for
-  # the Codex CLI harness. Explicit backend targets stay on the typed plane.
+  # the Codex CLI harness. Explicit backend targets stay on the direct native
+  # prompt plane.
   INBOX_PLANE=0
   if [ -n "$TARGET_SELECTOR" ]; then
     case "$RESOLVE_ANSWER_TEXT" in

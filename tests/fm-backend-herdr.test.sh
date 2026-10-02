@@ -4066,9 +4066,9 @@ test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint() {
 # Regression guard for the PRE-injection empty-box guard itself
 # (bin/fm-supervise-daemon.sh's pane_input_pending, dispatched via
 # fm_backend_composer_state -> fm_backend_herdr_composer_state): this task
-# changes ONLY submit confirmation, so genuine unsubmitted text in the
-# composer must still read 'pending' and the guard must still refuse to
-# inject into it.
+# changes ordinary submission, while genuine unsubmitted text in the composer
+# must still read 'pending' and the separate supervisor guard must still refuse
+# to inject into it.
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-guard-still-refuses"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"

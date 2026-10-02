@@ -222,22 +222,26 @@ Herdr passes its server startup environment to every later pane, so retaining th
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
-All text submission uses the explicitly selected session's native Herdr prompt API: `agent send <pane> <text>` on clients that expose the legacy command and `agent prompt <pane> <text>` on clients that expose the renamed command.
+The shared text-submission primitive uses the explicitly selected session's native Herdr prompt API: `agent send <pane> <text>` on clients that expose the legacy command and `agent prompt <pane> <text>` on clients that expose the renamed command.
 Ordinary local steers first preserve the exact text in the durable steering inbox, then submit only its constant doorbell through that API.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
-Text submission does not read the pane, composer, native execution state, or vendor transcript and does not send or retry Enter.
+The native submission primitive does not read the pane, composer, native execution state, or vendor transcript and does not send or retry Enter.
 A zero exit from the selected native prompt command means only that Herdr accepted the submission; it does not prove that the worker read, handled, or completed it.
 A timeout-like result remains uncertain and must not be replayed blindly, while a definite API or transport refusal remains a failure.
 The durable inbox record remains queued until the worker moves it to `handled/`; that move is observation of handling, not proof of semantic task completion.
 Transcript readers remain available only to recovery/lifecycle operations that independently require their provenance; they are not an ordinary Codex or TraeX state source.
-Manual key operations, shell launch commands, and composer guards used by unrelated overwrite-sensitive control paths retain their separate owners.
+Manual key operations, shell launch commands, and composer guards used by overwrite-sensitive lifecycle and supervisor paths retain their separate owners.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
 
-For ordinary Codex and TraeX state, `bin/fm-busy-lib.sh` combines Herdr's native status with the exact registered worker process. `working` is busy; `idle`, `done`, `blocked`, and `waiting` are idle. If the native state is unrecognized but the exact worker process is alive, it is also treated as idle; an exited process is dead and inconclusive liveness is unknown. This is intentionally presentation-coarse: an unrecognized live UI can be reported idle. A matching no-mistakes run remains authoritative, and native idle never proves the task was read, handled, accepted, or completed.
+For ordinary Codex and TraeX state, `bin/fm-busy-lib.sh` combines Herdr's native status with the exact registered worker process.
+`working` is busy; `idle`, `done`, `blocked`, and `waiting` are idle.
+If the native state is unrecognized but the exact worker process is alive, it is also treated as idle; an exited process is dead and inconclusive liveness is unknown.
+This is intentionally presentation-coarse: an unrecognized live UI can be reported idle.
+A matching no-mistakes run remains authoritative, and native idle never proves the task was read, handled, accepted, or completed.
 
 ## Composer and injection safety
 
@@ -271,7 +275,9 @@ A registration alone never proves an agent.
 Herdr keeps a Pi registration (`agent get` still reports `agent=pi` with its last status) after the Pi process has exited to a plain shell whenever a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table through the shared harness-process classifier in `bin/fm-agent-process-lib.sh`: a harness in the foreground process group, or still a descendant of the pane shell, keeps the registration live; a foreground that is nothing but shells with no harness descendant is a `stale-agent` pane, agent-free with that explicit reason; a foreground holding anything else is sampled over the existing bounded settle window because shells can host transient prompt helpers; an unclassified or unreadable process view remains `unknown`, trusting neither the registration nor its absence.
 A named registration must echo the exact pane identity; its presentation status may be unknown, absent, or newly introduced without negating independent process evidence.
-Structural `live` establishes no state by itself except the narrow ordinary Codex/TraeX rule that native unknown plus exact liveness is idle. It does not relax task ownership, generation, recovery provenance, supervisor-only empty-composer guards, or cleanup completion gates. Ordinary native prompt submission has no transcript input fence.
+Structural `live` establishes no state by itself except the narrow ordinary Codex/TraeX rule that native unknown plus exact liveness is idle.
+It does not relax task ownership, generation, recovery provenance, supervisor-only empty-composer guards, or cleanup completion gates.
+Ordinary native prompt submission has no transcript input fence.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`, and the native busy verdict is verified the same way so a shell-only pane never reads busy.
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
 The response shape the adapter parses (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) is verified live on Herdr 0.8.0 and 0.9.0, with the idle-shell proof's narrower parse previously verified on 0.7.5.

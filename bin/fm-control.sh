@@ -79,14 +79,13 @@
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
-#     is typed, so existing text is preserved instead of being concatenated.
+#     is submitted, so a lifecycle transition cannot overtake an operator draft.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
-#   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,6 +136,7 @@ POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
+# Retained only for the shared submit call shape; Herdr native prompts ignore it.
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
 die() {  # <message>
@@ -473,12 +473,9 @@ do_exit() {
       die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
       ;;
   esac
-  # The submit verdict is NOT the postcondition here: a successful exit command
-  # destroys the composer the verdict is read from, so a post-exit read can
-  # legitimately report anything. Only a hard transport failure aborts; the
-  # authoritative proof is the agent-state wait below. The retried Enter still
-  # matters, because a slash command opens a completion popup on some TUIs that
-  # swallows the first Enter.
+  # The submit verdict is NOT the postcondition here: native API acceptance does
+  # not prove that the lifecycle command ran. Only a hard transport failure
+  # aborts immediately; the authoritative proof is the agent-state wait below.
   verdict=$(fm_backend_send_text_submit "$BACKEND" "$T" "$cmd" "$EXIT_RETRIES" "$POLL" 1.2 "$LABEL") \
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
