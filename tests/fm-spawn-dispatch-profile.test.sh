@@ -544,37 +544,61 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
+# A codex models catalog shaped like ${CODEX_HOME}/models_cache.json: the
+# supported levels are read from it, never keyed to a model name in the script.
+make_codex_catalog() {  # <dir>
+  mkdir -p "$1"
+  cat > "$1/models_cache.json" <<'JSON'
+{"models":[
+{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"},{"effort":"max"}]},
+{"slug":"gpt-5","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"},{"effort":"xhigh"}]}
+]}
+JSON
+}
+
 test_codex_threads_model_and_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
+  make_codex_catalog "$CASE_DIR/codex-home"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-luna --effort max)
+  out=$(CODEX_HOME="$CASE_DIR/codex-home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-luna --effort max)
   status=$?
-  expect_code 0 "$status" "codex Luna spawn with max effort should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna max
+  expect_code 0 "$status" "codex spawn with max effort on a model whose catalog lists it should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5.6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not thread Luna's max reasoning effort config"
-  pass "codex Luna receives --model and model_reasoning_effort max profile flags"
+  assert_contains "$launch" "codex --model 'gpt-6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread max reasoning effort for a catalog model that lists it"
+  pass "codex passes max effort for any model whose catalog lists it"
 }
 
-test_codex_omits_max_effort_for_unsupported_model() {
-  local rec id out status launch
+# The dropped-effort incident: an effort the launch cannot honor must refuse the
+# spawn with a clear error and start nothing, never launch at the default effort.
+test_codex_refuses_unsupported_or_unverifiable_effort() {
+  local rec id out status
   id=profile-codex-max-unsupported-z4b
   rec=$(make_spawn_case profile-codex-max-unsupported codex "$id")
   read_case_record "$rec"
+  make_codex_catalog "$CASE_DIR/codex-home"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(CODEX_HOME="$CASE_DIR/codex-home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max 2>&1)
   status=$?
-  expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
-  pass "codex omits max for models without the catalog capability"
+  [ "$status" -ne 0 ] || fail "codex spawn must refuse an effort the model's catalog entry does not list"
+  assert_contains "$out" "does not support --effort max" "refusal did not name the unsupported effort"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused codex spawn must not launch anything"
+
+  out=$(CODEX_HOME="$CASE_DIR/codex-home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-unlisted --effort max 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex spawn must refuse an effort it cannot verify for an unlisted model"
+  assert_contains "$out" "cannot verify codex --effort max" "refusal did not say the effort cannot be verified"
+
+  out=$(CODEX_HOME="$CASE_DIR/no-catalog" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-luna --effort max 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "codex spawn must refuse max when no catalog can verify it"
+  assert_contains "$out" "cannot verify codex --effort max" "missing-catalog refusal did not say the effort cannot be verified"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused codex spawn must not launch anything"
+  pass "codex refuses an unsupported or unverifiable effort instead of dropping it"
 }
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
@@ -1904,7 +1928,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
-test_codex_omits_max_effort_for_unsupported_model
+test_codex_refuses_unsupported_or_unverifiable_effort
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort

@@ -80,7 +80,9 @@
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed. Ultra is the explicit
+#   from that harness's launch rather than guessed. Codex refuses an effort its
+#   model's catalog entry does not list (bin/fm-harness.sh validate-codex-effort)
+#   instead of omitting it. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
 #   OpenCode has no interactive effort flag, so its effort is written as the
@@ -2392,6 +2394,10 @@ if [ "$EFFORT" = ultra ]; then
     exit 1
   }
 fi
+# A codex effort its model does not list refuses here, before any provisioning.
+if [ "$HARNESS" = codex ] && [ "$RAW_LAUNCH" = 0 ] && [ "$EFFORT" != ultra ]; then
+  "$SCRIPT_DIR/fm-harness.sh" validate-codex-effort "$MODEL" "$EFFORT" || exit 1
+fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
 fi
@@ -2596,14 +2602,14 @@ effort_flag_for_harness() {
     esac
     ;;
   codex)
-    # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # The installed codex config schema uses model_reasoning_effort. Levels a
+    # model supports come from its codex models catalog (fm-harness.sh
+    # validate-codex-effort), and an unsupported or unverifiable level refuses
+    # the launch rather than dropping the flag.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
-    max)
-      [ "$model" = gpt-5.6-luna ] || return 0
-      printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
+    low | medium | high | xhigh | max)
+      "$SCRIPT_DIR/fm-harness.sh" validate-codex-effort "$model" "$effort" || return 1
+      printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")"
       ;;
     esac
     ;;
