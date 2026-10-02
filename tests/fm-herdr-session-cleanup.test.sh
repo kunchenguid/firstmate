@@ -229,6 +229,7 @@ reset_fixture() {
   printf 'w1:t1\n' > "$FIXTURE_DIR/active-tab"
   printf 'absent\n' > "$FIXTURE_DIR/agent"
   write_v1 "$ID"
+  printf '%s\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-display-name"
 }
 
 assert_preserved() { # <case>
@@ -237,6 +238,7 @@ assert_preserved() { # <case>
   fm_herdr_session_cleanup >/dev/null 2>&1
   if [ "$had_journal" -eq 1 ]; then
     [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$name retired the journal"
+    [ -f "$FM_STATE_OVERRIDE/$ID.herdr-display-name" ] || fail "$name retired the display-name record"
   fi
   [ ! -s "$CLOSE_LOG" ] || fail "$name closed the pane"
   pass "$name preserves the candidate"
@@ -245,6 +247,7 @@ assert_preserved() { # <case>
 reset_fixture
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "positive cleanup kept the journal"
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-display-name" ] || fail "positive cleanup kept the display-name record"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "positive cleanup did not close exactly once"
 [ "$(sed -n '1p' "$LOCK_LOG")" = "$FM_STATE_OVERRIDE/.spawn-$ID.lock" ] || fail "task lock was not acquired first"
 [ "$(sed -n '2p' "$LOCK_LOG")" = "$TMP_ROOT/presentation.lock" ] || fail "presentation lock was not acquired second"

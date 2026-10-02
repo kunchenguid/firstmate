@@ -149,6 +149,20 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # No send, capture, Treehouse, or general task-ownership path reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
 
+# The per-task display name a projection label shows, recorded under state/ as
+# <id>.herdr-display-name.
+# It exists because the presentation label must stay reproducible from durable
+# records alone: the label is re-derived during restart discovery, long after the
+# spawn that knew the project name and any operator-supplied short name.
+# The record is presentation-only. It never names an endpoint, and its absence
+# only returns a task to the task-id-derived label.
+FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_SUFFIX=".herdr-display-name"
+
+# The longest display name a label carries, in characters.
+# A narrow sidebar truncates the label's tail, so the budget exists to keep the
+# distinguishing words inside the visible width rather than to save bytes.
+FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_MAX=28
+
 # The config item a home writes to opt out of, or explicitly in to, the
 # projection.
 FM_BACKEND_HERDR_PRESENTATION_CONFIG="herdr-presentation-spaces"
@@ -618,7 +632,7 @@ fm_backend_herdr_projection_journal_field() {  # <journal> <key>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines expected_task_label exact
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -672,10 +686,11 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   [ -n "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] \
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
-  expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
   expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
+  [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ] || return 1
+  fm_backend_herdr_projection_workspace_label_binds_token \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
 }
 
 # fm_backend_herdr_projection_journal_token: validate and read either journal
@@ -753,6 +768,9 @@ fm_backend_herdr_projection_journal_replace_endpoint() {  # <journal> <task-id> 
 # Removes firstmate/, 2ndmate-<id>/, and a presentation-level fm- owner
 # prefix when present. The ordinary task tab remains fm-<id> and is not
 # built by this helper.
+# This is also the task-id-derived FALLBACK display name: it is what a task with
+# no display-name record shows, so every label written before display names
+# existed still re-derives byte-identically during restart discovery.
 fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   local task=$1
   case "$task" in
@@ -765,12 +783,213 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   printf '%s' "$task"
 }
 
+fm_backend_herdr_projection_display_name_path() {  # <state-dir> <task-id>
+  printf '%s/%s%s' "$1" "$2" "$FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_SUFFIX"
+}
+
+# fm_backend_herdr_projection_display_name_sanitize: reduce one candidate
+# display name to a single label-safe line, or fail when no letter or digit survives.
+# ':' and U+00B7 are replaced rather than escaped, because the label grammar
+# finds its token after the LAST " · p:" separator and refuses a title holding a
+# second "p:" occurrence; a display name able to forge either would make a
+# workspace title ambiguous to the discovery that has to re-derive it.
+# Underscores become spaces so a snake_case name reads as words.
+# Over-long input is trimmed on a word boundary when one is available, so a
+# truncated name never ends in a dangling partial word.
+fm_backend_herdr_projection_display_name_sanitize() {  # <raw>
+  local raw=$1 out cut
+  raw=${raw%%$'\n'*}
+  out=$(printf '%s' "$raw" | LC_ALL=C tr -c 'A-Za-z0-9 .+#()_-' ' ')
+  out=${out//_/ }
+  out=$(printf '%s' "$out" | LC_ALL=C tr -s ' ')
+  out=${out# }
+  out=${out% }
+  [ -n "$out" ] || return 1
+  if [ "${#out}" -gt "$FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_MAX" ]; then
+    cut=${out:0:$FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_MAX}
+    if [ "${out:$FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_MAX:1}" != ' ' ] && [ -n "${cut% *}" ]; then
+      cut=${cut% *}
+    fi
+    out=$cut
+    out=${out% }
+  fi
+  # Punctuation alone is not a readable name, so at least one letter or digit
+  # has to survive.
+  case "$out" in
+  *[A-Za-z0-9]*) ;;
+  *) return 1 ;;
+  esac
+  printf '%s' "$out"
+}
+
+# fm_backend_herdr_projection_display_name_titlecase: capitalize each word's
+# first character and leave the rest of that word untouched, so an acronym the
+# caller already wrote in capitals survives.
+# Written without bash 4's ${var^} because this adapter still runs under the
+# bash 3.2 that ships as /bin/bash on macOS.
+fm_backend_herdr_projection_display_name_titlecase() {  # <words>
+  local in=$1 out='' word rest head
+  while [ -n "$in" ]; do
+    word=${in%% *}
+    rest=${in#"$word"}
+    rest=${rest# }
+    in=$rest
+    [ -n "$word" ] || continue
+    head=$(printf '%s' "${word:0:1}" | LC_ALL=C tr '[:lower:]' '[:upper:]')
+    if [ -z "$out" ]; then
+      out="$head${word:1}"
+    else
+      out="$out $head${word:1}"
+    fi
+  done
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
+# fm_backend_herdr_projection_display_name_derive: build one readable display
+# name automatically from a task id, putting the DISTINGUISHING words first.
+# A repeated leading "<project>-" segment is dropped, because every worker on
+# one project carries it and a narrow sidebar then truncates every row to that
+# one shared prefix - the exact condition that makes workers indistinguishable.
+# The drop is skipped when nothing would remain, so a task id that is only the
+# project name still keeps a name.
+# Project arguments are optional and each accepts a registry name or a clone
+# path. Several may be given because the project a spawn was asked for can be an
+# alias or path whose last segment differs from the resolved clone's name; the
+# first candidate that names the leading segment wins, and only one segment is
+# ever dropped.
+fm_backend_herdr_projection_display_name_derive() {  # <task-id> [project...]
+  local task=$1 project base lower plower
+  shift
+  base=$(fm_backend_herdr_projection_concise_task_label "$task")
+  lower=$(printf '%s' "$base" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+  for project in "$@"; do
+    project=${project%/}
+    project=${project##*/}
+    [ -n "$project" ] || continue
+    plower=$(printf '%s' "$project" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+    case "$lower" in
+    "$plower"-?*)
+      base=${base:$((${#project} + 1))}
+      break
+      ;;
+    esac
+  done
+  base=${base//-/ }
+  base=$(fm_backend_herdr_projection_display_name_sanitize "$base") || return 1
+  fm_backend_herdr_projection_display_name_titlecase "$base"
+}
+
+# fm_backend_herdr_projection_display_name_record: atomically publish one task's
+# presentation display name BEFORE any projection label is built from it.
+# Presentation is best effort, so a caller treats failure here as "fall back to
+# the task-id-derived label", never as a reason to fail a spawn.
+fm_backend_herdr_projection_display_name_record() {  # <state-dir> <task-id> <name>
+  local state=$1 id=$2 name=$3 path tmp
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  name=$(fm_backend_herdr_projection_display_name_sanitize "$name") || return 1
+  path=$(fm_backend_herdr_projection_display_name_path "$state" "$id")
+  tmp=$(mktemp "$state/.${id##*/}${FM_BACKEND_HERDR_PRESENTATION_DISPLAY_NAME_SUFFIX}.XXXXXX") \
+    || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! printf '%s\n' "$name" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+}
+
+# fm_backend_herdr_projection_display_name: the display name a task's label
+# shows right now.
+# A valid record wins; anything else - absent, a symlink, unreadable, empty,
+# multi-line, or holding nothing label-safe - falls back to the task-id-derived
+# name rather than failing, so a damaged presentation record can never strand a
+# projection that discovery still has to recognize.
+fm_backend_herdr_projection_display_name() {  # <task-id> [state-dir]
+  local id=$1 state=${2:-} path raw lines name
+  if [ -n "$state" ]; then
+    path=$(fm_backend_herdr_projection_display_name_path "$state" "$id")
+    if [ -f "$path" ] && [ ! -L "$path" ]; then
+      lines=$(wc -l < "$path" 2>/dev/null | tr -d '[:space:]')
+      if [ "$lines" = 1 ]; then
+        raw=$(head -n 1 "$path" 2>/dev/null) || raw=
+        if name=$(fm_backend_herdr_projection_display_name_sanitize "$raw" 2>/dev/null) \
+          && [ -n "$name" ]; then
+          printf '%s' "$name"
+          return 0
+        fi
+      fi
+    fi
+  fi
+  fm_backend_herdr_projection_concise_task_label "$id"
+}
+
 # fm_backend_herdr_projection_workspace_label: presentation-only child label.
 # Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
+# display name, then the unchanged · p:<full-22-char-token> suffix.
 # Labels and tokens remain non-authoritative correlators only.
-fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
+# The state directory is optional: a caller without one still builds the
+# task-id-derived label this grammar has always produced.
+fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id> [state-dir]
+  printf '└ %s · p:%s' \
+    "$(fm_backend_herdr_projection_display_name "$1" "${3:-}")" "$2"
+}
+
+# fm_backend_herdr_projection_legacy_workspace_label: the label this grammar
+# produced before display names existed, derived from the task id alone.
+fm_backend_herdr_projection_legacy_workspace_label() {  # <task-id> <projection-id>
   printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+}
+
+# fm_backend_herdr_projection_workspace_label_token: the projection token a
+# candidate workspace title carries, or nothing (nonzero) when the title is not
+# one this grammar produced.
+# This is the single owner of the title grammar: literal U+2514, one space, a
+# non-empty display name, then exactly one " · p:<22-char-token>" suffix.
+# A title holding a second "p:" occurrence is refused, because the token is read
+# from the LAST separator and a second occurrence makes that read ambiguous.
+fm_backend_herdr_projection_workspace_label_token() {  # <title>
+  local title=$1 token prefix rest
+  case "$title" in
+  '└ '*' · p:'*) ;;
+  *) return 1 ;;
+  esac
+  token=${title##*' · p:'}
+  prefix=${title%" · p:$token"}
+  [ "$prefix" != "$title" ] && [ -n "${prefix#'└ '}" ] || return 1
+  [ "${#token}" -eq 22 ] || return 1
+  case "$token" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+  rest=${title#*p:}
+  [ "$rest" != "$title" ] || return 1
+  case "$rest" in *p:*) return 1 ;; esac
+  printf '%s' "$token"
+}
+
+# fm_backend_herdr_projection_workspace_label_binds_token: is this candidate
+# title one of ours AND carrying exactly this token?
+# A version 2 journal is validated this way rather than by re-deriving its
+# display name, so the DISPLAY NAME never becomes load-bearing: losing or
+# editing a presentation display-name record cannot invalidate a journal that
+# still binds a live workspace. The token remains the correlator, and it must
+# match exactly.
+fm_backend_herdr_projection_workspace_label_binds_token() {  # <title> <projection-id>
+  local got
+  got=$(fm_backend_herdr_projection_workspace_label_token "$1") || return 1
+  [ "$got" = "$2" ]
+}
+
+# fm_backend_herdr_projection_workspace_label_matches: does one candidate title
+# name this exact task and token under ANY label this grammar has produced?
+# Discovery re-derives a label from durable records, so it must accept both the
+# display-name label and the task-id-derived label, so a projection labeled
+# before display names existed stays discoverable instead of stranded.
+# The token still has to match exactly, so accepting a second title spelling
+# never widens which task a candidate can be attributed to.
+fm_backend_herdr_projection_workspace_label_matches() {  # <candidate> <task-id> <projection-id> [state-dir]
+  local candidate=$1 id=$2 token=$3 state=${4:-}
+  [ "$candidate" = "$(fm_backend_herdr_projection_workspace_label "$id" "$token" "$state")" ] \
+    && return 0
+  [ "$candidate" = "$(fm_backend_herdr_projection_legacy_workspace_label "$id" "$token")" ]
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
