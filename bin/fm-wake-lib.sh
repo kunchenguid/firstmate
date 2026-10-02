@@ -102,7 +102,10 @@ fm_pid_identity() {
   # narrow-COLUMNS hook, where a truncated command would likewise reject a live
   # watcher (issue #799). This mirrors fm_pending_reply_pid_identity, which pins the
   # same width for the same reason.
-  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  # Pin TZ=UTC because BSD ps renders lstart in the local time zone: after a host
+  # time-zone change, an unpinned read rejects a live process against the
+  # identity it recorded, such as a supervise daemon against its lock.
+  out=$(COLUMNS=10000 LC_ALL=C TZ=UTC ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }

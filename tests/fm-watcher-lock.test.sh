@@ -1416,6 +1416,60 @@ SH
   pass "fm_pid_identity is locale-invariant across LC_ALL/LC_TIME"
 }
 
+test_pid_identity_is_time_zone_invariant() {
+  # BSD ps renders lstart in the local time zone, so a host time-zone change
+  # re-renders the identity of a process that still runs. A live supervise daemon
+  # then no longer matched its lock, and a live watcher no longer matched its
+  # watcher lock. The fallback pins TZ inside fm_pid_identity, so its output must
+  # be byte-identical regardless of the caller's exported TZ.
+  local live no_proc fakebin tz_log baseline via_tokyo via_unset
+  local real_first real_second observed
+  tail -f /dev/null &
+  live=$!
+  no_proc="$TMP_ROOT/no-tz-proc"
+  fakebin="$TMP_ROOT/tz-ps"
+  tz_log="$TMP_ROOT/tz-ps.observed"
+  mkdir -p "$fakebin"
+  : > "$tz_log"
+  # The stub renders lstart through date under whatever TZ it inherits, so its
+  # output changes when the caller's TZ leaks through.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${TZ-<unset>}" >> "$FAKE_PS_TZ_LOG"
+stamp=$(date -d @1784094040 '+%a %b %e %H:%M:%S %Y' 2>/dev/null) \
+  || stamp=$(date -r 1784094040 '+%a %b %e %H:%M:%S %Y' 2>/dev/null) \
+  || stamp='Mon Jul 28 20:00:00 2026'
+printf '%s tail -f /dev/null\n' "$stamp"
+SH
+  chmod +x "$fakebin/ps"
+  baseline=$(PATH="$fakebin:$PATH" FAKE_PS_TZ_LOG="$tz_log" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=UTC bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_tokyo=$(PATH="$fakebin:$PATH" FAKE_PS_TZ_LOG="$tz_log" FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=Asia/Tokyo bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  via_unset=$(PATH="$fakebin:$PATH" FAKE_PS_TZ_LOG="$tz_log" FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c 'unset TZ; . "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  # Keep the real ps fallback exercised wherever it supports the portable -o fields.
+  real_first=
+  real_second=
+  if LC_ALL=C ps -p "$live" -o lstart= -o command= >/dev/null 2>&1; then
+    real_first=$(FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=UTC bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+    real_second=$(FM_PROC_ROOT_OVERRIDE="$no_proc" TZ=Asia/Tokyo bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$baseline" ] || fail "fm_pid_identity produced no baseline identity under TZ=UTC"
+  [ "$via_tokyo" = "$baseline" ] || fail "fm_pid_identity varied with exported TZ (got '$via_tokyo', want '$baseline')"
+  [ "$via_unset" = "$baseline" ] || fail "fm_pid_identity varied with unset TZ (got '$via_unset', want '$baseline')"
+  while read -r observed; do
+    [ "$observed" = UTC ] || fail "fm_pid_identity invoked ps without pinning TZ=UTC (saw '$observed')"
+  done < "$tz_log"
+  if [ -n "$real_first" ]; then
+    [ "$real_second" = "$real_first" ] \
+      || fail "real ps fallback varied with exported TZ (got '$real_second', want '$real_first')"
+    pass "fm_pid_identity real ps fallback is time-zone-invariant"
+  else
+    pass "real ps fallback time-zone check skipped where ps -o lstart= is unsupported"
+  fi
+  pass "fm_pid_identity is time-zone-invariant across TZ"
+}
+
 test_pid_identity_is_terminal_width_invariant() {
   # The portable fallback records its identity from a wide shell (the arm or
   # watcher process) but re-reads it inside a narrow-COLUMNS hook, where ps cuts
@@ -1549,6 +1603,7 @@ test_msys_pid_identity_uses_proc() {
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
+test_pid_identity_is_time_zone_invariant
 test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc

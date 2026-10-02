@@ -7,12 +7,10 @@
 # fm_pid_identity, and fm_watcher_lock_matches_pid it calls. Only
 # fm_afk_daemon_stop signals anything.
 #
-# The lock alone cannot find every live daemon: a daemon can outlive its lock,
-# and the lock's recorded identity is fm_pid_identity, whose ps form renders the
-# start time in the local time zone, so a host time-zone change makes a live
-# daemon no longer match it. The watcher proof finds such a daemon while it
-# still runs this home's watcher; a daemon that runs neither exits on its own
-# once state/.afk is gone or its lock is lost.
+# The lock alone cannot find every live daemon: a daemon can outlive its lock.
+# The watcher proof finds such a daemon while it still runs this home's
+# watcher; a daemon that runs neither exits on its own once state/.afk is gone
+# or its lock is lost.
 #
 # Proofs that a pid is a live daemon of this home, strongest first:
 #   lock     the lock names a live pid whose recorded identity still matches,
