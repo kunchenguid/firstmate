@@ -569,7 +569,12 @@ if ! WORKER_SANDBOX_ENABLED=$(fm_config_source_present "$CONFIG/worker-sandbox")
 fi
 SANDBOX_PREFIX=
 if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
-  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
+  SANDBOX_SETTINGS=${FM_SANDBOX_SETTINGS:-$CONFIG/worker-sandbox-settings.json}
+  case "$SANDBOX_SETTINGS" in
+    /*) ;;
+    *) SANDBOX_SETTINGS="$(pwd -P)/$SANDBOX_SETTINGS" ;;
+  esac
+  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" FM_SANDBOX_SETTINGS="$SANDBOX_SETTINGS" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
     exit 1
   fi
   if [ -z "$SANDBOX_PREFIX" ]; then
@@ -3041,8 +3046,15 @@ if [ "$KIND" = secondmate ]; then
   # inheritance returned, and however it was skipped, and refuse the launch
   # rather than continue with the sandbox silently off.
   if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+    SECONDMATE_SANDBOX_SETTINGS="$PROJ_ABS/config/worker-sandbox-settings.json"
+    # An explicit settings override is shared by absolute path on this host;
+    # carry it in the agent command so a backend daemon or env allowlist cannot
+    # drop it, and descendants resolve the same file after changing homes.
+    if [ -n "${FM_SANDBOX_SETTINGS:-}" ]; then
+      SECONDMATE_SANDBOX_SETTINGS=$SANDBOX_SETTINGS
+    fi
     if ! cmp -s "$CONFIG/worker-sandbox" "$PROJ_ABS/config/worker-sandbox" ||
-      ! cmp -s "$CONFIG/worker-sandbox-settings.json" "$PROJ_ABS/config/worker-sandbox-settings.json"; then
+      ! cmp -s "$SANDBOX_SETTINGS" "$SECONDMATE_SANDBOX_SETTINGS"; then
       echo "error: secondmate $ID sandbox configuration does not match the primary (config/worker-sandbox, config/worker-sandbox-settings.json) for $PROJ_ABS; refusing to launch with missing or stale inherited settings" >&2
       exit 1
     fi
@@ -5211,6 +5223,9 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
+  if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+    LAUNCH="FM_SANDBOX_SETTINGS=$(shell_quote "$SECONDMATE_SANDBOX_SETTINGS") $LAUNCH"
+  fi
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Pane-scoped override: git in this worker reads our commit-msg strip without

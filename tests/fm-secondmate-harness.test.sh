@@ -638,6 +638,67 @@ test_spawn_checks_sandbox_bytes_when_inheritance_skipped() {
   pass "A5 spawn: skipped inheritance requires exact sandbox flag and settings bytes"
 }
 
+test_spawn_preserves_alternate_sandbox_settings() {
+  local w sm fakebin launchlog settings selection expected mode rc
+  for mode in absolute relative allowlist skipped; do
+    w="$TMP_ROOT/spawn-sandbox-alternate-$mode"
+    sm="$w/sm"
+    settings="$w/alternate settings.json"
+    launchlog="$w/launch.log"
+    mkdir -p "$w/home/config"
+    : > "$w/home/config/worker-sandbox"
+    printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' > "$settings"
+    make_seeded_home "$sm" sm
+    fakebin=$(make_launch_capturing_tmux "$w/tmux-sm")
+    fm_test_fake_srt "$fakebin"
+    selection=$settings
+    expected=$settings
+    if [ "$mode" = relative ]; then
+      selection='./alternate settings.json'
+      expected="$w/$selection"
+    elif [ "$mode" = allowlist ]; then
+      : > "$w/home/config/launch-env-allowlist"
+    elif [ "$mode" = skipped ]; then
+      FM_SANDBOX_SETTINGS="$selection" FM_SKIP_SECONDMATE_INHERIT=1 \
+        spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness pi \
+        > "$w/spawn.out" 2> "$w/sm.spawn.err"
+      rc=$?
+      [ "$rc" -ne 0 ] || fail "alternate settings must not bypass a missing inherited flag"
+      assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+        "skipped alternate settings must reach the flag postcondition"
+      [ ! -f "$w/home/state/sm.meta" ] || fail "missing flag refusal must not publish metadata"
+      mkdir -p "$sm/config"
+      cp "$w/home/config/worker-sandbox" "$sm/config/worker-sandbox"
+    fi
+    (cd "$w" &&
+      FM_SANDBOX_SETTINGS="$selection" FM_SKIP_SECONDMATE_INHERIT="$([ "$mode" = skipped ] && printf 1 || printf 0)" \
+        spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness pi) \
+        > "$w/spawn.out" 2> "$w/sm.spawn.err" \
+      || fail "alternate settings must launch without a default file ($mode): $(cat "$w/sm.spawn.err")"
+    [ -f "$w/home/state/sm.meta" ] || fail "alternate settings spawn must publish metadata"
+    [ -f "$sm/config/worker-sandbox" ] || fail "alternate settings must retain the inherited flag"
+    [ ! -e "$sm/config/worker-sandbox-settings.json" ] || fail "the absent default must stay absent"
+    # Execute the emitted launch interface with a fixture agent that asks the
+    # child's sandbox consumer to resolve and use its settings for a descendant.
+    {
+      printf '#!/usr/bin/env bash\n'
+      printf 'consumer=%q\nresult=%q\n' "$ROOT/bin/fm-sandbox.sh" "$w/child-settings"
+      cat <<'SH'
+set -e
+cd "$FM_HOME"
+"$consumer" exec -- /bin/sh -c 'printf "%s\n" "$FM_SANDBOX_SETTINGS"' > "$result"
+SH
+    } > "$fakebin/pi"
+    chmod +x "$fakebin/pi"
+    PATH="$fakebin:$BASE_PATH" HOME="$w/home/user-home" \
+      bash "$launchlog" > "$w/launch.out" 2> "$w/launch.err" \
+      || fail "the child must resolve alternate settings through its sandbox consumer ($mode): $(cat "$w/launch.err")"
+    [ "$(cat "$w/child-settings")" = "$expected" ] \
+      || fail "the descendant must receive the absolute preflight-selected settings ($mode)"
+  done
+  pass "A5 spawn: alternate settings survive the child-home, backend, and environment boundaries"
+}
+
 # Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
 # AGENT launches on codex; its own crewmates inherit claude; secondmate-harness
 # does not flow into the home.
@@ -2862,6 +2923,7 @@ test_spawn_refuses_when_sandbox_inheritance_fails
 test_spawn_inherits_sandbox_flag_and_settings
 test_spawn_refuses_stale_sandbox_after_failed_update
 test_spawn_checks_sandbox_bytes_when_inheritance_skipped
+test_spawn_preserves_alternate_sandbox_settings
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
