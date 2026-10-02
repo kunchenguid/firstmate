@@ -149,6 +149,8 @@ test_spawn_get_uses_per_home_treehouse_root() {
   id=settle-per-home-root-z3
   rec=$(make_settle_case settle-per-home-root "$id" 0)
   read_settle_record "$rec"
+  mkdir -p "$HOME_DIR/user-home"
+  printf 'https://user:secret@example.invalid\n' > "$HOME_DIR/user-home/.git-credentials"
 
   out=$(run_settle_spawn "$id")
   status=$?
@@ -160,6 +162,9 @@ test_spawn_get_uses_per_home_treehouse_root() {
     *) fail "per-home Treehouse root '$expected_root' must live under the launching HOME, never inside the firstmate home" ;;
   esac
   assert_present "$expected_root/firstmate-home" "spawn did not prepare the per-home Treehouse root"
+  [ -L "$expected_root/.git-credentials" ] || fail "spawn did not bridge the launching HOME's Git credential store"
+  assert_grep "https://user:secret@example.invalid" "$expected_root/.git-credentials" \
+    "prepared pool root cannot read the launching HOME's Git credential store"
   assert_grep "cd $PROJ_DIR && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
     "treehouse get did not receive the per-home root"
   assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
@@ -185,24 +190,28 @@ test_spawn_refuses_project_treehouse_config() {
   pass "fm-spawn.sh refuses project treehouse.toml before Treehouse acquisition"
 }
 
-test_pool_root_uses_sha256sum_without_shasum() {
-  local toolbin root key status sha256sum_path cut_path
-  toolbin="$HOME_DIR/hash-tools"
-  mkdir -p "$toolbin" "$HOME_DIR/user-home"
-  sha256sum_path=$(command -v sha256sum)
+test_pool_root_keeps_sha1_key_with_sha1sum_fallback() {
+  local shasum_bin sha1sum_bin root_with_shasum root_with_sha1sum status cut_path
+  shasum_bin="$HOME_DIR/shasum-tools"
+  sha1sum_bin="$HOME_DIR/sha1sum-tools"
+  mkdir -p "$shasum_bin" "$sha1sum_bin" "$HOME_DIR/user-home"
   cut_path=$(command -v cut)
-  ln -sf "$sha256sum_path" "$toolbin/sha256sum"
-  ln -sf "$cut_path" "$toolbin/cut"
+  ln -sf "$cut_path" "$shasum_bin/cut"
+  ln -sf "$cut_path" "$sha1sum_bin/cut"
+  printf '%s\n' '#!/bin/sh' 'IFS= read -r input || :' "printf '%s  -\\n' 0123456789abcdef0123456789abcdef01234567" > "$shasum_bin/shasum"
+  printf '%s\n' '#!/bin/sh' 'IFS= read -r input || :' "printf '%s  -\\n' 0123456789abcdef0123456789abcdef01234567" > "$sha1sum_bin/sha1sum"
+  chmod +x "$shasum_bin/shasum" "$sha1sum_bin/sha1sum"
 
   status=0
-  root=$(PATH="$toolbin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
-  expect_code 0 "$status" "pool root should resolve when sha256sum is the only available hasher"
-  key=${root##*/}
-  [ "${#key}" -eq 12 ] || fail "sha256sum fallback produced a pool key with the wrong length: '$key'"
-  case "$key" in
-    *[!0-9a-f]*) fail "sha256sum fallback produced a non-hex pool key: '$key'" ;;
-  esac
-  pass "Treehouse pool roots resolve with sha256sum when shasum is unavailable"
+  root_with_shasum=$(PATH="$shasum_bin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
+  expect_code 0 "$status" "pool root should resolve with the established shasum path"
+  status=0
+  root_with_sha1sum=$(PATH="$sha1sum_bin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
+  expect_code 0 "$status" "pool root should resolve when sha1sum is the only available hasher"
+  [ "$root_with_sha1sum" = "$root_with_shasum" ] || \
+    fail "sha1sum fallback changed the established pool key: '$root_with_shasum' != '$root_with_sha1sum'"
+  [ "${root_with_sha1sum##*/}" = 0123456789ab ] || fail "SHA-1 pool key was not truncated to its first 12 hex characters"
+  pass "Treehouse pool roots keep the established SHA-1 key with the sha1sum fallback"
 }
 
 test_pool_root_refuses_relative_override() {
@@ -213,6 +222,17 @@ test_pool_root_refuses_relative_override() {
   expect_code 1 "$status" "relative Treehouse pool bases should be refused"
   assert_contains "$out" "must be absolute" "relative pool-base refusal was not actionable"
   pass "Treehouse pool roots refuse caller-relative overrides"
+}
+
+test_pool_root_recovery_uses_nearest_treehouse_marker() {
+  local pool_root worktree recovered
+  pool_root="$HOME_DIR/user-home/.treehouse/firstmate/0123456789ab"
+  worktree="$pool_root/.treehouse/project/slot"
+  recovered=$(fm_treehouse_root_for_worktree "$HOME_DIR" "$worktree") || \
+    fail "pool-root recovery failed for a base containing a .treehouse component"
+  [ "$recovered" = "$pool_root" ] || \
+    fail "pool-root recovery used an outer .treehouse component: '$recovered' != '$pool_root'"
+  pass "Treehouse return recovers the pool root from the nearest .treehouse marker"
 }
 
 # A pane that reports the real worktree from the very first read costs exactly
@@ -305,8 +325,9 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 test_single_stale_first_read_is_not_accepted
 test_spawn_get_uses_per_home_treehouse_root
 test_spawn_refuses_project_treehouse_config
-test_pool_root_uses_sha256sum_without_shasum
+test_pool_root_keeps_sha1_key_with_sha1sum_fallback
 test_pool_root_refuses_relative_override
+test_pool_root_recovery_uses_nearest_treehouse_marker
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

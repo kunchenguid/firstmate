@@ -16,18 +16,19 @@
 # Because the Treehouse command runs with HOME pointed at the root, everything
 # git and its credential helpers read from HOME must be reachable there too:
 # fm_treehouse_prepare_root links the real ~/Library (macOS keychain for
-# credential.helper=osxkeychain), ~/.gitconfig, ~/.ssh and ~/.config into the
-# root, so a fresh pool can clone with the launching user's credentials.
+# credential.helper=osxkeychain), ~/.gitconfig, ~/.git-credentials, ~/.ssh and
+# ~/.config into the root, so a fresh pool can clone with the launching user's
+# credentials.
 
 fm_treehouse_pool_root() { # <home> -> <absolute-root>
   local home=$1 resolved key base
   resolved=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
   if command -v shasum >/dev/null 2>&1; then
     key=$(printf '%s' "$resolved" | shasum | cut -c1-12) || return 1
-  elif command -v sha256sum >/dev/null 2>&1; then
-    key=$(printf '%s' "$resolved" | sha256sum | cut -c1-12) || return 1
+  elif command -v sha1sum >/dev/null 2>&1; then
+    key=$(printf '%s' "$resolved" | sha1sum | cut -c1-12) || return 1
   else
-    echo "error: shasum or sha256sum is required to resolve the Treehouse pool root" >&2
+    echo "error: shasum or sha1sum is required to resolve the Treehouse pool root" >&2
     return 1
   fi
   [ "${#key}" -eq 12 ] || return 1
@@ -47,7 +48,7 @@ fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
   local home=$1 root=$2 entry
   mkdir -p -- "$root" || return 1
   printf '%s\n' "$home" > "$root/firstmate-home" || return 1
-  for entry in Library .gitconfig .ssh .config; do
+  for entry in Library .gitconfig .git-credentials .ssh .config; do
     [ -e "$HOME/$entry" ] || continue
     [ -e "$root/$entry" ] || [ -L "$root/$entry" ] || ln -s -- "$HOME/$entry" "$root/$entry" || return 1
   done
@@ -65,7 +66,7 @@ fm_treehouse_root_for_worktree() { # <home> <worktree> -> <absolute-root>
   local home=$1 worktree=$2 root
   case "$worktree" in
     */.treehouse/*)
-      root=${worktree%%/.treehouse/*}
+      root=${worktree%/.treehouse/*}
       [ -n "$root" ] || root=/
       ;;
     *)
