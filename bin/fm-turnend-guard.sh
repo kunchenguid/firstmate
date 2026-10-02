@@ -192,12 +192,13 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-CODEX_LEDGER="$STATE/.turnend-codex-ledger.$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' -f1)"
+CODEX_LEDGER="$STATE/.turnend-codex-ledger"
 
-# Each Codex session owns its own ledger file, scoped to one turn, so
-# concurrent sessions in one home cannot reset each other's count. A changed
-# watcher beacon proves that a checkpoint ran since the previous block and
-# earns a fresh block budget.
+# One ledger per home records the last blocked Codex session and turn; a new
+# session or turn overwrites it, and a healthy pass-through removes it. A
+# watcher beacon written at or after the last block proves that a checkpoint
+# may have run since then and earns a fresh block budget (whole-second mtimes
+# make a same-second update ambiguous, so it counts as progress).
 # The budget only bounds immediate retries: a stop more than
 # CODEX_RETRY_WINDOW seconds after the last block also starts a fresh budget,
 # so an exhausted ledger cannot leave the rest of a long turn unguarded.
@@ -205,33 +206,27 @@ codex_ledger_read() {
   CODEX_LEDGER_SESSION=$(sed -n '1s/^session=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   CODEX_LEDGER_TURN=$(sed -n '2s/^turn=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   CODEX_LEDGER_TIME=$(sed -n '3s/^time=//p' "$CODEX_LEDGER" 2>/dev/null || true)
-  CODEX_LEDGER_BEACON=$(sed -n '4s/^beacon=//p' "$CODEX_LEDGER" 2>/dev/null || true)
-  CODEX_LEDGER_COUNT=$(sed -n '5s/^count=//p' "$CODEX_LEDGER" 2>/dev/null || true)
+  CODEX_LEDGER_COUNT=$(sed -n '4s/^count=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   case "$CODEX_LEDGER_COUNT" in ''|*[!0-9]*) CODEX_LEDGER_COUNT=0 ;; esac
   case "$CODEX_LEDGER_TIME" in ''|*[!0-9]*) CODEX_LEDGER_TIME=0 ;; esac
 }
 
 codex_ledger_continues() {
+  local beacon_mtime
+  beacon_mtime=$(fm_path_mtime "$STATE/.last-watcher-beat" 2>/dev/null || true)
+  case "$beacon_mtime" in ''|*[!0-9]*) beacon_mtime=-1 ;; esac
   [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
     && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
-    && [ "$CODEX_LEDGER_BEACON" = "$1" ] \
+    && [ "$beacon_mtime" -lt "$CODEX_LEDGER_TIME" ] \
     && [ $(($(date +%s) - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
 }
 
-codex_beacon_stand() {
-  local mtime
-  mtime=$(fm_path_mtime "$STATE/.last-watcher-beat" 2>/dev/null || true)
-  printf '%s' "${mtime:-missing}"
-}
-
 codex_retry_budget_exhausted() {
-  local current_beacon
   [ "$CODEX_TURNEND_TRACKED" -eq 1 ] || return 1
-  current_beacon=$(codex_beacon_stand)
   fm_lock_try_acquire "$CODEX_LEDGER_LOCK" || return 1
   codex_ledger_read
   fm_lock_release "$CODEX_LEDGER_LOCK"
-  codex_ledger_continues "$current_beacon" \
+  codex_ledger_continues \
     && [ "$CODEX_LEDGER_COUNT" -ge "$CODEX_BLOCK_BUDGET" ] || return 1
   printf 'TURN-END GUARD: Codex stop retry budget exhausted for turn %s without watcher-beacon progress within %ss; allowing this stop to prevent an unending continuation loop.\n' \
     "$CODEX_TURN_ID" "$CODEX_RETRY_WINDOW" >&2
@@ -239,22 +234,21 @@ codex_retry_budget_exhausted() {
 }
 
 codex_ledger_record_block() {
-  local current_beacon count tmp
+  local count tmp
   [ "$CODEX_TURNEND_TRACKED" -eq 1 ] || return 0
-  current_beacon=$(codex_beacon_stand)
   fm_lock_try_acquire "$CODEX_LEDGER_LOCK" || {
     printf 'TURN-END GUARD: unable to lock Codex retry ledger; retaining the supervision block.\n' >&2
     return 0
   }
   codex_ledger_read
-  if codex_ledger_continues "$current_beacon"; then
+  if codex_ledger_continues; then
     count=$((CODEX_LEDGER_COUNT + 1))
   else
     count=1
   fi
   tmp="$CODEX_LEDGER.tmp.$$"
-  if printf 'session=%s\nturn=%s\ntime=%s\nbeacon=%s\ncount=%s\n' \
-    "$SESSION_ID" "$CODEX_TURN_ID" "$(date +%s)" "$current_beacon" "$count" > "$tmp" 2>/dev/null \
+  if printf 'session=%s\nturn=%s\ntime=%s\ncount=%s\n' \
+    "$SESSION_ID" "$CODEX_TURN_ID" "$(date +%s)" "$count" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$CODEX_LEDGER" 2>/dev/null; then
     :
   else
@@ -279,7 +273,10 @@ fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  if [ "$CLAUDE_MODE" -eq 0 ]; then
+    rm -f "$CODEX_LEDGER" 2>/dev/null || true
+    exit 0
+  fi
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
 }
