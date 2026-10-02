@@ -843,8 +843,14 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
       ;;
     *) __fm_note_text=$__fm_note_unstamped ;;
   esac
+  if ! _fm_key_before_colon "$__fm_note_unstamped" \
+    && ! _fm_key_unbracketed "$__fm_note_unstamped" >/dev/null \
+    && _fm_key_at_note_head "$__fm_note_unstamped" __fm_note_key \
+    && _fm_decision_slug_ok "$__fm_note_key"; then
+    __fm_note_text=${__fm_note_text#"[key=$__fm_note_key]"}
+    __fm_note_text=${__fm_note_text#"${__fm_note_text%%[![:space:]]*}"}
+  fi
   if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$__fm_note_text"; else printf '%s' "$__fm_note_text"; fi
-}
 _fm_decision_key() {  # <status-line> [<keyless>] [<out-var>] -> key slug, or <keyless> (default "default") when no token
   local __fm_key_slug __fm_key_unstamped
   _fm_status_unstamped "$1" __fm_key_unstamped
