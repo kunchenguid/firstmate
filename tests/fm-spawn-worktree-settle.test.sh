@@ -230,7 +230,7 @@ test_pool_root_refuses_relative_override() {
 }
 
 test_prepare_root_filters_treehouse_user_config() {
-  local user_home pool_root
+  local user_home pool_root race_bin real_ln
   user_home="$HOME_DIR/config-user-home"
   pool_root="$HOME_DIR/prepared-pool"
   mkdir -p "$user_home/.config/git" "$user_home/.config/treehouse" "$pool_root"
@@ -247,8 +247,19 @@ test_prepare_root_filters_treehouse_user_config() {
 
   mkdir -p "$user_home/.config/gh"
   ln -s "$user_home/.config/treehouse" "$pool_root/.config/treehouse"
-  HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
+  race_bin="$HOME_DIR/config-race-bin"
+  real_ln=$(command -v ln)
+  mkdir -p "$race_bin"
+  printf '%s\n' '#!/bin/sh' \
+    "for arg do config_target=\$arg; done" \
+    "case \"\$config_target\" in */git) exit 91 ;; esac" \
+    "\"\$FM_REAL_LN\" \"\$@\"" \
+    'exit 1' > "$race_bin/ln"
+  chmod +x "$race_bin/ln"
+  HOME="$user_home" FM_REAL_LN="$real_ln" PATH="$race_bin:$PATH" \
+    fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
     fail "pool preparation failed while refreshing filtered user config"
+  [ -L "$pool_root/.config/git" ] || fail "pool preparation replaced a valid config bridge"
   [ -L "$pool_root/.config/gh" ] || fail "pool preparation did not bridge a newly added user config entry"
   [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
     fail "pool preparation retained a stale Treehouse config link"

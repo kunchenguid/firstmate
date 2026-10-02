@@ -46,7 +46,7 @@ fm_treehouse_pool_root() { # <home> -> <absolute-root>
 }
 
 fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
-  local home=$1 root=$2 entry config_entry config_name
+  local home=$1 root=$2 entry config_entry config_name config_target
   mkdir -p -- "$root" || return 1
   printf '%s\n' "$home" > "$root/firstmate-home" || return 1
   for entry in Library .gitconfig .git-credentials .netrc .ssh; do
@@ -54,27 +54,36 @@ fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
     [ -e "$root/$entry" ] || [ -L "$root/$entry" ] || ln -s -- "$HOME/$entry" "$root/$entry" || return 1
   done
   if [ -L "$root/.config" ]; then
-    rm -- "$root/.config" || return 1
+    rm -- "$root/.config" 2>/dev/null || [ ! -L "$root/.config" ] || return 1
   fi
   mkdir -p -- "$root/.config" || return 1
+  if [ -e "$root/.config/treehouse" ] || [ -L "$root/.config/treehouse" ]; then
+    rm -rf -- "$root/.config/treehouse" || return 1
+  fi
   for config_entry in "$root/.config"/* "$root/.config"/.[!.]* "$root/.config"/..?*; do
     [ -L "$config_entry" ] || continue
-    rm -- "$config_entry" || return 1
+    [ -e "$config_entry" ] && continue
+    rm -- "$config_entry" 2>/dev/null || [ ! -L "$config_entry" ] || [ -e "$config_entry" ] || return 1
   done
-  if [ -e "$root/.config/treehouse" ]; then
-    echo "error: prepared Treehouse root contains an unsafe real .config/treehouse entry: $root/.config/treehouse" >&2
-    return 1
-  fi
   if [ -d "$HOME/.config" ]; then
     for config_entry in "$HOME/.config"/* "$HOME/.config"/.[!.]* "$HOME/.config"/..?*; do
       [ -e "$config_entry" ] || [ -L "$config_entry" ] || continue
       config_name=${config_entry##*/}
       [ "$config_name" = treehouse ] && continue
-      if [ -e "$root/.config/$config_name" ] || [ -L "$root/.config/$config_name" ]; then
-        echo "error: prepared Treehouse root contains an unsafe real .config entry: $root/.config/$config_name" >&2
+      config_target=$root/.config/$config_name
+      if [ -L "$config_target" ] && [ "$(readlink "$config_target")" = "$config_entry" ]; then
+        continue
+      fi
+      if [ -e "$config_target" ] || [ -L "$config_target" ]; then
+        echo "error: prepared Treehouse root contains an unsafe real .config entry: $config_target" >&2
         return 1
       fi
-      ln -s -- "$config_entry" "$root/.config/$config_name" || return 1
+      if ! ln -s -- "$config_entry" "$config_target" 2>/dev/null; then
+        if [ ! -L "$config_target" ] || [ "$(readlink "$config_target")" != "$config_entry" ]; then
+          echo "error: could not bridge user config into the prepared Treehouse root: $config_target" >&2
+          return 1
+        fi
+      fi
     done
   fi
 }
