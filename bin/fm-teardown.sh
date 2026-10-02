@@ -343,6 +343,7 @@ for _teardown_source in \
   fm-nm-run-lib.sh \
   fm-wake-lib.sh \
   fm-path-lib.sh \
+  fm-pid-identity-lib.sh \
   fm-lease-lib.sh
 do
   teardown_require_source "$SCRIPT_DIR/$_teardown_source"
@@ -2080,6 +2081,8 @@ $out
 EOF
 }
 
+# A start-only identity, compared within one teardown run. The ps form reads
+# lstart in UTC for the reason bin/fm-pid-identity-lib.sh gives.
 task_process_identity() {  # <pid>
   local pid=$1 proc_root stat_line starttime value
   local -a stat_fields
@@ -2093,7 +2096,7 @@ task_process_identity() {  # <pid>
     printf 'starttime=%s\n' "$starttime"
     return 0
   fi
-  value=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C TZ=UTC0 ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   value=$(fm_nm_trim "$value")
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac

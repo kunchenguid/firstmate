@@ -1483,6 +1483,144 @@ test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse() {
   pass "/proc process identity detects pid reuse"
 }
 
+test_pid_identity_is_time_zone_invariant() {
+  # ps renders lstart in the local time zone. A laptop that changes zone
+  # between recording an owner's identity and checking it must still read the
+  # same identity, or every lock user sees a live owner as dead. The stub
+  # renders one fixed instant through date in whatever zone it inherits, so it
+  # moves with the zone exactly as real lstart does.
+  local live no_proc fakebin east west real_east real_west
+  sleep 300 &
+  live=$!
+  fm_test_wait_exec "$live" "sleep 300" || fail "the identity fixture process never started"
+  no_proc="$TMP_ROOT/tz-no-proc"
+  fakebin="$TMP_ROOT/tz-ps"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+stamp=$(date -d @1784094040 '+%a %b %e %H:%M:%S %Y' 2>/dev/null) \
+  || stamp=$(date -r 1784094040 '+%a %b %e %H:%M:%S %Y')
+printf '%s sleep 300\n' "$stamp"
+SH
+  chmod +x "$fakebin/ps"
+  east=$(PATH="$fakebin:$PATH" TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  west=$(PATH="$fakebin:$PATH" TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  real_east=
+  real_west=
+  if LC_ALL=C ps -p "$live" -o lstart= -o command= >/dev/null 2>&1; then
+    real_east=$(TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+    real_west=$(TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$no_proc" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null)
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "$east" ] || fail "fm_pid_identity produced no identity through the zone-rendering ps"
+  [ "$west" = "$east" ] || fail "fm_pid_identity moved with the host time zone (east '$east', west '$west')"
+  if [ -n "$real_east" ]; then
+    [ "$real_west" = "$real_east" ] \
+      || fail "real ps fallback moved with the host time zone (east '$real_east', west '$real_west')"
+    pass "fm_pid_identity real ps fallback is time-zone-invariant"
+  else
+    pass "real ps fallback time-zone check skipped where ps -o lstart= is unsupported"
+  fi
+  pass "fm_pid_identity is time-zone-invariant"
+}
+
+# Record <pid> as this case's watcher holder under <identity>, as
+# bin/fm-watch.sh does, with a fresh beacon.
+write_identity_watch_lock() {  # <home> <pid> <identity>
+  local lockdir="$1/state/.watch.lock"
+  mkdir -p "$lockdir"
+  printf '%s\n' "$2" > "$lockdir/pid"
+  printf '%s\n' "$1" > "$lockdir/fm-home"
+  printf '%s\n' "$WATCH" > "$lockdir/watcher-path"
+  printf '%s\n' "$3" > "$lockdir/pid-identity"
+  touch "$1/state/.last-watcher-beat"
+}
+
+# 0 when the home's watcher reads healthy from host zone <tz>.
+watcher_healthy_in_zone() {  # <home> <tz>
+  TZ="$2" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/tz-no-proc" \
+    bash -c '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ "$LIB" "$1/state" "$WATCH" "$1"
+}
+
+# fm_pid_identity_matches for <pid> and <recorded>, read from host zone <tz>.
+identity_matches_in_zone() {  # <pid> <recorded> <tz> [proc-root]
+  TZ="$3" FM_STATE_OVERRIDE="$TMP_ROOT/tz-state" FM_PROC_ROOT_OVERRIDE="${4:-$TMP_ROOT/tz-no-proc}" \
+    bash -c '. "$1"; fm_pid_identity_matches "$2" "$3"' _ "$LIB" "$1" "$2"
+}
+
+test_watcher_lock_survives_time_zone_change() {
+  local dir live identity
+  dir=$(make_case tz-watch-lock)
+  sleep 300 &
+  live=$!
+  fm_test_wait_exec "$live" "sleep 300" || fail "the identity fixture process never started"
+  identity=$(TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/tz-no-proc" \
+    bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live" 2>/dev/null) \
+    || fail "could not record the watcher holder's identity"
+  write_identity_watch_lock "$dir" "$live" "$identity"
+  watcher_healthy_in_zone "$dir" "$FM_TEST_TZ_WEST" \
+    || fail "a time-zone change made the live watcher holder read as dead"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  ! watcher_healthy_in_zone "$dir" "$FM_TEST_TZ_WEST" \
+    || fail "the watcher lock stayed healthy after its holder exited"
+  pass "the watcher lock keeps a live holder across a time-zone change"
+}
+
+test_legacy_pid_identity_survives_upgrade_and_zone_change() {
+  # A build before the UTC pin recorded the bare local-time identity. After the
+  # upgrade, and after a later zone change, that record must still name its
+  # live owner, while a different start or command must not.
+  local dir live other legacy other_legacy rc proc_root
+  dir=$(make_case tz-legacy-identity)
+  sleep 300 &
+  live=$!
+  fm_test_wait_exec "$live" "sleep 300" || fail "the identity fixture process never started"
+  sleep 299 &
+  other=$!
+  fm_test_wait_exec "$other" "sleep 299" || fail "the second identity fixture process never started"
+  legacy=$(fm_test_legacy_pid_identity "$live" "$FM_TEST_TZ_EAST")
+  other_legacy=$(fm_test_legacy_pid_identity "$other" "$FM_TEST_TZ_EAST")
+  [ -n "$legacy" ] && [ -n "$other_legacy" ] || fail "could not render legacy local-time identities"
+
+  write_identity_watch_lock "$dir" "$live" "$legacy"
+  watcher_healthy_in_zone "$dir" "$FM_TEST_TZ_EAST" \
+    || fail "a legacy watcher record did not match its live holder after the upgrade"
+  watcher_healthy_in_zone "$dir" "$FM_TEST_TZ_WEST" \
+    || fail "a legacy watcher record did not match its live holder after a zone change"
+  identity_matches_in_zone "$live" "$legacy" '<+0545>-5:45' \
+    || fail "a legacy record did not match its live owner from a quarter-hour zone"
+
+  rc=0
+  identity_matches_in_zone "$live" "$(fm_test_shift_legacy_identity "$legacy" 2220)" "$FM_TEST_TZ_WEST" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a legacy record 37 minutes off matched a live pid (status $rc)"
+  rc=0
+  identity_matches_in_zone "$live" "$(fm_test_shift_legacy_identity "$legacy" 79200)" "$FM_TEST_TZ_WEST" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a legacy record 22 hours off, beyond every zone offset, matched a live pid (status $rc)"
+  rc=0
+  identity_matches_in_zone "$live" "${legacy:0:24}${other_legacy:24}" "$FM_TEST_TZ_WEST" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a legacy record with another command matched a live pid (status $rc)"
+
+  # A Linux-compatible /proc host reads its own keyed identity, yet must still
+  # recognize a legacy ps record (an older pending-reply sender).
+  proc_root="$dir/proc"
+  write_fake_proc_identity "$proc_root" "$live" 987654
+  identity_matches_in_zone "$live" "$legacy" "$FM_TEST_TZ_WEST" "$proc_root" \
+    || fail "a /proc host did not match a legacy ps record to its live owner"
+  rc=0
+  identity_matches_in_zone "$live" "$(fm_test_shift_legacy_identity "$legacy" 2220)" "$FM_TEST_TZ_WEST" "$proc_root" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a /proc host matched a legacy ps record 37 minutes off (status $rc)"
+
+  kill "$live" "$other" 2>/dev/null || true
+  wait "$live" "$other" 2>/dev/null || true
+  ! watcher_healthy_in_zone "$dir" "$FM_TEST_TZ_WEST" \
+    || fail "a legacy watcher record kept a dead holder alive"
+  ! identity_matches_in_zone "$live" "$legacy" "$FM_TEST_TZ_WEST" \
+    || fail "a legacy record matched a dead pid"
+  pass "a legacy local-time identity keeps its live owner across upgrade and zone change, and only it"
+}
+
 test_stale_watch_reclaim_publishes_before_clear() {
   local dir state lockdir rc token
   dir=$(make_case stale-watch-publish-before-clear)
@@ -1552,6 +1690,9 @@ test_pid_identity_is_locale_invariant
 test_pid_identity_is_terminal_width_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_pid_identity_is_time_zone_invariant
+test_watcher_lock_survives_time_zone_change
+test_legacy_pid_identity_survives_upgrade_and_zone_change
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable

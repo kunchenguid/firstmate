@@ -116,6 +116,9 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# shellcheck source=tests/pid-identity-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/pid-identity-helpers.sh"
+
 # --- process-event runner reaping -------------------------------------------
 #
 # A process-event runner is detached into its own process group and reparents to

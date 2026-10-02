@@ -2110,6 +2110,36 @@ assert_contains "$sr3_reconcile" "started=0" "reconcile started a second poller 
 pe "$HSR3" retire live-drift-src >/dev/null
 pass "a live generation is never reclaimed, drifted state root or not"
 
+# A host time-zone change between a runner claiming its source and the next
+# start must neither displace the live generation nor keep a retire from
+# stopping it, whether this build recorded the claim or a build before the UTC
+# pin recorded it in local time.
+for tz_form in current legacy; do
+  HTZ="$TMP_ROOT/htz-$tz_form"; new_home "$HTZ"
+  TZ_LOG="$TMP_ROOT/tz-executions-$tz_form"
+  pe_register "$HTZ" lavish "tz-$tz_form-src" -- "$RACE_BLOCKER" "$TZ_LOG" "$TMP_ROOT/tz-trigger-$tz_form" >/dev/null
+  TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" pe "$HTZ" reconcile >/dev/null
+  tz_claim="$FM_PROCEVENT_CLAIM_ROOT/tz-$tz_form-src.claim"
+  wait_for "$tz_claim" || fail "time-zone fixture ($tz_form) never claimed its source"
+  wait_for "$TZ_LOG" || fail "time-zone fixture ($tz_form) source never started"
+  tz_leader=$(sed -n '2p' "$tz_claim")
+  if [ "$tz_form" = legacy ]; then
+    awk -v identity="$(fm_test_legacy_pid_identity "$tz_leader" "$FM_TEST_TZ_EAST")" \
+      'NR == 4 { print identity; next } { print }' "$tz_claim" > "$tz_claim.tmp" && mv "$tz_claim.tmp" "$tz_claim"
+    chmod 0600 "$tz_claim"
+  fi
+  tz_out=$(TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" pe "$HTZ" start "tz-$tz_form-src")
+  assert_contains "$tz_out" "already owned" "a zone change displaced the live $tz_form generation: $tz_out"
+  [ "$(sed -n '2p' "$tz_claim")" = "$tz_leader" ] || fail "a zone change replaced the live $tz_form claim"
+  [ "$(wc -l < "$TZ_LOG" | tr -d ' ')" = 1 ] \
+    || fail "a second source ran beside the live $tz_form owner after a zone change: $(cat "$TZ_LOG")"
+  TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" pe "$HTZ" retire "tz-$tz_form-src" >/dev/null \
+    || fail "retire after a zone change refused the live $tz_form generation"
+  ! kill -0 "$tz_leader" 2>/dev/null || fail "retire after a zone change left the live $tz_form runner running"
+  assert_absent "$tz_claim" "retire after a zone change left the $tz_form claim behind"
+done
+pass "a host time-zone change never displaces a live process-event generation, current or legacy"
+
 HSR4="$TMP_ROOT/hsr4"; new_home "$HSR4"
 SR4_TRIGGER="$TMP_ROOT/state-root-reused-trigger"
 SR4_LOG="$TMP_ROOT/state-root-reused-executions"

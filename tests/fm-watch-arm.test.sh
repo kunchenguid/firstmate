@@ -1611,10 +1611,10 @@ test_arm_takes_over_a_leftover_away_daemon_watcher_with_a_stale_beacon() {
   pass "watch-arm: the arm stops a leftover away daemon whose watcher beacon is stale"
 }
 
-# On macOS the watcher's recorded identity renders its start time in the local
-# time zone, so a time-zone change makes the live watcher stop matching its lock.
-# Where the identity does not depend on the time zone, as with Linux /proc, the
-# test rewrites the recorded identity and keeps the file's mtime.
+# No time-zone change moves the watcher's recorded identity
+# (bin/fm-pid-identity-lib.sh), so the zone change alone must leave it matching.
+# The test then makes it drift past any match, as a record from another source
+# could, by rewriting it and keeping the file's mtime.
 test_arm_takes_over_a_leftover_away_daemon_watcher_whose_identity_drifted() {
   local dir state fakebin armout old_watcher recorded current
   dir=$(make_case arm-leftover-daemon-tz)
@@ -1625,12 +1625,12 @@ test_arm_takes_over_a_leftover_away_daemon_watcher_whose_identity_drifted() {
   old_watcher=$(cat "$state/.watch.lock/pid")
   recorded=$(cat "$state/.watch.lock/pid-identity")
   current=$(TZ=BBB7 bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$old_watcher")
-  if [ "$recorded" = "$current" ]; then
-    printf '%s drifted\n' "$recorded" > "$state/.watch.lock/pid-identity.next"
-    touch -r "$state/.watch.lock/pid-identity" "$state/.watch.lock/pid-identity.next"
-    mv "$state/.watch.lock/pid-identity.next" "$state/.watch.lock/pid-identity"
-    recorded=$(cat "$state/.watch.lock/pid-identity")
-  fi
+  [ "$recorded" = "$current" ] \
+    || { kill -TERM "$LEFTOVER_PID" 2>/dev/null; fail "a time-zone change moved the watcher's recorded identity"; }
+  printf '%s drifted\n' "$recorded" > "$state/.watch.lock/pid-identity.next"
+  touch -r "$state/.watch.lock/pid-identity" "$state/.watch.lock/pid-identity.next"
+  mv "$state/.watch.lock/pid-identity.next" "$state/.watch.lock/pid-identity"
+  recorded=$(cat "$state/.watch.lock/pid-identity")
   [ "$recorded" != "$current" ] \
     || { kill -TERM "$LEFTOVER_PID" 2>/dev/null; fail "the fixture could not make the watcher's recorded identity drift"; }
 
@@ -1646,7 +1646,7 @@ test_arm_takes_over_a_leftover_away_daemon_watcher_whose_identity_drifted() {
     || fail "the drifted-identity takeover was not recorded in the lifecycle ledger"
   grep -qxF 'check: rearm-resurface' "$armout" \
     || fail "the arm did not own a fresh cycle after the drifted-identity takeover: $(cat "$armout")"
-  pass "watch-arm: the arm stops a leftover away daemon whose watcher identity drifted after a time-zone change"
+  pass "watch-arm: the arm stops a leftover away daemon whose watcher identity drifted, and a time-zone change alone moves nothing"
 }
 
 test_arm_attaches_to_an_away_daemon_watcher_while_away_mode_is_on() {

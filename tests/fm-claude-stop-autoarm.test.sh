@@ -31,6 +31,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-path-lib.sh" "$dir/bin/fm-path-lib.sh"
+  cp "$ROOT/bin/fm-pid-identity-lib.sh" "$dir/bin/fm-pid-identity-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
@@ -1225,6 +1226,51 @@ test_open_generation_claim_defers_without_any_lock() {
   pass "auto-arm: a live open generation claim defers concurrent firings with no lock held"
 }
 
+# A host time-zone change between a claim and the next firing must never let
+# that firing steal the live claim and double-arm, whether this build recorded
+# the claim or a build before the UTC pin recorded it in local time.
+test_time_zone_change_never_steals_a_live_claim() {
+  local form dir out status pid
+  for form in current legacy; do
+    dir=$(make_primary_dir "$TMP_ROOT/tz-generation-claim-$form")
+    : > "$dir/state/task1.meta"
+    write_arm_fixture "$dir" actionable
+    sleep 60 &
+    pid=$!
+    fm_test_wait_exec "$pid" "sleep 60" || fail "the $form claim owner never started"
+    printf 'epoch=464 owner_pid=%s outcome=arming updated_at=1\n%s\n' "$pid" \
+      "$(fm_test_identity_record "$pid" "$form" "$FM_TEST_TZ_EAST" "$dir/no-proc")" > "$dir/state/.claude-autoarm-epoch"
+    touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+    : > "$dir/state/.last-watcher-beat"
+    out=$(TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" run_autoarm "$dir" 2>/dev/null); status=$?
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    expect_code 0 "$status" "a zone change must not supersede a live open $form generation claim"
+    [ -z "$out" ] || fail "deferring to a live $form generation claim after a zone change produced output: $out"
+    assert_absent "$dir/state/arm-ran" "a zone change let a firing steal a live $form generation claim"
+
+    dir=$(make_primary_dir "$TMP_ROOT/tz-lock-claim-$form")
+    : > "$dir/state/task1.meta"
+    write_arm_fixture "$dir" actionable
+    sleep 60 &
+    pid=$!
+    fm_test_wait_exec "$pid" "sleep 60" || fail "the $form claim owner never started"
+    record_autoarm_owner "$dir" "$pid"
+    fm_test_identity_record "$pid" "$form" "$FM_TEST_TZ_EAST" "$dir/no-proc" \
+      > "$dir/state/.claude-autoarm.lock/pid-identity"
+    record_autoarm_epoch "$dir" 464 "$pid" arming
+    : > "$dir/state/.last-watcher-beat"
+    out=$(TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$dir/no-proc" run_autoarm "$dir" 2>/dev/null); status=$?
+    kill -0 "$pid" 2>/dev/null || fail "a zone change got a live $form lock-holding claim signalled"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    expect_code 0 "$status" "a zone change must not reclaim a live $form lock-holding claim"
+    assert_absent "$dir/state/arm-ran" "a zone change let a firing steal a live $form lock-holding claim"
+    assert_present "$dir/state/.claude-autoarm.lock" "a zone change cost a live $form claim its owner lock"
+  done
+  pass "auto-arm: a host time-zone change never steals a live claim, current or legacy"
+}
+
 # The 2026-08-26 watcher flap in the generation model: a live, identity-matched
 # owner whose ledger entry and watcher beacon are both older than grace is
 # stuck, and the next firing supersedes it by taking the next generation.
@@ -1744,6 +1790,7 @@ test_terminal_check_claim_is_never_reclaimed
 test_stuck_live_legacy_owner_is_retired_and_reclaimed
 test_stopped_legacy_owner_is_reclaimed_with_term_pending
 test_open_generation_claim_defers_without_any_lock
+test_time_zone_change_never_steals_a_live_claim
 test_stuck_generation_claim_is_superseded_and_rearms
 test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm

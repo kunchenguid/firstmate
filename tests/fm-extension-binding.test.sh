@@ -1067,6 +1067,56 @@ assert_not_contains "$classification" "wrong-built-in-owner" "a later same-name 
 assert_absent "$H_FLOW/state/procevent/flow-source.source" "terminal external source stayed registered"
 FM_HOME="$H_FLOW" "$PROCEVENT" retire flow-source --if-owner "$owner_one" >/dev/null
 pass "one external adapter registers, invokes, captures unhandled evidence, classifies, and terminally retires end to end"
+
+# A runner records its claim from the shell while the extension host re-reads
+# it from Node, each under its own view of the host time zone. A claim recorded
+# under one zone must still prove its live owner to the extension host, so the
+# evidence is captured rather than refused as an inactive owner.
+# The silent verdict runs through the capture capability, whose claim owner the
+# extension host proves before it records the verdict.
+H_TZ_FLOW="$HOMES/tz-flow"; new_home "$H_TZ_FLOW"
+bind_package "$H_TZ_FLOW" "$P_FLOW" ext-flow >/dev/null
+FM_HOME="$H_TZ_FLOW" "$PROCEVENT" register-extension ext-flow tz-flow-source --config-ref silent-result >/dev/null
+TZ="$FM_TEST_TZ_EAST" FM_HOME="$H_TZ_FLOW" "$PROCEVENT" start tz-flow-source > "$TMP_ROOT/tz-flow-start.out" 2>&1
+assert_present "$H_TZ_FLOW/state/procevent-inbox/tz-flow-source.1.result" \
+  "a claim recorded under another host time zone kept the runner from capturing evidence: $(cat "$TMP_ROOT/tz-flow-start.out")"
+assert_present "$H_TZ_FLOW/state/procevent-inbox/tz-flow-source.1.handled" \
+  "the extension host refused a claim recorded under another host time zone: $(cat "$TMP_ROOT/tz-flow-start.out")"
+pass "an extension capture proves its claim owner whatever host time zone recorded the claim"
+
+# The extension host's legacy-identity rule (bin/fm-pid-identity.mjs) mirrors
+# the shell owner's, so both must reach the same verdict on every record shape.
+sleep 60 &
+tz_live=$!
+fm_test_wait_exec "$tz_live" "sleep 60" || fail "the parity fixture process never started"
+tz_legacy=$(fm_test_legacy_pid_identity "$tz_live" "$FM_TEST_TZ_EAST")
+tz_utc=$(fm_test_legacy_pid_identity "$tz_live" UTC0)
+tz_other=$(fm_test_legacy_pid_identity "$$" "$FM_TEST_TZ_EAST")
+[ -n "$tz_legacy" ] && [ -n "$tz_utc" ] && [ -n "$tz_other" ] || fail "could not render legacy identities for the parity check"
+for tz_case in "match|$tz_legacy" \
+  "match|$(fm_test_legacy_pid_identity "$tz_live" "$FM_TEST_TZ_WEST")" \
+  "match|$(fm_test_legacy_pid_identity "$tz_live" '<+0545>-5:45')" \
+  "mismatch|$(fm_test_shift_legacy_identity "$tz_legacy" 2220)" \
+  "mismatch|$(fm_test_shift_legacy_identity "$tz_legacy" 79200)" \
+  "mismatch|${tz_legacy:0:24}${tz_other:24}" \
+  "mismatch|lstart-utc=$tz_utc" \
+  "mismatch|not an identity"; do
+  tz_want=${tz_case%%|*}
+  tz_record=${tz_case#*|}
+  tz_shell=mismatch
+  if bash -c '. "$1"; fm_pid_identity_legacy_matches "$2" "$3"' _ "$ROOT/bin/fm-pid-identity-lib.sh" "$tz_record" "$tz_utc"; then
+    tz_shell=match
+  fi
+  tz_node=$(node --input-type=module -e '
+    const { legacyIdentityMatches } = await import(process.argv[1]);
+    console.log(legacyIdentityMatches(process.argv[2], process.argv[3]) ? "match" : "mismatch");
+  ' "$ROOT/bin/fm-pid-identity.mjs" "$tz_record" "$tz_utc") || fail "the Node legacy-identity rule could not run"
+  [ "$tz_shell" = "$tz_want" ] || fail "the shell legacy-identity rule said $tz_shell for '$tz_record', want $tz_want"
+  [ "$tz_node" = "$tz_want" ] || fail "the Node legacy-identity rule said $tz_node for '$tz_record', want $tz_want"
+done
+kill "$tz_live" 2>/dev/null || true
+wait "$tz_live" 2>/dev/null || true
+pass "the shell and Node legacy-identity rules agree on every record shape"
 FM_HOME="$H_FLOW" "$PROCEVENT" register-extension ext-flow crash-silent-source --config-ref crash-silent >/dev/null
 FM_HOME="$H_FLOW" "$PROCEVENT" start crash-silent-source > "$TMP_ROOT/crash-silent-start.out" 2>&1 &
 crash_silent_start_pid=$!
@@ -1885,8 +1935,8 @@ REMOTE_SSH_COUNT="$TMP_ROOT/remote-ssh.count"
 mkdir -p "$H_REMOTE_CONTROL/data" "$H_REMOTE" "$REMOTE_ROOT/bin"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 for remote_file in \
-  fm-extension.mjs fm-extension-launch-barrier.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
-  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
+  fm-extension.mjs fm-extension-launch-barrier.mjs fm-pid-identity.mjs fm-extension.sh fm-procevent.sh fm-procevent-lib.sh fm-procevent-extension-capture.pl fm-procevent-lavish.sh \
+  fm-pr-lib.sh fm-wake-lib.sh fm-path-lib.sh fm-pid-identity-lib.sh fm-remote-entrypoint.sh fm-remote-job-lib.sh \
   fm-remote-job-worker.sh; do
   cp "$ROOT/bin/$remote_file" "$REMOTE_ROOT/bin/$remote_file"
 done

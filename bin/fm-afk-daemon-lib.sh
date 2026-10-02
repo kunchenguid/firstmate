@@ -4,13 +4,16 @@
 # parent link of the watcher a daemon runs. Sourced by the daemon,
 # bin/fm-afk-start.sh, bin/fm-afk-launch.sh, bin/fm-watch-arm.sh, and
 # bin/fm-watch-checkpoint.sh, each after bin/fm-wake-lib.sh, whose fm_pid_alive,
-# fm_pid_identity, fm_watcher_lock_matches_pid, fm_path_mtime, and
-# fm_epoch_seconds_to it calls. Only fm_afk_daemon_stop signals anything.
+# fm_pid_identity, fm_pid_identity_matches, fm_watcher_lock_matches_pid,
+# fm_path_mtime, and fm_epoch_seconds_to it calls. Only fm_afk_daemon_stop
+# signals anything.
 #
 # The lock alone cannot find every live daemon: a daemon can outlive its lock,
-# and the lock's recorded identity is fm_pid_identity, whose ps form renders the
-# start time in the local time zone, so a host time-zone change makes a live
-# daemon no longer match it, and its watcher no longer match the watcher lock.
+# and a recorded identity can stop matching its live process. No host time-zone
+# change moves an identity (bin/fm-pid-identity-lib.sh), and the match bridges a
+# record a build before that fix wrote in local time, but such a record written
+# under another locale, or a wall-clock step on a host without /proc, still
+# leaves a live daemon unmatched by its lock and its watcher by the watcher lock.
 # The watcher proof finds such a daemon while it still runs this home's watcher;
 # a daemon that runs neither exits on its own once state/.afk is gone or its
 # lock is lost.
@@ -98,7 +101,7 @@ fm_afk_daemon_lock_pid() {  # <state>
 
 # The lock proof (header): strong enough to signal the lock's pid.
 fm_afk_daemon_lock_holder_proven() {  # <state>
-  local state=$1 owner pid identity current
+  local state=$1 owner pid identity
   owner=$(fm_afk_daemon_lock_owner "$state") || return 1
   pid=$(cat "$owner/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" || return 1
@@ -107,8 +110,7 @@ fm_afk_daemon_lock_holder_proven() {  # <state>
     fm_afk_daemon_pid_runs_daemon "$pid"
     return
   fi
-  current=$(fm_pid_identity "$pid") || return 1
-  [ "$current" = "$identity" ]
+  fm_pid_identity_matches "$pid" "$identity" || return 1
 }
 
 # The lock or command proof (header): a live daemon holds the lock, so it must
