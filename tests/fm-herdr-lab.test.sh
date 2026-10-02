@@ -318,7 +318,7 @@ write_viewer_record() {
   local record=$1 launcher_pid=$2 viewer_pid=$3 launcher_start viewer_start
   launcher_start=$(fm_herdr_lab_process_start "$launcher_pid") || fail "could not identify launcher fixture process"
   viewer_start=$(fm_herdr_lab_process_start "$viewer_pid") || fail "could not identify viewer fixture process"
-  printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
+  printf 'launcher_pid=%s\nlauncher_start_utc=%s\nviewer_pid=%s\nviewer_start_utc=%s\n' \
     "$launcher_pid" "$launcher_start" "$viewer_pid" "$viewer_start" > "$record"
 }
 
@@ -429,6 +429,35 @@ test_viewer_stop_only_signals_owned_processes() {
   assert_absent "$record" "a confirmed detach left the viewer record behind"
   run_with_fake fm_herdr_lab_teardown "$name" || fail "teardown after viewer stop failed"
   pass "fm-herdr-lab: viewer stop signals only recorded processes and confirms the detach"
+}
+
+# A viewer that a build before the UTC pin started recorded its start times in
+# the host's local time. Stop from another host time zone still signals it.
+test_viewer_stop_signals_a_pre_upgrade_viewer() {
+  local name="fm-lab-viewer-legacy-$$" record pair="$TMP_ROOT/viewer-legacy-pair" status=0
+  local launcher_start viewer_start
+  run_with_fake fm_herdr_lab_provision "$name" || fail "viewer-legacy fixture provision failed"
+  record=$(run_with_fake fm_herdr_lab_viewer_record_path "$name")
+  start_viewer_fixture "$pair"
+  launcher_start=$(TZ="$FM_TEST_TZ_EAST" LC_ALL=C ps -p "$FIXTURE_LAUNCHER_PID" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  viewer_start=$(TZ="$FM_TEST_TZ_EAST" LC_ALL=C ps -p "$FIXTURE_VIEWER_PID" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  printf 'launcher_pid=%s\nlauncher_start=%s\nviewer_pid=%s\nviewer_start=%s\n' \
+    "$FIXTURE_LAUNCHER_PID" "$launcher_start" "$FIXTURE_VIEWER_PID" "$viewer_start" > "$record"
+  [ "$viewer_start" != "$(TZ="$FM_TEST_TZ_WEST" LC_ALL=C ps -p "$FIXTURE_VIEWER_PID" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" ] \
+    || fail "the legacy fixture must record a start time that the stop time zone renders differently"
+  printf '%s\n' cleared > "$FAKE_STATE/$name.foreground"
+  TZ="$FM_TEST_TZ_WEST" FM_FAKE_HERDR_FAST_POLL=1 run_with_fake fm_herdr_lab_viewer_stop "$name" \
+    >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "stop must fail while the session still reports a foreground client"
+  if kill -0 "$FIXTURE_VIEWER_PID" 2>/dev/null; then
+    kill "$FIXTURE_VIEWER_PID" "$FIXTURE_LAUNCHER_PID" 2>/dev/null || true
+    fail "stop missed a viewer recorded in local time before the UTC pin"
+  fi
+  wait "$FIXTURE_LAUNCHER_PID" 2>/dev/null || true
+  printf '%s\n' no_foreground_client > "$FAKE_STATE/$name.foreground"
+  run_with_fake fm_herdr_lab_viewer_stop "$name" || fail "stop failed once the pre-upgrade viewer had detached"
+  run_with_fake fm_herdr_lab_teardown "$name" || fail "viewer-legacy fixture teardown failed"
+  pass "fm-herdr-lab: viewer stop signals a viewer recorded in local time before the UTC pin"
 }
 
 test_viewer_stop_requires_the_recorded_parent() {
@@ -547,6 +576,7 @@ test_viewer_start_cancels_an_unrecorded_launcher
 test_viewer_timeout_allows_launcher_escalation
 test_viewer_start_requires_its_owned_process
 test_viewer_stop_only_signals_owned_processes
+test_viewer_stop_signals_a_pre_upgrade_viewer
 test_viewer_stop_requires_the_recorded_parent
 test_interrupted_viewer_start_cancels_launcher
 test_teardown_refuses_while_viewer_attached

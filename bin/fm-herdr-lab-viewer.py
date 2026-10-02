@@ -98,9 +98,9 @@ def _write_pidfile(path, launcher_pid, viewer_pid):
     temporary = "%s.%d.tmp" % (path, launcher_pid)
     with open(temporary, "w", encoding="utf-8") as handle:
         handle.write("launcher_pid=%d\n" % launcher_pid)
-        handle.write("launcher_start=%s\n" % launcher_start)
+        handle.write("launcher_start_utc=%s\n" % launcher_start)
         handle.write("viewer_pid=%d\n" % viewer_pid)
-        handle.write("viewer_start=%s\n" % viewer_start)
+        handle.write("viewer_start_utc=%s\n" % viewer_start)
     os.rename(temporary, path)
 
 

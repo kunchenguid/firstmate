@@ -111,6 +111,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILDER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LAB_HOME_HELPER="$SCRIPT_DIR/fm-lab-home.sh"
+# shellcheck source=bin/fm-pid-identity-lib.sh
+. "$SCRIPT_DIR/fm-pid-identity-lib.sh"
 CLAUDE_TRUST="$SCRIPT_DIR/fm-claude-trust.sh"
 RECORD_NAME=.fm-live-lab
 RECORD_TOKEN='fm-live-lab v1'
@@ -605,27 +607,37 @@ record_launch_pid() {
   case "${1:-}" in ''|*[!0-9]*) die "cannot record lab process: missing or invalid PID '${1:-}'" ;; esac
   start=$(TZ=UTC0 ps -o lstart= -p "$1" | awk '{$1=$1; print}')
   [ -n "$start" ] || die "cannot record start time for lab process $1"
-  printf 'launch_pid=%s\nlaunch_start=%s\n' "$1" "$start" >> "$ROOT/$RECORD_NAME"
+  printf 'launch_pid=%s\nlaunch_start_utc=%s\n' "$1" "$start" >> "$ROOT/$RECORD_NAME"
+}
+
+# Print the recorded launch PIDs whose start time still matches. A
+# launch_start_utc record must match exactly; a bare launch_start record is a
+# pre-upgrade local-time rendering, checked by fm_pid_identity_legacy_matches.
+lab_roots() {
+  local line root="" start
+  while IFS= read -r line; do
+    case "$line" in
+      launch_pid=*) root=${line#launch_pid=}; case "$root" in ''|*[!0-9]*) root="" ;; esac ;;
+      launch_start_utc=*|launch_start=*)
+        [ -n "$root" ] || continue
+        start=$(TZ=UTC0 ps -o lstart= -p "$root" 2>/dev/null | awk '{$1=$1; print}')
+        case "$line" in
+          launch_start_utc=*) [ -n "$start" ] && [ "${line#launch_start_utc=}" = "$start" ] && echo "$root" ;;
+          *) fm_pid_identity_legacy_matches "${line#launch_start=}" "$start" && echo "$root" ;;
+        esac
+        root="" ;;
+    esac
+  done < "$ROOT/$RECORD_NAME"
 }
 
 # Resolve recorded roots only while their start times match, before tmux
 # reparents their descendants.
 lab_pids() {
-  TZ=UTC0 ps -axo pid=,ppid=,lstart= | awk -v record="$ROOT/$RECORD_NAME" '
-    BEGIN {
-      while ((getline line < record) > 0) {
-        if (line ~ /^launch_pid=[0-9]+$/) { sub(/^launch_pid=/, "", line); root=line }
-        else if (line ~ /^launch_start=/ && root != "") {
-          sub(/^launch_start=/, "", line); starts[root]=line; root=""
-        }
-      }
-      close(record)
-    }
-    {
-      pid[NR]=$1; ppid[$1]=$2
-      start=$3 " " $4 " " $5 " " $6 " " $7
-      if ($1 in starts && start == starts[$1]) roots[$1]=1
-    }
+  local roots
+  roots=$(lab_roots | tr '\n' ' ')
+  ps -axo pid=,ppid= | awk -v matched="$roots" '
+    BEGIN { split(matched, ids, /[[:space:]]+/); for (i in ids) if (ids[i] != "") roots[ids[i]]=1 }
+    { pid[NR]=$1; ppid[$1]=$2 }
     END {
       for (i = 1; i <= NR; i++) {
         p = pid[i]

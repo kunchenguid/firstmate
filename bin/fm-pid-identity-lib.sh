@@ -16,7 +16,8 @@
 # the legacy rule for the extension host, which re-reads shell-recorded claims.
 # Other ps lstart readers that keep their own record shape (the remote job
 # worker, teardown, and the labs) pin the same TZ=UTC0; the remote job worker
-# also reads its pre-pin records through fm_pid_identity_legacy_matches.
+# and the labs also read their pre-pin records through
+# fm_pid_identity_legacy_matches.
 
 # Print <pid>'s lstart and command line as ps renders them in UTC under the C
 # locale, with leading blanks removed. LC_ALL=C keeps the date format

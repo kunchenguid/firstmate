@@ -113,7 +113,7 @@ make_lab() {
 start_group() { perl -e 'setpgrp(0,0); exec @ARGV' "$@" >/dev/null 2>&1 & }
 
 record_pid() {  # <root> <pid>: the launch record up writes, its start time in UTC
-  printf 'launch_pid=%s\nlaunch_start=%s\n' "$2" "$(TZ=UTC0 ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
+  printf 'launch_pid=%s\nlaunch_start_utc=%s\n' "$2" "$(TZ=UTC0 ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
 }
 
 lab_tmux() {  # <root> <tmux args...>
@@ -494,6 +494,22 @@ expect_code 0 "$?" "down skips the mismatched root: $out"
 kill -0 "$REUSED" 2>/dev/null || fail "down killed a reused PID"
 kill -0 "$REUSED_CHILD" 2>/dev/null || fail "down killed the reused PID's child"
 pass "down ignores roots with mismatched start times"
+
+# A lab that a build before the UTC pin started recorded its launch start in
+# the host's local time. Down from another host time zone still stops it.
+LEGACY=$(make_lab legacy claude)
+start_group sleep 600
+LEGACY_ROOT=$!
+printf '%s\n' "$LEGACY_ROOT" >> "$TMP_ROOT/pids"
+printf 'launch_pid=%s\nlaunch_start=%s\n' "$LEGACY_ROOT" \
+  "$(TZ="$FM_TEST_TZ_EAST" ps -o lstart= -p "$LEGACY_ROOT" | awk '{$1=$1; print}')" >> "$LEGACY/.fm-live-lab"
+[ "$(sed -n 's/^launch_start=//p' "$LEGACY/.fm-live-lab")" != "$(TZ="$FM_TEST_TZ_WEST" ps -o lstart= -p "$LEGACY_ROOT" | awk '{$1=$1; print}')" ] \
+  || fail "the legacy fixture must record a start time that the down time zone renders differently"
+out=$(TZ="$FM_TEST_TZ_WEST" "$LIVE_LAB" down "$LEGACY" 2>&1)
+expect_code 0 "$?" "down of a pre-upgrade lab succeeds: $out"
+! kill -0 "$LEGACY_ROOT" 2>/dev/null || fail "down missed a launch process recorded in local time before the UTC pin"
+assert_absent "$LEGACY" "down removes the pre-upgrade lab root"
+pass "down stops launch processes of a lab recorded in local time before the UTC pin"
 
 # A group observed empty must not be admitted again if its id is later reused.
 # The ps shim hides the first group's only member on pass 2, then presents an
