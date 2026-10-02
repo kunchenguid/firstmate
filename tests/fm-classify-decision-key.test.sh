@@ -585,7 +585,6 @@ test_unbracketed_key_tab_and_losing_note_token() {
   [ "$note" = details ] || fail "winning note-head token was kept: '$note'"
   pass "tab-separated closes are seen and a losing note-head key token stays in the note"
 }
-
 # The supervisors' declared-wait read keeps a pause standing behind answers
 # for other keys even when those answers outrun the bounded tail window, and a
 # resolved line for the pause's own key still retracts it from there.
