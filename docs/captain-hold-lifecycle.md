@@ -530,6 +530,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
 - A call held in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog, and once answered there it still passes `verify`.
+  The same holds for a held call that `bin/fm-backlog-handoff.sh` moved out of the main backlog into a home seeded by `bin/fm-home-seed.sh`.
   An unregistered home, a remote route, a registered home whose marker is missing, symlinked, or names another id, an entry held nowhere, and a secondmate task closed without a recorded answer still fail `verify`.
 
 ### Answers, stamps, and deferral
