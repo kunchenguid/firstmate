@@ -302,7 +302,10 @@ The registrations in detail:
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-In the default Codex mode, a true value lets the second stop finish after one forced continuation.
+In default mode, a Codex payload with `turn_id` uses the state ledger and watcher beacon to distinguish a retry without progress from a later stop after a checkpoint.
+The guard rechecks the latter and starts a fresh retry budget when the beacon advances.
+`FM_CODEX_TURNEND_BLOCK_BUDGET` (default 3) bounds repeated blocks without beacon progress, then allows the stop with a stderr diagnostic.
+Payloads without `turn_id` retain the legacy behavior of allowing a true `stop_hook_active` value.
 
 ### Claude cooperative mode
 

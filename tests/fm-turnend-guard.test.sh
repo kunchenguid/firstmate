@@ -275,6 +275,13 @@ run_hook() {
   printf '{"stop_hook_active":%s}' "$stop_active" | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+run_codex_turn_hook() {
+  local dir=$1 active=$2 turn=$3 home
+  home=$(cd "$dir" && pwd)
+  printf '{"session_id":"codex-test-session","turn_id":"%s","stop_hook_active":%s}' "$turn" "$active" \
+    | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
 nonexistent_pid() {
   local pid=999999
   while kill -0 "$pid" 2>/dev/null; do
@@ -515,14 +522,56 @@ test_hook_uses_state_override() {
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
 }
 
-test_hook_loop_guard_allows_retry() {
+test_hook_codex_loop_guard_rechecks_same_turn_retry() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-loopguard")
   : > "$dir/state/task1.meta"
+  out=$(run_codex_turn_hook "$dir" false turn-retry); status=$?
+  expect_code 2 "$status" "the initial Codex stop must block when supervision is unhealthy"
+  out=$(run_codex_turn_hook "$dir" true turn-retry); status=$?
+  expect_code 2 "$status" "an immediate same-turn Codex retry must be checked until its budget is exhausted"
+  assert_contains "$out" "TURN WOULD END BLIND" "the same-turn retry must keep the supervision alarm visible"
+  pass "fm-turnend-guard: stop_hook_active=true Codex retry is rechecked within its turn budget"
+}
+
+test_hook_codex_retry_rechecks_after_checkpoint_progress() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-progress")
+  : > "$dir/state/task1.meta"
+  out=$(run_codex_turn_hook "$dir" false turn-progress); status=$?
+  expect_code 2 "$status" "the first Codex stop must block when supervision is unhealthy"
+  [ -f "$dir/state/.turnend-codex-ledger" ] || fail "the first Codex block did not persist its retry ledger"
+  sleep 1
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_codex_turn_hook "$dir" true turn-progress); status=$?
+  expect_code 2 "$status" "a Codex stop after checkpoint progress must be checked and blocked again when the watcher is absent"
+  assert_contains "$out" "TURN WOULD END BLIND" "the post-checkpoint Codex block must include the supervision alarm"
+  assert_contains "$(cat "$dir/state/.turnend-codex-ledger")" "count=1" "checkpoint progress must reset the Codex retry budget"
+  pass "fm-turnend-guard: Codex stop is rechecked after watcher-beacon progress"
+}
+
+test_hook_codex_retry_budget_allows_without_progress() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-budget")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" false turn-budget); status=$?
+  expect_code 2 "$status" "the initial Codex stop must be blocked"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-budget); status=$?
+  expect_code 2 "$status" "the first no-progress Codex retry must still be checked and blocked"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-budget); status=$?
+  expect_code 0 "$status" "Codex must allow a retry after the configured no-progress block budget"
+  assert_contains "$out" "retry budget exhausted" "budget fail-open must be loud on stderr"
+  pass "fm-turnend-guard: Codex retry budget bounds repeated stops without checkpoint progress"
+}
+
+test_hook_codex_payload_without_turn_id_keeps_legacy_allow() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-legacy")
+  : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" true); status=$?
-  expect_code 0 "$status" "hook must allow the stop when stop_hook_active is already true"
-  [ -z "$out" ] || fail "hook produced output on the loop-guarded retry: $out"
-  pass "fm-turnend-guard: stop_hook_active=true always allows the stop (never blocks twice in one turn)"
+  expect_code 0 "$status" "a payload without turn_id must retain the legacy stop_hook_active allow behavior"
+  [ -z "$out" ] || fail "legacy stop_hook_active payload unexpectedly emitted output: $out"
+  pass "fm-turnend-guard: payload without turn_id preserves legacy stop_hook_active behavior"
 }
 
 # A secondmate's OWN home runs a primary firstmate session and must be guarded
@@ -552,17 +601,33 @@ test_hook_silent_in_idle_secondmate_home() {
   pass "fm-turnend-guard: idle-by-default - silent in a secondmate home with nothing in flight"
 }
 
-# The stop_hook_active loop guard bounds the secondmate to one forced
-# continuation per turn, exactly as it does for the main primary - no wedged,
-# un-endable session.
-test_hook_secondmate_loop_guard_allows_retry() {
+# The secondmate's primary Codex session uses the same turn-aware retry budget
+# as the main primary, so a blind immediate retry is rechecked without allowing
+# an unbounded continuation loop.
+test_hook_secondmate_codex_loop_guard_rechecks_same_turn_retry() {
   local dir out status
   dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-loopguard")
   : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" true); status=$?
-  expect_code 0 "$status" "hook must allow the stop in a secondmate home when stop_hook_active is already true"
-  [ -z "$out" ] || fail "secondmate loop-guarded retry produced output: $out"
-  pass "fm-turnend-guard: stop_hook_active=true allows the stop in a secondmate home (never blocks twice in one turn)"
+  out=$(run_codex_turn_hook "$dir" false turn-secondmate-retry); status=$?
+  expect_code 2 "$status" "the initial Codex stop in a secondmate home must block when unhealthy"
+  out=$(run_codex_turn_hook "$dir" true turn-secondmate-retry); status=$?
+  expect_code 2 "$status" "an immediate same-turn Codex retry in a secondmate home must be rechecked"
+  assert_contains "$out" "TURN WOULD END BLIND" "the secondmate same-turn retry must show the supervision alarm"
+  pass "fm-turnend-guard: stop_hook_active=true Codex retry is rechecked in a secondmate home"
+}
+
+test_hook_secondmate_codex_retry_rechecks_after_progress() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-secondmate-codex-progress")
+  : > "$dir/state/task1.meta"
+  out=$(run_codex_turn_hook "$dir" false turn-secondmate); status=$?
+  expect_code 2 "$status" "the initial Codex stop in a secondmate home must block when unhealthy"
+  sleep 1
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_codex_turn_hook "$dir" true turn-secondmate); status=$?
+  expect_code 2 "$status" "a progressed Codex retry in a secondmate home must be rechecked"
+  assert_contains "$out" "TURN WOULD END BLIND" "secondmate Codex block must include the supervision alarm"
+  pass "fm-turnend-guard: turn-aware Codex recheck applies to secondmate homes"
 }
 
 # The guard's half of the deferred-death recovery loop in a secondmate home,
@@ -2220,10 +2285,14 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_registered_check_only_blocks_with_check_banner
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
-test_hook_loop_guard_allows_retry
+test_hook_codex_loop_guard_rechecks_same_turn_retry
+test_hook_codex_retry_rechecks_after_checkpoint_progress
+test_hook_codex_retry_budget_allows_without_progress
+test_hook_codex_payload_without_turn_id_keeps_legacy_allow
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
-test_hook_secondmate_loop_guard_allows_retry
+test_hook_secondmate_codex_loop_guard_rechecks_same_turn_retry
+test_hook_secondmate_codex_retry_rechecks_after_progress
 test_hook_secondmate_reinvoke_recovery_loop
 test_hook_silent_in_secondmate_child_worktree
 test_hook_blocks_in_treehouse_leased_secondmate_home
