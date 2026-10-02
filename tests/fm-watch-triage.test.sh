@@ -5831,8 +5831,9 @@ test_remote_reply_probe_keeps_signal_scan_live() {
     wait "$probe_pid" || fail "the detached remote probe did not finish"
 
     mkdir -p "$state/remote-replies"
-    ready="$state/remote-replies/lag-ready.remote-reply-lag-slow-1700000000"
-    printf 'check: remote reply channel stalled: mate=slow\n' > "$ready"
+    ready="$state/remote-replies/slow.lag-ready"
+    printf '0 1700000000 1\n' > "$state/remote-replies/slow.lag"
+    printf 'check: remote reply channel stalled: mate=slow\n0 1700000000\n' > "$ready"
     wake() {
       printf '%s\n' "$1" > "$dir/lag-reason"
       "$FM_WAKE_POST_OUTPUT_ACTION" 0
@@ -5841,6 +5842,12 @@ test_remote_reply_probe_keeps_signal_scan_live() {
     assert_grep 'check: remote reply channel stalled: mate=slow' "$dir/lag-reason" \
       "a completed remote probe was not surfaced"
     [ ! -e "$ready" ] || fail "a delivered lag receipt was not retired"
+    printf '0 1700000001 1\n' > "$state/remote-replies/slow.lag"
+    printf 'check: remote reply channel stalled: mate=slow\n0 1700000001\n' > "$ready"
+    printf 'schema=fm-remote-reply-cursor.v1\noffset=9\n' > "$state/remote-replies/slow.cursor"
+    rm -f "$dir/lag-reason"
+    remote_reply_lag_surface
+    [ ! -e "$dir/lag-reason" ] || fail "a progressed cursor surfaced an obsolete lag receipt"
     trap - EXIT
   )
   pass "remote reply size probes cannot block ordinary signal scans and completed probes surface"

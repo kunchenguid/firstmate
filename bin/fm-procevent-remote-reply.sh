@@ -164,7 +164,10 @@ write_cursor() { # <id> <offset> <hash>
     printf 'prefix_sha256=%s\n' "$hash"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
-  mv -f -- "$tmp" "$path"
+  mv -f -- "$tmp" "$path" || return 1
+  # Cursor progress ends the old lag episode before another network probe is
+  # due. A watcher also compares the receipt against this committed cursor.
+  rm -f -- "$CURSOR_DIR/$id.lag" "$CURSOR_DIR/$id.lag-ready" || true
 }
 
 ingest_receipt_matches() { # <id> <sequence> <result>
@@ -336,7 +339,8 @@ cmd_lag_check() {  # <secondmate-id>
   [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] || return 1
   marker="$CURSOR_DIR/$id.lag"
   probe="$CURSOR_DIR/$id.lag-probe"
-  [ ! -L "$marker" ] && [ ! -L "$probe" ] || return 1
+  ready="$CURSOR_DIR/$id.lag-ready"
+  [ ! -L "$marker" ] && [ ! -L "$probe" ] && [ ! -L "$ready" ] || return 1
   [ "$(fm_path_age "$probe")" -ge "$cadence" ] || return 0
   touch "$probe" || return 1
   read_cursor "$id"
@@ -345,7 +349,7 @@ cmd_lag_check() {  # <secondmate-id>
   [ "${#size}" -le 18 ] || return 0
   if [ "$size" -le "$CURSOR_OFFSET" ]; then
     [ ! -L "$marker" ] || return 1
-    rm -f -- "$marker"
+    rm -f -- "$marker" "$ready"
     return 0
   fi
   now=$(date +%s)
@@ -360,6 +364,7 @@ cmd_lag_check() {  # <secondmate-id>
   if [ "$prior_offset" != "$CURSOR_OFFSET" ] || [ -z "$prior_since" ] || [ "$prior_since" -gt "$now" ]; then
     prior_since=$now
     prior_alerted=0
+    rm -f -- "$ready" || return 1
   fi
   since=$prior_since
   if [ "$prior_alerted" = 1 ]; then return 0; fi
@@ -370,8 +375,6 @@ cmd_lag_check() {  # <secondmate-id>
   fi
   key="remote-reply-lag-$id-$since"
   reason="check: remote reply channel stalled: mate=$id remote_bytes=$size cursor=$CURSOR_OFFSET for $((now - since))s; inspect the process-event listener and watcher, then re-ensure remote-reply-$id"
-  ready="$CURSOR_DIR/lag-ready.$key"
-  [ ! -L "$ready" ] || return 1
   tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
   if ! fm_wake_append check "$key" "$reason"; then
     rm -f -- "$tmp"
@@ -379,7 +382,8 @@ cmd_lag_check() {  # <secondmate-id>
   fi
   # The watcher probes in a background worker. Publish its delivery receipt
   # before marking the episode alerted so a failed write retries next probe.
-  printf '%s\n' "$reason" > "$tmp" && mv -f -- "$tmp" "$ready" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n%s %s\n' "$reason" "$CURSOR_OFFSET" "$since" > "$tmp" \
+    && mv -f -- "$tmp" "$ready" || { rm -f -- "$tmp"; return 1; }
   tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
   printf '%s %s 1\n' "$CURSOR_OFFSET" "$since" > "$tmp" && mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
   "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$(source_id "$id")" >/dev/null 2>&1 || true
@@ -848,7 +852,8 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
-  rm -f -- "$CURSOR_DIR/$id.lag" "$CURSOR_DIR/$id.lag-probe" "$CURSOR_DIR/$id.source-failed"
+  rm -f -- "$CURSOR_DIR/$id.lag" "$CURSOR_DIR/$id.lag-ready" \
+    "$CURSOR_DIR/$id.lag-probe" "$CURSOR_DIR/$id.source-failed"
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 

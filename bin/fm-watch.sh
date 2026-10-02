@@ -1172,10 +1172,27 @@ remote_reply_lag_after_output() {
 }
 
 remote_reply_lag_surface() {
-  local ready reason
-  for ready in "$STATE/remote-replies"/lag-ready.*; do
+  local ready reason id marker cursor marker_offset marker_since marker_alerted
+  local ready_offset ready_since cursor_offset
+  for ready in "$STATE/remote-replies"/*.lag-ready; do
     [ -e "$ready" ] || continue
     [ -f "$ready" ] && [ ! -L "$ready" ] || continue
+    id=${ready##*/}
+    id=${id%.lag-ready}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    marker="$STATE/remote-replies/$id.lag"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    read -r marker_offset marker_since marker_alerted < "$marker" || continue
+    [ "$marker_alerted" = 1 ] || continue
+    read -r ready_offset ready_since < <(sed -n '2p' "$ready") || continue
+    [ "$ready_offset" = "$marker_offset" ] && [ "$ready_since" = "$marker_since" ] || continue
+    cursor="$STATE/remote-replies/$id.cursor"
+    cursor_offset=0
+    if [ -e "$cursor" ] || [ -L "$cursor" ]; then
+      [ -f "$cursor" ] && [ ! -L "$cursor" ] || continue
+      cursor_offset=$(sed -n 's/^offset=//p' "$cursor")
+    fi
+    [ "$cursor_offset" = "$ready_offset" ] || continue
     IFS= read -r reason < "$ready" || continue
     case "$reason" in 'check: remote reply channel stalled: mate='*) ;; *) continue ;; esac
     REMOTE_REPLY_LAG_READY=$ready

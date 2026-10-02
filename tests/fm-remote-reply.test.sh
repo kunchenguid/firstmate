@@ -1061,12 +1061,17 @@ assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
 remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
+printf '0 1700000000 1\n' > "$PARENT/state/remote-replies/ios.lag"
+printf 'check: remote reply channel stalled: mate=ios\n0 1700000000\n' \
+  > "$PARENT/state/remote-replies/ios.lag-ready"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
 assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
   "adapter retirement left a failed-read episode a later route could inherit"
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "retirement left a pending lag receipt for the watcher to announce"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 # A watcher compares the remote log size with the committed cursor. One lag
@@ -1087,7 +1092,7 @@ FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
 assert_grep 'remote reply channel stalled: mate=ios' "$TMP_ROOT/lag-second.out" \
   "an aged remote log ahead of its cursor did not wake"
 assert_grep 'remote reply channel stalled: mate=ios' \
-  "$PARENT/state/remote-replies/lag-ready.remote-reply-lag-ios-$(sed -n 's/^[0-9]* \([0-9]*\) 1$/\1/p' "$PARENT/state/remote-replies/ios.lag")" \
+  "$PARENT/state/remote-replies/ios.lag-ready" \
   "the background watcher has no durable receipt to surface after a lag probe"
 for _ in $(seq 1 100); do
   [ "$(lag_failures)" -ge 3 ] && [ "$(reply_owner)" = none ] && break
@@ -1114,6 +1119,12 @@ for _ in $(seq 1 100); do
 done
 assert_grep 'source was replaced' "$PARENT/state/ios.status" \
   "lagged reply was not ingested after the listener restarted"
+for _ in $(seq 1 100); do
+  [ ! -e "$PARENT/state/remote-replies/ios.lag-ready" ] && break
+  sleep 0.1
+done
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "committing cursor progress did not clear its obsolete lag receipt"
 stop_reply_listener || fail "lag catchup listener did not stop"
 for _ in $(seq 1 100); do
   [ "$(reply_owner)" = none ] && break
@@ -1124,6 +1135,8 @@ FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-caught-up.out"
 [ ! -s "$TMP_ROOT/lag-caught-up.out" ] || fail "a caught-up channel still woke"
 assert_absent "$PARENT/state/remote-replies/ios.lag" "catchup did not clear the lag episode"
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "catchup left a stale receipt for the watcher to announce"
 pass "an aged remote reply lag re-ensures its listener and wakes once per episode, and catchup resets it"
 
 # The live failure mode is a detached reconcile launch that never proves a
