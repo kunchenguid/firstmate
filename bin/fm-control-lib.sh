@@ -25,7 +25,8 @@
 #   2. Per-harness control mechanics: which key interrupts a running turn, how
 #      many times it must be sent, whether the composer needs clearing after
 #      that key, which adapter-owned cancellation acknowledgement is observable,
-#      which command exits the agent, and which task kinds the adapter is
+#      which command exits the agent, which key-only exit (if any) stops it
+#      when its composer cannot be read, and which task kinds the adapter is
 #      verified to run. These are the empirically verified facts previously
 #      carried only in the harness-adapters skill's per-adapter tables; that
 #      skill now points here so one executable owner holds them, and
@@ -231,6 +232,25 @@ fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
+    *) return 1 ;;
+  esac
+}
+
+# The key-only exit for a composer this plane cannot read, printed as
+# "<key> <presses>": a key the harness binds to discard its composer and then
+# quit. It types no text, so nothing can concatenate onto or submit a draft the
+# composer reader could not see - a draft, if any, is discarded, never sent.
+# fm-control.sh uses it only for an `unknown` composer on a positively idle
+# agent after a verified interrupt; a harness that prints nothing keeps
+# refusing an unreadable composer.
+# claude (2.1.283 on herdr 0.9.1, live 2026-09-26): after its Escape interrupt
+# on an idle agent, the first Ctrl+C clears the whole composer, a multi-line
+# draft included, and arms "Press Ctrl-C again to exit"; the second exits to
+# the shell. Both held at the 0.2s interrupt press gap.
+fm_control_unreadable_exit_keys() {  # <harness>
+  case "${1-}" in
+    claude) printf 'C-c 2' ;;
+    codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|muse|gemini|rovo|agy|devin) ;;
     *) return 1 ;;
   esac
 }

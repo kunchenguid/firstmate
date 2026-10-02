@@ -70,6 +70,8 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
 #   key-times  every named key with its wall-clock send time.
+#   ctrl-c-count  one byte per C-c; with FM_FAKE_CTRL_C_EXITS_AT=<n> the nth
+#            C-c stops the agent, as claude's second Ctrl+C does.
 #   devin    optional Devin screen model, which capture-pane renders as the
 #            rows devin 3000.11.1 draws: `running`, `armed`, `cancelled`,
 #            `idle`, `primed`, or `picker`. Escape moves running->armed (the
@@ -148,6 +150,11 @@ case "${1:-}" in
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
+      fi
+      if [ "$payload" = C-c ] && [ -n "${FM_FAKE_CTRL_C_EXITS_AT:-}" ]; then
+        printf 'x' >> "$D/ctrl-c-count"
+        [ "$(wc -c < "$D/ctrl-c-count")" -lt "$FM_FAKE_CTRL_C_EXITS_AT" ] \
+          || printf 'zsh' > "$D/command"
       fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
@@ -248,6 +255,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_CTRL_C_EXITS_AT="${FM_FAKE_CTRL_C_EXITS_AT:-}" \
     FM_FAKE_DEVIN_PICKER_STUCK="${FM_FAKE_DEVIN_PICKER_STUCK:-}" \
     "$CONTROL" "$@" 2>&1
 }
@@ -935,6 +943,123 @@ test_exit_accepts_agent_stopped_by_busy_interrupt() {
   pass "fm-control exit: an interrupt-stopped agent satisfies the gone-state postcondition"
 }
 
+# --- key-only exit for an unreadable composer (issue #5558) -----------------
+
+# unreadable_case <name> <harness> <busy|idle|none>: a live agent whose pane
+# draws no composer shape the reader recognizes - the cursor sits on a blank
+# row under transcript text - so its composer reads `unknown`.
+unreadable_case() {  # <name> <harness> <busy|idle|none>
+  local dir gen
+  dir=$(new_case "$1")
+  add_task "$dir" t1 "$2"
+  alive_as "$dir" "$2"
+  printf 'transcript line\n\n' > "$dir/fake/pane"
+  case "$3" in
+    busy) gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1) ;;
+    idle) gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --state idle --source fm-spawn --event seed) ;;
+    none) gen= ;;
+  esac
+  [ -z "$gen" ] || printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  printf '%s\n' "$dir"
+}
+
+test_unreadable_exit_keys_table() {
+  [ "$(fm_control_unreadable_exit_keys claude)" = "C-c 2" ] \
+    || fail "claude's key-only exit should be Ctrl+C twice"
+  local h
+  for h in codex opencode pi pi-signed omp grok kimi cursor muse gemini rovo agy devin; do
+    [ -z "$(fm_control_unreadable_exit_keys "$h")" ] \
+      || fail "$h has no verified key-only exit and must keep refusing an unreadable composer"
+  done
+  fm_control_unreadable_exit_keys not-a-harness >/dev/null 2>&1 \
+    && fail "an unverified harness must have no key-only exit mechanics"
+  pass "fm-control-lib: only claude has a verified key-only exit for an unreadable composer"
+}
+
+test_idle_claude_with_unreadable_composer_exits_by_keys() {
+  local dir out rc
+  dir=$(unreadable_case keyexit claude idle)
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=2 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "an idle claude behind an unreadable composer should exit by keys"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" "the outcome should report the agent stopped"
+  assert_contains "$out" "exit=keys composer=unknown draft=discarded-if-any" \
+    "the outcome should say the exit used keys and discarded any unseen draft"
+  [ "$(keys_sent "$dir" | tr '\n' ' ')" = "Escape C-c C-c " ] \
+    || fail "the verified interrupt should precede the two Ctrl+C presses, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  [ -z "$(literals "$dir")" ] || fail "no text may be typed into a composer not proven empty"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "a key-only exit should retire the stopped agent's busy wiring"
+  pass "fm-control exit: an idle claude with an unreadable composer is interrupted, then stopped by keys"
+}
+
+test_key_exit_sends_no_press_after_the_agent_stops() {
+  local dir out rc
+  dir=$(unreadable_case keyexit-early claude idle)
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "a key-only exit that stops the agent early should succeed"$'\n'"$out"
+  [ "$(keys_sent "$dir" | tr '\n' ' ')" = "Escape C-c " ] \
+    || fail "no Ctrl+C may reach the shell after the agent stopped, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  pass "fm-control exit: a key-only exit sends no further press once the agent is gone"
+}
+
+test_unreadable_composer_refuses_unless_positively_idle() {
+  local dir out rc
+  # No busy wiring: the busy state is unknown, so nothing is pressed at all.
+  dir=$(unreadable_case keyexit-unknown claude none)
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=2 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unknown-busy claude behind an unreadable composer must refuse"
+  assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
+  assert_contains "$out" "rather than positively idle" "the refusal should name the missing idle proof"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key may reach an agent not proven idle, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "no text may be typed into a composer not proven empty"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the refused agent must keep running"
+  # Busy: the verified interrupt is delivered, but a turn that still reads busy
+  # afterwards is never pressed with the exit keys.
+  dir=$(unreadable_case keyexit-busy claude busy)
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=2 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a claude still busy after its interrupt must refuse the key-only exit"
+  assert_contains "$out" "rather than positively idle" "the refusal should name the missing idle proof"
+  [ "$(keys_sent "$dir")" = Escape ] \
+    || fail "only the busy path's interrupt may be sent, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  [ -z "$(literals "$dir")" ] || fail "no text may be typed into a composer not proven empty"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the refused agent must keep running"
+  pass "fm-control exit: an unreadable composer refuses unless the agent reads positively idle"
+}
+
+test_unreadable_composer_refuses_without_a_verified_key_exit() {
+  local dir out rc
+  dir=$(unreadable_case keyexit-codex codex idle)
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=2 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a harness without a key-only exit must keep refusing an unreadable composer"
+  assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key may be sent, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  [ -z "$(literals "$dir")" ] || fail "no exit command may be typed"
+  pass "fm-control exit: a harness with no verified key-only exit keeps refusing an unreadable composer"
+}
+
+test_pending_composer_still_refuses_an_idle_claude() {
+  local dir out rc
+  dir=$(unreadable_case keyexit-pending claude idle)
+  printf '────────────────\n❯ an unsent draft\n────────────────\n' > "$dir/fake/pane"
+  out=$(FM_FAKE_CTRL_C_EXITS_AT=2 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a visibly pending composer must refuse even on an idle claude"
+  assert_contains "$out" "visibly holds pending text" "the refusal should name the pending text"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key may discard a visible draft, got: $(keys_sent "$dir" | tr '\n' ' ')"
+  [ -z "$(literals "$dir")" ] || fail "no exit command may be typed onto a visible draft"
+  pass "fm-control exit: a visible draft still refuses; the key-only exit is only for an unreadable composer"
+}
+
+test_key_exit_that_does_not_stop_reports_unconfirmed() {
+  local dir out rc
+  dir=$(unreadable_case keyexit-stubborn claude idle)
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a key-only exit the agent ignores must fail"
+  assert_contains "$out" "exit-keys=C-c*2 composer=unknown agent-state=alive exit=unconfirmed" \
+    "the failure should report the delivered keys and the unconfirmed exit"
+  [ -z "$(literals "$dir")" ] || fail "no text may be typed into a composer not proven empty"
+  pass "fm-control exit: a key-only exit that does not stop the agent reports it unconfirmed"
+}
+
 test_agent_that_does_not_stop_fails_closed() {
   local dir out rc gen
   dir=$(new_case stubborn)
@@ -1070,6 +1195,13 @@ EOF
 
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
+test_unreadable_exit_keys_table
+test_idle_claude_with_unreadable_composer_exits_by_keys
+test_key_exit_sends_no_press_after_the_agent_stops
+test_unreadable_composer_refuses_unless_positively_idle
+test_unreadable_composer_refuses_without_a_verified_key_exit
+test_pending_composer_still_refuses_an_idle_claude
+test_key_exit_that_does_not_stop_reports_unconfirmed
 test_devin_interrupt_invalidates_busy
 test_devin_idle_interrupt_sends_one_press
 test_devin_exit_after_turn_ended_types_quit_once

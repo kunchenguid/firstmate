@@ -219,6 +219,55 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_matrix_claude_titled_rule_composer() {
+  # Real named claude session (`claude -n fm-probe-task`) on herdr, captured
+  # live 2026-09-26, claude 2.1.283 on herdr 0.9.1 (issue #5558): the rule
+  # above the composer carries the session title, so it is not a solid
+  # separator row, and the bottom solid rule then stood alone below the bare
+  # `❯` row. That lone rule read as an unpaired separator, so a visibly empty
+  # composer read unknown and every steer and exit command was refused.
+  local rule titled idle typed footer screen out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  rule="${ESC}[0m${ESC}[38;5;244m────────────────────────────────────────${ESC}[0m"
+  titled="${ESC}[0m${ESC}[38;5;244m────────────────────────── fm-probe-task ─${ESC}[0m"
+  footer=$'\n  '"${ESC}[0m${ESC}[38;5;220m⚠ Transcript saving is off${ESC}[0m${ESC}[38;5;246m · restart with …${ESC}[0m"
+  footer="$footer"$'\n  '"${ESC}[0m${ESC}[38;5;211m⏵⏵ bypass permissions on${ESC}[0m${ESC}[38;5;246m (shift+tab to cycle)${ESC}[0m"
+  idle="❯$NBSP${ESC}[0m${ESC}[7m ${ESC}[0m"
+  screen=$'transcript line\n\n'"$titled"$'\n'"$idle"$'\n'"$rule$footer"
+  assert_screen "titled claude idle on tmux" empty "$CAPS_TMUX" "$screen" 3 "$claude_idle"
+  assert_screen "titled claude idle on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "titled claude idle on herdr without identity" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "titled claude idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "titled claude idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") \
+    || fail "titled claude idle composer must be extractable"
+  [ -z "$out" ] || fail "titled claude idle composer must extract nothing, got '$out'"
+  # The captured wrapped draft: typed text continuing on an indented row.
+  typed=$'❯ this is a long typed draft that should wrap\n  onto a continuation row'"${ESC}[0m${ESC}[7m ${ESC}[0m"
+  screen=$'transcript line\n\n'"$titled"$'\n'"$typed"$'\n'"$rule$footer"
+  assert_screen "titled claude wrapped draft on herdr" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "titled claude wrapped draft on cmux/orca" unknown "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") \
+    || fail "titled claude draft must be extractable"
+  [ "$out" = "this is a long typed draft that should wrap onto a continuation row" ] \
+    || fail "titled claude draft must extract the joined draft and never the footer, got '$out'"
+  # A titled pair closing over a blank row has no glyph proof, and pi
+  # identity never proves it: the rule is claude's, not pi's.
+  screen=$'transcript line\n'"$titled"$'\n\n'"$rule"
+  assert_screen "titled blank pair with pi identity" unknown "$CAPS_STYLED" "$screen" '' "$pi_idle"
+  assert_screen "titled blank pair with claude identity" unknown "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # A rule that only resembles a title - no trailing run, a title holding
+  # `─`, or a short leading run - stays an ordinary row, so the lone solid
+  # rule below the draft still refuses.
+  for bad in "────────────────────────── fm-probe-task" \
+             "────────────────────────── fm─probe ─" \
+             "──── fm-probe-task ─"; do
+    screen=$'transcript line\n'"$bad"$'\n❯'"$NBSP"$'\n'"$rule"
+    assert_screen "near-titled rule '$bad'" unknown "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  done
+  pass "matrix: claude's titled-rule composer reads empty idle, pending with a draft (#5558)"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -969,6 +1018,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_matrix_claude_titled_rule_composer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows

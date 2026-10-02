@@ -762,6 +762,27 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-09-26 claude 2.1.283 titled composer rule and key-only exit through Herdr
+
+Verified on 2026-09-26 on Linux x86_64 (6.8.0) against Claude Code 2.1.283 started as `claude --dangerously-skip-permissions -n fm-probe-task` in Herdr 0.9.1 panes of an isolated lab session, read with Herdr's exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
+A session started with `-n <name>` draws the composer's top rule with its name set into the line (`──…── fm-probe-task ─`), so that rule is not a solid separator; the closing solid rule was then left unpaired and the cursorless selection answered `unknown` on an idle, empty composer, which made every doorbell send fail and every `fm-control.sh exit` and `relaunch` refuse.
+
+The capture is `herdr pane read <pane> --source recent --lines 200 --format ansi` of an idle pane and of the same pane holding a typed draft that wraps onto a continuation row, each 20-row tail classified as in the entry above with the pane's `claude<TAB>idle` identity.
+Observed verdicts in the order idle, typed, before the fix and then after it:
+
+```text
+unknown unknown
+empty   pending
+```
+
+The titled rule now pairs with the solid rule below it only when the row between them opens with the agent glyph, so pi identity alone never proves a titled pair and a titled pair over a blank row still reads `unknown`.
+`test_matrix_claude_titled_rule_composer` in `tests/fm-composer-lib.test.sh` carries the captured shape with its footer rows and pins the idle composer as `empty` on every capability descriptor, the wrapped draft as `pending` with its exact extracted text, the plain-text read of that draft as `unknown`, and three near-titled rules as `unknown`.
+
+A composer that still reads `unknown` has a key-only exit on claude, measured by sending keys through the lab with `herdr pane send-keys <pane> escape`, then `ctrl+c` twice at 0.2-second gaps, reading `herdr agent get <pane>` and `herdr pane read <pane> --source visible` after each press, once from an empty composer and once from a two-line draft.
+In both runs Escape left the composer unchanged, the first Ctrl+C cleared it (including both draft lines) and showed `Press Ctrl-C again to exit`, and the second Ctrl+C returned the pane to its shell prompt.
+`test_idle_claude_with_unreadable_composer_exits_by_keys` and the refusal tests beside it in `tests/fm-control.test.sh` pin that exit and every case that must still refuse.
+No live guard in the `live-harness-optin` family refreshes this entry yet: the composer-matrix guard starts claude without `-n`, so it never renders the titled rule, and it does not drive `fm-control.sh`.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

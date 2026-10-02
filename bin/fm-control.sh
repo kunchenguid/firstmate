@@ -120,6 +120,13 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#     A composer not proven empty refuses too, with one exception: an
+#     `unknown` composer on an adapter with a key-only exit
+#     (fm_control_unreadable_exit_keys; claude's Ctrl+C twice) whose agent
+#     reads positively idle after a verified interrupt is stopped with those
+#     keys, typing no text. Whatever that composer held is discarded, never
+#     submitted, and the outcome says so (`exit=keys composer=unknown
+#     draft=discarded-if-any`).
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -554,10 +561,63 @@ retire_busy_incarnation() {
   fi
 }
 
+# require_idle_for_key_exit: the key-only exit acts only on a positively idle
+# agent, never on one whose busy state is busy, unknown, or unreadable.
+require_idle_for_key_exit() {
+  local busy
+  busy=$(busy_verdict)
+  case "$busy" in
+    idle*) ;;
+    *) die "task $ID's composer state is 'unknown', not proven empty, and its busy state reads '${busy%% *}' rather than positively idle; refusing both the exit command and the key-only exit. Clear the composer, or retry '$VERB' once it reads idle" ;;
+  esac
+}
+
+# exit_by_keys <"key presses"> <interrupt-result>: the honest exit for a
+# composer the reader cannot prove empty (issue #5558). It types no text: the
+# harness's key-only exit (fm_control_unreadable_exit_keys) discards whatever
+# the composer holds and stops the agent, so a draft the reader could not see
+# is lost, never submitted or concatenated onto. It acts only on a positively
+# idle agent after a verified interrupt - the busy path's, or one delivered
+# here - and refuses on anything else. Prints `stopped` plus the fields that
+# name how.
+exit_by_keys() {  # <"key presses"> <interrupt-result>
+  local key=${1%% *} presses=${1##* } interrupt_result=$2 cancel proof state gap i=0
+  fm_control_backend_supports_key "$BACKEND" "$key" \
+    || die "task $ID's composer state is 'unknown', not proven empty, and its key-only exit $key cannot be delivered by the $BACKEND backend; refusing to type the exit command. Clear the composer, then retry '$VERB'"
+  require_idle_for_key_exit
+  if [ "$interrupt_result" = not-needed ]; then
+    cancel=$(deliver_interrupt) || return $?
+    proof=$(verify_interrupt_running) || return $?
+    interrupt_result="delivered verified=$proof cancel=$cancel"
+    require_idle_for_key_exit
+  fi
+  state=$(agent_state)
+  [ "$state" = alive ] \
+    || die "task $ID's agent reads '$state' after its interrupt, before any exit key was sent; exit cannot prove what state it is in"
+  gap=$(fm_control_interrupt_press_gap "$HARNESS")
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+      || die "exit-delivered $ID interrupt=$interrupt_result exit-keys=$key-undelivered after $i of $presses; the agent may be waiting for the next $key"
+    i=$((i + 1))
+    [ "$i" -lt "$presses" ] || break
+    sleep "$gap"
+    # A press that already stopped the agent gets no successor: the next one
+    # would land on the shell the endpoint returned to.
+    state=$(agent_state)
+    [ "$state" = alive ] || break
+  done
+  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
+    die "exit-delivered $ID interrupt=$interrupt_result exit-keys=$key*$i composer=unknown agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
+  }
+  retire_busy_incarnation
+  printf 'stopped exit=keys composer=unknown draft=discarded-if-any'
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# `already-stopped`, `endpoint-gone`, or `stopped`, the last optionally
+# followed by fields naming a key-only exit (exit_by_keys).
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence exit_keys interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -630,6 +690,13 @@ do_exit() {
     empty) ;;
     pending)
       die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      ;;
+    unknown)
+      exit_keys=$(fm_control_unreadable_exit_keys "$HARNESS" 2>/dev/null) || exit_keys=
+      [ -n "$exit_keys" ] \
+        || die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      exit_by_keys "$exit_keys" "$interrupt_result"
+      return $?
       ;;
     *)
       die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
@@ -960,7 +1027,7 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result exit_detail state note_line
   local -a spawn_args
 
   require_state_verified_backend relaunch
@@ -1041,7 +1108,13 @@ do_relaunch() {
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
   RELAUNCH_ACTIVE=0
-  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT"
+  # When the old agent was stopped through the key-only path, its exit_result
+  # carries the same `exit=keys composer=unknown draft=discarded-if-any` notice
+  # `exit` prints directly, so surface it here too rather than hiding a possibly
+  # discarded draft from an operator reading only the relaunch result.
+  exit_detail=
+  [ "${exit_result%% *}" = "$exit_result" ] || exit_detail=" ${exit_result#* }"
+  echo "relaunched $ID harness=$TARGET_HARNESS from=$PRIOR_RECORDED_HARNESS model=$TARGET_MODEL effort=$TARGET_EFFORT backend=$BACKEND endpoint=$T worktree=$WT$exit_detail"
 }
 
 # --- verbs ------------------------------------------------------------------
@@ -1065,7 +1138,9 @@ case "$VERB" in
     ;;
   exit)
     result=$(do_exit)
-    echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    detail=
+    [ "${result%% *}" = "$result" ] || detail=" ${result#* }"
+    echo "${result%% *} $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT$detail"
     ;;
   relaunch)
     do_relaunch

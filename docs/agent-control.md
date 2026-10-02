@@ -50,6 +50,10 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+The one exception is an `unknown` or unreadable composer on an adapter with a verified key-only exit - today only claude, whose first Ctrl+C clears the composer and whose second exits - when the agent's busy state reads positively idle both before and after a verified interrupt: the plane then types no text, sends only those exit keys, and reports `exit=keys composer=unknown draft=discarded-if-any` so a possibly discarded draft is never hidden.
+Every other case refuses the exit keys and types no text: a `pending` or `pending-unproven` verdict, an unrecorded busy state, and an adapter without a key-only exit all refuse before any key is sent at all.
+A recorded-busy agent is the one qualification: `exit` interrupts a busy agent before it ever reads the composer, so such an agent may already have received the ordinary pre-exit interrupt (Escape) when the refusal lands - the refusal still prevents the exit keys, never types text, and leaves the agent running.
+[`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns the key-only exit table.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
@@ -57,7 +61,7 @@ Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm
 
 **`resume` is not a verb.**
 It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
-`relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
+`relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty, or the key-only exit above stopped it; Devin on Herdr currently fails that composer check and refuses.
 A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
 
 ## Transactional relaunch
@@ -166,7 +170,7 @@ The worktree and the task's records are unaffected either way.
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
-- `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
+- `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`, key-only exception included.
 - `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or a Herdr endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
   It also requires the shell to be in the recorded worktree: every backend but Orca (which owns its own task worktree with no current-path probe) gets one explicit `cd` to the recorded path, then a pre-launch path read that refuses before any harness starts unless it confirms the endpoint is sitting in the recorded copy.

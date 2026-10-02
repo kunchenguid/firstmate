@@ -99,6 +99,13 @@ case "${1:-}" in
           [ -z "${FM_FAKE_TRACE_EXPORTED:-}" ] || : > "$FM_FAKE_TRACE_EXPORTED"
           ;;
       esac
+      # The key-only exit stops a claude with the nth Ctrl+C, so a relaunch that
+      # takes that path can be exercised the same way the exit suite models it.
+      if [ "$payload" = C-c ] && [ -n "${FM_FAKE_CTRL_C_EXITS_AT:-}" ]; then
+        printf 'x' >> "$D/ctrl-c-count"
+        [ "$(wc -c < "$D/ctrl-c-count")" -lt "$FM_FAKE_CTRL_C_EXITS_AT" ] \
+          || printf 'zsh' > "$D/command"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -426,6 +433,27 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+test_relaunch_surfaces_the_key_only_draft_notice() {
+  local dir out rc gen
+  dir=$(new_case keyexit-relaunch rl45)
+  add_ship_task "$dir" rl45 claude
+  # Positively idle before and after the verified interrupt, so an idle claude
+  # behind an unreadable composer is licensed to take the key-only exit.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl45 --state idle --source fm-spawn --event seed)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/rl45.meta"
+
+  out=$(FM_FAKE_COMPOSER_READ_FAIL=1 FM_FAKE_CTRL_C_EXITS_AT=2 \
+    run_control "$dir" rl45 relaunch --note "stop by keys, then relaunch"); rc=$?
+
+  expect_code 0 "$rc" "an idle claude behind an unreadable composer should relaunch through the key-only exit"$'\n'"$out"
+  assert_contains "$out" "relaunched rl45 harness=claude from=claude" "the outcome should name the transition"
+  assert_contains "$out" "exit=keys composer=unknown draft=discarded-if-any" \
+    "the relaunch result must surface the same discarded-draft notice exit reports when it stops the old agent by keys"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the key-only exit types no exit command into a composer not proven empty"
+  pass "fm-control relaunch: a key-only exit surfaces its discarded-draft notice in the relaunch result"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -2389,6 +2417,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_surfaces_the_key_only_draft_notice
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
