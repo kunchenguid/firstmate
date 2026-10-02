@@ -24,6 +24,8 @@ set -u
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$ROOT/bin/fm-classify-lib.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$ROOT/bin/fm-hold-status-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-classify-decision-key-tests)
 
