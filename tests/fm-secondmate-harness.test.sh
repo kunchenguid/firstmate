@@ -486,10 +486,9 @@ make_seeded_home() {
 # spawn_secondmate <world> <id> <home> [explicit-harness]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE over a
-# blinded ancestry walk pins detect_own. stdout and stderr are discarded (the
-# local-HEAD ff sync harmlessly skips a non-worktree home); the function returns
-# fm-spawn's own exit status so a case can assert a refusal. Inspect
-# <world>/home/state/<id>.meta and <home>/config after.
+# blinded ancestry walk pins detect_own. stdout is discarded and stderr is saved
+# in <world>/<id>.spawn.err; the function returns fm-spawn's own exit status so a
+# case can assert a refusal. Inspect <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
@@ -504,7 +503,7 @@ spawn_secondmate() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1
+    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>"$world/$id.spawn.err"
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
@@ -525,7 +524,6 @@ test_spawn_refuses_when_sandbox_inheritance_fails() {
   # Force inheritance to fail: a regular file where the child home's config
   # directory must be created, so no inherited item can land.
   printf 'not-a-directory\n' > "$sm/config"
-
   spawn_secondmate "$w" sm "$sm"
   rc=$?
   [ "$rc" -ne 0 ] \
@@ -556,11 +554,76 @@ test_spawn_inherits_sandbox_flag_and_settings() {
   spawn_secondmate "$w" sm "$sm" \
     || fail "a secondmate spawn with a working sandbox inheritance must succeed"
   [ -f "$w/home/state/sm.meta" ] || fail "the successful spawn must publish secondmate metadata"
-  [ -e "$sm/config/worker-sandbox" ] \
-    || fail "the child home must inherit the enabled config/worker-sandbox flag"
-  [ -e "$sm/config/worker-sandbox-settings.json" ] \
-    || fail "the child home must inherit the sandbox settings"
+  cmp -s "$w/home/config/worker-sandbox" "$sm/config/worker-sandbox" \
+    || fail "the child home must inherit the exact config/worker-sandbox bytes"
+  cmp -s "$w/home/config/worker-sandbox-settings.json" "$sm/config/worker-sandbox-settings.json" \
+    || fail "the child home must inherit the exact sandbox settings bytes"
   pass "A5 spawn: a working inheritance carries config/worker-sandbox and its settings into the secondmate home"
+}
+
+test_spawn_refuses_stale_sandbox_after_failed_update() {
+  local w sm fakebin rc
+  w="$TMP_ROOT/spawn-sandbox-stale"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+  propagate_secondmate_inheritance "$w/home" "$sm" "$w/home/config" "$w/home/data" \
+    || fail "initial sandbox inheritance must succeed"
+  cp "$sm/config/worker-sandbox-settings.json" "$w/previous-settings.json"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":["/previously-allowed"]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  chmod 0555 "$sm/config"
+  if [ -w "$sm/config" ]; then
+    chmod 0755 "$sm/config"
+    printf 'ok - stale sandbox update permission test # SKIP directory permissions are bypassed by this user\n'
+    return
+  fi
+  spawn_secondmate "$w" sm "$sm"
+  rc=$?
+  chmod 0755 "$sm/config"
+  cmp -s "$w/previous-settings.json" "$sm/config/worker-sandbox-settings.json" \
+    || fail "failed propagation must leave the previous child settings in place"
+  assert_contains "$(cat "$w/sm.spawn.err")" "inheritance failed" \
+    "the unwritable config directory must cause propagation failure"
+  assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+    "stale child settings must reach the sandbox postcondition guard"
+  [ "$rc" -ne 0 ] || fail "stale sandbox settings after failed propagation must refuse launch"
+  [ ! -f "$w/home/state/sm.meta" ] || fail "stale sandbox refusal must not publish metadata"
+  pass "A5 spawn: failed sandbox update refuses launch with stale child settings"
+}
+
+test_spawn_checks_sandbox_bytes_when_inheritance_skipped() {
+  local w sm fakebin item rc
+  for item in worker-sandbox worker-sandbox-settings.json; do
+    w="$TMP_ROOT/spawn-sandbox-skipped-$item"
+    sm="$w/sm"
+    mkdir -p "$w/home/config"
+    : > "$w/home/config/worker-sandbox"
+    printf '%s\n' '{"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+      > "$w/home/config/worker-sandbox-settings.json"
+    make_seeded_home "$sm" sm
+    fakebin=$(make_noop_tmux "$w/tmux-sm")
+    fm_test_fake_srt "$fakebin"
+    propagate_secondmate_inheritance "$w/home" "$sm" "$w/home/config" "$w/home/data" \
+      || fail "initial sandbox inheritance must succeed"
+    printf '\n' >> "$sm/config/$item"
+    FM_SKIP_SECONDMATE_INHERIT=1 spawn_secondmate "$w" sm "$sm"
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "skipped propagation must refuse differing $item bytes"
+    assert_contains "$(cat "$w/sm.spawn.err")" "sandbox configuration does not match the primary" \
+      "skipped propagation must reach the sandbox postcondition guard for $item"
+    [ ! -f "$w/home/state/sm.meta" ] || fail "skipped stale sandbox must not publish metadata"
+    cp "$w/home/config/$item" "$sm/config/$item"
+    FM_SKIP_SECONDMATE_INHERIT=1 spawn_secondmate "$w" sm "$sm" \
+      || fail "skipped propagation with matching sandbox bytes must launch"
+    [ -f "$w/home/state/sm.meta" ] || fail "matching skipped sandbox must publish metadata"
+  done
+  pass "A5 spawn: skipped inheritance requires exact sandbox flag and settings bytes"
 }
 
 # Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
@@ -2785,6 +2848,8 @@ test_propagate_lib
 test_spawn_split_and_inherit
 test_spawn_refuses_when_sandbox_inheritance_fails
 test_spawn_inherits_sandbox_flag_and_settings
+test_spawn_refuses_stale_sandbox_after_failed_update
+test_spawn_checks_sandbox_bytes_when_inheritance_skipped
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins

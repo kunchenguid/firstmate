@@ -3041,9 +3041,9 @@ if [ "$KIND" = secondmate ]; then
   # inheritance returned, and however it was skipped, and refuse the launch
   # rather than continue with the sandbox silently off.
   if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
-    if [ ! -e "$PROJ_ABS/config/worker-sandbox" ] ||
-      [ ! -e "$PROJ_ABS/config/worker-sandbox-settings.json" ]; then
-      echo "error: secondmate $ID did not inherit config/worker-sandbox for $PROJ_ABS while this home has it enabled; refusing to launch so its own workers cannot run unsandboxed" >&2
+    if ! cmp -s "$CONFIG/worker-sandbox" "$PROJ_ABS/config/worker-sandbox" ||
+      ! cmp -s "$CONFIG/worker-sandbox-settings.json" "$PROJ_ABS/config/worker-sandbox-settings.json"; then
+      echo "error: secondmate $ID sandbox configuration does not match the primary for $PROJ_ABS; refusing to launch with missing or stale inherited settings" >&2
       exit 1
     fi
   fi
