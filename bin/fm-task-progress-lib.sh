@@ -76,22 +76,100 @@ fm_task_progress_read() { # <task>
     read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" --context "$context"
 }
 
+fm_task_progress_execution_generation() { # <task>
+  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
+  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} meta executor provider generation
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  executor=$(sed -n 's/^executor=//p' "$meta" | tail -1)
+  case "${executor:-local-agent}" in
+    local-agent)
+      generation=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
+      printf '%s' "$generation"
+      ;;
+    cloud-worker)
+      provider=$(sed -n 's/^provider=//p' "$meta" | tail -1)
+      [ "$provider" = aime ] || {
+        echo "REFUSED: task $id has an unsupported cloud execution identity" >&2
+        return 1
+      }
+      (
+        STATE=$state DATA=$data
+        export STATE DATA
+        # shellcheck source=bin/fm-aime-cloud-lib.sh
+        . "$FM_TASK_PROGRESS_BIN/fm-aime-cloud-lib.sh"
+        if ! fm_aime_state_load "$id" || ! fm_aime_meta_validate "$id" "$AIME_STATE_RESULT_MODE"; then
+          echo "REFUSED: task $id has no validated cloud execution identity" >&2
+          exit 1
+        fi
+        generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
+        [ -n "$generation" ] || {
+          echo "REFUSED: task $id has no current cloud execution generation" >&2
+          exit 1
+        }
+        printf 'cloud-worker:aime:%s' "$generation"
+      )
+      ;;
+    remote-agent)
+      provider=$(sed -n 's/^provider=//p' "$meta" | tail -1)
+      case "$provider" in
+        aime)
+          (
+            STATE=$state DATA=$data
+            export STATE DATA
+            # shellcheck source=bin/fm-aime-cloud-lib.sh
+            . "$FM_TASK_PROGRESS_BIN/fm-aime-cloud-lib.sh"
+            if ! fm_aime_state_load "$id" || ! fm_aime_meta_validate "$id" "$AIME_STATE_RESULT_MODE"; then
+              echo "REFUSED: task $id has no validated remote execution identity" >&2
+              exit 1
+            fi
+            generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
+            [ -n "$generation" ] || {
+              echo "REFUSED: task $id has no current remote execution generation" >&2
+              exit 1
+            }
+            printf 'remote-agent:aime:%s' "$generation"
+          )
+          ;;
+        ida)
+          (
+            STATE=$state DATA=$data
+            export STATE DATA
+            # shellcheck source=bin/fm-remote-agent-lib.sh
+            . "$FM_TASK_PROGRESS_BIN/fm-remote-agent-lib.sh"
+            if ! fm_remote_state_load "$id" || ! fm_remote_meta_validate "$id" ida "$REMOTE_STATE_TASK_TYPE"; then
+              echo "REFUSED: task $id has no validated remote execution identity" >&2
+              exit 1
+            fi
+            generation=$(jq -r '.generation // 1' "$REMOTE_STATE_FILE")
+            printf 'remote-agent:ida:%s' "$generation"
+          )
+          ;;
+        *)
+          echo "REFUSED: task $id has an unsupported remote execution identity" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "REFUSED: task $id has an unsupported executor identity" >&2
+      return 1
+      ;;
+  esac
+}
+
 # Bind a compact admission to authenticated intent and executor identity
 # without persisting either in the task body. A later brief correction or
 # worker replacement invalidates the read token and forces MAIN to publish a
 # fresh material next step before Branch can act again.
 fm_task_progress_context() { # <task>
   local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
-  local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} brief meta
-  local brief_digest='' generation=''
+  local brief brief_digest='' generation=''
   brief="$data/$id/brief.md"
-  meta="$state/$id.meta"
   if [ -f "$brief" ] && [ ! -L "$brief" ]; then
     brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
   fi
-  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
-    generation=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
-  fi
+  generation=$(fm_task_progress_execution_generation "$id") || return 1
   printf '%s:%s' "$brief_digest" "$generation"
 }
 

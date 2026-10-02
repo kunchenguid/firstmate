@@ -115,6 +115,68 @@ printf '%s' "$regenerated" | jq -e '.recorded==true and .next_step=="Run the cor
   || fail "MAIN did not reactivate replacement executor progress"
 token=$(printf '%s' "$regenerated" | jq -r .record_token)
 
+task_cmd add remote "Finish the remote result" --kind scout --body "Keep remote progress resumable." --start >/dev/null \
+  || fail "remote fixture task add failed"
+mkdir -p "$HOME_DIR/data/remote" "$HOME_DIR/state/remote-tasks/remote"
+printf '%s\n' 'Finish the authenticated remote request.' > "$HOME_DIR/data/remote/brief.md"
+printf 'kind=scout\nexecutor=remote-agent\nprovider=ida\ntask_type=research\nremote_state=%s\n' \
+  "$HOME_DIR/state/remote-tasks/remote" > "$HOME_DIR/state/remote.meta"
+jq -n --arg instruction "$HOME_DIR/data/remote/instructions.txt" '{
+  schema:"fm-remote-agent-task-state.v1", task_id:"remote", executor:"remote-agent", provider:"ida",
+  task_type:"research", phase:"running", generation:1, revision:1, instruction_file:$instruction,
+  instruction_sha256:("a" * 64), outcome:null, error_class:null, waiter:"armed",
+  result_availability:null, result_path:null, report_path:null, provider_state:{}
+}' > "$HOME_DIR/state/remote-tasks/remote/state.json"
+chmod 0600 "$HOME_DIR/state/remote.meta" "$HOME_DIR/state/remote-tasks/remote/state.json"
+remote_initial=$(progress progress remote) || fail "remote progress read failed"
+remote_updated=$(progress update-progress remote --expected-token "$(printf '%s' "$remote_initial" | jq -r .record_token)" \
+  --progress "$record") || fail "remote progress update failed"
+jq '.generation=2 | .revision+=1' "$HOME_DIR/state/remote-tasks/remote/state.json" > "$HOME_DIR/state/remote-tasks/remote/next.json"
+chmod 0600 "$HOME_DIR/state/remote-tasks/remote/next.json"
+mv "$HOME_DIR/state/remote-tasks/remote/next.json" "$HOME_DIR/state/remote-tasks/remote/state.json"
+remote_replaced=$(progress progress remote) || fail "remote replacement progress read failed"
+if [ "$(printf '%s' "$remote_updated" | jq -r .record_token)" = "$(printf '%s' "$remote_replaced" | jq -r .record_token)" ]; then
+  fail "remote execution replacement retained the old compact token"
+fi
+printf '%s' "$remote_replaced" | jq -e '.recorded==false and .next_step==""' >/dev/null \
+  || fail "remote execution replacement left stale progress active"
+
+task_cmd add legacy-cloud "Finish the legacy cloud result" --kind scout --body "Keep legacy progress resumable." --start >/dev/null \
+  || fail "legacy cloud fixture task add failed"
+mkdir -p "$HOME_DIR/data/legacy-cloud" "$HOME_DIR/state/cloud-tasks/legacy-cloud"
+printf '%s\n' 'Finish the authenticated legacy cloud request.' > "$HOME_DIR/data/legacy-cloud/brief.md"
+printf 'kind=scout\nexecutor=cloud-worker\nprovider=aime\ntask_type=research\ncloud_state=%s\n' \
+  "$HOME_DIR/state/cloud-tasks/legacy-cloud" > "$HOME_DIR/state/legacy-cloud.meta"
+jq -n --arg instruction "$HOME_DIR/data/legacy-cloud/instructions.txt" '{
+  schema:"fm-aime-task-state.v1", task_id:"legacy-cloud", executor:"cloud-worker", provider:"aime",
+  execution_generation:"aime-g1", revision:1, phase:"running", site:"sg", space_id:"fixture-space",
+  identity:"user", result_mode:"research", instruction_file:$instruction,
+  instruction_sha256:("b" * 64), bytedcli_version:"fixture", session_id:null, message_id:null, event_cursor:0
+}' > "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json"
+chmod 0600 "$HOME_DIR/state/legacy-cloud.meta" "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json"
+legacy_initial=$(progress progress legacy-cloud) || fail "legacy cloud progress read failed"
+legacy_updated=$(progress update-progress legacy-cloud --expected-token "$(printf '%s' "$legacy_initial" | jq -r .record_token)" \
+  --progress "$record") || fail "legacy cloud progress update failed"
+jq '.execution_generation="aime-g2" | .revision+=1' "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json" > "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
+chmod 0600 "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
+mv "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json" "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json"
+legacy_replaced=$(progress progress legacy-cloud) || fail "legacy cloud replacement progress read failed"
+if [ "$(printf '%s' "$legacy_updated" | jq -r .record_token)" = "$(printf '%s' "$legacy_replaced" | jq -r .record_token)" ]; then
+  fail "legacy cloud execution replacement retained the old compact token"
+fi
+printf '%s' "$legacy_replaced" | jq -e '.recorded==false and .next_step==""' >/dev/null \
+  || fail "legacy cloud execution replacement left stale progress active"
+jq 'del(.execution_generation) | .revision+=1' "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json" > "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
+chmod 0600 "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json"
+mv "$HOME_DIR/state/cloud-tasks/legacy-cloud/next.json" "$HOME_DIR/state/cloud-tasks/legacy-cloud/state.json"
+out=$(progress progress legacy-cloud 2>&1)
+rc=$?
+expect_code 1 "$rc" "legacy cloud missing generation"
+assert_contains "$out" "no current cloud execution generation" \
+  "legacy cloud progress did not fail closed without an execution generation"
+task_cmd "done" remote >/dev/null || fail "remote fixture completion failed"
+task_cmd "done" legacy-cloud >/dev/null || fail "legacy cloud fixture completion failed"
+
 task_cmd update ordinary --title "Corrected requested outcome" \
   --body "User corrected the task body while MAIN was working." >/dev/null \
   || fail "concurrent correction fixture failed"

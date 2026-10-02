@@ -1585,7 +1585,7 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        const verdict = verdictRaw as Verdict;
+        let verdict = verdictRaw as Verdict;
         const scopeRefusal = wakeScopeRefusal(task);
         if (scopeRefusal) {
           return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
@@ -1609,7 +1609,7 @@ export default function (pi: ExtensionAPI) {
           if (progressToken) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
-            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state === "done") {
+            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state !== "in_flight") {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
             const before = branchProgressSnapshots[task];
@@ -1620,6 +1620,7 @@ export default function (pi: ExtensionAPI) {
               !branchEffectAuthorityNeeded.has(task);
             continuationChange = after === before && handoffs.every((handoff) => handoff.change === "none")
               ? "none" : "material";
+            if (branchEffectAuthorityNeeded.has(task)) verdict = "captain";
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1744,7 +1745,7 @@ export default function (pi: ExtensionAPI) {
             const current = await run(["progress", task]);
             if (current.status !== 0) throw new Error(current.stderr.trim() || "task progress read refused");
             const progress = JSON.parse(current.stdout);
-            if (progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state === "done") {
+            if (progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state !== "in_flight") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
             return { content: [{ type: "text", text: JSON.stringify(progress) }], details: undefined };
@@ -1903,7 +1904,7 @@ export default function (pi: ExtensionAPI) {
             );
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
             if (!progress || progress.record_token !== progressToken || !progress.remaining_gap ||
-                !progress.next_step || progress.task_state === "done") {
+                !progress.next_step || progress.task_state !== "in_flight") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
           }
@@ -2480,7 +2481,7 @@ ${context.command}
       const read = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", offer.task], { env: scriptEnv });
       const progress = read.status === 0 ? JSON.parse(read.stdout) : null;
       if (!progress || progress.record_token !== offer.progress.record_token || !progress.remaining_gap ||
-          !progress.next_step || progress.task_state === "done") {
+          !progress.next_step || progress.task_state !== "in_flight") {
         throw new Error("task goal, acceptance, progress, or disposition changed before branch receipt");
       }
       const branchForTask = await ensureBranch(acceptedGeneration);

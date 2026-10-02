@@ -15,10 +15,11 @@ No task directory, lifecycle JSON, evidence list, scheduler or mirrored progress
 The task title remains the canonical goal and is returned with every progress read.
 The compact block contains only `acceptance`, `current_state`, `remaining_gap` and `next_step`, plus an opaque context version in its marker.
 The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a concurrent title/body correction refuses the stale update, while an authenticated brief update or executor-generation replacement also makes the recorded fields inactive until MAIN publishes corrected progress.
+Executor identity comes from the existing local `spawn_gen`, native remote-agent generation, or legacy AIME execution generation owner, and an unreadable or unsupported active identity fails closed.
 The token is only a compare-and-swap guard and is not an evidence reference or semantic assessment fingerprint.
 An identical update performs no task-record write.
 MAIN is the only progress writer, and it writes only after a material change.
-The branch may read one token-bound compact admission and route work already authorized through an existing owner, but it cannot update these fields or make final semantic acceptance.
+The branch may read one token-bound compact admission while the original task remains exactly `in_flight` and route work already authorized through an existing owner, but it cannot update these fields or make final semantic acceptance.
 
 The existing wake queue, actor claims, task inbox, handoff record, execution metadata, provider record, operation receipt, merge guard and cleanup receipt remain authoritative for their own effects.
 An attempted or uncertain effect must still be read back through its existing owner before retry.
@@ -37,7 +38,7 @@ A declined or failed branch offer falls back to MAIN.
 It never derives task identity from a backend endpoint label.
 A healthy unchanged wait and verified routine advancement are retained quietly in the branch session.
 A changed executor observation admits another bounded Branch turn without a MAIN progress rewrite.
-Only goal-ready evidence, a genuine blocker, or an authority decision is delivered to MAIN; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
+Only goal-ready evidence, a genuine blocker, or an authority decision is delivered through MAIN's durable sequence-bound processing and acknowledgement path; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
 These transcript entries are delivery receipts only and never become another progress source.
 Topic switches, session reload and compaction therefore recover from the original task row, while ordinary commands and unchanged observations add no progress writes.
 
@@ -128,11 +129,11 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 ## Verification
 
-[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers original-row reuse, explicit goal and acceptance projection, MAIN-only compare-and-swap updates, concurrent task and authenticated-intent correction refusal, unchanged-write suppression, terminal safety and absence of a second progress store.
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers original-row reuse, explicit goal and acceptance projection, MAIN-only compare-and-swap updates, concurrent task and authenticated-intent correction refusal, local and remote execution-generation invalidation, unchanged-write suppression, terminal safety and absence of a second progress store.
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, routine-policy grant fencing and renewal, exact handled-receipt recovery, lost wake recovery, unchanged-wake outcome coverage, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, relevant-change-only terminal observations and exact outcome replay.
 [`tests/fm-task-handoff.test.sh`](../tests/fm-task-handoff.test.sh) covers durable rejection when an exact pending handoff's bound source becomes terminal.
 [`tests/lifecycle-native.mjs`](../tests/lifecycle-native.mjs), run by [`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh), covers topic-switch restart, intermediate-result continuation, canonical task identity reminders, compact call and response measurements, quiet unchanged work and read-only historical lifecycle access through the installed Pi SDK.
-The same branch suite also exercises the harmless Herdr-shaped path from an incomplete checkpoint through real `fm-send.sh` inbox receipts, stale-intent and cross-task refusal, intermediate continuation, and final MAIN-only acceptance.
+The same branch suite also exercises the harmless Herdr-shaped path from an incomplete checkpoint through real `fm-send.sh` inbox receipts, stale-intent, stopped-task and cross-task refusal, sequence-acknowledged authority escalation, intermediate continuation, and final MAIN-only acceptance.
 [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh), including its [`retirement-business.py`](../tests/retirement-business.py) fixture, covers business closure with resources retained, current-delivery selection among multiple receipts, identity and generation refusal, interruption recovery, and exact Done-history convergence.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.

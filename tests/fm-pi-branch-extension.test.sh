@@ -6049,8 +6049,8 @@ test_compact_progress_drives_branch_same_worker_continuation() {
   PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_PROCEVENT_CLAIM_ROOT="$home/state/procevent-claims" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
-const { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot }; })()`);
+const { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot } = globalThis.__t;
 const { createHash } = await import("node:crypto");
 const { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
@@ -6167,6 +6167,8 @@ let readResult;
 let deniedUpdate;
 let reportResult;
 let scopedRefusal;
+let staleRead;
+let staleHandoff;
 globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   promptCount += 1;
   const expectedStep = recordedNextStep;
@@ -6177,7 +6179,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   if (promptCount === 2 && !text.includes("run failed")) {
     throw new Error(`Branch did not receive the changed executor result: ${text}`);
   }
-  if (promptCount === 10 && !text.includes("checks green")) {
+  if (promptCount === 11 && !text.includes("checks green")) {
     throw new Error(`Branch did not receive the goal-ready executor result: ${text}`);
   }
   const continuation = session.options.customTools.find((tool) => tool.name === "fm_task_continuation");
@@ -6267,9 +6269,16 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
     }
   }
-  reportResult = await report.execute("report", { task: "viewer", verdict: promptCount === 10 ? "captain" : "routine",
-    silent: promptCount !== 10,
-    summary: promptCount === 10 ? "The requested acceptance evidence is complete and ready for MAIN's semantic review." : promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
+  if (promptCount === 10) {
+    const queued = run("fm-tasks-axi.sh", ["reopen", "viewer"]);
+    if (queued.status !== 0) throw new Error(`concurrent task queue failed: ${queued.stderr}`);
+    staleRead = await continuation.execute("stale-read", { action: "read", task: "viewer" });
+    staleHandoff = await handoff.execute("stale-handoff", { task: "viewer", target: "other", id: "viewer-queued-r1",
+      instruction: "A queued task must not deliver this instruction." });
+  }
+  reportResult = await report.execute("report", { task: "viewer", verdict: promptCount === 11 ? "captain" : "routine",
+    silent: promptCount !== 11,
+    summary: promptCount === 11 ? "The requested acceptance evidence is complete and ready for MAIN's semantic review." : promptCount === 10 ? "A concurrently queued task invalidated every compact authority boundary." : promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
       ? "The future decision recheck was armed while captain approval remains pending."
       : promptCount === 5 ? "The prepared cross-task handoff reached the authorized worker."
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
@@ -6277,7 +6286,34 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       : promptCount === 8 ? "Oversized history did not authorize a compact cross-task handoff."
       : promptCount === 9 ? "Repeated compact handoff requests remained unauthorized."
       : "The exact MAIN-authored next step reached the same worker idempotently." });
-  if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
+  if (promptCount === 10) {
+    if (!reportResult.isError || !reportResult.content[0].text.includes("invalidated this branch result")) {
+      throw new Error(`held task retained compact report authority: ${JSON.stringify(reportResult)}`);
+    }
+  } else if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
+};
+
+const processLatestAuthority = async (summary) => {
+  const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const row = rows.at(-1);
+  if (row?.verdict !== "captain" || row?.summary !== summary) {
+    throw new Error(`effect authority did not use captain outcome semantics: ${JSON.stringify(row)}`);
+  }
+  const request = sentToMain.at(-1);
+  if (request?.message?.customType !== "fm-branch-process" || request?.options?.triggerTurn !== true ||
+      request?.options?.deliverAs !== "followUp" || !request.message.content.includes(`[seq ${row.seq}] task=viewer`)) {
+    throw new Error(`effect authority did not start MAIN processing: ${JSON.stringify(request)}`);
+  }
+  const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+  const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+  const exact = await outcomes.execute("authority-read", { sequences: String(row.seq) });
+  if (exact.isError || !exact.content[0].text.includes(summary)) {
+    throw new Error(`MAIN could not read exact authority outcome: ${JSON.stringify(exact)}`);
+  }
+  const acknowledged = await processed.execute("authority-ack", { through: row.seq });
+  if (acknowledged.isError || !acknowledged.content[0].text.includes(`processed through seq ${row.seq}`)) {
+    throw new Error(`MAIN could not acknowledge authority outcome: ${JSON.stringify(acknowledged)}`);
+  }
 };
 
 await fire("session_start", {}, defaultSessionCtx);
@@ -6562,11 +6598,11 @@ if (!(promptCount === 7 && reportResult)) {
     ? readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8") : "";
   throw new Error(`timed out waiting for same-task authority refusal report: prompts=${promptCount} report=${JSON.stringify(reportResult)} outcomes=${outcomes} routed=${JSON.stringify(routed)}`);
 }
-if (reportResult.isError || !reportResult.content?.[0]?.text?.includes("delivered [routine]") ||
-    sentToMain.length !== beforeMain + 1 ||
-    !sentToMain.at(-1)?.message?.content?.includes("Arbitrary same-task text requires MAIN effect authority")) {
+if (reportResult.isError || !reportResult.content?.[0]?.text?.includes("delivered [captain]") ||
+    sentToMain.length !== beforeMain + 1) {
   throw new Error(`same-task authority refusal did not reach MAIN: ${JSON.stringify({ reportResult, sentToMain })}`);
 }
+await processLatestAuthority("Arbitrary same-task text requires MAIN effect authority.");
 if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("Arbitrary same-task text requires MAIN")) {
   throw new Error("same-task authority refusal settled silently instead of reaching MAIN");
 }
@@ -6585,13 +6621,14 @@ record = JSON.parse(result.stdout);
 recordedNextStep = quiet.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 8 && reportResult?.content?.[0]?.text?.includes("delivered [routine]") &&
+await settle(() => promptCount === 8 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
   sentToMain.length === beforeMain + 2,
   "oversized handoff authority report");
 if (existsSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`) ||
-    !sentToMain.at(-1)?.message?.content?.includes("Oversized history did not authorize")) {
+    sentToMain.at(-1)?.message?.customType !== "fm-branch-process") {
   throw new Error(`compact oversized handoff authority was not reported: ${JSON.stringify(sentToMain)}`);
 }
+await processLatestAuthority("Oversized history did not authorize a compact cross-task handoff.");
 if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("Oversized history did not authorize")) {
   throw new Error("missing handoff authority settled silently instead of reaching MAIN");
 }
@@ -6613,13 +6650,49 @@ record = JSON.parse(result.stdout);
 recordedNextStep = noEffect.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("delivered [routine]") &&
+await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
   sentToMain.length === beforeMain + 3,
   "repeated rejected handoff authority report");
-if (!sentToMain.at(-1)?.message?.content?.includes("Repeated compact handoff requests remained unauthorized") ||
-    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+await processLatestAuthority("Repeated compact handoff requests remained unauthorized.");
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
   throw new Error("no-effect typed handoff created progress or duplicate delivery");
 }
+
+// A concurrent move back to Queued after admission invalidates every compact authority
+// boundary before any read, handoff, or report can be consumed.
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const holdCheck = { ...noEffect,
+  current_state: "The compact admission is about to race a task queue transition",
+  remaining_gap: "The stale admission must lose all authority after the queue transition",
+  next_step: "Verify the queued task refuses the admitted compact operations",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(holdCheck)]);
+if (result.status !== 0) throw new Error(`MAIN queue-boundary progress update failed: ${result.stderr}`);
+recordedNextStep = holdCheck.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try { await settle(() => promptCount === 10 && reportResult?.isError, "queued task invalidates compact authority"); }
+catch (error) {
+  throw new Error(`${error}; prompts=${promptCount} report=${JSON.stringify(reportResult)} main=${JSON.stringify(sentToMain.slice(beforeMain))}`);
+}
+if (existsSync(`${home}/state/task-handoffs/records/viewer-queued-r1.msg`)) {
+  throw new Error("queued task created a handoff from stale compact authority");
+}
+if (!staleRead?.isError || !staleRead.content[0].text.includes("disposition changed") ||
+    !staleHandoff?.isError || !staleHandoff.content[0].text.includes("disposition changed")) {
+  throw new Error(`queued task retained compact read or handoff authority: ${JSON.stringify({ staleRead, staleHandoff })}`);
+}
+await settle(() => sentToMain.length === beforeMain + 4, "queued admission recovery outcome");
+const recoveryRows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+const recoverySummary = recoveryRows.at(-1)?.summary ?? "";
+if (!recoverySummary.includes("continuation settled without a durable outcome")) {
+  throw new Error(`queued admission did not fail closed through MAIN: ${JSON.stringify(recoveryRows.at(-1))}`);
+}
+await processLatestAuthority(recoverySummary);
+result = run("fm-tasks-axi.sh", ["start", "viewer"]);
+if (result.status !== 0) throw new Error(`queued task restart failed: ${result.stderr}`);
 
 // A new executor result gets a fresh bounded Branch admission without a MAIN
 // progress rewrite. Goal-ready evidence alone crosses into MAIN, which then
@@ -6627,21 +6700,34 @@ if (!sentToMain.at(-1)?.message?.content?.includes("Repeated compact handoff req
 writeFileSync(`${home}/data/viewer/report.md`, "The requested acceptance checks passed.\n");
 writeFileSync(`${home}/state/viewer.status`, "done: goal-ready evidence is available\n");
 writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: completed\n  head: ${candidateHead}\n  outcome: checks-passed\n  steps[1]{step,status,findings,duration_ms}:\n    ci,completed,0,1\n`);
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const goalReady = { ...noEffect,
+  current_state: "The requested acceptance checks passed",
+  remaining_gap: "MAIN has not performed final semantic acceptance",
+  next_step: "MAIN reviews the completed artifact against the requested outcome",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(goalReady)]);
+if (result.status !== 0) throw new Error(`MAIN goal-ready progress update failed: ${result.stderr}`);
+recordedNextStep = goalReady.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-for (let attempt = 0; attempt < 1000 && !(promptCount === 10 && sentToMain.length === beforeMain + 4); attempt += 1) {
+for (let attempt = 0; attempt < 1000 && !(promptCount === 11 && reportResult); attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (!(promptCount === 10 && sentToMain.length === beforeMain + 4)) {
+if (!(promptCount === 11 && reportResult && !reportResult.isError && sentToMain.length === beforeMain + 5)) {
   throw new Error(`timed out waiting for goal-ready continuation outcome: prompts=${promptCount} main=${sentToMain.length - beforeMain} report=${JSON.stringify(reportResult)}`);
 }
 const goalReadyOutcome = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n")
   .map((line) => JSON.parse(line)).find((entry) => entry.task === "viewer" &&
     entry.verdict === "captain" && entry.summary.includes("acceptance evidence is complete"));
-if (!sentToMain.at(-1)?.message?.content?.includes("task=viewer") ||
+if (sentToMain.at(-1)?.message?.customType !== "fm-branch-process" ||
+    !sentToMain.at(-1)?.message?.content?.includes("task=viewer") ||
     !goalReadyOutcome?.summary?.includes("acceptance evidence is complete")) {
-  throw new Error(`goal-ready evidence did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+  throw new Error(`goal-ready evidence did not reach MAIN: outcomes=${readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")} main=${JSON.stringify(sentToMain)}`);
 }
+await processLatestAuthority("The requested acceptance evidence is complete and ready for MAIN's semantic review.");
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const accepted = { ...noEffect, current_state: "All requested checks passed and MAIN reviewed the artifact",
@@ -6651,10 +6737,10 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 10 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 3 ||
+if (promptCount !== 11 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 3 ||
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
-    sentToMain.length !== beforeMain + 4) {
+    sentToMain.length !== beforeMain + 5) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
