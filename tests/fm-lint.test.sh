@@ -1532,6 +1532,89 @@ test_root_memory_limit_reports_a_named_death() {
   pass "a root refused by its enforced memory limit fails by name with a memory reason"
 }
 
+test_memory_failure_retries_without_external_sources() {
+  local tmp fakebin fixture out rc log roots_log rss_kib
+  tmp=$(fm_test_tmproot fm-lint-memory-fallback)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/teardown.sh"
+  log="$tmp/flags.log"
+  roots_log="$tmp/pass.roots.tsv"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+follow=no
+exclude=none
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    --external-sources) follow=yes ;;
+    --exclude=*) exclude=${1#--exclude=} ;;
+  esac
+  shift
+done
+shift
+printf '%s\t%s\n' "$follow" "$exclude" >> "$FM_TEST_FALLBACK_LOG"
+if [ "$follow" = yes ]; then
+  printf 'shellcheck: Heap exhausted;\n' >&2
+  exit 251
+fi
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+    FM_TEST_FALLBACK_LOG="$log" "$LINT" --telemetry "$tmp/pass.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a clean no-source fallback did not pass"$'\n'"$out"
+  [ "$(cat "$log")" = "$(printf 'yes\tnone\nno\tSC1091,SC2034,SC2153,SC2329')" ] \
+    || fail "the memory failure did not retry without external sources and exclude only cross-file codes"$'\n'"$(cat "$log")"
+  assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=251)" \
+    "the fallback was not identified in the output"
+  assert_contains "$out" "fallback passed with cross-file codes excluded (SC1091,SC2034,SC2153,SC2329)" \
+    "the narrower fallback result was not disclosed"
+  awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ && $9 == 0 && $10 == "memory-fallback" { found=1 } END { exit !found }' \
+    "$tmp/pass.roots.tsv" || fail "the clean fallback was not recorded distinctly"
+  rss_kib=$(awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ { print $11 }' "$tmp/pass.roots.tsv")
+  case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): real fallback finding check"
+    return
+  fi
+  local real_shellcheck
+  real_shellcheck=$(command -v shellcheck)
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  exec "$FM_REAL_SHELLCHECK" "$@"
+fi
+for arg in "$@"; do
+  if [ "$arg" = --external-sources ]; then
+    printf 'shellcheck: Heap exhausted;\n' >&2
+    exit 251
+  fi
+done
+exec "$FM_REAL_SHELLCHECK" "$@"
+SH
+  chmod +x "$fakebin/shellcheck"
+  # shellcheck disable=SC2016 # The fixture intentionally contains an unexpanded parameter.
+  printf '#!/usr/bin/env bash\nx=$1\nprintf "%%s\\n" $x\n' > "$fixture"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_REAL_SHELLCHECK="$real_shellcheck" \
+    FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+    "$LINT" --telemetry "$tmp/finding.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a real ShellCheck finding in the fallback did not fail lint (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "fallback reason=findings rc=1" \
+    "the fallback finding was not identified"
+  assert_contains "$out" "SC2086" "the real fallback finding was not reported"
+  awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ && $9 == 1 && $10 == "findings" { found=1 } END { exit !found }' \
+    "$tmp/finding.roots.tsv" || fail "the fallback finding was not recorded as a failure"
+  pass "memory failures retry without source following, exclude cross-file codes, and preserve a real fallback finding"
+}
+
 test_memory_evidence_outranks_findings_and_signal_reasons() {
   local tmp fakebin roots_log out rc name reason bounded
   local -a roots modes
@@ -1891,6 +1974,7 @@ test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
 test_root_memory_limit_reports_a_named_death
+test_memory_failure_retries_without_external_sources
 test_memory_evidence_outranks_findings_and_signal_reasons
 test_source_excerpt_with_oom_text_stays_findings
 test_require_bounds_refuses_when_enforcement_is_missing

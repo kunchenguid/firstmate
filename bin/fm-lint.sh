@@ -71,6 +71,11 @@
 # cannot apply the address-space limit at all) each root still runs in its
 # own ShellCheck process with identical diagnostics, just unbounded.
 #
+# If a source-following root exits with a memory failure, it is retried once
+# without --external-sources. A clean retry passes with an explicit
+# memory-fallback reason and warning; the retry excludes only the same
+# cross-file-dependent codes omitted in local no-source lint, and other findings
+# still fail lint.
 # Per-root evidence is incremental: workers append begin/end records (root,
 # mode, shard, start, end, duration, exit status, reason, and peak RSS when
 # measured) to a roots log as each root completes, so a mid-run kill still
@@ -160,6 +165,17 @@ fm_lint_root_rss() {  # <rss-file>
   printf '%s\n' "${kib:-unavailable}"
 }
 
+fm_lint_max_root_rss() {  # <rss-kib> <rss-kib>
+  local first=$1 second=$2
+  case "$first" in ''|unavailable|*[!0-9]*) printf '%s\n' "$second"; return ;; esac
+  case "$second" in ''|unavailable|*[!0-9]*) printf '%s\n' "$first"; return ;; esac
+  if [ "$first" -gt "$second" ]; then
+    printf '%s\n' "$first"
+  else
+    printf '%s\n' "$second"
+  fi
+}
+
 # Map a root's exit status onto the reported reason vocabulary without
 # pretending every signal or nonzero exit is a memory kill: only process-level
 # memory-failure evidence earns the memory reason - GHC's heap-exhaustion
@@ -209,24 +225,11 @@ fm_lint_classify_root() {  # <rc> <root-stderr-file>
   esac
 }
 
-# Run one selected root in its own ShellCheck process, record its lifecycle
-# in the roots log, and append its diagnostics to the shard output.
-fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
-  local index=$1 path=$2 output_dir=$3 shard_index=$4
-  local root_out="$output_dir/root.$shard_index.$index.out"
-  local root_err="$output_dir/root.$shard_index.$index.err"
-  local rss_file="$output_dir/root.$shard_index.$index.rss"
-  local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib
-  start_ms=$(fm_lint_now_ms)
-  if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
-    printf 'begin\t%s\t%s\t%s\t%s\t%s\n' \
-      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" "$start_ms" \
-      >> "$FM_LINT_INTERNAL_ROOTS_LOG"
-  fi
-  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ]; then
-    printf 'fm-lint: begin %s (shard %s, %s mode)\n' \
-      "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-unknown}" >&2
-  fi
+# Run one ShellCheck invocation with the same per-root timeout and address-space
+# limit, returning its exit status in FM_LINT_LAST_RC.
+fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <args...>
+  local path=$1 root_out=$2 root_err=$3 rss_file=$4 invocation_rc=0
+  shift 4
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
     # The watchdog runs in a process group of its own (the same setpgrp hop the
     # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
@@ -239,31 +242,88 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
         "${BASH:-bash}" "$SELF" --internal-timed \
         "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
         "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
-        "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" ) > "$root_out" 2> "$root_err" &
+        "$FM_LINT_SHELLCHECK" "$@" -- "$path" ) > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
   else
-    "$FM_LINT_SHELLCHECK" "${FM_LINT_WORKER_ARGS[@]}" -- "$path" > "$root_out" 2> "$root_err" &
+    "$FM_LINT_SHELLCHECK" "$@" -- "$path" > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
     wait "$FM_LINT_WORKER_RUN_PID" || invocation_rc=$?
     FM_LINT_WORKER_RUN_PID=
   fi
+  FM_LINT_LAST_RC=$invocation_rc
+}
+
+# Run one selected root, retry memory failures without source following, record
+# its lifecycle in the roots log, and append the final diagnostics.
+fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
+  local index=$1 path=$2 output_dir=$3 shard_index=$4
+  local root_out="$output_dir/root.$shard_index.$index.out"
+  local root_err="$output_dir/root.$shard_index.$index.err"
+  local rss_file="$output_dir/root.$shard_index.$index.rss"
+  local fallback_out="$output_dir/root.$shard_index.$index.fallback.out"
+  local fallback_err="$output_dir/root.$shard_index.$index.fallback.err"
+  local fallback_rss="$output_dir/root.$shard_index.$index.fallback.rss"
+  local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib initial_rc initial_reason
+  local -a fallback_args
+  start_ms=$(fm_lint_now_ms)
+  if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
+    printf 'begin\t%s\t%s\t%s\t%s\t%s\n' \
+      "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" "$start_ms" \
+      >> "$FM_LINT_INTERNAL_ROOTS_LOG"
+  fi
+  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ]; then
+    printf 'fm-lint: begin %s (shard %s, %s mode)\n' \
+      "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-unknown}" >&2
+  fi
+  fm_lint_exec_root "$path" "$root_out" "$root_err" "$rss_file" \
+    "${FM_LINT_WORKER_ARGS[@]}"
+  invocation_rc=$FM_LINT_LAST_RC
+  reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
+  initial_rc=$invocation_rc
+  initial_reason=$reason
+  if [ "$reason" = memory ] \
+    && [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
+    fallback_args=()
+    for arg in "${FM_LINT_WORKER_ARGS[@]}"; do
+      [ "$arg" = --external-sources ] || fallback_args+=("$arg")
+    done
+    [ -z "$LOCAL_NOX_EXCLUDE" ] || fallback_args+=("--exclude=$LOCAL_NOX_EXCLUDE")
+    fm_lint_exec_root "$path" "$fallback_out" "$fallback_err" "$fallback_rss" \
+      "${fallback_args[@]}"
+    invocation_rc=$FM_LINT_LAST_RC
+    reason=$(fm_lint_classify_root "$invocation_rc" "$fallback_err")
+    rss_kib=$(fm_lint_max_root_rss \
+      "$(fm_lint_root_rss "$rss_file")" "$(fm_lint_root_rss "$fallback_rss")")
+    printf 'fm-lint: %s hit the memory ceiling with --external-sources (reason=%s rc=%s); retried without it' \
+      "$path" "$initial_reason" "$initial_rc" >> "$output_dir/shard.$shard_index.out"
+    if [ "$reason" = ok ]; then
+      reason=memory-fallback
+      invocation_rc=0
+      printf '; fallback passed with cross-file codes excluded (%s)\n' "$LOCAL_NOX_EXCLUDE" \
+        >> "$output_dir/shard.$shard_index.out"
+    else
+      printf '; fallback reason=%s rc=%s\n' "$reason" "$invocation_rc" \
+        >> "$output_dir/shard.$shard_index.out"
+    fi
+    cat "$fallback_out" "$fallback_err" >> "$output_dir/shard.$shard_index.out"
+  else
+    rss_kib=$(fm_lint_root_rss "$rss_file")
+    cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
+  fi
   end_ms=$(fm_lint_now_ms)
   duration_ms=$((end_ms - start_ms))
-  rss_kib=$(fm_lint_root_rss "$rss_file")
-  reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
     printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" \
       "$start_ms" "$end_ms" "$duration_ms" "$invocation_rc" "$reason" "$rss_kib" \
       >> "$FM_LINT_INTERNAL_ROOTS_LOG"
   fi
-  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ] || { [ "$reason" != ok ] && [ "$reason" != findings ]; }; then
+  if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ] || { [ "$reason" != ok ] && [ "$reason" != findings ] && [ "$reason" != memory-fallback ]; }; then
     printf 'fm-lint: end %s reason=%s rc=%s duration_ms=%s rss_kib=%s\n' \
       "$path" "$reason" "$invocation_rc" "$duration_ms" "$rss_kib" >&2
   fi
-  cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
   return "$invocation_rc"
 }
 
