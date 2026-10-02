@@ -261,6 +261,8 @@ HANDLE_RC=0
 ENGINE_SUBSHELL=
 SUCCESSOR_PID=
 SUCCESSOR_OUT=
+SUCCESSOR_WATCHER=
+SUCCESSOR_GENERATION=
 ENGINE_RUNNING=0
 # The successor arm a predecessor's pass-through left for main, which the
 # first cycle takes over.
