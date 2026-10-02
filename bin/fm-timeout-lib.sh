@@ -206,7 +206,7 @@ fm_timed_out() {  # <status>
 # which keeps the bound off perl's platform-dependent syscall-restart signal
 # semantics and off the drift of counting sleep intervals.
 fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
-  local seconds=${1:-} grace=${2:-} value owner
+  local seconds=${1:-} grace=${2:-} value owner frame_pid
   for value in "$seconds" "$grace"; do
     case "$value" in
       '' | 0* | *[!0-9]*)
@@ -221,7 +221,19 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  # Only this frame's own pid tells a subshell caller from the script that owns
+  # it. Bash 3.2 has no BASHPID, and $$ there would make every subshell caller
+  # watch the script's parent, so an exec'd child shell's PPID names the frame.
+  # A frame pid this can't resolve at all must refuse rather than silently keep
+  # $$ as the owner, which would watch the wrong process.
+  frame_pid=${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')}
+  case $frame_pid in
+    '' | 0* | *[!0-9]*)
+      echo "fm_exec_timed: error: could not determine the calling shell pid (BASHPID unset and the sh probe failed)" >&2
+      exit 127
+      ;;
+  esac
+  [ "$owner" != "$frame_pid" ] || owner=$PPID
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '

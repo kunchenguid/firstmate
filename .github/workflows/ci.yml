@@ -493,6 +493,22 @@ jobs:
             exit 1
           }
 
+          # Stock Bash 3.2 has no BASHPID, so the bounded-execution owner
+          # resolution must run under it rather than only simulated elsewhere.
+          timeout_output=$(/bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$timeout_output"
+          timeout_count=$(printf '%s\n' "$timeout_output" | grep -c '^ok - ')
+          [ "$timeout_count" -eq 18 ] || {
+            echo "::error::expected 18 timeout-lib bash 3.2 tests, got $timeout_count"
+            exit 1
+          }
+          for case in "a subshell caller's script" "a main-shell caller's parent"; do
+            printf '%s\n' "$timeout_output" | grep -qF "ok - fm_exec_timed watches $case as owner without BASHPID" || {
+              echo "::error::the no-BASHPID owner regression for $case did not run under stock Bash"
+              exit 1
+            }
+          done
+
           backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
             FM_TEST_BASH=/bin/bash \
             /bin/bash tests/fm-backend.test.sh)
