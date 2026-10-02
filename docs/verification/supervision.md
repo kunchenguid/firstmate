@@ -205,7 +205,7 @@ ok - traex endpoint death
 The guard preserves the managed TUI flags and positional operational brief; it does not use `exec`, `--no-daemon`, a remote app-server, or shared daemon configuration.
 Provider responses and HTTP 401 are simulated; tool execution, interrupt keys, vendor transcript emission, process exit and classification run for real.
 This does not verify an authenticated provider's availability or the allocator that provisions a worktree.
-The exact binding, version-independent structural identity, record-size limit, missing-log behavior and conservative submission-fence rules belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
+The exact binding, version-independent structural identity, per-record size limit, streaming whole-transcript validation, missing-log behavior and conservative submission-fence rules belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
 Manual input that bypasses Firstmate's send path has only the vendor log's observation timing; it has no Firstmate submission fence.
 The portable regressions also cover stale generations, child/mismatched/ambiguous sessions, queued submissions and missing, corrupt, truncated or replaced logs.
 

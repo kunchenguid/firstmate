@@ -428,7 +428,7 @@ test_boolean_view_never_promotes_unknown
 
 test_task_bound_rollouts() {
   python3 - "$ROOT" "$TMP_ROOT/rollouts" <<'PYTEST' || fail 'task-bound rollout regressions failed'
-import copy, json, os, pathlib, subprocess, sys
+import copy, json, os, pathlib, resource, subprocess, sys
 root, base = map(pathlib.Path, sys.argv[1:])
 reader = root/'bin/fm-busy-transcript.py'
 
@@ -660,6 +660,8 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     reset(); log.write_text(log.read_text()+'{"type":'); expect('unknown','partial tail')
     reset(); log.write_text(log.read_text()+'invalid\n'); expect('unknown','corrupt record')
     reset(); log.write_text(log.read_text()+'[]\n'); expect('unknown','wrong JSON record shape')
+    reset(); append({'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-1',
+        'item':{'type':'UserMessage','id':'missing-content'}}}); expect('unknown','missing user content')
     reset(); other=logs/'rollout-duplicate.jsonl';other.write_bytes(log.read_bytes()); expect('unknown','ambiguous sessions')
     reset(); child=copy.deepcopy(records);child[0]['payload']['source']={'subagent':'worker'}; write(child)
     expect('unknown','child session excluded even with copied marker')
@@ -702,6 +704,55 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     assert denied.returncode != 0
     write(records+[complete])
     expect('unknown','lost watermark cannot later resurrect old idle')
+    reset(); append(complete); expect('idle', 'bind before long append-only history')
+    next_ordinal = 4
+    padding = 'x' * 65536
+    with log.open('a') as stream:
+        while stream.tell() <= 32 * 1024 * 1024 + 65536:
+            stream.write(json.dumps({'type':'response_item','ordinal':next_ordinal,
+                'payload':{'type':'reasoning','summary':[{'type':'summary_text','text':padding}]}})+'\n')
+            next_ordinal += 1
+    assert log.stat().st_size > 32 * 1024 * 1024
+    expect('idle', 'append-only transcript above 32 MiB retains its binding')
+    inbox = state/'worker.inbox'; inbox.mkdir()
+    record = inbox/'001.msg'
+    record.write_text('schema=fm-task-inbox.v1\n--\nharmless long-log instruction\n')
+    ring = '''set -eu
+source "$1/bin/fm-backend.sh"
+source "$1/bin/fm-task-inbox-lib.sh"
+fm_backend_source() { :; }
+fm_backend_agent_state() { printf alive; }
+fm_backend_composer_state() { printf empty; }
+fm_backend_herdr_send_text_submit() { printf empty; }
+fm_task_inbox_ring herdr lab:w1:p1 "$2" fm-worker
+fm_task_inbox_doorbell_line "$2"
+'''
+    doorbell = run('bash','-c',ring,'_',root,record)
+    with log.open('a') as stream:
+        rows = [
+            {'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-long','root_turn_id':'turn-long'}},
+            {'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-long',
+                'item':{'type':'UserMessage','id':'long-user','content':[{'type':'text','text':doorbell}]}}},
+            {'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-long'}},
+        ]
+        for row in rows:
+            stream.write(json.dumps(dict(row,ordinal=next_ordinal))+'\n')
+            next_ordinal += 1
+    (inbox/'handled').mkdir(); record.rename(inbox/'handled/001.msg')
+    expect('idle', 'ordinary inbox receipt settles above 32 MiB')
+    if sys.platform == 'linux' and hasattr(resource, 'RLIMIT_AS'):
+        def bounded_address_space():
+            resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, 64 * 1024 * 1024))
+        bounded = subprocess.run(['python3',reader,'read',state,'worker',harness,'herdr','lab:w1:p1'],
+                                 capture_output=True,text=True,preexec_fn=bounded_address_space)
+        assert bounded.returncode == 0 and bounded.stdout.strip() == 'idle '+harness+'-transcript', bounded
+        print('ok - '+harness+' long transcript read stays within a 64 MiB address-space ceiling')
+    with log.open('a') as stream:
+        stream.write(json.dumps({'type':'response_item','ordinal':next_ordinal,
+            'payload':{'text':'x'*(32*1024*1024)}})+'\n')
+    expect('unknown', 'an individual record above 32 MiB is refused')
+    assert json.loads((state/'worker.busy-session').read_text())['last_refusal'] == {
+        'stage':'read','reason':'record-too-large'}
     reset()
     # The classifier's liveness input is backed by a real short-lived process.
     process=subprocess.Popen(['sleep','30'])
