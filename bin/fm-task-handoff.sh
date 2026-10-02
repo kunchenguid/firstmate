@@ -44,7 +44,7 @@
 # inbox and backend doorbell. Historical persistent-home and remote-home
 # records are refused here.
 # Harness-native parser invocations are also refused because they belong to
-# fm-send's typed plane, not a durable cross-task command.
+# fm-send's direct native-prompt plane, not a durable cross-task command.
 #
 # Exit codes: 0 delivered/already delivered/no matching retry-task work;
 # 2 usage; 6 retryable supervision-ownership refusal; 7 durable terminal
@@ -411,8 +411,18 @@ _handoff_deliver_locked() {  # <id>
   }
   fm_task_inbox_ring "$backend" "$endpoint" "$inbox_record" "fm-$target" || ring_rc=$?
   case "$ring_rc" in
-    1) echo "fm-task-handoff: doorbell skipped because the composer holds pending text; delivered at $inbox_record and the watcher will re-ring" >&2 ;;
     2) echo "fm-task-handoff: doorbell did not reach $endpoint; delivered at $inbox_record and the watcher will re-ring" >&2 ;;
+    4)
+      if fm_wake_append stale "$endpoint" "stale: $endpoint (handoff doorbell submission outcome is uncertain for $inbox_record; do not replay blindly; inspect the worker)"; then
+        if ! fm_task_inbox_record_escalated "$STATE" "$target" "$inbox_record"; then
+          echo "fm-task-handoff: uncertainty wake was queued for $endpoint, but its inbox escalation marker could not be recorded; the watcher may report it again" >&2
+        else
+          echo "fm-task-handoff: doorbell submission is uncertain; delivered at $inbox_record and will not be replayed blindly" >&2
+        fi
+      else
+        echo "fm-task-handoff: uncertainty wake could not be queued for $endpoint; leaving $inbox_record unmarked so the watcher can retry" >&2
+      fi
+      ;;
   esac
   printf 'task handoff %s delivered at %s\n' "$id" "$inbox_record"
 }

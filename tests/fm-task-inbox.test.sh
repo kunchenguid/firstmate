@@ -2,9 +2,9 @@
 # tests/fm-task-inbox.test.sh - the per-task steering inbox
 # (bin/fm-task-inbox-lib.sh) and the watcher's re-ring ladder.
 #
-# The inbox+doorbell design replaces typed steer payloads with durable
-# sequenced records acknowledged by an atomic mv into handled/; the terminal
-# carries only a constant doorbell line, and the watcher re-rings an
+# The inbox+doorbell design replaces direct steer payloads with durable
+# sequenced records acknowledged by an atomic mv into handled/; the native
+# prompt carries only a constant doorbell line, and the watcher re-rings an
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
@@ -23,8 +23,8 @@
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
-#   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
-#      shell, the ring skips an agent the backend classifies dead, and the
+#   6. Dead panes: the doorbell line remains shell-safe for historical clients,
+#      the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
 set -u
 
@@ -60,6 +60,7 @@ make_watch_stubs() {  # <dir> -> echoes fakebin dir
 set -u
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get')
     if [ "${FM_FAKE_HERDR_MISSING:-0}" = 1 ]; then
       echo '{"error":{"code":"pane_not_found"}}'
@@ -72,6 +73,13 @@ case "$1 ${2:-}" in
     elif [ -n "${FM_FAKE_HERDR_AGENT:-}" ]; then
       jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}'
     else echo '{}'; fi ;;
+  'agent prompt')
+    printf '%s\n' "${4:-}" >> "${FM_SEND_LOG:-/dev/null}"
+    if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
+      mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
+    fi
+    echo '{"result":{"type":"agent_prompted"}}'
+    ;;
   'pane process-info')
     jq -n --arg p "$4" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:999999,foreground_processes:[{pid:999998,name:"pi"}]}}}' ;;
   'pane read')

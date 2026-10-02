@@ -196,7 +196,7 @@ SH
 
 # --- fake Herdr / ssh / sleep -----------------------------------------------
 
-# Herdr send fixture; captures actual typed bytes and preserves failure knobs.
+# Herdr send fixture; captures native prompt bytes and preserves failure knobs.
 fm_test_fake_herdr_send() {
   local fakebin=$1
   cat > "$fakebin/herdr" <<'SH'
@@ -205,9 +205,16 @@ set -u
 [ -z "${FM_HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_HERDR_LOG"
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
   'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"codex",argv0:"codex"}]}}}';;
   'agent get') jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
+  'agent prompt')
+    if [ "${FM_FAKE_HERDR_TIMEOUT:-0}" = 1 ]; then echo 'timeout waiting for response' >&2; exit 1; fi
+    [ "${FM_FAKE_HERDR_SEND_FAIL:-0}" != 1 ] || { echo 'backend rejected prompt' >&2; exit 1; }
+    printf '%s' "${4:-}" >> "${FM_SEND_LOG:-/dev/null}"
+    jq -n --arg pane "$3" '{result:{type:"agent_prompted",pane_id:$pane}}'
+    ;;
   'pane read')
     if [ "${FM_FAKE_HERDR_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'

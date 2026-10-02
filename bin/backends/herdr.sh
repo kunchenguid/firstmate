@@ -2219,6 +2219,9 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
   count=$(printf '%s' "$info" | jq -er \
     '.result.process_info.foreground_processes | select(type == "array") | length' 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
+  case "$count" in
+    ''|*[!0-9]*) printf 'unreadable'; return 0 ;;
+  esac
   i=0
   while [ "$i" -lt "$count" ]; do
     pid=$(printf '%s' "$info" | jq -r --argjson i "$i" \
@@ -3057,22 +3060,6 @@ fm_backend_herdr_send_literal() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane send-text "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
-# Program input uses Herdr's native, live-mode-gated paste encoder only for a
-# verified foreground Codex. Exit 10 is inapplicable; all other failures stop
-# before Enter, without a raw-text fallback that could duplicate an insertion.
-# Bare literal insertion and shell launch commands retain their own paths.
-fm_backend_herdr_send_program_text() {  # <target> <text>
-  local rc=0
-  fm_backend_herdr_target_ready "$1" || return 1
-  printf '%s' "$2" | python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-codex-input.py" \
-    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" || rc=$?
-  case "$rc" in
-    0) return 0 ;;
-    10) fm_backend_herdr_send_literal "$1" "$2" ;;
-    *) return "$rc" ;;
-  esac
-}
-
 # fm_backend_herdr_normalize_key: map firstmate's key vocabulary (Enter,
 # Escape, C-c, as used by fm-send.sh --key and stuck-crewmate-recovery) onto
 # herdr's `pane send-keys` names. Verified empirically: enter, escape/esc, and
@@ -3108,7 +3095,8 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # rows for a default-sized pane), instead of clamping to the last N lines - it
 # does not merely ignore the bound, it drops the read entirely. This silently
 # broke exactly the small bounded reads this adapter relies on most (including
-# the composer-state guard/fallback reads around submit and injection). Workaround:
+# supervisor injection guards). Ordinary message submission does not use this
+# reader. Workaround:
 # always request a generous fetch far above any realistic viewport height, then
 # trim to the caller's requested bound ourselves with `tail`.
 fm_backend_herdr_capture() {  # <target> <lines>
@@ -3310,185 +3298,54 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   printf '%s' "$verdict"
 }
 
-# fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's
-# RENDERED busy footer, scanning the captured 40-line tail folded to its last
-# 12 non-blank rows. This is NOT a worker-state source: herdr's native
-# agent-state (fm_backend_herdr_busy_state) stays the semantic owner, and this
-# read exists only so the submit core below can confirm a delivery for a
-# harness whose native state never transitions. Without a harness argument the
-# shared matcher uses its union of verified tokens, which is what the submit
-# core wants: it has no recorded harness for the pane.
-fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unknown
-  local target=$1 harness=${2:-} cap visible
-  cap=$(fm_backend_herdr_capture "$target" 40) || { printf 'unknown'; return 0; }
-  visible=$(printf '%s' "$cap" | grep -v '^[[:space:]]*$' | tail -12)
-  [ -n "$visible" ] || { printf 'unknown'; return 0; }
-  if printf '%s' "$visible" | fm_busy_lines_match "$harness"; then
-    printf 'busy'
-  else
-    printf 'idle'
-  fi
-}
-
-# fm_backend_herdr_send_text_submit: insert <text> into <target> once via the
-# program-input path, then submit with a named Enter key, retried
-# (Enter only, never retyped) until native agent-state, a cleared composer, or
-# fm_composer_queued_enter_verdict confirms delivery. Verified hazard
-# (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
-# `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
-# harness popups, so the caller's <settle> before the first Enter matters
-# here the same way it does for tmux.
-#
-# Confirmation signal: when the target is legibly idle before Enter,
-# submission is confirmed by fm_backend_herdr_wait_for_working observing a
-# submit-active agent_status after Enter. A native agent can keep
-# agent_status idle for a whole landed turn, so an idle native result
-# falls through to the shared composer verdict: empty is positive delivery,
-# proven pending retries Enter, and retries-exhausted pending plus a
-# generating busy signal is a queued Enter via
-# fm_composer_queued_enter_verdict (bin/fm-composer-lib.sh).
-#
-# Incident (2026-07-07, followed up on 2026-07-08): a redelivery loop in the
-# away-mode daemon. Root cause: composer-content submit confirmation was too
-# sensitive to harness rendering details. Codex uses bare prompt rows and adds
-# dynamic idle suggestions after `›`; the later
-# ANSI-aware composer classifier now handles that Codex shape, and idle-baseline
-# submit confirmation still prefers native agent-state so a faint idle tip
-# cannot block a landed send. Composer content is consulted only after native
-# state stays idle, as the empty/pending owner, and for submit attempts whose
-# pre-Enter agent-state baseline is not legibly idle.
-#
-# This also still correctly handles the earlier 2026-07-03 incident (a
-# slash-command popup selection/placeholder-fill on the FIRST Enter is not a
-# genuine submission) without any popup-specific logic at all: filling a
-# composer placeholder never starts a turn, so agent_status simply never
-# reports "working" for that Enter, the composer stays pending, and the retry
-# loop below sends a second Enter exactly as it did before - the fix
-# generalizes instead of special-casing the popup shape.
-#
-# Failure-mode analysis (the two directions the caller-facing contract must
-# not get wrong - see docs/herdr-backend.md "Native agent-state submit
-# confirmation" for the empirical timing behind this):
-#   - Slow transition: fm_backend_herdr_wait_for_working samples repeatedly
-#     across herdr's per-attempt confirmation budget (not once at the end), so a
-#     transition landing partway through a window is still caught before this
-#     loop gives up and sends a needless extra Enter.
-#   - Instant round-trip or a native status that never leaves idle: bounded by
-#     the composer fallback. A cleared composer is delivery; a proven-pending
-#     composer on an idle pane is a swallow; extra Enter on an already-empty
-#     composer is a no-op, not a duplicate delivery of <text>.
-# Fallback path, for a harness whose native agent-state is never legibly idle.
-# Such a harness always lands in the composer branch, and a mid-turn composer
-# can render its own placeholder beside a right-aligned busy token, producing
-# `pending` even when it holds no user text and making a landed steer look
-# unconfirmed.
-# The escape is the SAME semantic signal the idle-baseline path uses, read from
-# the pane's verified busy footer instead of native agent-state, and it is the
-# rendered-footer confirmation: an idle-to-busy transition ACROSS our Enter is proof the
-# harness accepted the submission. The baseline is taken before the first Enter
-# and only when the native baseline was not legibly idle, so the idle-baseline
-# path still never reads pane content until native stays idle. A pane already
-# mid-turn cannot use a rendered-footer transition as proof of this Enter;
-# only the separate retries-exhausted, proven-pending queued-Enter verdict can
-# confirm delivery from its native working state.
-# Queued-while-busy Enter, for any harness that keeps typed text visible until
-# the current turn ends: after the retry budget, a proven
-# pending composer plus native agent_status=working is delivered, not swallowed.
-# A blocked state is not working and does not receive this conversion. On an
-# idle native baseline, a rendered busy footer may supply the same generating
-# signal when native state never leaves idle. The policy is
-# fm_composer_queued_enter_verdict; this adapter only
-# supplies the busy primitive.
-# Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
-# submit vocabulary. Empty means confirmed submitted for every backend; how
-# each backend confirms it is an internal decision.
-#
-# fm_backend_herdr_queued_enter_busy: delivery-busy for the shared queued-Enter
-# conversion. Native agent_status=working is generating; blocked is not, since
-# a permission prompt is not a queued mid-turn. When <allow-rendered> is 1, an
-# idle native baseline may also take the pane's rendered busy footer because
-# native state can remain idle through a whole turn.
-fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
-  local target=$1 allow_rendered=${2:-0} raw
-  raw=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
-  case "$raw" in
-    working) printf 'busy'; return 0 ;;
-  esac
-  if [ "$allow_rendered" = 1 ]; then
-    fm_backend_herdr_rendered_busy_state "$target"
-  else
-    printf 'idle'
-  fi
-}
-
-fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
-  local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  fm_backend_herdr_send_program_text "$target" "$text" || { printf 'send-failed'; return 0; }
-  sleep "$settle"
-  raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
-  baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
-  confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
-  # Typing never starts a turn, so a footer read taken after the literal send
-  # and before the first Enter is still a pre-submission baseline.
-  if [ "$baseline" = idle ]; then
-    allow_rendered=1
-  else
-    footer_baseline=$(fm_backend_herdr_rendered_busy_state "$target")
-  fi
-  while :; do
-    if fm_backend_herdr_send_key "$target" Enter; then
-      enter_sent=1
-    elif [ "$enter_sent" -eq 0 ]; then
-      i=$((i + 1))
-      if [ "$i" -ge "$retries" ]; then
-        printf 'send-failed'
+fm_backend_herdr_agent_submit_capability() {  # <session>
+  local session=$1 bin help command rest legacy=0
+  fm_backend_herdr_client_select "$session"
+  bin=$(fm_backend_herdr_bin)
+  help=$(HERDR_SESSION="$session" "$bin" agent --help --session "$session" 2>/dev/null) || return 1
+  while read -r command rest; do
+    case "$command" in
+      prompt)
+        FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND=prompt
         return 0
-      fi
-      sleep "$sleep_s"
-      continue
-    fi
-    if [ "$baseline" = idle ]; then
-      verdict=$(fm_backend_herdr_wait_for_working "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" \
-        "$confirm_sleep" "$FM_BACKEND_HERDR_SUBMIT_POLLS")
-      case "$verdict" in
-        busy) printf 'empty'; return 0 ;;
-        unknown) printf 'unknown'; return 0 ;;
-      esac
-      # Native stayed idle. Composer empty is positive delivery even when a
-      # landed turn never flipped agent_status. Proven pending retries.
-      verdict=$(fm_backend_herdr_composer_state "$target")
-      case "$verdict" in
-        empty) printf 'empty'; return 0 ;;
-        pending|pending-unproven) ;;
-        *) printf '%s' "$verdict"; return 0 ;;
-      esac
-    else
-      sleep "$sleep_s"
-      verdict=$(fm_backend_herdr_composer_state "$target")
-      if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
-        && [ "$footer_baseline" = idle ] \
-        && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
-        verdict=busy
-      fi
-      case "$verdict" in
-        busy) printf 'empty'; return 0 ;;
-        empty) printf 'empty'; return 0 ;;
-        unknown) printf 'unknown'; return 0 ;;
-      esac
-    fi
-    i=$((i + 1))
-    if [ "$i" -ge "$retries" ]; then
-      if [ "$enter_sent" -eq 0 ]; then
-        printf 'send-failed'
-      else
-        fm_composer_queued_enter_verdict "$verdict" \
-          "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"
-      fi
-      return 0
-    fi
-  done
+        ;;
+      send) legacy=1 ;;
+    esac
+  done <<< "$help"
+  [ "$legacy" -eq 1 ] || return 1
+  FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND=send
+}
+
+# fm_backend_herdr_send_text_submit: submit <text> exactly once through Herdr's
+# native agent prompt API. This bypasses terminal composer rendering, manual
+# Enter retries and vendor-transcript proof. A zero exit means only that Herdr
+# accepted the prompt for the exact named-session pane; it does not prove that
+# the worker read, handled or completed it. A timeout-like refusal is unknown
+# because acceptance may have raced the client response, so callers must not
+# replay it blindly. Other nonzero API results are definite transport failures.
+fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
+  local target=$1 text=$2 output rc=0
+  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  if ! fm_backend_herdr_agent_submit_capability "$FM_BACKEND_HERDR_SESSION"; then
+    echo "error: selected herdr client exposes neither agent prompt nor agent send" >&2
+    printf 'send-failed'
+    return 0
+  fi
+  output=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent "$FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND" \
+    "$FM_BACKEND_HERDR_PANE" "$text" 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'submitted'
+    return 0
+  fi
+  [ -z "$output" ] || printf '%s\n' "$output" >&2
+  if [ "$rc" -eq 124 ]; then
+    printf 'unknown'
+    return 0
+  fi
+  case "$output" in
+    *timeout*|*timed\ out*|*deadline*|*agent_prompt_stalled*|*agent_send_stalled*) printf 'unknown' ;;
+    *) printf 'send-failed' ;;
+  esac
 }
 
 # fm_backend_herdr_kill: remove the task's pane, best-effort (mirrors
@@ -3593,37 +3450,24 @@ fm_backend_herdr_endpoint_confirmed_gone() {  # <target>
 
 # fm_backend_herdr_classify_agent_status: map a raw `agent get` agent_status
 # value to the adapter's watcher busy|idle|unknown vocabulary. working ->
-# busy (actively generating); idle/done -> idle; blocked -> idle (a blocked
-# agent is stuck waiting on the human, not grinding - the watcher should
+# busy (actively generating); idle/done -> idle; blocked/waiting -> idle (an
+# agent waiting on the human is not grinding - the watcher should
 # treat it like a stale pane needing attention, not suppress it as busy);
-# unknown/unparseable/empty -> unknown, the caller's cue to fall back to
-# pane-regex detection.
+# unknown/unparseable/empty -> unknown. Ordinary Codex/TraeX classification
+# combines that verdict with exact process liveness; supervisor guards may use
+# their separate rendered fallback.
 fm_backend_herdr_classify_agent_status() {  # <raw-agent_status>
   case "$1" in
     working) printf 'busy' ;;
-    idle|done) printf 'idle' ;;
-    blocked) printf 'idle' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-fm_backend_herdr_classify_submit_agent_status() {  # <raw-agent_status>
-  case "$1" in
-    working|blocked) printf 'busy' ;;
-    idle|done) printf 'idle' ;;
+    idle|done|blocked|waiting) printf 'idle' ;;
     *) printf 'unknown' ;;
   esac
 }
 
 # fm_backend_herdr_agent_status_raw: one `agent get` read, echoing the raw
-# agent_status string (working/idle/done/blocked/...), or empty on any
+# agent_status string (working/idle/done/blocked/waiting/...), or empty on any
 # failure. Deliberately skips fm_backend_herdr_target_ready's server-ensure
-# round trip (an extra `status --json` call) that fm_backend_herdr_busy_state
-# pays on every call: fm_backend_herdr_wait_for_working polls this in a tight
-# loop right after a caller has already parsed the target and confirmed the
-# server is live (e.g. fm_backend_herdr_send_text_submit, immediately after a
-# successful send-text), so re-checking server liveness on every poll would
-# only add latency without adding safety.
+# round trip because its lifecycle callers already resolved the named session.
 fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out
   out=$(fm_backend_herdr_cli "$session" agent get "$pane_id" 2>/dev/null) || { printf ''; return 0; }
@@ -3641,7 +3485,8 @@ fm_backend_herdr_agent_status_raw() {  # <session> <pane_id>
 # mid-turn, issue #4115) reads `unknown`, never busy, so the recovery classifier
 # cannot report a shell-only pane as working. Only the busy case pays the extra
 # process read; an unreadable process view also reads unknown, never proof of
-# work. Idle and unknown are never trusted as busy by any consumer.
+# work. Idle and unknown are never trusted as busy by any consumer; the ordinary
+# Codex/TraeX classifier separately maps native unknown plus exact liveness to idle.
 fm_backend_herdr_busy_state() {  # <target>
   local verdict
   fm_backend_herdr_target_ready "$1" || { printf 'unknown'; return 0; }
@@ -3654,73 +3499,6 @@ fm_backend_herdr_busy_state() {  # <target>
     esac
   fi
   printf '%s' "$verdict"
-}
-
-# fm_backend_herdr_wait_for_working: poll <session>:<pane_id>'s NATIVE
-# agent-state (agent get) up to <polls> times spread evenly across
-# <budget-seconds>, returning on stdout the STRONGEST signal observed:
-#
-#   busy    - a submit-active status was observed at least once. This is
-#             confirmation that a real turn started or reached a prompt -
-#             the submit landed - independent of
-#             whatever the composer's own text happens to show (docs/
-#             herdr-backend.md "Incident (2026-07-07)": composer content is
-#             what fooled the OLD confirmation on codex's dynamic idle-tip
-#             text). Returned the INSTANT it is seen, without waiting out the
-#             rest of the budget.
-#   idle    - the target was legibly read at least once and never reported
-#             "busy" across the whole window. This is readable but
-#             inconclusive: native state can remain idle for a landed turn,
-#             so the caller falls through to composer confirmation.
-#   unknown - EVERY poll in the window failed to read the target at all (a
-#             hard I/O failure - pane gone, socket error - not a timing
-#             race). The caller must not keep retrying Enter against a target
-#             it cannot even read.
-#
-# <polls> spread across <budget-seconds> (rather than one check at the end)
-# lets the fast path catch a native transition that lands partway through the
-# window. A whole-window idle result remains inconclusive and is resolved by
-# the caller's shared composer fallback.
-# FM_BACKEND_HERDR_SUBMIT_POLLS (default 6): how many samples
-# fm_backend_herdr_send_text_submit spreads across each Enter attempt's
-# confirmation budget. Overridable for tests (a value of 1
-# reproduces the old single-check-at-the-end timing exactly, for byte-for-byte
-# call-count assertions).
-FM_BACKEND_HERDR_SUBMIT_POLLS=${FM_BACKEND_HERDR_SUBMIT_POLLS:-6}
-FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=${FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP:-0.6}
-
-fm_backend_herdr_submit_confirm_budget() {  # <caller-budget-seconds>
-  awk -v b="${1:-0}" -v m="$FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP" 'BEGIN {
-    b += 0
-    m += 0
-    if (b < 0) b = 0
-    if (m < 0) m = 0
-    if (m > b) b = m
-    printf "%.4f", b
-  }' 2>/dev/null || printf '%s' "${1:-0}"
-}
-
-fm_backend_herdr_wait_for_working() {  # <session> <pane_id> <budget-seconds> <polls>
-  local session=$1 pane_id=$2 budget=$3 polls=${4:-1} i interval raw bs saw_idle=0
-  case "$polls" in ''|*[!0-9]*|0) polls=1 ;; esac
-  interval=$(awk -v b="$budget" -v p="$polls" 'BEGIN { d = p - 1; if (d < 1) d = 1; v = b / d; if (v < 0) v = 0; printf "%.4f", v }' 2>/dev/null)
-  case "$interval" in ''|*[!0-9.]*) interval=0 ;; esac
-  for ((i = 0; i < polls; i++)); do
-    if [ "$polls" -eq 1 ] || [ "$i" -gt 0 ]; then
-      sleep "$interval"
-    fi
-    raw=$(fm_backend_herdr_agent_status_raw "$session" "$pane_id")
-    bs=$(fm_backend_herdr_classify_submit_agent_status "$raw")
-    case "$bs" in
-      busy) printf 'busy'; return 0 ;;
-      idle) saw_idle=1 ;;
-    esac
-  done
-  if [ "$saw_idle" -eq 1 ]; then
-    printf 'idle'
-  else
-    printf 'unknown'
-  fi
 }
 
 # fm_backend_herdr_pane_for_tab: the root pane id for <tab_id> in <workspace_id>

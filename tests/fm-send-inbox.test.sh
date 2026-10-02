@@ -5,17 +5,17 @@
 # payload: fm-send appends a durable sequenced record to state/<id>.inbox/ and
 # rings one constant self-describing doorbell line, best-effort. These tests
 # drive the real fm-send executable over a stubbed Herdr CLI and pin:
-#   1. The payload is durably recorded and never typed; only the doorbell
-#      crosses the terminal, and the send exits 0 at enqueue.
+#   1. The payload is durably recorded and never submitted directly; only the
+#      doorbell crosses the native prompt API, and the send exits 0 at enqueue.
 #   2. Multi-line steers are legal and round-trip byte-exact.
 #   3. A re-send enqueues a NEW sequence and still never retypes a payload,
 #      so the terminal can never truncate, garble, or duplicate a steer.
-#   4. The composer pre-check is advisory: visibly pending text skips the ring
-#      with a notice, and the steer is still durably sent (exit 0).
+#   4. Composer rendering is not read before native prompt submission.
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
 #      watcher's re-ring ladder owns delivery from the record on.
-#   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
-#      "$" to codex, an explicit backend target, and the --key path.
+#   6. Carve-outs use direct native prompts: a leading "/" (any harness), a
+#      leading "$" to codex, and an explicit backend target; --key remains a
+#      separate literal-key path.
 #   7. An unwritable inbox is a real local failure: nonzero exit and nothing
 #      typed.
 #   8. An empty or whitespace-only text steer is refused before anything is
@@ -32,9 +32,8 @@ SEND="$ROOT/bin/fm-send.sh"
 TMP_ROOT=$(fm_test_tmproot fm-send-inbox)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# Stub Herdr CLI: logs literal typed text to FM_SEND_LOG and lets the submit and
-# composer paths reach clean verdicts. FM_FAKE_HERDR_COMPOSER=pending renders a
-# composer visibly holding text; FM_FAKE_HERDR_SEND_FAIL=1 fails pane sends.
+# Stub Herdr CLI: logs native prompt text to FM_SEND_LOG and lets the submit path
+# reach clean verdicts. FM_FAKE_HERDR_SEND_FAIL=1 fails prompt submissions.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -131,18 +130,19 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
-test_pending_composer_skips_ring_advisorily() {
+test_pending_composer_does_not_gate_native_prompt() {
   local dir err rc
   dir=$(setup_case pendingskip)
   err="$dir/send.err"
   run_send "$dir" "$err" FM_FAKE_HERDR_COMPOSER=pending -- t1 "steer past a stuck composer"
   rc=$?
-  expect_code 0 "$rc" "a skipped ring is still a sent steer"
+  expect_code 0 "$rc" "composer rendering must not gate a native prompt"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the steer was not recorded"
-  [ ! -s "$dir/send.log" ] || fail "a visibly pending composer should skip the ring:"$'\n'"$(cat "$dir/send.log")"
-  assert_contains "$(cat "$err")" "watcher will re-ring" \
-    "the skip notice should point at the re-ring"
-  pass "fm-send inbox: a visibly pending composer skips the ring, and the steer stays durably sent"
+  assert_contains "$(cat "$dir/send.log")" 'Firstmate instruction waiting' \
+    "the native prompt should be submitted without a composer read"
+  assert_not_contains "$(cat "$err")" 'composer' \
+    "composer-independent submission must not report a composer gate"
+  pass "fm-send inbox: composer rendering does not gate native prompt submission"
 }
 
 test_failed_ring_is_still_sent() {
@@ -156,6 +156,70 @@ test_failed_ring_is_still_sent() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the failed-ring notice should point at the re-ring"
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
+}
+
+test_uncertain_ring_persists_recovery_before_suppression() {
+  local dir err rc record
+  dir=$(setup_case uncertain-marker-failure)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/state/t1.inbox/.escalated"
+  run_send "$dir" "$err" FM_FAKE_HERDR_TIMEOUT=1 -- t1 "retain the uncertain steer"
+  rc=$?
+  expect_code 0 "$rc" "an uncertain doorbell must keep the durable enqueue contract"
+  record="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$record" ] || fail "the uncertain steer lost its durable inbox record"
+  grep -F "$record" "$dir/home/state/.wake-queue" >/dev/null \
+    || fail "marker failure occurred before the uncertainty wake was durable"
+  assert_contains "$(cat "$err")" 'uncertainty wake was queued' \
+    "marker failure did not report the durable recovery path"
+
+  dir=$(setup_case uncertain-wake-failure)
+  err="$dir/send.err"
+  mkdir "$dir/home/state/.wake-queue"
+  run_send "$dir" "$err" FM_FAKE_HERDR_TIMEOUT=1 -- t1 "retain after wake failure"
+  rc=$?
+  expect_code 0 "$rc" "a wake persistence failure must not revoke the durable steer"
+  record="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$record" ] || fail "wake persistence failure lost the durable inbox record"
+  [ ! -e "$dir/home/state/t1.inbox/.escalated" ] \
+    || fail "wake persistence failure suppressed recovery before a wake existed"
+  assert_contains "$(cat "$err")" 'uncertainty wake could not be queued' \
+    "wake persistence failure was not reported"
+  pass "fm-send uncertainty keeps recovery durable before suppressing replay"
+}
+
+test_transcript_variants_are_never_opened_by_send() {
+  local variant dir err rc marker transcript body
+  for variant in missing unreadable huge malformed; do
+    dir=$(setup_case "no-transcript-read-$variant" codex)
+    err="$dir/send.err"
+    marker="$dir/python-called"
+    transcript="$dir/vendor.jsonl"
+    printf 'busy_gen=g1\n' >> "$dir/home/state/t1.meta"
+    case "$variant" in
+      missing) : ;;
+      unreadable) mkdir "$transcript" ;;
+      huge) truncate -s 67108864 "$transcript" ;;
+      malformed) printf '{not json}\n' > "$transcript" ;;
+    esac
+    printf '{"version":1,"gen":"g1","harness":"codex","cwd":"%s","sessions":"%s","backend":"herdr","target":"sess:w1:p-t1","bound":{"path":"%s"}}\n' \
+      "$dir" "$dir" "$transcript" > "$dir/home/state/t1.busy-session"
+    cat > "$dir/fakebin/python3" <<SH
+#!/usr/bin/env bash
+touch '$marker'
+exit 97
+SH
+    chmod +x "$dir/fakebin/python3"
+    run_send "$dir" "$err" -- t1 "transcript-independent $variant"
+    rc=$?
+    expect_code 0 "$rc" "$variant transcript must not gate ordinary send"
+    [ ! -e "$marker" ] || fail "$variant transcript caused the send chain to invoke its reader"
+    body=$(record_body _ "$dir/home/state/t1.inbox/001.msg")
+    [ "$body" = "transcript-independent $variant" ] || fail "$variant case changed durable text"
+    assert_contains "$(cat "$dir/send.log")" 'Firstmate instruction waiting' \
+      "$variant transcript case did not reach the native prompt"
+  done
+  pass "fm-send inbox: missing, unreadable, huge, and malformed transcripts are never opened before native submission"
 }
 
 test_harness_invocations_stay_typed() {
@@ -294,8 +358,10 @@ test_empty_message_refused() {
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
-test_pending_composer_skips_ring_advisorily
+test_pending_composer_does_not_gate_native_prompt
 test_failed_ring_is_still_sent
+test_uncertain_ring_persists_recovery_before_suppression
+test_transcript_variants_are_never_opened_by_send
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox

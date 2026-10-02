@@ -250,7 +250,8 @@ fm_composer_strip_ghost() {
 }
 
 
-# Delivery acknowledgements only; current worker state belongs to fm-busy-lib.
+# Rendered supervisor busy guard only; current worker state belongs to
+# fm-busy-lib, and native prompt submission does not consult these patterns.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc to interrupt|Working\.\.\.'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'
@@ -515,9 +516,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # Identity stays a lazy second pass so the common non-pi read never pays for
 # the probe.
 #
-# Consumers that can overwrite input or confirm delivery must accept only the
-# exact positive proof they require (`empty`), so unrecognized future verdicts
-# fail safe by default.
+# Consumers that can overwrite input must accept only the exact positive proof
+# they require (`empty`), so unrecognized future verdicts fail safe by default.
 
 # _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
 # least 8 columns wide. The width floor is a literal substring test so it is
@@ -1177,8 +1177,8 @@ EOF
 # retyping would duplicate it. Proven pending (and pending-unproven) retries
 # consume the budget; any other verdict returns immediately, so `unknown`
 # stays a loud refusal rather than a blind retry into an unreadable pane.
-# Herdr's richer core consumes this same shared verdict plus
-# fm_composer_queued_enter_verdict; no shape knowledge lives in either loop.
+# The retained retry helper has no production caller after Herdr moved ordinary
+# text submission to its native prompt API; no shape knowledge lives in it.
 fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries> <enter-sleep> [expected-label]
   local send_key_fn=$1 state_fn=$2 target=$3 retries=$4 sleep_s=$5 expected_label=${6:-} i=0 state
   while :; do
@@ -1194,7 +1194,7 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
   done
 }
 
-# fm_composer_queued_enter_verdict: the ONE busy-queued-Enter policy.
+# fm_composer_queued_enter_verdict: retained busy-queued-Enter policy helper.
 # After Enter retries are spent, convert a structurally proven pending
 # composer given a delivery-busy signal from the adapter:
 #   pending + busy  -> empty   (Enter was accepted and queued; do not re-send)
@@ -1202,8 +1202,8 @@ fm_composer_submit_retry_core() {  # <send-key-fn> <state-fn> <target> <retries>
 #   pending + unknown -> pending (unreadable busy is not proof of a queue)
 # Every other composer verdict is returned unchanged, so pending-unproven,
 # empty, and unknown never receive this conversion.
-# Herdr supplies the busy primitive: native agent_status=working, or a rendered
-# busy footer on an idle native baseline. This function does not read a pane.
+# The current Herdr native prompt path does not call this helper.
+# This function does not read a pane.
 fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   local state=$1 busy=${2:-}
   [ "$state" = pending ] || { printf '%s' "$state"; return 0; }

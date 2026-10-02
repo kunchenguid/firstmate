@@ -76,9 +76,9 @@ Optional next_action.continuation has exactly one of these observation contracts
             {type, task_id, execution_generation, brief_sha256}.
     Ordinary actionless dispatch can use its confirmed launch publication with
     the lifecycle-bound brief and execution generation for the same observation.
-    A spawn brief needs an authoritative active run-step or observed
-    pi-ext/Codex/TraeX transcript activity, never the synthetic fm-spawn busy
-    seed, process presence, or a status report.
+    A spawn brief needs an authoritative active run-step or current working
+    state attributed to pi-ext or herdr-native, never the synthetic fm-spawn
+    busy seed, process presence, or a status report.
     A matching handled inbox message plus current working executor proves receipt;
     delivery alone is pending. This reader never sends, retries or relaunches.
   blocker: {type, owner, dependency, release_ref, release_sha256, recovery_trigger,
@@ -1786,7 +1786,7 @@ class Task:
             return 'pending', 'executor receipt exists but current state is ' + match[1]
         if continuation.get('brief_sha256'):
             active_run = re.search(r'(?:^|\n)state: working · source: run-step(?: ·|$)', result.stdout)
-            harness_busy = re.search(r'harness busy \((?:pi-ext|codex-transcript|traex-transcript)\)', result.stdout)
+            harness_busy = re.search(r'harness busy \((?:pi-ext|herdr-native)\)', result.stdout)
             if not active_run and not harness_busy:
                 return 'pending', 'spawn brief is assigned but actual harness start is not observed'
             return 'running', 'bound spawn brief and authoritative activity observed'

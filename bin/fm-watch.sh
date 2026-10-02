@@ -65,7 +65,8 @@
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
+#                          budget while the worker was not classified busy and
+#                          still produced no acknowledgement
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
@@ -369,7 +370,7 @@ window_key() {  # <window>
 
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
   local w=$1 task=$2 rec=$3 reason
-  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so the doorbell was not typed; recover the worker)"
+  reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker's agent has exited or its endpoint is missing, so native prompt delivery was not attempted; recover the worker)"
   if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
     fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
     return 0
@@ -386,16 +387,15 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
+# durable and the worker will reach a turn boundary - any other live or
+# inconclusive state gets one delivery attempt. A spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
-# or missing skips the ladder altogether: it is never typed into and surfaces
+# or missing skips the ladder altogether: it receives no prompt and surfaces
 # as that same stale wake exactly once. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
 # stale path instead of silently re-ringing forever; acknowledgement or teardown
-# still makes the race quiet. The attempt is data-plane typing or a
-# composer-protected skip, never a wake, so normal retries keep the watcher
-# blocking.
+# still makes the race quiet. A definite prompt refusal consumes one attempt;
+# an uncertain acceptance surfaces immediately and is never replayed blindly.
 inbox_steer_check() {  # <window> <task>
   local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
@@ -429,6 +429,13 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
+      if [ "$ring_rc" -eq 4 ]; then
+        reason="stale: $w (doorbell submission outcome is uncertain for $rec; do not replay blindly; inspect the worker)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        fm_task_inbox_record_escalated "$STATE" "$task" "$rec" || exit 1
+        wake "$reason"
+        return 0
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
@@ -443,7 +450,7 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count native prompt delivery attempts while the worker was not classified busy; inspect the worker)"
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0

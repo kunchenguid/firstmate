@@ -57,7 +57,7 @@
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
-#     alert if submit still cannot be confirmed.
+#     alert if native prompt submission still cannot be accepted.
 #   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
 #     state/*.status for a captain-relevant line the per-wake classifier might
 #     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
@@ -94,12 +94,12 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
-#                                   for delivery guards
+#                                   for the supervisor pre-submit guard
 #          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
 #                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
 #                                   undelivered before one normal flush attempt;
-#                                   if that cannot confirm a submit, a wedge
+#                                   if that cannot obtain prompt acceptance, a wedge
 #                                   alarm fires (default 300; 0 disables)
 #          FM_WEDGE_ALARM_CHANNEL   override config/wedge-alarm with a single
 #                                   active-alert directive for that wedge alarm
@@ -120,16 +120,10 @@
 #                                   its watchdog terminates it and continues to the
 #                                   next channel (default 10; invalid/zero uses the
 #                                   default).
-#          FM_INJECT_CONFIRM_RETRIES Enter-retry attempts on a swallowed Enter
-#                                   (default 3); the digest is typed once, only
-#                                   Enter is retried. Composer-empty detection is
-#                                   structural and style-aware (bin/fm-composer-lib.sh):
-#                                   it drops dim/faint ghost text and strips the
-#                                   harness's box borders before deciding, so a
-#                                   ghost-only or bordered-but-empty composer is
-#                                   not misread as pending input.
-#          FM_INJECT_CONFIRM_SLEEP  seconds between daemon submit checks
-#                                   (default 0.5)
+#          Composer-empty detection is structural and style-aware
+#          (bin/fm-composer-lib.sh): it drops dim/faint ghost text and strips
+#          the harness's box borders before deciding, so a ghost-only or
+#          bordered-but-empty composer is not misread as pending input.
 #          FM_LOG_MAX_BYTES / FM_LOG_KEEP_LINES / FM_CRASH_*  log + crash guards
 #          FM_STATE_OVERRIDE        alternate state dir (testing)
 #          Logs each wake to state/.supervise-daemon.log (size-capped). Single
@@ -186,7 +180,7 @@ ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
 # Max time a buffered escalation may sit undelivered before the daemon retries
-# the normal flush path and, if that cannot confirm a submit, raises a loud wedge
+# the normal flush path and, if that cannot obtain prompt acceptance, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
 MAX_DEFER_SECS_DEFAULT=300
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
@@ -195,9 +189,10 @@ WEDGE_ALARM_NOTIFIER_PID=
 # The captain-relevant verb set and the status classifiers (last_status_line,
 # status_is_captain_relevant, window_to_task, and the status-span reader) now
 # live in bin/fm-classify-lib.sh, shared with the always-on watcher.
-# Composer-empty detection, submit acknowledgement, and the harness-scoped
-# supervisor-pane busy guard live in bin/fm-composer-lib.sh.
+# Composer-empty detection and the harness-scoped supervisor-pane busy guard
+# live in bin/fm-composer-lib.sh; native prompt acceptance belongs to the backend.
 INJECT_FAIL_SLEEP_DEFAULT=30
+# Retained only for the shared submit call shape; Herdr native prompts ignore them.
 INJECT_CONFIRM_RETRIES_DEFAULT=3
 INJECT_CONFIRM_SLEEP_DEFAULT=0.5
 CRASH_THRESHOLD_DEFAULT=10
@@ -302,8 +297,7 @@ strip_injection_marker() {  # <message-text>
 }
 
 # Collapse all newlines to a literal " - " separator so the injected digest is
-# a single line. Submission via send-keys + Enter is then unambiguous regardless
-# of how the target TUI handles embedded newlines in its composer.
+# one compact operational-input envelope across native prompt implementations.
 _collapse_newlines() {  # <text>
   local s=$1
   s=${s//$'\n'/ - }
@@ -675,10 +669,11 @@ escalate_add() {  # <state> <distilled-item>
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
-# supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
+# supervisor pane. Returns 0 on accepted inject (or empty buffer), 1 when the
+# buffer remains eligible for a later attempt, and 2 after an uncertain native
+# submission is recorded and retired from replay.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg rc marker recovery recovery_base recovery_status suffix
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -687,7 +682,61 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  recovery_base="$state/.subsuper-inject-uncertain.$(date +%s).$$"
+  recovery=$recovery_base
+  suffix=0
+  while [ -e "$recovery" ] || [ -e "${recovery}.status" ]; do
+    suffix=$((suffix + 1))
+    recovery="$recovery_base.$suffix"
+  done
+  if ! mv "$buf" "$recovery"; then
+    log "inject claim failed: escalation buffer remains retryable; native submission was not attempted"
+    return 1
+  fi
+  recovery_status="${recovery}.status"
+  if ! printf 'claimed\n' > "$recovery_status"; then
+    log "inject claim status could not be written; claimed payload remains outside automatic replay"
+  fi
+  if inject_msg "$msg" "$state"; then
+    if ! printf 'submitted\n' > "$recovery_status"; then
+      log "inject submitted: recovery outcome status could not be written"
+    fi
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    if ! rm -f "$recovery" "$recovery_status"; then
+      log "inject submitted: non-replay recovery state could not be retired"
+    fi
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    # The native prompt may already have been accepted even though its client
+    # response timed out. Preserve that uncertainty durably, but retire this
+    # exact buffered payload so a later housekeeping cycle cannot submit it a
+    # second time.
+    marker="$state/.subsuper-inject-wedged"
+    if ! printf 'unknown\n' > "$recovery_status"; then
+      log "inject uncertain: recovery outcome status could not be written"
+    fi
+    rm -f "${buf}.since"
+    {
+      printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown as of %s; not replayed\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+      printf 'Submitted-at-most-once buffered items:\n'
+      cat "$recovery" 2>/dev/null
+    } > "$marker" 2>/dev/null || {
+      log "inject uncertain: uncertainty marker could not be written; payload retained at $recovery and retired from automatic replay"
+      return 2
+    }
+    if ! rm -f "$recovery" "$recovery_status"; then
+      log "inject uncertain: uncertainty marker was written but its fallback recovery record could not be removed"
+    fi
+    return 2
+  fi
+  if mv "$recovery" "$buf"; then
+    rm -f "$recovery_status"
+  else
+    log "inject refused: claimed payload could not be restored to the retryable escalation buffer"
+  fi
   return 1
 }
 
@@ -914,8 +963,8 @@ wedge_alarm_notify() {  # <summary> <marker>
 }
 
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
-# max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
-# is swallowed). The daemon must NEVER silently wedge: this logs
+# max-defer (the supervisor pane is genuinely busy/wedged, its composer guard
+# defers, or the native prompt is definitely refused). The daemon must NEVER silently wedge: this logs
 # an ERROR, drops a durable marker firstmate/recovery can surface, and attempts a
 # configurable backend-independent active alert (wedge_alarm_notify). Nothing
 # is lost - the buffer and the
@@ -933,7 +982,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; native submission was deferred or refused (supervisor pane busy, pending, unreadable, or transport failed). Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
@@ -962,7 +1011,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  1) batch flush: if the escalation buffer's oldest content is older than
 #     ESCALATE_BATCH_SECS (or batching is disabled), inject one digest.
 #  1b) max-defer escape: if the buffer is STILL undelivered past MAX_DEFER_SECS,
-#     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
+#     attempt one normal delivery; if it remains retryable, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
@@ -988,14 +1037,15 @@ housekeeping() {  # <state>
   fi
 
   # (1b) max-defer escape. If anything is still buffered past MAX_DEFER_SECS,
-  # retry the normal delivery path. If that still cannot confirm, raise a loud
-  # wedge alarm while preserving the buffer.
+  # retry the normal delivery path. If that leaves a retryable buffer, raise a
+  # loud wedge alarm. An uncertain submission retires its exact payload instead.
   max_defer=${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}
   if afk_active "$state" && [ "$max_defer" -gt 0 ] && [ -s "$state/.subsuper-escalations" ]; then
     oldest=$(_oldest_line_age "$state/.subsuper-escalations")
     # Throttle the alarm to once per max-defer window (the wedge marker doubles
-    # as the throttle). A successful flush clears the buffer; a failed one alarms
-    # and waits.
+    # as the throttle). A successful flush clears the buffer; a retryable failure
+    # alarms and waits; an uncertain submission writes its own marker and retires
+    # the exact payload.
     if [ "$oldest" -ge "$max_defer" ] \
        && [ "$(_file_age "$state/.subsuper-inject-wedged")" -ge "$max_defer" ]; then
       if escalate_flush "$state"; then
@@ -1173,23 +1223,20 @@ window_for_task() {  # <task-key> [state]
 
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# Returns 0 when the backend accepts the submission, 2 when the transport
+# outcome is uncertain, and 1 for a definite refusal or a pre-submit deferral.
+# The caller preserves the buffer only for return 1. Return 2 retires the exact
+# payload after recording the uncertainty so it cannot be blindly replayed.
 #
 # Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
-#     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     Herdr's normal idle-baseline path requires an observed turn start.
-#     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
-#   - COMPOSER GUARD before typing: if the cursor line already has real content
+#   - Submit once through the backend's native prompt API; never type into the
+#     terminal or retry an uncertain result.
+#   - `submitted` means only that the API accepted the prompt. The supervisor's
+#     later behavior is not inferred from transport success.
+#   - COMPOSER GUARD before submission: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
-#     line, or a previous injection's unsent text), defer entirely - injecting
-#     would merge with the human's text.
+#     line, or a previous injection's unsent text), defer entirely so lifecycle
+#     escalation cannot overtake an operator draft.
 inject_msg() {  # <message> [state]
   local msg=$1 state target backend retries sleep_s verdict composer encoded
   state="${2:-$(_state_root)}"
@@ -1197,9 +1244,9 @@ inject_msg() {  # <message> [state]
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
   # watcher triage. Escalations buffer and survive for the next catch-up flush.
   afk_active "$state" || { log "inject deferred: afk inactive"; return 1; }
-  # (2) Single-line digest: collapse any embedded newlines so submission via
-  # send-keys + Enter is unambiguous regardless of how the TUI composer treats
-  # them. Then use the canonical typed envelope so downstream consumers retain
+  # (2) Single-line digest: collapse embedded newlines to retain the stable
+  # operational-input envelope and compact rendering across harnesses.
+  # Then use the canonical typed envelope so downstream consumers retain
   # the exact away-supervisor kind without interpreting this payload's prose.
   msg=$(_collapse_newlines "$msg")
   fm_operational_input_encode away-supervisor "$msg" encoded || return 1
@@ -1227,18 +1274,20 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the backend confirms
-  # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
-  # buffer is preserved (strict) rather than cleared.
-  # fm_backend_send_text_submit owns Herdr's typed-once delivery confirmation.
+  # (4) Submit the digest once through the native backend API. Acceptance does
+  # not prove that the supervisor read it. Unknown transport is returned
+  # distinctly so the caller can record it and retire the payload from replay.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
+  if [ "$verdict" = submitted ]; then
+    return 0
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  if [ "$verdict" = unknown ]; then
+    log "inject uncertain: native prompt may have been accepted; this payload must not be replayed"
+    return 2
+  fi
+  log "inject failed: native prompt was refused (verdict=$verdict)"
   return 1
 }
 

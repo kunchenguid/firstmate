@@ -12,7 +12,7 @@ The router owns TraeX's role and backend boundary.
 | Models | `--model <model>`; discover current-account support with `traex models --json`. |
 | Authentication | `traex login status` checks the credential used by TraeX without printing it. |
 | Effort | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`; `max` is refused before endpoint creation. |
-| Busy state | Managed workers use the task-bound transcript reader owned by `bin/fm-busy-transcript.py`, with structural process liveness from Herdr; [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter) owns version-independent admission and unknown-state boundaries, with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
+| Busy state | See the version-independent native-state and exact-process contract in [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter), with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
 | Exit | Use the generic backend pane-cleanup owner. |
 | Interrupt | Single Escape, followed by generic Herdr `Ctrl+U` because TraeX restores interrupted input into the composer. |
 | Skill invocation | No separately verified command form; use natural language. |

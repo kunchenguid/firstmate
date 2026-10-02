@@ -4,9 +4,10 @@
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
-# slash commands and Codex CLI $skill invocations, which use the typed plane.
-# Explicit backend targets use the typed plane. --resolve-key closes a matching
-# local task decision only after durable enqueue or confirmed typed submission.
+# slash commands and Codex CLI $skill invocations, which use direct native
+# prompt submission. Explicit backend targets use that same direct path.
+# --resolve-key closes a matching local task decision only after durable enqueue
+# or native API acceptance.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -398,8 +399,8 @@ if [ "${1:-}" = "--key" ]; then
 fi
 
 # Close each answered decision in this home's ledger, only after the answer is
-# durably sent: enqueued on the inbox plane, submit-confirmed on the typed
-# plane. An append failure exits nonzero with the manual close
+# durably submitted: enqueued on the inbox plane, accepted by the native API on
+# the direct plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 # The close is this home's own bookkeeping, written by the very turn that
 # answered the decision, so it goes through the guarded self-announced append
@@ -447,16 +448,14 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
-# Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
-# The target's BACKEND comes from selector meta, from matching an explicit target
+# The target's harness comes from its task metadata and selects which leading
+# forms are native harness invocations rather than ordinary inbox text. The
+# target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
-# Do not add a separate passive liveness preflight here. Active send paths own
-# backend readiness: Herdr routes through its session-aware target_ready path
-# before sending. A failed backend send is still surfaced below as a hard
-# error with the attempted resolution attached.
+# Do not add a separate passive liveness preflight here.
+# The native Herdr prompt request itself reports target availability; a definite
+# failure is surfaced below with the attempted resolution attached, while a
+# timeout-like result stays uncertain and forbids blind replay.
 
 if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
   echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
@@ -486,7 +485,8 @@ else
   RESOLVE_ANSWER_TEXT=$MESSAGE
   # Text addressed to a task selector rides the inbox unless it is a
   # harness-native invocation: a leading slash, or a leading dollar sign for
-  # the Codex CLI harness. Explicit backend targets stay on the typed plane.
+  # the Codex CLI harness. Explicit backend targets stay on the direct native
+  # prompt plane.
   INBOX_PLANE=0
   if [ -n "$TARGET_SELECTOR" ]; then
     case "$RESOLVE_ANSWER_TEXT" in
@@ -496,7 +496,7 @@ else
     esac
   fi
   if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
-    echo 'REFUSED: lifecycle actions cannot use the typed plane' >&2; exit 6
+    echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -557,33 +557,26 @@ else
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in
-    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-    3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    3) echo "fm-send: doorbell native submission skipped because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    4)
+      if fm_wake_append stale "$T" "stale: $T (doorbell submission outcome is uncertain for $INBOX_RECORD; do not replay blindly; inspect the worker)"; then
+        if ! fm_task_inbox_record_escalated "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
+          echo "fm-send: uncertainty wake was queued for $T, but its inbox escalation marker could not be recorded; the watcher may report it again" >&2
+        else
+          echo "fm-send: doorbell submission to $T is uncertain; the steer remains at $INBOX_RECORD and will not be replayed blindly" >&2
+        fi
+      else
+        echo "fm-send: uncertainty wake could not be queued for $T; leaving $INBOX_RECORD unmarked so the watcher can retry" >&2
+      fi
+      ;;
     esac
     exit 0
   fi
-  # Slash commands open a completion popup in some TUIs (verified on codex);
-  # submitting too fast selects nothing, so give the popup time to settle before
-  # the (retried) Enter. Codex opens the same kind of popup for a `$<skill>`
-  # invocation, so a `$...` message to a codex target gets the same settle. That
-  # `$` case is scoped to codex on purpose: unlike `/`, a leading `$` commonly
-  # starts ordinary text ("$5/month", "$HOME"), so a universal `$` rule would
-  # needlessly slow plain text to Pi. The target backend's
-  # verified submit retry still backs the settle up either way.
-  case "$*" in
-  /*) settle=1.2 ;;
-  \$*)
-    if [ "$TARGET_HARNESS" = codex ]; then settle=1.2; else settle=0.3; fi
-    ;;
-  *) settle=0.3 ;;
-  esac
-  retries=${FM_SEND_RETRIES:-3}
-  sleep_s=${FM_SEND_SLEEP:-0.4}
-  # Type once, submit, verify. Only exact empty confirms delivery; every other
-  # verdict preserves the loud refusal boundary.
+  # Submit once through the native backend API. API success means submitted,
+  # not read or completed; uncertainty is loud and is never retried here.
   send_rc=0
-  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
+  if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" 0 0 0 "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
@@ -593,19 +586,14 @@ else
     exit 1
   fi
   case "$verdict" in
-  empty)
+  submitted)
     ;;
   send-failed)
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
     ;;
-  pending)
-    # The text was typed into the live target and Enter was sent; only the
-    # submit read-back stayed unconfirmed (e.g. a busy harness queues the
-    # steer and keeps rendering it). That is not a proven failure, so never
-    # re-type the message: verify the pane instead. Exit 3 is the documented
-    # delivered-unconfirmed status.
-    echo "fm-send: text delivered to $T but submission is unconfirmed (verdict=pending; tried $RESOLUTION_TRIED); do not retype or blindly resend - verify with fm-peek.sh, then re-send '--key Enter' only if the composer still holds the text" >&2
+  unknown)
+    echo "fm-send: text submission to $T is uncertain (tried $RESOLUTION_TRIED); do not retype or blindly resend - inspect the worker before deciding what happened" >&2
     exit 3
     ;;
   *)
@@ -613,16 +601,13 @@ else
     exit 1
     ;;
   esac
-  # Delivery is fully confirmed: close each answered decision in this home's
-  # ledger (answerer-closes; see the header contract).
+  # Native submission was accepted: close each answered decision in this
+  # home's ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
-  # Submit landed with exact empty. Confirmation only proves the text was
-  # accepted; the harness still needs a beat to spin up the
-  # turn before its busy footer shows. Pause so an immediate peek catches the
-  # crewmate actually working instead of the stale idle pane. FM_SEND_SETTLE=0
-  # disables it. Scoped to this path only, never the shared submit core.
+  # Submission was accepted. It does not prove the worker read or completed it.
+  # Keep the historical post-submit beat so an immediate peek can observe work.
   [ "${FM_SEND_SETTLE:-1}" = 0 ] || sleep "${FM_SEND_SETTLE:-1}"
 fi

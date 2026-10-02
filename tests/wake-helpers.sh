@@ -69,6 +69,7 @@ write_composer() {
 }
 case "$1 ${2:-}" in
   'status --json') echo '{"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
   'pane get')
     [ "${FM_FAKE_HERDR_PANE_ALIVE:-1}" = 1 ] || { echo '{"error":{"code":"pane_not_found"}}'; exit 1; }
     jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
@@ -77,6 +78,14 @@ case "$1 ${2:-}" in
       bash|zsh|sh) echo '{"error":{"code":"agent_not_found"}}' ;;
       *) echo '{"result":{"agent":{"agent":"pi","agent_status":"unknown"}}}' ;;
     esac ;;
+  'agent prompt')
+    [ "${FM_FAKE_PROMPT_TIMEOUT:-0}" != 1 ] || {
+      printf 'timeout waiting for response\n' >&2
+      exit 1
+    }
+    [ "${FM_FAKE_SEND_FAIL:-0}" != 1 ] || exit 1
+    printf '%s\n' "${4:-}" >> "$sent"
+    printf '{"result":{"type":"agent_prompted"}}\n' ;;
   'pane process-info')
     jq -n --arg p "$4" --arg command "${FM_FAKE_HERDR_CURRENT_COMMAND:-pi}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:$command,argv0:$command}]}}}' ;;
   'pane read')
@@ -96,14 +105,9 @@ case "$1 ${2:-}" in
     fi ;;
   'pane send-keys')
     case "${4:-}" in Enter|enter)
-      swallow=${FM_FAKE_SWALLOW:-${FM_FAKE_HERDR_SWALLOW_FILE:-}}
-      if [ -n "$swallow" ] && [ -f "$swallow" ]; then
-        [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$swallow"
-      else
-        printf '[ENTER]\n' >> "$sent"
-        if [ -n "$capture" ]; then
-          if [ -n "${FM_FAKE_COMPOSER:-}" ]; then write_composer ''; else printf '❯\n' > "$capture"; fi
-        fi
+      printf '[ENTER]\n' >> "$sent"
+      if [ -n "$capture" ]; then
+        if [ -n "${FM_FAKE_COMPOSER:-}" ]; then write_composer ''; else printf '❯\n' > "$capture"; fi
       fi ;;
     esac ;;
   *) exit 1 ;;

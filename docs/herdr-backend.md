@@ -36,7 +36,7 @@ TraeX is verified on Herdr 0.8.0 for ordinary isolated workers and scouts only.
 The [`harness-adapters` TraeX reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns its exact launch, profile, marker, trust, interrupt, exit, and resume facts.
 
 After launch, TraeX uses the generic Herdr agent, pane, process, input, kill, supervision, and stale-recovery paths used by ordinary harnesses.
-Its managed-worker busy verdict comes from the shared task-bound transcript source, with Herdr supplying structural process liveness; the [TraeX harness reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns the current boundary.
+Its ordinary managed-worker busy verdict comes from Herdr's native status plus structural process liveness; the [TraeX harness reference](../.agents/skills/harness-adapters/references/harness/traex.md) owns the current boundary.
 It has no TraeX-specific readiness state machine, transition journal, completion transaction, watcher scan, or exactly-once guarantee.
 The opt-in smoke test is `FM_TRAEX_HERDR_LIVE=1 bin/fm-test-run.sh tests/fm-traex-harness-live-e2e.test.sh`.
 ## Client selection
@@ -215,47 +215,33 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Shell adapter calls go through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
-The native Codex input transport uses that same session's selected client and explicit session flag for its probes, and only its verified named socket for the text-only API request.
+The native prompt transport uses that same session's selected client and explicit session flag for its request.
 An environment variable alone is not reliable when another Herdr server is running.
 When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
-Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
+The shared text-submission primitive uses the explicitly selected session's native Herdr prompt API: `agent send <pane> <text>` on clients that expose the legacy command and `agent prompt <pane> <text>` on clients that expose the renamed command.
+Ordinary local steers first preserve the exact text in the durable steering inbox, then submit only its constant doorbell through that API.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
-Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
-Typed-plane text is typed once; only Enter is retried.
-
-For a structurally verified foreground Codex, program input uses the native `pane.send_input` capability with no keys, through `bin/backends/herdr-codex-input.py`.
-Herdr checks that exact pane's live bracketed-paste mode when encoding the text, so paste framing separates notification text from the existing external Enter even when both arrive in one input read.
-The transport binds the socket to the requested named session, verifies foreground process identity, and capability-gates the method from the schema or, when schema discovery is unavailable, from an empty-pane error response that cannot write to a target.
-Targets conclusively outside the native Codex path retain literal insertion; ambiguous identity or capability evidence and unconfirmed write responses stop before Enter without retrying or falling back to raw input.
-Shell launch commands retain their separate run primitive.
-The composer pre-check and submission-key budget are unchanged.
-The coalesced-input regression is part of `tests/fm-send-inbox-doorbell-live-e2e.test.sh`; [runtime verification](verification/runtime-backends.md#steering-inbox-doorbell) records the current empirical boundary.
-
-On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
-If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
-After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
-On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
-A fully unreadable target stops retrying and reports unknown.
-A blocked pane is not treated as a queued-Enter busy signal.
-
-An unavailable native idle baseline leaves the composer fallback paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
-It is the same semantic signal the native path uses and the shared submit logic consumes.
-A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
-The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
-The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
+The native submission primitive does not read the pane, composer, native execution state, or vendor transcript and does not send or retry Enter.
+A zero exit from the selected native prompt command means only that Herdr accepted the submission; it does not prove that the worker read, handled, or completed it.
+A timeout-like result remains uncertain and must not be replayed blindly, while a definite API or transport refusal remains a failure.
+The durable inbox record remains queued until the worker moves it to `handled/`; that move is observation of handling, not proof of semantic task completion.
+Transcript readers remain available only to recovery/lifecycle operations that independently require their provenance; they are not an ordinary Codex or TraeX state source.
+Manual key operations, shell launch commands, and composer guards used by overwrite-sensitive lifecycle and supervisor paths retain their separate owners.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
 The capture owner requests at least 200 lines from Herdr and trims locally to the caller's bound.
 This generous floor is required for small composer and peek reads.
 
-Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
-A human-blocked permission dialog has no busy banner and still surfaces.
+For ordinary Codex and TraeX state, `bin/fm-busy-lib.sh` combines Herdr's native status with the exact registered worker process.
+`working` is busy; `idle`, `done`, `blocked`, and `waiting` are idle.
+If the native state is unrecognized but the exact worker process is alive, it is also treated as idle; an exited process is dead and inconclusive liveness is unknown.
+This is intentionally presentation-coarse: an unrecognized live UI can be reported idle.
+A matching no-mistakes run remains authoritative, and native idle never proves the task was read, handled, accepted, or completed.
 
 ## Composer and injection safety
 
@@ -289,7 +275,9 @@ A registration alone never proves an agent.
 Herdr keeps a Pi registration (`agent get` still reports `agent=pi` with its last status) after the Pi process has exited to a plain shell whenever a nested interactive shell sits under the pane's top shell, which is the crew shape `treehouse get` leaves behind (measured on Herdr 0.9.0 - [verification](verification/runtime-backends.md) "Stale agent registration"; upstream issue #4115).
 So before a registered agent counts as live, the pane classifier reads `pane process-info` and the real process table through the shared harness-process classifier in `bin/fm-agent-process-lib.sh`: a harness in the foreground process group, or still a descendant of the pane shell, keeps the registration live; a foreground that is nothing but shells with no harness descendant is a `stale-agent` pane, agent-free with that explicit reason; a foreground holding anything else is sampled over the existing bounded settle window because shells can host transient prompt helpers; an unclassified or unreadable process view remains `unknown`, trusting neither the registration nor its absence.
 A named registration must echo the exact pane identity; its presentation status may be unknown, absent, or newly introduced without negating independent process evidence.
-Structural `live` does not establish semantic busy or idle, and does not relax task ownership, generation, transcript input fences, empty-composer checks, or cleanup completion gates.
+Structural `live` establishes no state by itself except the narrow ordinary Codex/TraeX rule that native unknown plus exact liveness is idle.
+It does not relax task ownership, generation, recovery provenance, supervisor-only empty-composer guards, or cleanup completion gates.
+Ordinary native prompt submission has no transcript input fence.
 No registered status outranks the process view, because an agent killed mid-turn leaves `working` behind just as a quit one leaves `idle`, and the native busy verdict is verified the same way so a shell-only pane never reads busy.
 The `pane process-info` subcommand that this process-level proof depends on is present in every supported release client from the 0.7.1 floor upward (measured 2026-09-10 on the pinned 0.7.1, 0.7.3, 0.7.4, and 0.7.5 release clients - [verification](verification/runtime-backends.md) "Stale agent registration").
 The response shape the adapter parses (`result.type` of `pane_process_info`, `process_info.shell_pid`, and `foreground_processes` entries carrying `name`, `argv0`, `argv`, and `cmdline`) is verified live on Herdr 0.8.0 and 0.9.0, with the idle-shell proof's narrower parse previously verified on 0.7.5.
@@ -320,7 +308,7 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 The away daemon supports Herdr supervisor panes only.
 It refuses every retired or unknown supervisor backend rather than applying the wrong transport.
-For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
+For Herdr, target existence, native state, capture, composer state, and native prompt submission all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
 Harnesses with native tracked background execution can run the daemon in their terminal.

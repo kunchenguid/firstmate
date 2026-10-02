@@ -3,8 +3,8 @@
 # status-phrase matrix (a product contract), escalation batching/dedupe,
 # decision-owned queued-row suppression, afk presence-gating, and the
 # injection-hardening units that an e2e cannot deterministically reach
-# (persistent-Enter-swallow, max-defer wedge alarms, fm-send typed-plane swallow
-# reporting, composer-pending ANSI parsing). The operator-visible inject flow
+# (native-prompt uncertainty, max-defer wedge alarms, and composer-pending ANSI
+# parsing). The operator-visible inject flow
 # lives in fm-afk-inject-e2e and fm-wake-daemon-lifecycle-e2e.
 set -u
 
@@ -1458,8 +1458,8 @@ test_escalate_batches_into_one_digest() {
     || fail "batch digest did not join events with literal ' | '"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
-  n=$(grep -c '\[ENTER\]' "$sent")
-  [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
+  n=$(grep -c 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent")
+  [ "$n" -eq 1 ] || fail "expected one native-prompt digest, got $n submissions"
   pass "multiple escalations flush as a single batched digest"
 }
 
@@ -2068,57 +2068,178 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   pass "pane_input_pending: text inside a bordered composer is still pending"
 }
 
-test_submit_ack_confirms_on_bordered_empty_composer() {
-  # RC2: the submit acknowledgement must recognize a bordered-EMPTY composer as
-  # "submitted." The old ACK reused the broken check, so on pi it could never
-  # confirm and always reported a false "Enter swallowed."
+test_native_prompt_success_reports_submitted_once() {
   local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-bordered)
+  dir=$(make_bordered_case native-prompt-success)
   fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
   verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     fm_backend_herdr_send_text_submit "fixture:win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = empty ] || fail "submit-ACK did not confirm on a bordered-empty composer: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest typed more than once (retype)"
-  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "expected exactly one submitted Enter"
-  pass "submit-ACK confirms a submit when the composer returns to a bordered-empty box"
+  [ "$verdict" = submitted ] || fail "native prompt acceptance did not report submitted: $verdict"
+  [ "$(grep -Fxc 'the digest' "$sent")" -eq 1 ] || fail "native prompt did not submit exactly once"
+  pass "native prompt success reports one submitted payload"
 }
 
-test_submit_ack_reports_pending_on_persistent_swallow() {
-  # A genuinely swallowed Enter (text stays in the box across all retries) is
-  # reported as "pending" — the daemon keeps the buffer, fm-send exits non-zero —
-  # and the digest is typed ONCE (Enter-only retries, never a retype).
-  local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-swallow)
-  fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  touch "$dir/.swallow"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
-    fm_backend_herdr_send_text_submit "fixture:win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = pending ] || fail "persistent swallow not reported as pending: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest retyped on swallow (expected type-once)"
-  pass "submit-ACK reports pending on a persistently swallowed Enter (type-once)"
-}
-
-test_max_defer_empty_swallow_types_once_and_alarms() {
+test_uncertain_native_prompt_is_recorded_and_never_replayed() {
   local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-stuck)
+  dir=$(make_bordered_case native-prompt-uncertain)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
-  touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer typed the digest more than once"
+  [ ! -s "$sent" ] || fail "uncertain prompt fixture unexpectedly recorded an accepted payload"
   [ -s "$state/.subsuper-inject-wedged" ] \
-    || fail "stuck max-defer inject did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] \
-    || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+    || fail "uncertain prompt did not leave durable uncertainty evidence"
+  grep -F 'not replayed' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "uncertainty marker did not explain the at-most-once decision"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "uncertain payload remained eligible for a blind later replay"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_ESCALATE_BATCH_SECS=0 housekeeping "$state"
+  [ ! -s "$sent" ] || fail "later housekeeping replayed an uncertain prompt"
+  pass "uncertain native prompt is recorded durably and retired without blind replay"
+}
+
+test_failed_preclaim_skips_native_submission() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-preclaim-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: remain retryable without submission"
+  printf '%s\n' "$(( $(date +%s) - 600 ))" > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  chmod 500 "$state"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 0; }
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=1 housekeeping "$state"
+  )
+  chmod 700 "$state"
+  if [ -f "$dir/inject.calls" ]; then calls=$(wc -l < "$dir/inject.calls" | tr -d ' '); else calls=0; fi
+  [ "$calls" -eq 0 ] || fail "failed preclaim invoked native submission $calls times"
+  grep -Fx 'needs-decision: remain retryable without submission' "$state/.subsuper-escalations" >/dev/null \
+    || fail "failed preclaim changed the retryable payload"
+  assert_contains "$(cat "$dir/daemon.log")" 'native submission was not attempted' \
+    "failed preclaim did not report the no-effect boundary"
+  pass "failed preclaim leaves retryable state without native submission"
+}
+
+test_uncertain_marker_failure_retires_buffer_without_replay() {
+  local dir state calls recovery
+  dir=$(make_bordered_case native-prompt-marker-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: retain this exact payload"
+  mkdir "$state/.subsuper-inject-wedged"
+  afk_enter "$state"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 2; }
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=0 housekeeping "$state"
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=0 housekeeping "$state"
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "marker persistence failure submitted the uncertain payload $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "marker persistence failure left the payload eligible for automatic replay"
+  recovery=$(find "$state" -maxdepth 1 -type f -name '.subsuper-inject-uncertain.*' ! -name '*.status' -print)
+  [ -n "$recovery" ] || fail "marker persistence failure did not retain fallback recovery state"
+  grep -Fx 'needs-decision: retain this exact payload' "$recovery" >/dev/null \
+    || fail "marker persistence failure discarded the fallback payload"
+  [ "$(cat "${recovery}.status")" = unknown ] \
+    || fail "marker persistence failure did not retain the unknown outcome"
+  assert_contains "$(cat "$dir/daemon.log")" 'uncertainty marker could not be written' \
+    "marker persistence failure was not reported"
+  pass "uncertain marker failure retires the payload and never replays it"
+}
+
+test_uncertain_readonly_buffer_is_retired_without_replay() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-buffer-clear-failure)
+  state="$dir/state"
+  printf '%s\n' 'needs-decision: retain this payload in the marker' > "$state/.subsuper-escalations"
+  chmod 400 "$state/.subsuper-escalations"
+  printf '%s\n' "$(( $(date +%s) - 600 ))" > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 2; }
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=0 housekeeping "$state"
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=0 housekeeping "$state"
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "read-only uncertain buffer was submitted $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "read-only uncertain buffer remained eligible for automatic replay"
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "read-only uncertain buffer did not produce the durable uncertainty marker"
+  grep -F 'needs-decision: retain this payload in the marker' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "read-only uncertain buffer lost its payload from the uncertainty marker"
+  pass "read-only uncertain buffer is retired and never replayed"
+}
+
+test_uncertain_retirement_failure_remains_nonreplayable() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-uncertain-retirement-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: keep uncertain cleanup failure"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 2; }
+    rm() {
+      case "$*" in *subsuper-inject-uncertain*) return 1 ;; *) command rm "$@" ;; esac
+    }
+    LOG="$dir/daemon.log" escalate_flush "$state" || true
+    LOG="$dir/daemon.log" escalate_flush "$state" || true
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "uncertain retirement failure submitted the payload $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "uncertain retirement failure restored automatic replay eligibility"
+  assert_contains "$(cat "$dir/daemon.log")" 'fallback recovery record could not be removed' \
+    "uncertain retirement failure was not reported"
+  pass "uncertain retirement failure remains outside automatic replay"
+}
+
+test_submitted_retirement_failure_remains_nonreplayable() {
+  local dir state calls recovery
+  dir=$(make_bordered_case native-prompt-submitted-retirement-failure)
+  state="$dir/state"
+  escalate_add "$state" "done: retain accepted cleanup failure"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 0; }
+    rm() {
+      case "$*" in *subsuper-inject-uncertain*) return 1 ;; *) command rm "$@" ;; esac
+    }
+    LOG="$dir/daemon.log" escalate_flush "$state"
+    LOG="$dir/daemon.log" escalate_flush "$state"
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "submitted retirement failure invoked native submission $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "submitted retirement failure restored automatic replay eligibility"
+  recovery=$(find "$state" -maxdepth 1 -type f -name '.subsuper-inject-uncertain.*' ! -name '*.status' -print)
+  [ -n "$recovery" ] || fail "submitted retirement failure lost its recovery payload"
+  [ "$(cat "${recovery}.status")" = submitted ] \
+    || fail "submitted retirement failure did not preserve its accepted outcome"
+  assert_contains "$(cat "$dir/daemon.log")" 'non-replay recovery state could not be retired' \
+    "submitted retirement failure was not reported"
+  pass "submitted retirement failure remains outside automatic replay"
+}
+
+test_definite_refusal_restores_retryable_buffer() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-definite-refusal)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: retry only after definite refusal"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 1; }
+    escalate_flush "$state" || true
+    escalate_flush "$state" || true
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 2 ] || fail "definite refusal did not restore retry eligibility: $calls attempts"
+  grep -Fx 'needs-decision: retry only after definite refusal' "$state/.subsuper-escalations" >/dev/null \
+    || fail "definite refusal did not restore the exact payload"
+  pass "definite refusal alone restores the retryable escalation buffer"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -2541,37 +2662,32 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
 
-test_fm_send_reports_delivered_unconfirmed_submit() {
-  # When typed-plane text was typed and Enter sent but the submit read-back
-  # remains pending, fm-send must return its documented delivered-unconfirmed status and prevent
-  # a duplicate resend reflex. A synchronously confirmed submit remains zero.
+test_fm_send_reports_uncertain_native_prompt() {
+  # A timeout-like native prompt result may have been accepted. fm-send returns
+  # its documented uncertain status and explicitly prevents a replay reflex.
   local dir fakebin err rc
-  dir=$(make_bordered_case send-swallow)
+  dir=$(make_bordered_case send-native-timeout)
   fakebin="$dir/fakebin"; err="$dir/send.err"
   # Clean submit -> exit 0.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:w1:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
-  # Persistent composer text after Enter -> delivered-unconfirmed exit 3 with
-  # a non-error warning that explicitly tells the operator not to resend.
-  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
-  touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:w1:win 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
     rc=0
   else
     rc=$?
   fi
-  [ "$rc" -eq 3 ] || fail "fm-send returned $rc instead of delivered-unconfirmed exit 3: $(cat "$err")"
-  grep -F 'submission is unconfirmed' "$err" >/dev/null \
-    || fail "fm-send did not explain the pending confirmation: $(cat "$err")"
+  [ "$rc" -eq 3 ] || fail "fm-send returned $rc instead of uncertain exit 3: $(cat "$err")"
+  grep -F 'text submission' "$err" | grep -F 'is uncertain' >/dev/null \
+    || fail "fm-send did not explain the uncertain native result: $(cat "$err")"
   grep -F 'do not retype or blindly resend' "$err" >/dev/null \
     || fail "fm-send did not prevent a duplicate resend: $(cat "$err")"
   if grep -F 'error:' "$err" >/dev/null; then
     fail "fm-send mislabeled delivered-unconfirmed as an error: $(cat "$err")"
   fi
-  pass "fm-send returns 3 with a non-error no-resend warning when confirmation stays pending"
+  pass "fm-send returns 3 with a non-error no-resend warning on native prompt timeout"
 }
 
 test_fm_send_exits_nonzero_on_initial_send_failure() {
@@ -2581,25 +2697,10 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:w1:win 'route this work' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero despite initial tmux send-keys failure"
+    fail "fm-send exited zero despite native prompt refusal"
   fi
   grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"
   pass "fm-send exits non-zero when initial text send fails"
-}
-
-test_fm_send_exits_nonzero_on_unproven_submit() {
-  local dir fakebin err
-  dir=$(make_bordered_case send-unproven)
-  fakebin="$dir/fakebin"; err="$dir/send.err"
-  touch "$dir/.swallow"
-  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:w1:win '修复' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero when submit proof remained pending-unproven"
-  fi
-  grep -F 'verdict=pending-unproven' "$err" >/dev/null \
-    || fail "fm-send did not preserve the unproven-submit verdict: $(cat "$err")"
-  pass "fm-send exits non-zero unless delivery is proven empty"
 }
 
 # --- herdr backend-awareness (fm-turnend-guard-h6-adjacent transport fix) ----
@@ -2766,12 +2867,12 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
       case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      printf 'empty'
+      printf 'submitted'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
-      || fail "inject_msg should succeed when send_text_submit confirms empty"
+      || fail "inject_msg should succeed when the native API accepts submission"
   ) || fail "herdr successful-submit inject_msg subshell failed"
-  pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
+  pass "inject_msg: dispatches guards and native submission through the herdr backend"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -2896,9 +2997,14 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
-test_submit_ack_confirms_on_bordered_empty_composer
-test_submit_ack_reports_pending_on_persistent_swallow
-test_max_defer_empty_swallow_types_once_and_alarms
+test_native_prompt_success_reports_submitted_once
+test_uncertain_native_prompt_is_recorded_and_never_replayed
+test_failed_preclaim_skips_native_submission
+test_uncertain_marker_failure_retires_buffer_without_replay
+test_uncertain_readonly_buffer_is_retired_without_replay
+test_uncertain_retirement_failure_remains_nonreplayable
+test_submitted_retirement_failure_remains_nonreplayable
+test_definite_refusal_restores_retryable_buffer
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
@@ -2924,9 +3030,8 @@ test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
-test_fm_send_reports_delivered_unconfirmed_submit
+test_fm_send_reports_uncertain_native_prompt
 test_fm_send_exits_nonzero_on_initial_send_failure
-test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state

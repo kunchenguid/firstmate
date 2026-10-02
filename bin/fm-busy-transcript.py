@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""Task-bound Codex/TraeX rollout reader; called by fm-busy-lib and fm-spawn.
+"""Task-bound Codex/TraeX lifecycle and recovery evidence reader.
 
 Usage: init STATE ID HARNESS CWD SESSIONS BACKEND TARGET
        activate STATE ID
        read STATE ID HARNESS BACKEND TARGET
-       fence-target STATE BACKEND TARGET
-       fence-text STATE BACKEND TARGET (exact submitted text on stdin)
-       check-target STATE BACKEND TARGET
        recover-check STATE ID ORIGINAL_TERMINAL ORIGINAL_PID
        recover-apply STATE ID RECEIPT (internal fm-busy-event recovery writer)
 
 Owns <id>.busy-session; its writer emits v1 JSON, while readers bind the
 semantic identity fields and treat the version label and additive diagnostics
-as descriptive. The existing busy-gen and busy-state.lock serialize
-init/read/submission fencing with arm/retire. No vendor file is written.
+as descriptive. The existing busy-gen and busy-state.lock serialize reads with
+arm/retire. No vendor file is written.
 The optional process_binding records the original terminal, native PID/start,
 shell PID/start and kernel boot identity after in-place recovery. Every later
-read/text/key guard verifies that seal against Herdr and Linux /proc. Recovery
+evidence read or recovery guard verifies that seal against Herdr and Linux /proc. Recovery
 restores the original gen only, under fm-busy-event's writer authority; its
 shell owner also holds lease/control/meta locks and reconciles the backlog.
 The check command writes no records. Apply must receive its exact receipt and
@@ -30,14 +27,10 @@ are unknown at discovery; after binding only that exact file is read. No timesta
 Metadata comments, including indented history, are ignored; duplicate effective
 assignments still refuse identity verification.
 
-Before known text input, fence-text records its SHA-256 and the last observed
-ordinal under the same lock. Only a later exact typed UserMessage in the bound
-thread's active turn consumes it, once, in submission order. Busy observation
-does not prove delivery; idle requires every pending input to be consumed.
-Key-only fence-target and old required_starts records retain their conservative
-root-start watermark. Legacy unaccounted_input has no reconstructable receipt
-and remains unknown. A failed pre-input read now refuses transport; a complete
-retry can observe state without inventing an input. No timeout clears a fence.
+Spawn and bounded recovery paths call this reader; ordinary busy classification
+and message submission do not. This reader observes retained lifecycle evidence,
+and transcript identity, launch history, typed UserMessage matching and old
+pending-input fields are not transport prerequisites or delivery receipts.
 last_refusal retains only a bounded stage/category, never exception or input
 text; stderr exposes the same categories even when identity prevents writing.
 Unreadable/corrupt evidence, malformed metadata and individual records over 32
@@ -70,8 +63,7 @@ class BrokenBinding(Unknown):
 
 REFUSALS = {"identity-mismatch", "malformed-record", "partial-record",
             "record-too-large",
-            "transient-read", "missing-evidence", "lock-busy",
-            "unconsumed-input", "legacy-unaccounted-input", "pending-capacity"}
+            "transient-read", "missing-evidence", "lock-busy"}
 
 
 def refusal(error):
@@ -168,7 +160,8 @@ def load(state, task, recovery=False):
     data = json.loads((state / (task + ".busy-session")).read_text(), object_pairs_hook=unique_fields)
     meta = metadata(state, task)
     # The writer label is diagnostic. Admission is bound to the task, launch,
-    # process and transcript evidence below, including pending input accounting.
+    # process and transcript evidence below; retired pending-input fields are
+    # deliberately irrelevant to this retained evidence reader.
     require(isinstance(data, dict), "malformed-record")
     gen_path = state / (task + ".busy-gen")
     require(not gen_path.is_symlink())
@@ -283,7 +276,6 @@ def recovery_evidence(state, task, terminal, original_pid):
         require(not path.exists() or (path.is_file() and path.stat().st_uid == os.getuid()))
     data = load(state, task, recovery=True)
     require(bool(data["gen"]) and all(c.isascii() and (c.isalnum() or c in "._-") for c in data["gen"]))
-    require(not data.get("unaccounted_input"))
     record = state / (task + ".busy-state")
     if record.exists():
         require("gen=" + data["gen"] in record.read_text().split())
@@ -339,7 +331,6 @@ def inspect(path, data, prefix_size=0):
         seen = set()
         state = "unknown"
         previous = -1
-        users = []
         user_ids = set()
         size = 0
         while True:
@@ -379,10 +370,6 @@ def inspect(path, data, prefix_size=0):
                         "malformed-record")
                 user_ids.add(item_id)
                 require(isinstance(content, list), "malformed-record")
-                # Non-text inputs cannot prove consumption of a text submission.
-                if all(part.get("type") == "text" and isinstance(part.get("text"), str) for part in content):
-                    text = "\n".join(part["text"] for part in content)
-                    users.append({"ordinal": ordinal, "digest": hashlib.sha256(text.encode()).hexdigest()})
             if event not in ("task_started", "task_complete", "turn_aborted"):
                 continue
             tid = payload.get("turn_id")
@@ -402,8 +389,7 @@ def inspect(path, data, prefix_size=0):
     return {"path": str(path), "sid": sid, "dev": stat.st_dev, "ino": stat.st_ino,
             "size": size, "digest": digest.hexdigest(),
             "prefix_digest": prefix_digest.hexdigest() if not prefix_remaining else None,
-            "starts": len(seen), "state": state,
-            "ordinal": previous, "users": users}
+            "state": state, "ordinal": previous}
 
 
 def observe(data):
@@ -442,42 +428,12 @@ def observe(data):
     return current
 
 
-def account_inputs(data, current):
-    pending = data.get("pending_inputs", [])
-    cursor = data.get("input_cursor", -1)
-    require(isinstance(pending, list) and len(pending) <= 256
-            and type(cursor) is int and -1 <= cursor <= current["ordinal"], "malformed-record")
-    for item in pending:
-        require(isinstance(item, dict) and type(item.get("after")) is int
-                and 0 <= item["after"] <= current["ordinal"]
-                and isinstance(item.get("digest"), str) and len(item["digest"]) == 64
-                and all(c in "0123456789abcdef" for c in item["digest"]), "malformed-record")
-    consumed = 0
-    for item in pending:
-        match = next((user for user in current["users"]
-                      if user["ordinal"] > max(cursor, item["after"])
-                      and user["digest"] == item["digest"]), None)
-        if match is None:
-            break
-        cursor = match["ordinal"]
-        consumed += 1
-    data["pending_inputs"] = pending[consumed:]
-    data["input_cursor"] = cursor
-
-
-def observe_accounted(data):
-    current = observe(data)
-    account_inputs(data, current)
-    return current
-
-
 def read(state, task, harness, backend, target):
     with Lock(state, task):
         data = load(state, task)
         require((data["harness"], data["backend"], data["target"]) == (harness, backend, target))
         try:
-            require(not data.get("unaccounted_input"), "legacy-unaccounted-input")
-            current = observe_accounted(data)
+            current = observe(data)
         except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             if isinstance(error, BrokenBinding):
                 data["broken_binding"] = True
@@ -485,63 +441,8 @@ def read(state, task, harness, backend, target):
             save(state / (task + ".busy-session"), data)
             raise
         verdict = current["state"]
-        if (data["pending_inputs"] or current["starts"] < data.get("required_starts", 0)) and verdict == "idle":
-            verdict = "unknown"
-            note_refusal(data, "read", "unconsumed-input")
         save(state / (task + ".busy-session"), data)
         print(verdict + " " + harness + "-transcript")
-
-
-def fence(state, backend, target, check_only=False, text=None):
-    tasks = set()
-    # Metadata makes a missing or damaged sidecar a refusal, not a silent
-    # opt-out from identity checking. Unmanaged legacy endpoints stay outside
-    # this transcript contract.
-    for path in state.glob("*.meta"):
-        try:
-            meta = metadata(state, path.stem)
-        except Unknown:
-            require("window=" + target not in path.read_text().splitlines(), "contradictory metadata for the target endpoint")
-            continue
-        except OSError:
-            continue
-        if (meta.get("backend", "tmux"), meta.get("window")) == (backend, target):
-            binding = state / (path.stem + ".busy-session")
-            if meta.get("harness") in HARNESSES and (meta.get("busy_gen") or binding.exists() or binding.is_symlink()):
-                tasks.add(path.stem)
-    for path in state.glob("*.busy-session"):
-        # A damaged unrelated binding must not affect another adapter's input.
-        # Its own reader already fails closed, so allowing input cannot produce
-        # a false idle verdict from that damaged binding.
-        try:
-            header = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if (header.get("backend"), header.get("target")) != (backend, target):
-            continue
-        tasks.add(path.name.removesuffix(".busy-session"))
-    require(len(tasks) <= 1)
-    for task in tasks:
-        path = state / (task + ".busy-session")
-        with Lock(state, task):
-            data = load(state, task)
-            if check_only or not data.get("input_enabled"):
-                continue
-            try:
-                current = observe_accounted(data)
-                if text is None:
-                    data["required_starts"] = max(data.get("required_starts", 0), current["starts"]) + 1
-                else:
-                    require(len(data["pending_inputs"]) < 256, "pending-capacity")
-                    data["pending_inputs"].append({"after": current["ordinal"],
-                        "digest": hashlib.sha256(text.encode()).hexdigest()})
-            except (Unknown, OSError, ValueError, KeyError, TypeError, AttributeError) as error:
-                if isinstance(error, BrokenBinding):
-                    data["broken_binding"] = True
-                note_refusal(data, "fence", refusal(error))
-                save(path, data)
-                raise
-            save(path, data)
 
 
 def main():
@@ -569,7 +470,6 @@ def main():
                 data, proof = recovery_evidence(state, task, expected["process"]["terminal"], expected["process"]["pid"])
                 require(proof == expected)
                 data["process_binding"] = proof["process"]
-                data["input_enabled"] = True
                 # Publish the restriction first. Interruption leaves either the
                 # old refusal or a fully proven original-generation binding.
                 save(state / (task + ".busy-session"), data)
@@ -600,18 +500,9 @@ def main():
         with Lock(state, task):
             data = load(state, task, recovery=True)
             require(data["gen"] == (state / (task + ".busy-gen")).read_text().strip())
-            data["input_enabled"] = True
             save(state / (task + ".busy-session"), data)
     elif command == "read":
         read(state, *args)
-    elif command == "fence-target":
-        fence(state, *args)
-    elif command == "fence-text":
-        text = sys.stdin.read(LIMIT + 1)
-        require(bool(text) and len(text) <= LIMIT, "malformed-record")
-        fence(state, *args, text=text)
-    elif command == "check-target":
-        fence(state, *args, check_only=True)
     else:
         raise Unknown()
 
@@ -628,5 +519,5 @@ if __name__ == "__main__":
                 detail = str(error) if isinstance(error, Unknown) and str(error) else "missing, unreadable or contradictory identity evidence"
                 print("error: recovery refused: " + detail, file=sys.stderr)
             else:
-                print("error: transcript binding unavailable; input not sent", file=sys.stderr)
+                print("error: transcript lifecycle evidence unavailable", file=sys.stderr)
             sys.exit(1)

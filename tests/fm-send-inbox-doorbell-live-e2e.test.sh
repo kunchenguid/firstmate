@@ -18,16 +18,14 @@
 # authorized by the harness-dependent-checks rule. An absent harness is
 # reported explicitly and skipped; a run that verified nothing fails rather
 # than passing vacuously. Restrict with
-# FM_SEND_INBOX_LIVE_HARNESSES="pi codex" when needed, and tune the
+# FM_SEND_INBOX_LIVE_HARNESSES="codex traex" when needed, and tune the
 # per-harness wait with FM_SEND_INBOX_LIVE_TIMEOUT (seconds, default 240).
 # Record the dated per-harness result in
 # docs/verification/runtime-backends.md ("Steering-inbox doorbell").
 #
-# Codex uses a disposable authenticated home with no shared daemon or hooks.
-# Its input consumer is briefly suspended during the real fm-send, so text
-# and Enter accumulate together. Only the isolated, identity-checked Codex
-# process may be signalled; a finally clause always resumes it. No re-ring or
-# recovery Enter is allowed for this regression.
+# Codex and TraeX use disposable authenticated homes with no shared daemon or
+# hooks. Ordinary delivery is one native Herdr prompt, so the guard does not
+# suspend a TUI, inspect its transcript, or send a recovery Enter.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -78,18 +76,16 @@ launch_cmd() {  # <name> <home> <play>
   case "$1" in
     codex)
       printf 'env CODEX_HOME=%q codex --no-daemon --dangerously-bypass-approvals-and-sandbox -c features.hooks=false -C %q' "$2/codex-home" "$3" ;;
+    traex)
+      printf 'env TRAE_HOME=%q FM_TRAEX_HARNESS=traex traex -y --model Seed-Evolving -c model_reasoning_effort="high"' "$2/trae-home" ;;
     pi) printf '%s' "$1" ;;
     *) return 1 ;;
   esac
 }
 
-# Wait for the harness to look steerable. 0 = the composer classified a
-# proven empty; 2 = the readiness budget expired without an empty verdict but
-# also without a pending one. The caller proceeds on 2 with a note, because
-# that mirrors production exactly: the send path's composer check is ADVISORY
-# and skips only on visibly pending text, so a harness whose idle screen the
-# classifier cannot positively identify still gets its doorbell (the composer
-# matrix guard, not this one, owns re-proving the classifier per release).
+# Wait for the lab harness to look steerable before the measurement.
+# This fixture-only readiness observation is not a production send gate; the
+# native prompt path itself does not read the composer.
 wait_ready() {  # <window>
   local win=$1 i=0 budget=60 verdict dismissed=0 screen
   while [ "$i" -lt "$budget" ]; do
@@ -114,7 +110,7 @@ wait_ready() {  # <window>
 }
 
 check_harness_doorbell() {  # <name>
-  local name=$1 version cmd win home task acted rec handled i ready_rc ids tab workspace play info body
+  local name=$1 version cmd win home task acted rec handled i ready_rc ids tab workspace play body
   version=$(harness_version "$name")
   home="$LAB/$name-home"
   play="$home/play"
@@ -129,6 +125,13 @@ check_harness_doorbell() {  # <name>
     cp "${CODEX_HOME:-$HOME/.codex}/auth.json" "$home/codex-home/auth.json"
     chmod 600 "$home/codex-home/auth.json"
     printf 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "high"\n[projects."%s"]\ntrust_level = "trusted"\n' "$play" > "$home/codex-home/config.toml"
+  elif [ "$name" = traex ]; then
+    mkdir -p "$home/trae-home/cli"
+    if [ ! -f "${TRAE_HOME:-$HOME/.trae}/cli/auth.json" ]; then
+      FAILED=1; printf 'not ok - traex (%s): local authentication unavailable\n' "$version" >&2; return 0
+    fi
+    cp "${TRAE_HOME:-$HOME/.trae}/cli/auth.json" "$home/trae-home/cli/auth.json"
+    chmod 600 "$home/trae-home/cli/auth.json"
   fi
   cmd=$(launch_cmd "$name" "$home" "$play") || { note "no launch recipe for $name"; return 0; }
   task="live-$name"
@@ -138,6 +141,25 @@ check_harness_doorbell() {  # <name>
   workspace=${win%%:*}
   fm_backend_herdr_send_text_line "$SESSION:$win" "exec $cmd" \
     || { FAILED=1; printf 'not ok - %s (%s): launch failed\n' "$name" "$version" >&2; return 0; }
+  if [ "$name" = traex ]; then
+    i=0
+    while [ "$i" -lt 60 ]; do
+      screen=$(fm_backend_capture herdr "$SESSION:$win" 40 2>/dev/null || true)
+      case "$screen" in
+        *'Trusting the directory'*'Yes, continue'*'No, quit'*) break ;;
+      esac
+      sleep 0.5
+      i=$((i + 1))
+    done
+    case "$screen" in
+      *'Trusting the directory'*'Yes, continue'*'No, quit'*)
+        fm_backend_send_key herdr "$SESSION:$win" Enter \
+          || { FAILED=1; printf 'not ok - %s (%s): verified trust acceptance failed\n' "$name" "$version" >&2; return 0; }
+        ;;
+      *)
+        FAILED=1; printf 'not ok - %s (%s): exact trust chooser was not observed\n' "$name" "$version" >&2; return 0 ;;
+    esac
+  fi
   wait_ready "$win"; ready_rc=$?
   if [ "$ready_rc" -eq 1 ]; then
     FAILED=1
@@ -150,32 +172,7 @@ check_harness_doorbell() {  # <name>
   printf 'window=%s:%s\nkind=ship\nharness=%s\nbackend=herdr\nendpoint_task_id=%s\nherdr_session=%s\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\nworktree=%s\nproject=%s\n' \
     "$SESSION" "$win" "$name" "$task" "$SESSION" "$workspace" "$tab" "$win" "$play" "$play" > "$home/state/$task.meta"
   body="Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line."
-  if [ "$name" = codex ]; then
-    info=$(fm_backend_herdr_cli "$SESSION" pane process-info --pane "$win") || { FAILED=1; return 0; }
-    if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" python3 - "$info" "$play" "$home/codex-home" "$ROOT/bin/fm-send.sh" "$task" "$body" <<'PY'
-import json, os, pathlib, signal, subprocess, sys
-info, play, codex_home, send, task, body = sys.argv[1:]
-processes = json.loads(info)['result']['process_info']['foreground_processes']
-matches = [p for p in processes if p['name'] == 'codex' and p['argv'][0].split('/')[-1] == 'codex' and p['cwd'] == play]
-assert len(matches) == 1, 'expected one foreground lab Codex'
-pid = matches[0]['pid']
-proc = pathlib.Path('/proc') / str(pid)
-if proc.exists():
-    assert b'CODEX_HOME=' + codex_home.encode() in (proc/'environ').read_bytes().split(b'\0')
-    start = (proc/'stat').read_text().split()[21]
-os.kill(pid, signal.SIGSTOP)
-try:
-    result = subprocess.run([send, task, body], timeout=45)
-finally:
-    if proc.exists():
-        assert (proc/'stat').read_text().split()[21] == start, 'lab PID identity changed'
-    os.kill(pid, signal.SIGCONT)
-sys.exit(result.returncode)
-PY
-    then
-      FAILED=1; printf 'not ok - codex (%s): coalesced fm-send failed\n' "$version" >&2; return 0
-    fi
-  elif ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" "$body" >/dev/null 2>&1; then
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" "$body" >/dev/null 2>&1; then
     FAILED=1
     printf 'not ok - %s (%s): fm-send refused the live steer\n' "$name" "$version" >&2
     fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
@@ -203,23 +200,9 @@ PY
     i=$((i + 1))
   done
   if [ -f "$handled" ] && [ -e "$acted" ]; then
-    if [ "$name" = codex ] && ! python3 - "$home/codex-home" <<'PY'
-import json, pathlib, sys
-messages = []
-for path in pathlib.Path(sys.argv[1]).glob('sessions/**/*.jsonl'):
-    for line in path.read_text().splitlines():
-        event = json.loads(line)
-        p = event.get('payload', {})
-        if event['type'] == 'response_item' and p.get('role') == 'user':
-            messages.extend(c.get('text', '') for c in p.get('content', []) if c.get('type') == 'input_text')
-assert sum(t.startswith(': Firstmate instruction waiting:') for t in messages) == 1, 'notification must become exactly one Codex user message'
-PY
-    then
-      FAILED=1; printf 'not ok - codex (%s): submission count is not one\n' "$version" >&2; return 0
-    fi
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): the doorbell reached a real worker, which acted and acked with the mv"
-    [ "$name" != codex ] || pass "$name ($version): coalesced input submitted once without re-ring or recovery Enter"
+    pass "$name ($version): native prompt submission required no transcript receipt or recovery Enter"
   else
     FAILED=1
     printf 'not ok - %s (%s): doorbell not honored within %ss (acted=%s acked=%s)\n' \
@@ -230,7 +213,7 @@ PY
   fm_backend_kill herdr "$SESSION:$win" 2>/dev/null || true
 }
 
-HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'pi codex'}
+HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'codex traex'}
 for h in $HARNESSES; do
   if command -v "$h" >/dev/null 2>&1; then
     check_harness_doorbell "$h"
