@@ -84,7 +84,7 @@ def _process_start(pid):
         check=True,
         capture_output=True,
         text=True,
-        env={**os.environ, "LC_ALL": "C"},
+        env={**os.environ, "LC_ALL": "C", "TZ": "UTC0"},
     )
     value = result.stdout.strip()
     if not value:

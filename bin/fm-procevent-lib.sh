@@ -721,15 +721,13 @@ fm_procevent_group_alive() {
 # leaderless group created after PID/PGID reuse, so cleanup preserves the claim
 # without signalling the group or starting a replacement.
 fm_procevent_pid_state() {
-  local pid=$1 expected=$2 actual
+  local pid=$1 expected=$2 match=0
   if ! fm_pid_alive "$pid"; then
     fm_procevent_group_alive "$pid" && return 3
     return 1
   fi
-  if actual=$(fm_pid_identity "$pid" 2>/dev/null); then
-    [ "$actual" = "$expected" ] && return 0
-    return 1
-  fi
+  fm_pid_identity_matches "$pid" "$expected" || match=$?
+  [ "$match" -eq 2 ] || return "$match"
   fm_pid_alive "$pid" || { fm_procevent_group_alive "$pid" && return 3; return 1; }
   return 2
 }

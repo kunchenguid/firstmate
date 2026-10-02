@@ -20,6 +20,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/pid-identity-helpers.sh
+. "$ROOT/tests/pid-identity-helpers.sh"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
@@ -564,6 +566,93 @@ unit_stop_ordering() {
   kill "$daemon_pid" 2>/dev/null || true
   wait "$daemon_pid" 2>/dev/null || true
   rm -rf "$st"
+}
+
+# Run <command...> for home <st> from the west zone, with the ps identity path.
+in_west() {  # <st> <command...>
+  local st=$1
+  shift
+  TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$st/no-proc" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# UNIT: a host time-zone change between recording the daemon's lock and
+# reading it, the trigger of the 2026-10-01 lost worker events. An entry from
+# the new zone must still see the live daemon, the turn-end ownership check
+# must still credit it, and the return must still stop it rather than skip it.
+# A record a build before the UTC pin wrote in local time must behave the same.
+# ---------------------------------------------------------------------------
+unit_time_zone_change_keeps_the_live_daemon() {
+  local form st lock marker daemon_pid
+  for form in current legacy; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-daemon.XXXXXX")
+    mkdir -p "$st/state"
+    date '+%s' > "$st/state/.afk"
+    marker="$st/daemon-term"
+    bash -c 'trap "echo term > \"$1\"; exit 0" TERM; while :; do sleep 0.2; done' _ "$marker" &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+    daemon_pid=$!
+    fm_test_wait_exec "$daemon_pid" "while :" || fail "time zone ($form): the fake daemon never started"
+    lock="$st/state/.supervise-daemon.lock"
+    mkdir -p "$lock"
+    printf '%s' "$daemon_pid" > "$lock/pid"
+    fm_test_identity_record "$daemon_pid" "$form" "$FM_TEST_TZ_EAST" "$st/no-proc" > "$lock/pid-identity"
+    # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+    if in_west "$st" bash -c '. "$1"; set +e; daemon_lock_held_by_live_daemon' _ "$START"; then
+      pass "time zone ($form): an entry after a zone change still sees the live daemon"
+    else
+      fail "time zone ($form): an entry after a zone change read the live daemon as dead"
+    fi
+    # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+    if in_west "$st" bash -c '. "$1"; fm_afk_daemon_owns_supervision "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$st/state"; then
+      pass "time zone ($form): the turn-end check still credits the live daemon"
+    else
+      fail "time zone ($form): the turn-end check stopped crediting the live daemon"
+    fi
+    printf 'none\t-\tnative\n' > "$st/state/.afk-daemon-terminal"
+    in_west "$st" "$LAUNCH" stop >/dev/null 2>&1
+    # shellcheck disable=SC2031 # The background daemon writes this shared file; no shell variable is reassigned.
+    if [ "$(cat "$marker" 2>/dev/null || echo missing)" = term ]; then
+      pass "time zone ($form): the return after a zone change stopped the live daemon"
+    else
+      fail "time zone ($form): the return after a zone change skipped the live daemon"
+    fi
+    kill "$daemon_pid" 2>/dev/null || true
+    wait "$daemon_pid" 2>/dev/null || true
+    rm -rf "$st"
+  done
+}
+
+# The launch lock serializes away-mode entry and return under the same identity.
+unit_time_zone_change_keeps_the_launch_lock_owner() {
+  local form st lock owner
+  for form in current legacy; do
+    st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tz-launch.XXXXXX")
+    mkdir -p "$st/state"
+    sleep 600 &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+    owner=$!
+    fm_test_wait_exec "$owner" "sleep 600" || fail "time zone ($form): the launch lock owner never started"
+    lock="$st/state/.afk-launch.lock"
+    mkdir -p "$lock"
+    printf '%s' "$owner" > "$lock/pid"
+    printf '%s' "$(fm_test_identity_record "$owner" "$form" "$FM_TEST_TZ_EAST" "$st/no-proc")" > "$lock/pid-identity"
+    # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+    if in_west "$st" bash -c '. "$1"; set +e; fm_afk_launch_lock_owned' _ "$LAUNCH"; then
+      pass "time zone ($form): the launch lock keeps its live owner across a zone change"
+    else
+      fail "time zone ($form): a zone change made the launch lock's live owner read as gone"
+    fi
+    kill "$owner" 2>/dev/null || true
+    wait "$owner" 2>/dev/null || true
+    # shellcheck disable=SC2016 # The child shell expands its own positional parameters.
+    if in_west "$st" bash -c '. "$1"; set +e; fm_afk_launch_lock_owned' _ "$LAUNCH"; then
+      fail "time zone ($form): the launch lock kept a dead owner"
+    else
+      pass "time zone ($form): the launch lock releases a dead owner"
+    fi
+    rm -rf "$st"
+  done
 }
 
 unit_stop_rejects_reused_pid() {
@@ -1739,6 +1828,8 @@ unit_mode_quiet_daemon_to_away
 unit_mode_garbage_and_legacy_content_reads_away
 unit_stop_ordering
 unit_stop_rejects_reused_pid
+unit_time_zone_change_keeps_the_live_daemon
+unit_time_zone_change_keeps_the_launch_lock_owner
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
 unit_lock_initialization_grace

@@ -122,6 +122,8 @@ _FM_PENDING_REPLY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/n
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-marker-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$_FM_PENDING_REPLY_LIB_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-pid-identity-lib.sh
+. "$_FM_PENDING_REPLY_LIB_DIR/fm-pid-identity-lib.sh"
 # Deliberately undirected: this library consumes no symbols from
 # bin/fm-tmux-lib.sh, so following it under ShellCheck's external-source
 # traversal would expand that graph for zero cross-file checks.
@@ -974,7 +976,7 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
-  sender_identity=$(fm_pending_reply_pid_identity "$sender_pid") || return 1
+  sender_identity=$(fm_pid_identity "$sender_pid") || return 1
   # One fresh, uncached read immediately before firing, under the same
   # per-correlation lock that records the send: a correlated report resolved
   # in between can then never be overwritten by the repost. Lock globals are
@@ -1020,21 +1022,12 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   return 1
 }
 
-fm_pending_reply_pid_identity() {  # <pid>
-  local pid=$1 identity
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
-  [ -n "$identity" ] || return 1
-  printf '%s' "$identity"
-}
-
 fm_pending_reply_sender_alive() {  # <record-path>
-  local rec=$1 pid expected actual
+  local rec=$1 pid expected
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
   [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
-  [ "$actual" = "$expected" ]
+  fm_pid_identity_matches "$pid" "$expected"
 }
 
 fm_pending_reply_finish_recovery() {  # <state-dir> <corr_id> <confirmed|failed>

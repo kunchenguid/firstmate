@@ -207,8 +207,10 @@ fm_herdr_lab_viewer_reason() { # <session>
   printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null
 }
 
+# Read in UTC, as bin/fm-herdr-lab-viewer.py records it, so a host time-zone
+# change cannot disown a live viewer (bin/fm-pid-identity-lib.sh).
 fm_herdr_lab_process_start() { # <pid>
-  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  LC_ALL=C TZ=UTC0 ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 fm_herdr_lab_process_parent() { # <pid>

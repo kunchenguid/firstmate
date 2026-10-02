@@ -95,6 +95,11 @@
 # bin/fm-remote-job-reap-orphans.sh uses it to reap workers that were already
 # orphaned that way.
 
+_FM_REMOTE_JOB_LIB_DIR=${BASH_SOURCE[0]%/*}
+[ "$_FM_REMOTE_JOB_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_REMOTE_JOB_LIB_DIR=.
+# shellcheck source=bin/fm-pid-identity-lib.sh
+. "$_FM_REMOTE_JOB_LIB_DIR/fm-pid-identity-lib.sh"
+
 FM_REMOTE_JOB_LABEL=dev.firstmate.remote-job
 FM_REMOTE_JOB_MAX_BYTES=${FM_REMOTE_JOB_MAX_BYTES:-1048576}
 FM_REMOTE_JOB_QUEUE_TIMEOUT=${FM_REMOTE_JOB_QUEUE_TIMEOUT:-360}
@@ -812,7 +817,7 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
-  [ "$recorded_start" = "$actual_start" ]
+  fm_remote_job_start_matches "$recorded_start" "$actual_start"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -946,13 +951,31 @@ fm_remote_job_worker_ready_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.r
 fm_remote_job_worker_identity_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.identity"; }
 fm_remote_job_worker_lock_path() { printf '%s\n' "$FM_REMOTE_JOB_STATE/worker.lock"; }
 
+# A process start record: lstart read in UTC under the C locale and keyed like
+# fm_pid_identity's ps form (bin/fm-pid-identity-lib.sh), so no host time-zone
+# change makes a live owner look dead. Compare records with
+# fm_remote_job_start_matches, which also reads the local-time records builds
+# before the UTC pin wrote.
 fm_remote_job_process_start() {
   local pid=$1 ps_bin value
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi
-  value=$("$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=$(LC_ALL=C TZ=UTC0 "$ps_bin" -p "$pid" -o lstart= 2>/dev/null) || return 1
+  value=${value#"${value%%[![:space:]]*}"}
+  value=${value%"${value##*[![:space:]]}"}
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  printf '%s\n' "$value"
+  printf 'lstart-utc=%s\n' "$value"
+}
+
+# True when <current>, a fresh fm_remote_job_process_start, names the process
+# the non-empty start record <recorded> was written for.
+fm_remote_job_start_matches() { # <recorded> <current>
+  [ -n "$1" ] || return 1
+  [ "$1" = "$2" ] && return 0
+  case "$2" in
+    lstart-utc=*) fm_pid_identity_legacy_matches "$1" "${2#lstart-utc=}" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_remote_job_process_command() {
@@ -1056,7 +1079,7 @@ fm_remote_job_lock_owner_matches_process() {
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$lock/start" 256) || return 1
   actual_start=$(fm_remote_job_process_start "$pid") || return 1
-  [ "$recorded_start" = "$actual_start" ] || return 1
+  fm_remote_job_start_matches "$recorded_start" "$actual_start" || return 1
   recorded_command=$(fm_remote_job_read_single_line "$lock/command" 8192) || return 1
   actual_command=$(fm_remote_job_process_command "$pid") || return 1
   [ "$recorded_command" = "$actual_command" ] || return 1
@@ -1093,12 +1116,16 @@ fm_remote_job_code_identity() { # <remote-root> <account-home>
   local root=$1 account_home=$2 git_bin root_hash library_hash worker_hash
   root=$(fm_remote_job_canonical_existing_dir "$root") || return 1
   [ -f "$root/bin/fm-remote-job-lib.sh" ] && [ ! -L "$root/bin/fm-remote-job-lib.sh" ] || return 1
+  [ -f "$root/bin/fm-pid-identity-lib.sh" ] && [ ! -L "$root/bin/fm-pid-identity-lib.sh" ] || return 1
   [ -f "$root/bin/fm-remote-job-worker.sh" ] && [ ! -L "$root/bin/fm-remote-job-worker.sh" ] || return 1
   fm_remote_job_compose_operator_path "$account_home" >/dev/null
   git_bin=$(fm_remote_job_operator_tool git 2>/dev/null || true)
   [ -n "$git_bin" ] || return 1
   root_hash=$(printf '%s' "$root" | "$git_bin" hash-object --stdin 2>/dev/null) || return 1
-  library_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-lib.sh" 2>/dev/null) || return 1
+  # The library hash covers the identity library it sources, so a change to
+  # either replaces a worker still running the old definitions.
+  library_hash=$(cat -- "$root/bin/fm-remote-job-lib.sh" "$root/bin/fm-pid-identity-lib.sh" 2>/dev/null \
+    | "$git_bin" hash-object --stdin 2>/dev/null) || return 1
   worker_hash=$("$git_bin" hash-object -- "$root/bin/fm-remote-job-worker.sh" 2>/dev/null) || return 1
   case "$root_hash:$library_hash:$worker_hash" in *[!0-9a-f:]*) return 1 ;; esac
   [ -n "$root_hash" ] && [ -n "$library_hash" ] && [ -n "$worker_hash" ] || return 1

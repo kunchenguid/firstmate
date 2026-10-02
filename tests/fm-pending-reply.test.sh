@@ -526,7 +526,7 @@ test_recovery_attempt_is_never_reinjected() {
   fm_pending_reply_mark_turn_completed "$state" "$live_corr" request
   live_rec=$(fm_pending_reply_path "$state" "$live_corr")
   live_pid=${BASHPID:-$$}
-  live_identity=$(fm_pending_reply_pid_identity "$live_pid") \
+  live_identity=$(fm_pid_identity "$live_pid") \
     || fail "live sender identity should be observable"
   fm_pending_reply_set "$live_rec" recovery_attempted_epoch 2500 || fail "live attempt precommit failed"
   fm_pending_reply_set "$live_rec" recovery_sender_pid "$live_pid" || fail "live sender pid commit failed"
@@ -555,6 +555,43 @@ test_recovery_attempt_is_never_reinjected() {
   [ "$lines" = 1 ] || fail "reconciliation must not call recovery transport, got $lines attempts"
   unset FM_PENDING_REPLY_SEND_HOOK
   pass "recovery attempts reconcile without reinjection"
+}
+
+# A host time-zone change between a recovery sender recording its identity and
+# the next tick must leave that live sender's attempt in progress, whether this
+# build recorded it or a build before the UTC pin recorded it in local time,
+# while a dead sender's attempt still reconciles as unknown delivery.
+test_live_recovery_sender_survives_time_zone_change() {
+  local home state form corr rec sender
+  home=$(setup_parent recovery-time-zone)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=2500
+  for form in current legacy; do
+    sleep 60 &
+    sender=$!
+    fm_test_wait_exec "$sender" "sleep 60" || fail "the $form recovery sender never started"
+    corr=$(fm_pending_reply_create "$home" "$state" hibit "time zone $form")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    fm_pending_reply_mark_turn_completed "$state" "$corr" request
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" recovery_attempted_epoch 2500 || fail "$form attempt precommit failed"
+    fm_pending_reply_set "$rec" recovery_sender_pid "$sender" || fail "$form sender pid commit failed"
+    fm_pending_reply_set "$rec" recovery_sender_identity \
+      "$(fm_test_identity_record "$sender" "$form" "$FM_TEST_TZ_EAST" "$TMP_ROOT/no-proc")" \
+      || fail "$form sender identity commit failed"
+    fm_pending_reply_set "$rec" phase recovery_sending || fail "$form sending phase failed"
+    TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "$form recovery tick failed after a zone change"
+    [ "$(phase_of "$state" "$corr")" = recovery_sending ] \
+      || fail "a zone change made the live $form recovery sender read as gone"
+    kill "$sender" 2>/dev/null || true
+    wait "$sender" 2>/dev/null || true
+    TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$TMP_ROOT/no-proc" fm_pending_reply_tick_one "$state" "$corr" unknown \
+      || fail "$form recovery reconciliation failed"
+    [ "$(phase_of "$state" "$corr")" = escalated ] \
+      || fail "a dead $form recovery sender's attempt did not reconcile as unknown delivery"
+  done
+  pass "a recovery sender keeps its live attempt across a host time-zone change, current or legacy"
 }
 
 test_recovery_reply_resolves_original() {
@@ -2003,6 +2040,7 @@ test_recovery_fresh_status_read_resolves_before_firing
 test_partial_resolve_write_blocks_firing
 test_escalation_grace_measures_from_recovery_turn_completion
 test_recovery_attempt_is_never_reinjected
+test_live_recovery_sender_survives_time_zone_change
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalation_wakes_and_its_close_stays_quiet

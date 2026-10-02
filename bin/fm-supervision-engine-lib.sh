@@ -182,7 +182,7 @@ fm_supervision_host_outcomes_drained() {
 
 # fm_supervision_host_main_key <state-dir>: print the key of the current main
 # session, which changes at every main session start: the session-lock holder,
-# a checksum of its process identity (bin/fm-wake-lib.sh fm_pid_identity), and
+# a checksum of its process identity (bin/fm-pid-identity-lib.sh), and
 # a checksum of its session sidecar, so a later session given a recycled lock
 # pid never shares it. The host keys its engine conversation and broken-session
 # latch to it; the dialog mirror (bin/fm-host-mirror.sh) keys each entry and
@@ -252,13 +252,24 @@ fm_supervision_engine_bin() {
   printf '%s\n' "$bin"
 }
 
-# Print a process's identity (bin/fm-wake-lib.sh fm_pid_identity) on one
-# line, the form the descendant ledger records and compares.
+# Print a process's identity (bin/fm-pid-identity-lib.sh) on one line, the
+# form the descendant ledger and the host records keep.
 _fm_engine_identity() {  # <pid>
   local identity
   identity=$(fm_pid_identity "$1" 2>/dev/null) || return 1
   [ -n "$identity" ] || return 1
   printf '%s\n' "$identity" | tr '\t\n' '  ' | sed 's/ *$//'
+}
+
+# True while <pid> is still the process a non-empty _fm_engine_identity record
+# names, including a record an older build wrote in local time
+# (fm_pid_identity_matches owns that rule).
+_fm_engine_identity_matches() {  # <pid> <recorded>
+  local current
+  [ -n "$2" ] || return 1
+  current=$(_fm_engine_identity "$1") || return 1
+  [ "$current" = "$2" ] && return 0
+  fm_pid_identity_matches "$1" "$2"
 }
 
 # Print "<pid> <ppid>" for every process.
@@ -306,14 +317,13 @@ _fm_engine_snapshot_descendants() {
 # that is still alive under its recorded identity. A recycled pid never
 # matches its recorded identity, so it is never signalled.
 _fm_engine_reap() {
-  local ledger=$1 pid identity current signal survivors i
+  local ledger=$1 pid identity signal survivors i
   [ -s "$ledger" ] || return 0
   for signal in TERM KILL; do
     survivors=0
     while IFS="$(printf '\t')" read -r pid identity; do
       fm_pid_alive "$pid" || continue
-      current=$(_fm_engine_identity "$pid") || continue
-      [ "$current" = "$identity" ] || continue
+      _fm_engine_identity_matches "$pid" "$identity" || continue
       kill "-$signal" "$pid" 2>/dev/null || true
       survivors=$((survivors + 1))
     done < "$ledger"

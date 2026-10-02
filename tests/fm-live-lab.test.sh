@@ -112,8 +112,8 @@ make_lab() {
 # Recorded fixture roots must not share the runner's process group.
 start_group() { perl -e 'setpgrp(0,0); exec @ARGV' "$@" >/dev/null 2>&1 & }
 
-record_pid() {  # <root> <pid>
-  printf 'launch_pid=%s\nlaunch_start=%s\n' "$2" "$(ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
+record_pid() {  # <root> <pid>: the launch record up writes, its start time in UTC
+  printf 'launch_pid=%s\nlaunch_start=%s\n' "$2" "$(TZ=UTC0 ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
 }
 
 lab_tmux() {  # <root> <tmux args...>
@@ -363,11 +363,12 @@ printf '%s\n' "$SIBLING" >> "$TMP_ROOT/pids"
 # The worker spawn failed after keeping its task temp dirs, before its meta.
 rm -f "$CH/state/$WORKER_ID.meta"
 C_TMUX=$(sed -n 's/^tmux_dir=//p' "$C/.fm-live-lab")
-out=$(HOME="$LATER_HOME" "$LIVE_LAB" down "$C" 2>&1)
+# Down runs from a host time zone other than the one up recorded in.
+out=$(HOME="$LATER_HOME" TZ="$FM_TEST_TZ_WEST" "$LIVE_LAB" down "$C" 2>&1)
 expect_code 0 "$?" "down of a clean Claude lab succeeds from a shell with another HOME: $out"
 kill -0 "$STRAY" 2>/dev/null || fail "down leaves unrelated processes opening the lab path alone"
 kill -0 "$STRAY_CHILD" 2>/dev/null || fail "down leaves their descendants alone"
-! kill -0 "$OWNED" 2>/dev/null || fail "down stops recorded launch processes"
+! kill -0 "$OWNED" 2>/dev/null || fail "down stops recorded launch processes, whatever the host time zone"
 kill -0 "$UNRELATED" 2>/dev/null || fail "down signalled an unrelated process outside recorded groups"
 assert_absent "$C" "down removes the lab root"
 kill -0 "$SIBLING" 2>/dev/null || fail "down leaves a sibling root's process running"
