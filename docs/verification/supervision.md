@@ -20,7 +20,7 @@ Relevant output:
 ok - a resurfacing handling successor stays alive and supervises instead of going blind
 ok - OpenCode restores immediate successors before ordered wake delivery
 ok - OpenCode rearms a failed successor during blocked wake delivery
-ok - OpenCode binds recovery retirement to its exact arm
+ok - OpenCode awaits exact replacement readiness after stale recovery
 ```
 
 Native commands and the turn-end guard were verified on 2026-10-01 on Linux with OpenCode 1.18.34:

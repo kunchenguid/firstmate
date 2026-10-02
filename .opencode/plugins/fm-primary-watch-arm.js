@@ -291,7 +291,7 @@ function confirmHandlingDeliveryWithRetry(paths, recoveryArm, recovery) {
 
 async function deliverActionableWake(paths, client, sessionID, message, recoveryArm, recovery) {
   if (recovery) {
-    const confirmed = confirmHandlingDeliveryWithRetry(paths, recoveryArm, recovery);
+    let confirmed = confirmHandlingDeliveryWithRetry(paths, recoveryArm, recovery);
     if (!confirmed.ok) {
       if (recovery.watcherPid) {
         try {
@@ -300,8 +300,15 @@ async function deliverActionableWake(paths, client, sessionID, message, recovery
           await retireArm(recoveryArm);
         }
       }
-      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
-      return;
+      const replacement = await restoreContinuity(paths, sessionID, client, String(recoveryArm?.pid ?? ""));
+      if (replacement.recovery) {
+        confirmed = confirmHandlingDeliveryWithRetry(paths, replacement.recoveryArm, replacement.recovery);
+      }
+      if (!confirmed.ok) {
+        const detail = replacement.failure ? `${confirmed.detail}\n${replacement.failure}` : confirmed.detail;
+        await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${detail}`));
+        return;
+      }
     }
   }
   await sendPrompt(paths, client, sessionID, wakePrompt(message));
@@ -350,7 +357,7 @@ function restorationFailure(status) {
   return `watcher: FAILED - OpenCode could not verify a ready successor watcher (${status || "idle"})`;
 }
 
-async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
+async function restoreContinuity(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
@@ -475,7 +482,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     if (classification.kind === "actionable") {
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const restoration = restoreContinuity(paths, sessionID, client, predecessor);
       armRestoration.set(armChild, restoration);
       void restoration.catch(() => {});
       queueDelivery(paths, client, sessionID, async () => {

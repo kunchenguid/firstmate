@@ -235,6 +235,15 @@ try {
   process.kill(replacementPid, 0);
   if (prompts.length !== 1) throw new Error("first wake delivery was not blocked");
   releaseFirst();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  if (prompts.length !== 1) {
+    throw new Error("queued wake delivered before replacement readiness");
+  }
+  process.kill(replacementPid, 0);
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 4) {
+    throw new Error("stale recovery retired the replacement arm");
+  }
+  writeFileSync(`${home}/state/release-fourth-arm`, "ready\n");
   const queuedDeadline = Date.now() + 5000;
   while (Date.now() < queuedDeadline && prompts.length < 2) {
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -243,13 +252,7 @@ try {
     throw new Error(`queued wake was not delivered in order: ${JSON.stringify(prompts)}`);
   }
   process.kill(replacementPid, 0);
-  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 4) {
-    throw new Error("stale recovery retired the replacement arm");
-  }
-  writeFileSync(`${home}/state/release-fourth-arm`, "ready\n");
-  await new Promise(resolve => setTimeout(resolve, 100));
-  process.kill(replacementPid, 0);
-  console.log("stale recovery left the exact replacement arm alive");
+  console.log("stale recovery awaited the exact replacement arm readiness");
 } catch (error) {
   releaseFirst();
   console.error(error);
@@ -264,7 +267,7 @@ JS
   )
   status=$?
   expect_code 0 "$status" "OpenCode must not retire a replacement for a stale recovery generation: $out"
-  pass "OpenCode binds recovery retirement to its exact arm"
+  pass "OpenCode awaits exact replacement readiness after stale recovery"
 }
 
 install_pi_watch_extension_fixture() {
