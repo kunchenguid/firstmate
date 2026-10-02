@@ -104,12 +104,12 @@ fm_is_ai_attribution_line() {
   esac
   name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
   case "$email" in
-  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com)
+  noreply@anthropic.com | cursoragent@* | noreply@openai.com | copilot@github.com | worker@firstmate.local)
     return 0
     ;;
   esac
   case "$name" in
-  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai)
+  cursor | 'cursor agent' | claude | 'claude code' | 'github copilot' | copilot | codex | chatgpt | gemini | 'google gemini' | grok | openai | firstmate-worker | 'firstmate worker')
     return 0
     ;;
   esac
