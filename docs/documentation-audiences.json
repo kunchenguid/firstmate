@@ -575,6 +575,10 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/whimsical-board/SKILL.md",
+      "audience": "agent-runtime"
     }
   ]
 }

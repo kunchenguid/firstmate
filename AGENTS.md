@@ -404,6 +404,7 @@ The skill owns the guarded fleet update and restart procedure; it never touches 
 
 Skill descriptions are the always-loaded trigger index; load each agent-only skill only at its stated trigger.
 Load `agent-skill-trigger-index` only when auditing or maintaining the complete trigger index.
+Load `whimsical-board` before creating or revising a Whimsical board.
 
 ## 14. Relay
 
