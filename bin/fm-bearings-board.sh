@@ -78,6 +78,9 @@
 # that date with a UTC timestamp) the template orders the section by, newest
 # first; a row with no comparable date keeps its payload order after every dated
 # row. Anything else in that field refuses rather than sorting on garbage.
+# A Charted Next row's `title` and `reason` are the full, untruncated text -
+# the composer fills them from the snapshot's `--fields gate-text` columns -
+# and the template wraps them rather than clipping either one.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
