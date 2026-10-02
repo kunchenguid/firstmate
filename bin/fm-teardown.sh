@@ -281,6 +281,25 @@
 #     roots are unique per task and never
 #     shared, so this can never reach another task's or the primary's
 #     processes. Idempotent: nothing left to find is a silent no-op.
+#     The one exemption is the pool's own return. A crew slot is held by a
+#     `treehouse get` process outside it whose subshell runs the worker; once
+#     the reap ends that subshell, the holder resets the slot through git
+#     steps whose working directory is the slot (treehouse v3.1.0: checkout
+#     --detach, status, read-tree --reset -u <default>, clean -fd, then its own
+#     HEAD move). Reaping those steps as leaks cut the reset off: the reap
+#     outlasted its passes and refused, and a cut after read-tree left the
+#     index and tracked files at the default branch with HEAD still on the task
+#     commit, refusing every retry as uncommitted changes (observed 2026-09-22
+#     to 09-28 after large merged changes; small resets finished between
+#     scans). So a git process started directly by a treehouse holder outside
+#     the task roots, and everything below it, is never signalled: the reap
+#     waits for the holder to exit (FM_TEARDOWN_POOL_RETURN_WAIT_SECS, default
+#     60), moves on once a live holder has run no step for
+#     FM_TEARDOWN_POOL_RETURN_QUIET_SECS (default 2; it is idle, for example
+#     at its own clean-and-return prompt), and refuses rather than cut steps
+#     still running at the deadline. A copy an earlier cut already left in that
+#     state is recognized by the landed-work safety check
+#     (worktree_is_interrupted_pool_reset) and finished by the pool return.
 #   Fix 3 - sweep abandoned remote job workers. A remote job worker started
 #     from a worktree's own bin/ outlives that worktree's removal without
 #     being reachable by Fix 2, because its working directory is wherever it
@@ -1864,8 +1883,71 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Untracked paths firstmate itself leaves in a task copy, which never count as
+# the worker's uncommitted work.
+TEARDOWN_IGNORABLE_UNTRACKED='(\.claude/|\.fm-(grok|kimi)-turnend$)'
+
+# A pool reset cut off before it moved HEAD (see script header, Fix 2) leaves
+# HEAD detached on the task commit (the return detaches before it resets)
+# while the slot's index and tracked files hold a default-branch commit
+# exactly, so every entry reads as staged. That content is on the default
+# branch by construction, so it is not uncommitted work, and HEAD's own
+# commits still face the landed-work checks below. The matched commit must
+# also already contain HEAD's work (merging HEAD into it changes nothing), so
+# it is at or after the task's landing: a staged rollback to a default-branch
+# tree from before the landing is real work. Deliberate limitation: if the
+# default branch reverts or alters the merged task's changes before teardown,
+# a genuine interrupted reset fails this contains-HEAD's-work check and plain
+# teardown refuses; that refusal is safe (the captain's --force finishes it)
+# and is the accepted price for never discarding a staged rollback to a
+# historical default-branch tree. An attached HEAD, an untracked
+# file, a worktree edit, a conflict, or an index matching no such commit in
+# the default branch's recent first-parent history is real work: no match.
+# The remote-tracking default is always a candidate; local-only work also
+# lands on the local default branch, so that is a candidate only there.
+INTERRUPTED_RESET_REF=
+worktree_is_interrupted_pool_reset() {  # <non-ignorable porcelain entries>
+  local entries=$1 line others name tree ref commit merged
+  local -a refs=()
+  INTERRUPTED_RESET_REF=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      ?' '*) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$entries
+EOF
+  ! git -C "$WT" symbolic-ref --quiet HEAD >/dev/null 2>&1 || return 1
+  git -C "$WT" diff --quiet -- 2>/dev/null || return 1
+  others=$(git -C "$WT" ls-files --others --exclude-standard 2>/dev/null) || return 1
+  others=$(printf '%s\n' "$others" | grep -vE "^$TEARDOWN_IGNORABLE_UNTRACKED" | sed '/^$/d' || true)
+  [ -z "$others" ] || return 1
+  tree=$(git -C "$WT" write-tree 2>/dev/null) || return 1
+  name=$(default_branch) || return 1
+  if git -C "$WT" rev-parse --quiet --verify "refs/remotes/origin/$name" >/dev/null 2>&1; then
+    refs+=("refs/remotes/origin/$name")
+  fi
+  if [ "$MODE" = local-only ] \
+     && git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    refs+=("refs/heads/$name")
+  fi
+  for ref in "${refs[@]+"${refs[@]}"}"; do
+    for commit in $(git -C "$WT" log --first-parent --format='%T %H' -n 1000 "$ref" -- 2>/dev/null \
+                      | awk -v tree="$tree" '$1 == tree { print $2 }'); do
+      merged=$(git -C "$WT" merge-tree --write-tree "$commit" HEAD 2>/dev/null) || continue
+      if [ "$(printf '%s\n' "$merged" | head -1)" = "$tree" ]; then
+        INTERRUPTED_RESET_REF=$ref
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty_entries dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1880,7 +1962,12 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  dirty_entries=$(printf '%s\n' "$dirty_raw" | grep -vE "^\\?\\? $TEARDOWN_IGNORABLE_UNTRACKED" || true)
+  dirty=$(printf '%s\n' "$dirty_entries" | sed '/^$/d' | head -1)
+  if [ -n "$dirty" ] && worktree_is_interrupted_pool_reset "$dirty_entries"; then
+    echo "teardown: $WT holds a pool reset cut off before it moved HEAD (index and tracked files match $INTERRUPTED_RESET_REF exactly, nothing untracked); letting the pool return finish it" >&2
+    dirty=
+  fi
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2126,6 +2213,142 @@ $dir_pids"
   TASK_PIDS=$(printf '%s\n' "$pids" | grep -E '^[0-9]+$' | sort -un || true)
 }
 
+task_process_parent() {  # <pid>
+  local ppid
+  ppid=$(ps -o ppid= -p "$1" 2>/dev/null) || return 1
+  ppid=$(printf '%s' "$ppid" | tr -d '[:space:]')
+  case "$ppid" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s\n' "$ppid"
+}
+
+task_process_name() {  # <pid>
+  local comm
+  comm=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
+  comm=$(fm_nm_trim "$comm")
+  [ -n "$comm" ] || return 1
+  printf '%s\n' "${comm##*/}"
+}
+
+# Fix 2's pool-return exemption (see script header). Walks <pid>'s ancestry to
+# the nearest treehouse process that is not itself under the task roots - the
+# `treehouse get` holder that opened the worker's subshell - and prints it as
+# "<holder-pid> <step>", where step is 1 only when the ancestor directly below
+# the holder is git: that is the holder's own return of the slot. The worker's
+# subshell and everything the worker started descend through a non-git child
+# and stay reapable. Returns non-zero when no such holder is an ancestor.
+task_pool_holder_of() {  # <pid> <root-pids>
+  local pid=$1 roots=$2 parent depth=0
+  while [ "$depth" -lt 32 ]; do
+    parent=$(task_process_parent "$pid") || return 1
+    case "$parent" in 0|1) return 1 ;; esac
+    if [ "$(task_process_name "$parent" 2>/dev/null)" = treehouse ] \
+       && ! task_pid_list_contains "$roots" "$parent"; then
+      if [ "$(task_process_name "$pid" 2>/dev/null)" = git ]; then
+        printf '%s 1\n' "$parent"
+      else
+        printf '%s 0\n' "$parent"
+      fi
+      return 0
+    fi
+    pid=$parent
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# Pool holders seen by this teardown's scans, as "<pid> <identity>" lines, and
+# the pids of the latest scan that are the holders' own return steps.
+TASK_POOL_HOLDERS=
+TASK_POOL_STEPS=
+# Record every pool holder above the scanned pids and split out its return
+# steps, which the reaper never signals.
+task_pool_classify() {  # <pids>
+  local pids=$1 pid holder step identity
+  TASK_POOL_STEPS=
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    read -r holder step <<EOF
+$(task_pool_holder_of "$pid" "$pids" || true)
+EOF
+    [ -n "${holder:-}" ] || continue
+    if ! printf '%s\n' "$TASK_POOL_HOLDERS" | grep -q "^$holder "; then
+      if identity=$(task_process_identity "$holder"); then
+        TASK_POOL_HOLDERS="$TASK_POOL_HOLDERS$holder $identity
+"
+      fi
+    fi
+    if [ "$step" = 1 ]; then
+      TASK_POOL_STEPS="$TASK_POOL_STEPS$pid
+"
+    fi
+  done <<EOF
+$pids
+EOF
+}
+
+task_pool_holder_alive() {
+  local holder identity
+  while read -r holder identity; do
+    [ -n "$holder" ] || continue
+    task_process_identity_matches "$holder" "$identity" && return 0
+  done <<EOF
+$TASK_POOL_HOLDERS
+EOF
+  return 1
+}
+
+# Once the worker's subshell is gone, its treehouse holder resets the slot with
+# git steps that run inside it. Wait for that return to finish rather than cut
+# it off: return 0 when every holder has exited, or when a live holder has run
+# no step for FM_TEARDOWN_POOL_RETURN_QUIET_SECS (it is idle, for example at
+# its own prompt, and teardown's own return handles the slot); return 1 when
+# the scan fails; return 2 when steps are still running at
+# FM_TEARDOWN_POOL_RETURN_WAIT_SECS, leaving them to finish. The quiet window
+# only has to span the gaps between steps: treehouse runs its return steps
+# back to back, and a slow step keeps a live step process under the slot.
+POOL_RETURN_WAIT_SECS=${FM_TEARDOWN_POOL_RETURN_WAIT_SECS:-60}
+case "$POOL_RETURN_WAIT_SECS" in ''|*[!0-9]*) POOL_RETURN_WAIT_SECS=60 ;; esac
+POOL_RETURN_QUIET_SECS=${FM_TEARDOWN_POOL_RETURN_QUIET_SECS:-2}
+case "$POOL_RETURN_QUIET_SECS" in ''|*[!0-9]*) POOL_RETURN_QUIET_SECS=2 ;; esac
+wait_for_pool_return() {  # <dir>...
+  local deadline last_step reported=0
+  [ -n "$TASK_POOL_HOLDERS" ] || return 0
+  deadline=$((SECONDS + POOL_RETURN_WAIT_SECS))
+  last_step=$SECONDS
+  while task_pool_holder_alive; do
+    task_pids_under_roots "$@" || return 1
+    task_pool_classify "$TASK_PIDS"
+    if [ -n "$TASK_POOL_STEPS" ]; then
+      last_step=$SECONDS
+      if [ "$reported" = 0 ]; then
+        echo "teardown: waiting for treehouse's own return of the worktree for $ID to finish" >&2
+        reported=1
+      fi
+      [ "$SECONDS" -lt "$deadline" ] || return 2
+    else
+      [ $((SECONDS - last_step)) -lt "$POOL_RETURN_QUIET_SECS" ] || return 0
+    fi
+    sleep 0.2
+  done
+  return 0
+}
+
+pool_return_wait_or_refuse() {  # <label> <dir>...
+  local label=$1 rc=0
+  shift
+  wait_for_pool_return "$@" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      echo "REFUSED: treehouse is still returning the $label for $ID after ${POOL_RETURN_WAIT_SECS}s; left its reset running rather than cut it off. Retry teardown once it finishes." >&2
+      ;;
+    *)
+      echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
+      ;;
+  esac
+  return 1
+}
+
 reap_task_backend_process_group() {  # <label>
   local label=$1 leader leader_start pgid current_pgid own_pgid
   if [ "$BACKEND" != tmux ]; then
@@ -2185,16 +2408,19 @@ reap_task_worktree_processes() {  # <label> <dir>...
     return 0
   fi
   while [ "$pass" -le "$max_passes" ]; do
+    pool_return_wait_or_refuse "$label" "$@" || return 1
     if ! task_pids_under_roots "$@"; then
       echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
       return 1
     fi
     pids=$TASK_PIDS
     [ -n "$pids" ] || return 0
+    task_pool_classify "$pids"
     tracked_pids=()
     tracked_identities=()
     while IFS= read -r pid; do
       [ -n "$pid" ] || continue
+      task_pid_list_contains "$TASK_POOL_STEPS" "$pid" && continue
       if ! identity=$(task_process_identity "$pid"); then
         if ! task_pids_under_roots "$@"; then
           echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
@@ -2220,7 +2446,7 @@ EOF
       return 1
     fi
     current_pids=$TASK_PIDS
-    echo "teardown: reaping leaked $label process(es) for $ID: $(printf '%s' "$pids" | tr '\n' ' ')" >&2
+    echo "teardown: reaping leaked $label process(es) for $ID: ${tracked_pids[*]}" >&2
     for i in "${!tracked_pids[@]}"; do
       pid=${tracked_pids[$i]}
       identity=${tracked_identities[$i]}
@@ -2264,6 +2490,7 @@ EOF
     fi
     pass=$((pass + 1))
   done
+  pool_return_wait_or_refuse "$label" "$@" || return 1
   if ! task_pids_under_roots "$@"; then
     echo "REFUSED: cannot determine leaked processes under ${TASK_PIDS_FAILED_DIR:-<missing>} for $ID (lsof failed); preserving the worktree/tasktmp for manual inspection or retry." >&2
     return 1

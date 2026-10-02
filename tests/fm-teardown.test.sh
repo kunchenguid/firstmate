@@ -53,6 +53,12 @@
 #   (w) index.lock mtime read failure                         -> lock kept, REFUSE
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
+#
+# Also covers the pool's own return (bin/fm-teardown.sh header, Fix 2):
+#   (z1) treehouse holder resetting the slot during the reap   -> reset not cut off, ALLOW
+#   (z2) idle treehouse holder outside the task roots          -> not signalled, ALLOW
+#   (z3) landed copy left by a reset cut off before HEAD moved -> ALLOW without --force
+#   (z4) that shape plus untracked, edited, staged, or unlanded work -> REFUSE
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -4073,6 +4079,207 @@ EOF
   pass "a process exiting during identity lookup does not block teardown"
 }
 
+# Emulate the treehouse slot holder a crew pane runs: a process named
+# treehouse, outside the task roots, whose child subshell sits in the task
+# worktree. In reset mode it returns the slot once that subshell exits, the
+# way `treehouse get` v3.1.0 does - git steps run inside the slot (detach,
+# read-tree to the default branch, a clean slowed so a reaper scan overlaps
+# it, then the HEAD move) - and writes holder.done only when every step
+# succeeded. In idle mode it runs no step, as when it waits at its own
+# clean-and-return prompt. Echoes the holder pid.
+start_pool_holder() {  # <case_dir> <reset|idle>
+  local case_dir=$1 mode=$2
+  mkdir -p "$case_dir/holderbin"
+  # A symlink, not a copy: the process then carries the treehouse name on
+  # both Linux and macOS, where a copied platform bash is killed at exec.
+  ln -s "$(command -v bash)" "$case_dir/holderbin/treehouse"
+  # shellcheck disable=SC2016 # the holder script expands its own arguments
+  ( cd "$case_dir" && exec "$case_dir/holderbin/treehouse" -c '
+      wt=$1 mode=$2 done=$3
+      ( cd "$wt" && exec sleep 300 ) &
+      wait "$!"
+      if [ "$mode" = idle ]; then
+        sleep 300
+        exit 0
+      fi
+      git -C "$wt" checkout -q --detach || exit 1
+      git -C "$wt" read-tree --reset -u refs/remotes/origin/main || exit 1
+      git -C "$wt" -c alias.slowclean="!sleep 4 && git clean -fdq" slowclean || exit 1
+      git -C "$wt" checkout -q --detach refs/remotes/origin/main || exit 1
+      printf "returned\n" > "$done"
+    ' holder "$case_dir/wt" "$mode" "$case_dir/holder.done" ) >/dev/null 2>&1 &
+  printf '%s\n' "$!"
+}
+
+# Landed squash-merged work whose default branch then moved on, the shape a
+# merged task's copy has when teardown runs.
+land_merged_work_then_move_main() {  # <case_dir>
+  local case_dir=$1
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  land_on_origin_main "$case_dir" other.txt "another merged change"
+  git -C "$case_dir/wt" fetch -q origin
+}
+
+test_pool_holder_return_is_not_cut_off() {
+  local case_dir rc holder subshell
+  case_dir=$(make_case pool-holder-return)
+  write_meta "$case_dir" no-mistakes ship
+  land_merged_work_then_move_main "$case_dir"
+  holder=$(start_pool_holder "$case_dir" reset)
+  sleep 0.5
+  subshell=$(pgrep -P "$holder" sleep || true)
+  [ -n "$subshell" ] || { kill -KILL "$holder" 2>/dev/null; fail "pool-holder-return: holder subshell did not start"; }
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$holder" 2>/dev/null || break
+    sleep 1
+  done
+  kill -KILL "$holder" 2>/dev/null || true
+
+  expect_code 0 "$rc" "pool-holder-return: teardown should complete"
+  ! kill -0 "$subshell" 2>/dev/null || fail "pool-holder-return: the worker subshell survived teardown"
+  assert_present "$case_dir/holder.done" \
+    "pool-holder-return: teardown cut the pool's own return of the slot off"
+  assert_equals "$(git -C "$case_dir/wt" rev-parse refs/remotes/origin/main)" \
+    "$(git -C "$case_dir/wt" rev-parse HEAD)" "pool-holder-return: the slot HEAD was not moved to the default branch"
+  assert_equals "" "$(git -C "$case_dir/wt" status --porcelain)" \
+    "pool-holder-return: the slot was left half reset"
+  assert_grep "waiting for treehouse's own return" "$case_dir/stderr" \
+    "pool-holder-return: teardown did not report waiting for the pool return"
+  pass "the reaper lets the treehouse holder's own return of the slot finish instead of reaping its git steps"
+}
+
+test_idle_pool_holder_does_not_block_teardown() {
+  local case_dir rc holder subshell alive=0
+  case_dir=$(make_case pool-holder-idle)
+  write_meta "$case_dir" no-mistakes ship
+  land_merged_work_then_move_main "$case_dir"
+  holder=$(start_pool_holder "$case_dir" idle)
+  sleep 0.5
+  subshell=$(pgrep -P "$holder" sleep || true)
+  [ -n "$subshell" ] || { kill -KILL "$holder" 2>/dev/null; fail "pool-holder-idle: holder subshell did not start"; }
+
+  rc=0
+  FM_TEARDOWN_POOL_RETURN_WAIT_SECS=30 \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if kill -0 "$holder" 2>/dev/null; then alive=1; fi
+  pkill -KILL -P "$holder" 2>/dev/null || true
+  kill -KILL "$holder" 2>/dev/null || true
+
+  expect_code 0 "$rc" "pool-holder-idle: teardown should complete"
+  ! kill -0 "$subshell" 2>/dev/null || fail "pool-holder-idle: the worker subshell survived teardown"
+  [ "$alive" = 1 ] || fail "pool-holder-idle: teardown signalled the holder outside the task roots"
+  assert_no_grep "REFUSED" "$case_dir/stderr" "pool-holder-idle: an idle holder made teardown refuse"
+  pass "an idle treehouse holder outside the task roots neither blocks teardown nor is signalled"
+}
+
+# The state a cut-off pool return leaves: HEAD detached on the landed task
+# commit while the index and tracked files already hold the default branch.
+# The fake pool return records each call in treehouse.log and resets the slot
+# the way `treehouse return --force` does: HEAD detached at the default branch
+# with the index and tracked files reset to it and untracked files cleaned.
+setup_interrupted_pool_reset() {  # <case_dir> [<index-commit>]
+  local case_dir=$1 index=${2:-refs/remotes/origin/main}
+  git -C "$case_dir/wt" checkout -q --detach
+  git -C "$case_dir/wt" read-tree --reset -u "$index"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$case_dir/treehouse.log'
+slot=\${!#}
+git -C "\$slot" checkout -q --detach
+git -C "\$slot" reset -q --hard refs/remotes/origin/main
+git -C "\$slot" clean -qfd
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_interrupted_pool_reset_is_finished_without_force() {
+  local case_dir rc
+  case_dir=$(make_case interrupted-pool-reset)
+  write_meta "$case_dir" no-mistakes ship
+  land_merged_work_then_move_main "$case_dir"
+  setup_interrupted_pool_reset "$case_dir"
+  # The default branch keeps moving while the copy sits in this state.
+  land_on_origin_main "$case_dir" later.txt "a later merged change"
+  git -C "$case_dir/wt" fetch -q origin
+  [ -n "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "interrupted-pool-reset: fixture did not reproduce the staged-change shape"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+  expect_code 0 "$rc" "interrupted-pool-reset: teardown should finish the cut-off reset without --force"
+  assert_grep "cut off before it moved HEAD" "$case_dir/stderr" \
+    "interrupted-pool-reset: teardown did not name the interrupted reset"
+  assert_present "$case_dir/treehouse.log" \
+    "interrupted-pool-reset: teardown did not hand the slot to the pool return"
+  [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$(git -C "$case_dir/wt" rev-parse refs/remotes/origin/main)" ] \
+    || fail "interrupted-pool-reset: the slot HEAD was not reset to the default branch"
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "interrupted-pool-reset: the slot was left dirty after the pool return"
+  pass "a pool reset cut off before it moved HEAD is finished by a plain teardown"
+}
+
+test_interrupted_pool_reset_shape_never_hides_real_work() {
+  local variant case_dir rc head
+  for variant in untracked-file worktree-edit staged-edit hidden-untracked unlanded-head historical-rollback; do
+    case_dir=$(make_case "interrupted-reset-$variant")
+    write_meta "$case_dir" no-mistakes ship
+    if [ "$variant" = unlanded-head ]; then
+      wt_commit_file "$case_dir" feature.txt hello "add feature"
+      land_on_origin_main "$case_dir" other.txt "another merged change"
+      git -C "$case_dir/wt" fetch -q origin
+    else
+      land_merged_work_then_move_main "$case_dir"
+    fi
+    if [ "$variant" = historical-rollback ]; then
+      # A staged rollback to the default branch's tree from before the task
+      # landed matches its history but does not contain HEAD's work.
+      setup_interrupted_pool_reset "$case_dir" refs/remotes/origin/main~2
+    else
+      setup_interrupted_pool_reset "$case_dir"
+    fi
+    case "$variant" in
+      untracked-file)
+        printf '%s\n' "new work" > "$case_dir/wt/notes.txt"
+        ;;
+      worktree-edit)
+        printf '%s\n' "edited" > "$case_dir/wt/other.txt"
+        ;;
+      staged-edit)
+        printf '%s\n' "edited" > "$case_dir/wt/other.txt"
+        git -C "$case_dir/wt" add other.txt
+        ;;
+      hidden-untracked)
+        git -C "$case_dir/wt" config status.showUntrackedFiles no
+        printf '%s\n' "new work" > "$case_dir/wt/notes.txt"
+        ;;
+    esac
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+
+    expect_code 1 "$rc" "interrupted-reset-$variant: teardown should refuse"
+    assert_grep "uncommitted changes present" "$case_dir/stderr" \
+      "interrupted-reset-$variant: refusal did not cite uncommitted changes"
+    assert_no_grep "cut off before it moved HEAD" "$case_dir/stderr" \
+      "interrupted-reset-$variant: real work was recognized as an interrupted reset"
+    [ "$(git -C "$case_dir/wt" rev-parse HEAD)" = "$head" ] \
+      || fail "interrupted-reset-$variant: refusal moved HEAD"
+    [ -e "$case_dir/state/task-x1.meta" ] \
+      || fail "interrupted-reset-$variant: refusal erased the durable task record"
+    assert_absent "$case_dir/treehouse.log" "interrupted-reset-$variant: refusal returned the slot"
+    if [ "$variant" = hidden-untracked ]; then
+      assert_present "$case_dir/wt/notes.txt" "interrupted-reset-$variant: refusal lost the untracked file"
+    fi
+  done
+  pass "the interrupted-reset recognition refuses untracked, edited, staged-beyond-default, unlanded, and rolled-back work"
+}
+
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4392,3 +4599,7 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_pool_holder_return_is_not_cut_off
+test_idle_pool_holder_does_not_block_teardown
+test_interrupted_pool_reset_is_finished_without_force
+test_interrupted_pool_reset_shape_never_hides_real_work
