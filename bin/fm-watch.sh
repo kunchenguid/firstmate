@@ -1504,8 +1504,8 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # can be absorbed this way: the plain non-terminal path, and the
 # stale_is_terminal-overridden path (a captain-relevant status-log line that an
 # active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
-# the dead-record probe (wedge_dead_record) run ONLY here, inside the
+# The dead-record probe (wedge_dead_record), wait-evidence consult
+# (wedge_wait_evidence), and worktree write probe run ONLY here, inside the
 # at-threshold branch that is about to escalate: at most one each per window per
 # STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
 # wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
@@ -1531,15 +1531,22 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fm_epoch_seconds_to age
       age=$(( age - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # A captain hold suppresses repeat wedge alarms, not proof that the
+        # endpoint is gone. Check death first so a held task can never conceal
+        # a failed agent.
+        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
+          return 0
+        fi
+        if captain_call_stale_bound "$(window_key "$win")" "$task"; then
+          triage_log "absorbed $label (open captain hold): $win"
+          return 0
+        fi
         if evidence=$(wedge_wait_evidence "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
-          return 0
-        fi
-        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1801,22 +1808,17 @@ pause_state_class() {  # <window> <task>
 # a wait this watcher cannot prove is not a wait.
 #
 # The read costs one subprocess and runs only where the watcher is about to
-# alarm, so at most once per distinct stale hash per window, beside the crew-state
-# read the same paths already pay. The secondmate stale gate deliberately runs
-# before this bound and admits only status-declared waits: a backlog-only hold
-# whose mate still says `working:` or `done:` does not reach this read. Reaching
-# it would put backlog reads into windows deliberately skipped on ordinary polls.
+# alarm, beside the crew-state read the same paths already pay. The secondmate
+# stale gate deliberately runs before this guard and admits only status-declared
+# waits: a backlog-only hold whose mate still says `working:` or `done:` does not
+# reach this read. Reaching it would put backlog reads into windows deliberately
+# skipped on ordinary polls.
 STALE_WAIT_DECLARATION=
-
-CAPTAIN_CALL_IDENTITY=
 
 task_captain_call_open() {  # <task>
   local task=$1
-  CAPTAIN_CALL_IDENTITY=
   [ -n "$task" ] || return 1
-  CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
-    open "$task" --identity 2>/dev/null) || return 1
-  return 0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" >/dev/null 2>&1
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log
@@ -1825,18 +1827,6 @@ task_captain_call_open() {  # <task>
 # silence of the one before it.
 stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
-}
-
-# The same scope for a captain call, carrying the CALL's own lifecycle identity
-# beside the status signature. The status log is not enough on its own: a task
-# can be answered with `--release` and held again as a genuinely different call
-# without any status append, and binding the throttle to the signature alone let
-# the second call inherit the first one's silence and absorbed its first sight.
-# That first sight is the one alarm this bound must never swallow - a decision
-# waiting on the captain that is never surfaced is invisible, where a delivery
-# announced twice is merely noise.
-captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -1848,14 +1838,6 @@ stale_wait_throttled() {  # <window-key> <declaration>
     && [ "$(age_of "$throttle")" -lt "$PAUSE_RESURFACE_SECS" ]
 }
 
-# The same bound, for a stale window whose last line IS captain-relevant. That
-# line is real and its first sight must still reach the captain, but a delivery
-# they are already holding has nothing new to say on the next pane tick.
-# Sets STALE_WAIT_DECLARATION to the scope this sighting is bound to, and leaves
-# it EMPTY when no open captain call bounds it, so an unheld delivery, a blocker,
-# and a failure alarm exactly as they do today.
-# Returns 0 to absorb this sighting; 1 to alarm, after which the caller records
-# the throttle through stale_wait_record once its own wake append has succeeded.
 # Record a fired wake against the bounded cadence, and ONLY after that wake was
 # durably appended. A marker written ahead of the append outlives a failed one:
 # the watcher exits with no wake queued, and the next sighting reads the fresh
@@ -1866,19 +1848,20 @@ stale_wait_record() {  # <window-key>
   printf '%s' "$STALE_WAIT_DECLARATION" > "$STATE/.paused-resurfaced-$1"
 }
 
-# Bound a due stale alarm for an ordinary crew task held for the captain.
+# Suppress a due stale alarm for an ordinary crew task held for the captain.
 # Backlog-only secondmate holds are outside this guard because the earlier gate
 # preserves their no-backlog-read hot path.
-# While the away-posture record exists the bound is absolute: an open captain
-# call is never rechecked, whatever the throttle says, because nobody is there
-# to answer it and the return brief lists it.
+# The backlog is the authoritative hold record, so this must not depend on a
+# status-line declaration the held worker can no longer write. A successful read
+# suppresses every stale and wedge alarm while the hold remains open; a release
+# makes the next due check fall through to ordinary supervision without restarting
+# the watcher. A failed read deliberately falls through too: an unproven hold
+# must never silence an alarm.
 captain_call_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2
+  local task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
-  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
-  away_record_present && return 0
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+  return 0
 }
 
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
@@ -1931,10 +1914,11 @@ surface_nonterminal_stale() {  # <window> <hash>
       stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
     fi
   elif captain_call_stale_bound "$key" "$task"; then
-    bounded=0
-    throttled=0
-  elif [ -n "$STALE_WAIT_DECLARATION" ]; then
-    bounded=0
+    # Leave the hash unseen while the hold is open. That preserves the ordinary
+    # stale path for the very next poll after release, even if the pane did not
+    # change, and does not delete an already-overdue wedge timer.
+    triage_log "absorbed non-terminal stale (open captain hold): $win"
+    return 0
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -3079,15 +3063,11 @@ EOF
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
             elif captain_call_stale_bound "$key" "$task"; then
               # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further NEW pane hashes with
-              # the same status-log state have nothing to add while they are
-              # deciding. Only that new-hash repetition is bounded - the first
-              # sight already alarmed, a new hash inside the window is absorbed,
-              # and a new hash after it alarms again. A stable hash stays as inert
-              # here as it already was after a first terminal alarm.
-              printf '%s' "$h" > "$sf"
-              rm -f "$ssf"
-              clear_write_tracking "$key"
+              # the captain already holds this work: every stale/wedge sighting
+              # while that hold stays open is absorbed, with no periodic
+              # re-surface - the captain already has everything a repeat alarm
+              # would say. Releasing the hold falls through to ordinary
+              # supervision on the very next check.
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
