@@ -16,11 +16,12 @@ fm_task_progress_decode_scalar() {
     my $shown = <STDIN>;
     $shown =~ s/\s+\z//;
     exit 0 if $shown eq "" || $shown eq "-";
-    my $value = $shown =~ /\A"/
+    my $encoded = $shown =~ /\A"/;
+    my $value = $encoded
       ? JSON::PP->new->utf8->allow_nonref->decode($shown) : $shown;
     binmode STDOUT, ":raw";
     utf8::encode($value) if utf8::is_utf8($value);
-    print $value unless $value eq "-";
+    print $value if $encoded || $value ne "-";
   '
 }
 

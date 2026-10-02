@@ -131,7 +131,7 @@ test_resend_enqueues_new_sequence() {
 }
 
 test_branch_idempotent_continuation_reuses_unread_and_handled_receipt() {
-  local dir err token branch_env count
+  local dir err token branch_env count inactive
   dir=$(setup_case branch-idempotent)
   err="$dir/send.err"
   mkdir -p "$dir/home/data/t1"
@@ -169,6 +169,33 @@ test_branch_idempotent_continuation_reuses_unread_and_handled_receipt() {
     "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
     t1 --idempotent "Start the existing no-mistakes run" || fail "handled Branch continuation readback failed: $(cat "$err")"
   [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'an acknowledged automatic continuation was duplicated'
+
+  sed -i 's/^spawn_gen=s1$/spawn_gen=s2/' "$dir/home/state/t1.meta"
+  inactive=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1) || fail 'replacement-generation progress read failed'
+  printf '%s' "$inactive" | jq -e '.recorded==false and .remaining_gap=="" and .next_step==""' >/dev/null \
+    || fail 'replacement generation retained stale continuation progress'
+  token=$(printf '%s' "$inactive" | jq -r .record_token)
+  branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
+  if run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run"; then
+    fail 'replacement worker continued before MAIN refreshed progress'
+  fi
+  assert_contains "$(cat "$err")" 'compact task progress no longer permits continuation' \
+    'replacement worker refusal lost its progress boundary'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --expected-token "$token" \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"The replacement checkpoint is ready","remaining_gap":"Validation has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
+    || fail 'replacement-generation progress refresh failed'
+  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
+  branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail "replacement-generation Branch continuation failed: $(cat "$err")"
+  [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail 'a replacement worker reused the prior generation inbox receipt'
+  grep -Fx 'execution_generation=s2' "$dir/home/state/t1.inbox/002.msg" >/dev/null \
+    || fail 'replacement-generation continuation lost its executor binding'
 
   if run_send "$dir" "$err" -- t1 --idempotent "Start the existing no-mistakes run"; then
     fail 'MAIN gained the Branch-only idempotent send mode'

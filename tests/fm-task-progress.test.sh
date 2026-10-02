@@ -33,6 +33,33 @@ printf '%s' "$initial" | jq -e '
   (.record_token|test("^[a-f0-9]{64}$"))' >/dev/null || fail "initial projection was not compact and empty"
 
 token=$(printf '%s' "$initial" | jq -r .record_token)
+task_cmd add twin "Keep the requested outcome moving" --kind ship \
+  --body "Original scope and acceptance stay here." --start >/dev/null || fail "twin fixture task add failed"
+mkdir -p "$HOME_DIR/data/twin"
+printf '%s\n' 'Original authenticated task intent.' > "$HOME_DIR/data/twin/brief.md"
+printf '%s\n' 'spawn_gen=g1' > "$HOME_DIR/state/twin.meta"
+out=$(progress update-progress twin --expected-token "$token" --progress \
+  '{"acceptance":"The requested behavior passes its public fixture","current_state":"Implementation returned an intermediate result","remaining_gap":"Validation has not passed","next_step":"Run the authorized validation and review its result"}' 2>&1)
+rc=$?
+expect_code 6 "$rc" "cross-task progress token"
+assert_contains "$out" "task record changed" "an identical task accepted another task's progress token"
+task_cmd done twin >/dev/null || fail "twin fixture completion failed"
+
+task_cmd add dash-body "Preserve a dash body" --kind ship --body "-" --start >/dev/null \
+  || fail "dash-body fixture task add failed"
+dash_initial=$(progress progress dash-body) || fail "dash-body initial progress read failed"
+progress update-progress dash-body --expected-token "$(printf '%s' "$dash_initial" | jq -r .record_token)" \
+  --progress '{"acceptance":"The original task body survives","current_state":"Ready","remaining_gap":"Check preservation","next_step":"Read the task body"}' >/dev/null \
+  || fail "dash-body progress update failed"
+dash_shown=$(task_cmd show dash-body --full) || fail "dash-body task read failed"
+dash_body=$(printf '%s\n' "$dash_shown" | sed -n 's/^  body: //p' | head -1 | python3 -c 'import json,sys; print(json.load(sys.stdin), end="")') \
+  || fail "dash-body task body decode failed"
+case "$dash_body" in
+  $'-\n\n<!-- firstmate-progress:v1 context='*) ;;
+  *) fail "a literal dash task body was discarded by the progress update" ;;
+esac
+task_cmd done dash-body >/dev/null || fail "dash-body fixture completion failed"
+
 record='{"acceptance":"The requested behavior passes its public fixture","current_state":"Implementation returned an intermediate result","remaining_gap":"Validation has not passed","next_step":"Run the authorized validation and review its result"}'
 updated=$(progress update-progress ordinary --expected-token "$token" --progress "$record") \
   || fail "material progress update failed"
@@ -43,7 +70,7 @@ printf '%s' "$updated" | jq -e '
   .remaining_gap=="Validation has not passed" and
   .next_step=="Run the authorized validation and review its result"' >/dev/null \
   || fail "updated projection lost resumable progress"
-assert_grep '<!-- firstmate-progress:v1 -->' "$HOME_DIR/data/backlog.md" \
+assert_grep '<!-- firstmate-progress:v1 context=' "$HOME_DIR/data/backlog.md" \
   "progress did not reuse the original task record"
 assert_absent "$HOME_DIR/data/ordinary/lifecycle.json" \
   "ordinary progress created a second lifecycle progress store"
@@ -66,7 +93,27 @@ after_intent=$(progress progress ordinary) || fail "progress read after authenti
 if [ "$(printf '%s' "$after_intent" | jq -r .record_token)" = "$token" ]; then
   fail "authenticated intent correction retained the old progress token"
 fi
-token=$(printf '%s' "$after_intent" | jq -r .record_token)
+printf '%s' "$after_intent" | jq -e '
+  .recorded==false and .acceptance=="" and .current_state=="" and
+  .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "authenticated intent correction left stale progress active"
+corrected_record='{"acceptance":"The corrected task behavior passes","current_state":"The corrected intent is recorded","remaining_gap":"The corrected validation remains","next_step":"Run the corrected validation"}'
+corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_intent" | jq -r .record_token)" \
+  --progress "$corrected_record") || fail "corrected intent progress update failed"
+printf '%s' "$corrected" | jq -e '.recorded==true and .next_step=="Run the corrected validation"' >/dev/null \
+  || fail "MAIN did not reactivate corrected progress"
+
+sed -i 's/^spawn_gen=g1$/spawn_gen=g2/' "$HOME_DIR/state/ordinary.meta"
+after_generation=$(progress progress ordinary) || fail "progress read after executor replacement failed"
+printf '%s' "$after_generation" | jq -e '
+  .recorded==false and .acceptance=="" and .current_state=="" and
+  .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "executor replacement left stale progress active"
+regenerated=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_generation" | jq -r .record_token)" \
+  --progress "$corrected_record") || fail "replacement executor progress update failed"
+printf '%s' "$regenerated" | jq -e '.recorded==true and .next_step=="Run the corrected validation"' >/dev/null \
+  || fail "MAIN did not reactivate replacement executor progress"
+token=$(printf '%s' "$regenerated" | jq -r .record_token)
 
 task_cmd update ordinary --title "Corrected requested outcome" \
   --body "User corrected the task body while MAIN was working." >/dev/null \

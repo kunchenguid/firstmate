@@ -1,5 +1,4 @@
 import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
@@ -363,45 +362,6 @@ function hasOpenNeedsDecision(
     .some((decision) => decision.verb === "needs-decision");
 }
 
-function hasOnlyReviewableNoMistakesDecisions(state: string, data: string, task: string): boolean {
-  const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
-  const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
-  const reservedPrefixes = (process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES || "pending-reply-")
-    .split(/\s+/)
-    .filter(Boolean);
-  try {
-    const taskPath = resolve(data, task);
-    const taskStat = lstatSync(taskPath);
-    if (!taskStat.isDirectory() || taskStat.isSymbolicLink() ||
-        (typeof process.getuid === "function" && taskStat.uid !== process.getuid())) return false;
-    const status = lstatSync(`${state}/${task}.status`);
-    if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1 ||
-        (typeof process.getuid === "function" && status.uid !== process.getuid())) return false;
-    const decisions = [...openDecisions(
-      readFileSync(`${state}/${task}.status`, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line)),
-      resolveVerb,
-      heldVerb,
-      reservedPrefixes,
-    ).entries()];
-    if (decisions.length === 0 || decisions.some(([, decision]) => decision.verb !== "needs-decision")) return false;
-    const taskDir = realpathSync(taskPath);
-    return decisions.every(([key, decision]) => {
-      if (!/^nm-[A-Za-z0-9._-]+$/.test(key)) return false;
-      const match = decision.note.match(/^ask-user findings=[A-Za-z0-9._,-]+ file=(\/.+)$/);
-      if (!match) return false;
-      const findingInput = resolve(match[1]);
-      const finding = lstatSync(findingInput);
-      if (!finding.isFile() || finding.isSymbolicLink() || finding.nlink !== 1 ||
-          (typeof process.getuid === "function" && finding.uid !== process.getuid())) return false;
-      const findingPath = realpathSync(findingInput);
-      return dirname(findingPath) === taskDir && /^nm-[A-Za-z0-9._-]+-findings\.txt$/.test(basename(findingPath)) &&
-        findingPath === resolve(taskDir, basename(findingPath));
-    });
-  } catch {
-    return false;
-  }
-}
-
 // Same record grammar as fm_wake_grant_rows_valid: a present claim is a
 // nonempty set of distinct decimal rows. Absence means no MAIN claim; malformed
 // or changing evidence fails closed. The locked publish remains the authority
@@ -460,34 +420,12 @@ export async function scopeForUnreadWakeWithLifecycle(
   home: string,
   state: string,
   heartbeat: boolean,
-): Promise<{ modes: Record<string, string>; reviewableDecisionTasks: string[]; scope: UnreadWakeScope }> {
+): Promise<{ modes: Record<string, string>; scope: UnreadWakeScope }> {
   const modes = await lifecycleModesForWake(root, home, state);
-  const initial = scopeForUnreadWake(state, heartbeat, modes);
-  const data = process.env.FM_DATA_OVERRIDE || `${home}/data`;
-  const candidates = [...new Set(initial.needsDecisionKeys
-    .map((key) => initial.taskByWakeKey[key] ?? initial.taskByWakeKey[key.replace(/^fm-/, "")])
-    .filter((task): task is string => Boolean(task)))];
-  const reviewableDecisionTasks: string[] = [];
-  for (const task of candidates) {
-    const result = await runCommandAsync("bash", [`${root}/bin/fm-task-state.sh`, "progress", task], {
-      env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state,
-        FM_DATA_OVERRIDE: data },
-    });
-    if (result.status !== 0) continue;
-    try {
-      const progress = JSON.parse(result.stdout);
-      if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step &&
-          hasOnlyReviewableNoMistakesDecisions(state, data, task)) {
-        reviewableDecisionTasks.push(task);
-      }
-    } catch { /* An unreadable progress record remains MAIN-owned. */ }
-  }
-  return { modes, reviewableDecisionTasks,
-    scope: scopeForUnreadWake(state, heartbeat, modes, new Set(reviewableDecisionTasks)) };
+  return { modes, scope: scopeForUnreadWake(state, heartbeat, modes) };
 }
 
-export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {},
-  reviewableDecisionTasks: ReadonlySet<string> = new Set()): UnreadWakeScope {
+export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleModes: Record<string, string> = {}): UnreadWakeScope {
   let queue = "";
   try {
     queue = readFileSync(`${state}/.wake-queue`, "utf8");
@@ -594,11 +532,8 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleM
         // status append surfaced through the actionable signal path is
         // excluded from what the branch may claim without vetoing the scan
         // (docs/pi-supervision-branch.md "Autonomy").
-        const decisionTask = taskByKey.get(key) ?? taskByKey.get(key.replace(/\.(?:status|turn-ended)$/, "")) ?? "";
-        if (!reviewableDecisionTasks.has(decisionTask)) {
-          needsDecisionKeys.push(key);
-          continue;
-        }
+        needsDecisionKeys.push(key);
+        continue;
       }
       task = key.replace(/\.(?:status|turn-ended)$/, "");
       project = metadata.get(task) ?? "";
@@ -646,7 +581,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, lifecycleM
           }
           staleDecisionOwnership.set(statusPath, decisionOwned);
         }
-        if (staleDecisionOwnership.get(statusPath) && !reviewableDecisionTasks.has(task)) {
+        if (staleDecisionOwnership.get(statusPath)) {
           needsDecisionKeys.push(key);
           continue;
         }

@@ -152,6 +152,10 @@ assert.match(readFileSync(home + '/data/task/brief.md', 'utf8'), /Clarify the ac
 const correctedRead = await tool({ action: 'read', task: 'task' });
 assert.notEqual(correctedRead.record_token, completed.record_token,
   'authenticated intent change did not invalidate the old progress scope');
+assert.equal(correctedRead.recorded, false, 'authenticated intent change left old progress active');
+assert.deepEqual({ acceptance: correctedRead.acceptance, current_state: correctedRead.current_state,
+  remaining_gap: correctedRead.remaining_gap, next_step: correctedRead.next_step },
+{ acceptance: '', current_state: '', remaining_gap: '', next_step: '' });
 const staleScope = await rawTool({ action: 'update', task: 'task', record_token: completed.record_token,
   progress: { ...progress, current_state: 'Old scope attempted to continue',
     remaining_gap: 'Old scope must remain refused', next_step: 'Do not execute this stale step' } });

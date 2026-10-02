@@ -179,6 +179,20 @@ fm_task_inbox_handoff_id() {  # <record-path>
   return 1
 }
 
+# Read the execution generation attached to one inbox record. An older
+# generation is a different delivery even when its instruction body is equal.
+fm_task_inbox_execution_generation() {  # <record-path>
+  local rec=$1 line
+  [ -f "$rec" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" != -- ] || { printf ''; return 0; }
+    case "$line" in
+      execution_generation=*) printf '%s' "${line#execution_generation=}"; return 0 ;;
+    esac
+  done < "$rec"
+  return 1
+}
+
 # Find one inbox record by its handoff identity across both the unhandled and
 # acknowledged locations. Caller must hold the inbox sequence lock.
 _fm_task_inbox_find_handoff_locked() {  # <inbox-dir> <handoff-id>
@@ -249,7 +263,7 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode] [executi
 # its outcome is synchronous, so a repeated identical local steer is a
 # deliberate new instruction.
 fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [execution-generation]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} dir lock want have f rec='' status=0
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} dir lock want have f found_generation rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -271,6 +285,16 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
         elif fm_task_inbox_is_fire_and_forget "$f"; then
           continue
         fi
+        if ! found_generation=$(fm_task_inbox_execution_generation "$f" 2>/dev/null); then
+          case "$f" in
+            "$dir"/*.msg)
+              f="$dir/handled/${f##*/}"
+              found_generation=$(fm_task_inbox_execution_generation "$f" 2>/dev/null) || continue
+              ;;
+            *) continue ;;
+          esac
+        fi
+        [ "$found_generation" = "$execution_generation" ] || continue
         if ! fm_task_inbox_body "$f" > "$have" 2>/dev/null; then
           case "$f" in
             "$dir"/*.msg)

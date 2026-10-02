@@ -13,8 +13,8 @@ A process exit, worker return, report, pull request, empty inbox or provider suc
 No task directory, lifecycle JSON, evidence list, scheduler or mirrored progress store is created for ordinary continuation.
 
 The task title remains the canonical goal and is returned with every progress read.
-The compact block contains only `acceptance`, `current_state`, `remaining_gap` and `next_step`.
-The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a concurrent title/body correction, authenticated brief update, or executor-generation replacement changes that token and refuses the stale update or steer.
+The compact block contains only `acceptance`, `current_state`, `remaining_gap` and `next_step`, plus an opaque context version in its marker.
+The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a concurrent title/body correction refuses the stale update, while an authenticated brief update or executor-generation replacement also makes the recorded fields inactive until MAIN publishes corrected progress.
 The token is only a compare-and-swap guard and is not an evidence reference or semantic assessment fingerprint.
 An identical update performs no task-record write.
 MAIN is the only progress writer, and it writes only after a material change.
@@ -49,8 +49,7 @@ No progress action accepts evidence paths, authority references, lifecycle JSON 
 
 Neither the monitor nor the branch replaces an action owner.
 The branch may call that owner's existing interface for an already-authorized routine next step, while MAIN handles genuine scope/product/architecture, destructive, security, merge and cleanup decisions, reviews actual artifacts, writes material progress changes, and alone accepts the goal.
-For no-mistakes ask-user findings delivered with their exact task-local snapshot, the branch may route an answer to the same worker only when the accepted brief makes the required fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
-Every other decision remains MAIN-owned.
+Ask-user findings remain MAIN-owned.
 Project-required routine confirmations follow the same in-scope rule; all other decisions return to MAIN.
 An empty inbox or unchanged wait is quiet, but a recorded actionable gap does not disappear until MAIN advances it, records a genuine blocker, or satisfies acceptance.
 

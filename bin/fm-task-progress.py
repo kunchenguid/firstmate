@@ -14,12 +14,12 @@ import re
 import sys
 
 
-START = "<!-- firstmate-progress:v1 -->"
+START = "<!-- firstmate-progress:v1"
 END = "<!-- /firstmate-progress -->"
 FIELDS = ("acceptance", "current_state", "remaining_gap", "next_step")
 MAX_FIELD_BYTES = 1200
 BLOCK_RE = re.compile(
-    rf"(?:^|\n){re.escape(START)}\n"
+    rf"(?:^|\n){re.escape(START)}(?: context=(?P<context>[a-f0-9]{{64}}))? -->\n"
     r"acceptance: (?P<acceptance>[^\n]*)\n"
     r"current_state: (?P<current>[^\n]*)\n"
     r"remaining_gap: (?P<gap>[^\n]*)\n"
@@ -49,14 +49,14 @@ def text(value: object, name: str, *, empty: bool = False) -> str:
     return value
 
 
-def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None]:
+def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None, str | None]:
     matches = list(BLOCK_RE.finditer(body))
     if len(matches) > 1:
         raise Refusal("task body has duplicate Firstmate progress blocks")
     if not matches:
         if START in body or END in body:
             raise Refusal("task body has a malformed Firstmate progress block")
-        return None, None
+        return None, None, None
     match = matches[0]
     try:
         values = {
@@ -70,33 +70,34 @@ def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None]:
     values = {name: text(values[name], name, empty=name not in ("acceptance", "current_state")) for name in FIELDS}
     if bool(values["remaining_gap"]) != bool(values["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
-    return values, match
+    return values, match, match.group("context")
 
 
 def projection(task: str, goal: str, state: str, body: str, context: str) -> dict[str, object]:
-    values, _ = parse(body)
+    values, _, stored_context = parse(body)
+    active = values is not None and stored_context == digest(context.encode())
     return {
         "task_id": task,
         "goal": goal,
         "task_state": state,
-        "recorded": values is not None,
-        "acceptance": values["acceptance"] if values else "",
-        "current_state": values["current_state"] if values else "",
-        "remaining_gap": values["remaining_gap"] if values else "",
-        "next_step": values["next_step"] if values else "",
+        "recorded": active,
+        "acceptance": values["acceptance"] if active else "",
+        "current_state": values["current_state"] if active else "",
+        "remaining_gap": values["remaining_gap"] if active else "",
+        "next_step": values["next_step"] if active else "",
         # Context is an opaque read-time concurrency salt supplied by the
         # task owner (currently brief bytes plus execution generation). It is
         # neither persisted progress nor an evidence reference.
-        "record_token": digest(goal.encode() + b"\0" + body.encode() + b"\0" + context.encode()),
+        "record_token": digest(task.encode() + b"\0" + goal.encode() + b"\0" + body.encode() + b"\0" + context.encode()),
     }
 
 
-def render(values: dict[str, object]) -> str:
+def render(values: dict[str, object], context: str) -> str:
     clean = {name: text(values.get(name), name, empty=name not in ("acceptance", "current_state")) for name in FIELDS}
     if bool(clean["remaining_gap"]) != bool(clean["next_step"]):
         raise Refusal("remaining_gap and next_step must both be empty or both be present")
     return "\n".join([
-        START,
+        START + " context=" + digest(context.encode()) + " -->",
         "acceptance: " + json.dumps(clean["acceptance"], ensure_ascii=False),
         "current_state: " + json.dumps(clean["current_state"], ensure_ascii=False),
         "remaining_gap: " + json.dumps(clean["remaining_gap"], ensure_ascii=False),
@@ -130,8 +131,8 @@ def main() -> int:
         values = json.loads(args.progress_json)
         if not isinstance(values, dict) or set(values) != set(FIELDS):
             raise Refusal("progress update must contain only acceptance, current_state, remaining_gap and next_step")
-        block = render(values)
-        _, match = parse(body)
+        block = render(values, args.context)
+        _, match, _ = parse(body)
         if match:
             prefix = body[:match.start()].rstrip("\n")
             suffix = body[match.end():].lstrip("\n")

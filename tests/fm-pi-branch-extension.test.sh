@@ -4771,18 +4771,17 @@ if (command.status !== 0) throw new Error(`progress fixture update failed: ${com
 
 writeFileSync(`${state}/task-a.status`, "needs-decision [key=product-scope]: choose a broader product contract\n");
 const genuineDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
-if (genuineDecision.reviewableDecisionTasks.length !== 0 || genuineDecision.scope.eligible ||
-    genuineDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
+if (genuineDecision.scope.eligible || genuineDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
   throw new Error(`compact fields moved a genuine decision away from MAIN: ${JSON.stringify(genuineDecision)}`);
 }
 
 const findingPath = `${process.env.FM_HOME}/data/task-a/nm-run-review-findings.txt`;
 writeFileSync(findingPath, "NM-1: restore the already accepted behavior\n");
 writeFileSync(`${state}/task-a.status`, `needs-decision [key=nm-run-review]: ask-user findings=NM-1 file=${findingPath}\n`);
-const reviewableDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
-if (reviewableDecision.reviewableDecisionTasks.join(",") !== "task-a" || !reviewableDecision.scope.eligible ||
-    reviewableDecision.scope.eligibleSeqs.join(",") !== "1" || reviewableDecision.scope.needsDecisionKeys.length !== 0) {
-  throw new Error(`an exact no-mistakes decision snapshot did not reach bounded branch review: ${JSON.stringify(reviewableDecision)}`);
+const noMistakesDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
+if (noMistakesDecision.scope.eligible || noMistakesDecision.scope.eligibleSeqs.length !== 0 ||
+    noMistakesDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
+  throw new Error(`an exact no-mistakes decision snapshot moved away from MAIN: ${JSON.stringify(noMistakesDecision)}`);
 }
 
 // A captain-held task's bounded stale recheck is itself a decision wake. It is
@@ -6076,8 +6075,19 @@ case "$1 $2" in
 esac
 `);
 chmodSync(`${home}/fakebin/herdr`, 0o755);
-const candidateBranch = spawnSync("git", ["-C", realRoot, "branch", "--show-current"], { encoding: "utf8" }).stdout.trim();
-const candidateHead = spawnSync("git", ["-C", realRoot, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout.trim();
+const projectDir = `${home}/project`;
+mkdirSync(projectDir, { recursive: true });
+writeFileSync(`${projectDir}/fixture.txt`, "fixture\n");
+for (const args of [
+  ["init", "-q", "-b", "fixture-branch", projectDir],
+  ["-C", projectDir, "add", "fixture.txt"],
+  ["-C", projectDir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "fixture"],
+]) {
+  const git = spawnSync("git", args, { encoding: "utf8" });
+  if (git.status !== 0) throw new Error(`project fixture failed: ${git.stderr}`);
+}
+const candidateBranch = spawnSync("git", ["-C", projectDir, "branch", "--show-current"], { encoding: "utf8" }).stdout.trim();
+const candidateHead = spawnSync("git", ["-C", projectDir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout.trim();
 writeFileSync(`${home}/fakebin/no-mistakes`, `#!/bin/sh
 case "$1 $2" in
   "axi status") [ -f '${home}/nm-status' ] || exit 1; cat '${home}/nm-status' ;;
@@ -6098,7 +6108,7 @@ if (result.status !== 0) throw new Error(result.stderr);
 result = run("fm-tasks-axi.sh", ["add", "other", "Advance the existing dependent work", "--kind", "ship",
   "--body", "Keep the existing dependent task identity.", "--start"]);
 if (result.status !== 0) throw new Error(result.stderr);
-writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${home}/project\nworktree=${realRoot}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${projectDir}\nworktree=${projectDir}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 mkdirSync(`${home}/data/viewer`, { recursive: true });
 writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive.\n");
 writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);

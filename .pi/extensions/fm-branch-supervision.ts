@@ -2295,9 +2295,9 @@ ${context.command}
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
         const heartbeat = /^heartbeat($|:)/.test(message);
-        const { modes, reviewableDecisionTasks } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, heartbeat);
+        const { modes } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, heartbeat);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
-        const scope = scopeForUnreadWake(state, heartbeat, modes, new Set(reviewableDecisionTasks));
+        const scope = scopeForUnreadWake(state, heartbeat, modes);
         const disposition = dispositionForWakeTrigger(message, scope);
         // A newly-arrived main-owned (check-kind) row never bounces this
         // whole recheck back to main - scopeForUnreadWake excludes it from
