@@ -2397,18 +2397,27 @@ fm_backend_herdr_server_running_state() {  # <session>
 # whose state cannot itself be read, still yields `unreadable` here too: absence
 # is claimed only from positive evidence of it.
 fm_backend_herdr_agent_state() {  # <target>
+  local target=$1 state
+  state=$(fm_backend_herdr_answering_agent_state "$target")
+  if [ "$state" = unreadable ] && fm_backend_herdr_parse_target "$target" &&
+     [ "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" = stopped ]; then
+    state=missing
+  fi
+  printf '%s' "$state"
+}
+
+# fm_backend_herdr_answering_agent_state: the same vocabulary with no stopped
+# server widening, so `missing` here is only ever the recorded session's own
+# running server answering that the pane does not exist. It starts nothing: a
+# stopped server keeps its panes and reads `unreadable`, never absence.
+fm_backend_herdr_answering_agent_state() {  # <target>
   local target=$1
   fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
   case "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
     dead) printf 'missing' ;;
     no-agent|stale-agent) printf 'dead' ;;
     live) printf 'alive' ;;
-    *)
-      case "$(fm_backend_herdr_server_running_state "$FM_BACKEND_HERDR_SESSION")" in
-        stopped) printf 'missing' ;;
-        *) printf 'unreadable' ;;
-      esac
-      ;;
+    *) printf 'unreadable' ;;
   esac
 }
 

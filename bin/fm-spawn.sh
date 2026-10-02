@@ -167,6 +167,9 @@
 #   while it still holds the allocation lock drops its own claim; an abort after
 #   metadata publication has released that lock leaves the claim in place;
 #   guarded teardown must release it before that slot can be reused.
+#   An id with a retained state/<id>.reassigned-record refuses every spawn and
+#   relaunch until that record is reconciled and removed; bin/fm-teardown.sh owns
+#   the archive.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -1581,6 +1584,17 @@ spawn_require_relocated_queued_work() {
     exit 1
   fi
 }
+# A retained state/<id>.reassigned-record is an earlier task under this id whose
+# work is not reconciled (bin/fm-teardown.sh owns that archive), so the id is not
+# dispatchable. Checked before anything is created, and again under the task
+# record lock, which is the lock the archive is published under.
+spawn_refuse_retained_reassigned_record() {
+  local archive="$STATE/$ID.reassigned-record"
+  [ -e "$archive" ] || [ -L "$archive" ] || return 0
+  echo "error: task $ID has a retained reassignment record at $archive: an earlier task under this id was retired records-only and its work is not reconciled; reconcile it and remove that record before dispatching this id again" >&2
+  exit 1
+}
+spawn_refuse_retained_reassigned_record
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -3493,6 +3507,7 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
 fi
+spawn_refuse_retained_reassigned_record
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then

@@ -116,6 +116,7 @@ Every transient or self-contradicting read stays `unreadable` or `ambiguous` and
 
 That proof has one owner for the whole control plane (`fm_control_endpoint_absence_verdict` in `bin/fm-control-lib.sh`), so `exit` and `relaunch` cannot reach two different answers about one endpoint.
 `exit` reports what the proof established and nothing more - see its row in the verb table above.
+[`bin/fm-teardown.sh`](../bin/fm-teardown.sh)'s records-only retirement asks the same owner without the server start, so a stopped Herdr server refuses there instead of being started, and tmux refuses as it does here.
 
 What a reclaim is not:
 

@@ -17,6 +17,19 @@ The optional real-Treehouse case reproduced shared allocation across those clone
 Treehouse v2.1.0 resolves explicit returns from the slot path itself, so the real-tool check does not claim that a foreign Git common directory alone reproduces an unmanaged return.
 The portable failure fixture covers that cleanup failure independently.
 
+A pool root reached through a symlink does reproduce it, verified on 2026-10-01 with Treehouse v2.1.0.
+Treehouse registers the slot under the symlink spelling and matches a return path as a string, so `treehouse return --force <physical path>` answers `is not managed by treehouse` while the same call with the registered spelling returns the slot, including a slot that is already available.
+`fm_treehouse_return_preflight` matches the recorded physical path against the pool's registered paths and returns by the registered spelling.
+The portable case covers a forced scout cleanup and a clean landed ship cleanup whose records hold the physical path.
+
+```sh
+bash tests/fm-spawn-pool-base-freshen.test.sh
+Treehouse v2.1.0 alias root: physical-path return unmanaged; registered spelling returned
+ok - real Treehouse v2.1.0 matches a symlinked pool root by its registered spelling; Firstmate returns by that spelling
+bash tests/fm-teardown-endpoint-safety.test.sh
+ok - fm-teardown: a slot registered through a pool-root alias is returned by that registered spelling when a scout or landed ship record holds the physical path
+```
+
 The real Treehouse v2.1.0 process-exit regression was verified on 2026-09-30 through the executable allocation preflight from a second local home.
 Its unowned control transitions from `in-use` to `available` and reproduces reuse of the same slot with its detached HEAD reset.
 Separate retained-record and retained-claim cases refuse before process exit, preserve the unlanded detached HEAD and exact reflog, and refuse again after exit.
@@ -83,15 +96,19 @@ ok - slot claims distinguish identical task ids in different homes and accept sy
 ok - a changed Treehouse pool root refuses before any process kill or return even when Git repository identity matches
 ```
 
-The 2026-09-30 records-only recovery regression retains the exact old metadata bytes, ancillary task state, an unlanded branch and commit, and a live process even when the old `tasktmp` names the successor's slot.
+The records-only recovery regression, refreshed on 2026-10-01, retains the exact old metadata bytes, ancillary task state, an unlanded branch and commit, and a live process even when the old `tasktmp` names the successor's slot.
 It also exercises present and unreadable endpoint refusal, an existing evidence archive, symlinked slot-local state before lease locking, and forced whole-home refusal for a reassigned child.
-The executable command and selected output are:
+Retirement proceeds only for a Herdr record whose running session server answers that the pane does not exist; a stopped Herdr server and a tmux window absent from the addressed server both refuse and keep the record, with no server start.
+An id whose retained record still exists refuses dispatch and dispatches again once that record is removed.
+These cases use canned Herdr and tmux responses; no live session is operated.
+The executable commands and selected output are:
 
 ```sh
-bash bin/fm-test-run.sh tests/fm-teardown-endpoint-safety.test.sh
+bash bin/fm-test-run.sh tests/fm-teardown-endpoint-safety.test.sh tests/fm-spawn-pool-base-freshen.test.sh
 ok - fm-teardown: a stale record on a claimed slot retires, then the claimant tears down
-ok - records-only recovery requires a proven missing endpoint and never overwrites retained evidence
+ok - records-only recovery requires an endpoint proven gone - never a stopped Herdr server or an unaddressable tmux window - and never overwrites retained evidence
 ok - reassigned slots survive repository and pool drift; records-only retirement preserves evidence and whole-home deletion refuses
+ok - an id with a retained reassignment record refuses dispatch until that record is reconciled and removed
 ```
 
 The shared spawn path covers every supported worker harness before its launch, with no rendered harness signal involved.

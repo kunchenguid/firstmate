@@ -57,6 +57,45 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
+# Records-only retirement needs an endpoint whose absence can be proven, which
+# only a Herdr record offers: its own running session server answers for the
+# exact pane. This is a canned fake, never a real Herdr session, and it logs
+# every call that is not a read so a lifecycle action cannot pass unnoticed.
+write_stale_herdr_meta() {  # <case> <id> <kind> [project]
+  local dir=$1 id=$2 kind=$3 project=${4:-$1/project}
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fixture-lab:w1:p2" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$project" "kind=$kind" \
+    "backend=herdr" "herdr_session=fixture-lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t2" "herdr_pane_id=w1:p2"
+}
+
+write_fake_herdr() {  # <case> <gone|stopped>
+  local dir=$1 shape=$2
+  cat > "$dir/fakebin/herdr" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "session list") printf '%s\n' '{"sessions":[{"name":"fixture-lab","running":true,"socket_path":"$dir/herdr.sock"}]}' ;;
+  "status --json")
+    if [ "$shape" = stopped ]; then printf '%s\n' '{"server":{"running":false}}'
+    else printf '%s\n' '{"server":{"running":true}}'; fi
+    ;;
+  "pane get")
+    if [ "$shape" = stopped ]; then echo 'server is not running' >&2
+    else printf '%s\n' '{"error":{"code":"pane_not_found"}}'; fi
+    exit 1
+    ;;
+  *)
+    printf 'herdr' >> "\${FM_RUNTIME_LOG:?}"
+    printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+    printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/herdr"
+}
+
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -735,6 +774,65 @@ test_sole_slot_record_still_tears_down() {
   pass "fm-teardown: a task that solely holds its slot still returns it"
 }
 
+# The mirror of the symlinked record above, and the shape a symlinked pool root
+# produces: Treehouse registers the slot through the alias and matches that
+# string, while the record holds the physical path. Treehouse v2.1.0 answers a
+# physical-path return of such a slot "not managed by treehouse"
+# (docs/verification/runtime-backends.md), so the fake matches by string too.
+test_registry_alias_slot_returns_by_its_registered_spelling() {
+  local dir id=alias-task kind physical registered rc
+
+  # A forced scout cleanup, and a clean landed ship cleanup with every
+  # unlanded-work check still applied.
+  for kind in scout ship; do
+    dir=$(make_case "slot-registry-alias-$kind")
+    mark_case_as_treehouse_pool "$dir"
+    physical="$dir/pool/1/project"
+    ln -s "$dir/pool" "$dir/pool-alias"
+    registered="$dir/pool-alias/1/project"
+    printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$registered" \
+      > "$dir/pool/treehouse-state.json"
+    cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+state="${FM_RUNTIME_LOG%/*}/pool/treehouse-state.json"
+if [ "${1:-}" = status ]; then
+  jq '.worktrees' "$state"
+  exit
+fi
+printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if jq -e --arg path "${3:-}" '.worktrees | any(.path == $path)' "$state" >/dev/null; then
+  exit 0
+fi
+echo "worktree ${3:-} is not managed by treehouse" >&2
+exit 1
+SH
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$physical" "project=$dir/project" "kind=$kind"
+
+    set +e
+    if [ "$kind" = ship ]; then
+      rm -f "$physical/sentinel"
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    else
+      run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    fi
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$kind teardown could not return a slot registered through an alias: $(cat "$dir/stderr")"
+    [ "$(grep -c '^treehouse <return>' "$dir/runtime.log")" = 1 ] \
+      || fail "$kind alias-registered slot was not returned exactly once: $(cat "$dir/runtime.log")"
+    grep -Fxq "treehouse <return> <--force> <$registered>" "$dir/runtime.log" \
+      || fail "$kind return used a spelling Treehouse does not have registered: $(cat "$dir/runtime.log")"
+    assert_absent "$dir/home/state/$id.meta" "$kind alias-registered teardown left the task record"
+  done
+  pass "fm-teardown: a slot registered through a pool-root alias is returned by that registered spelling when a scout or landed ship record holds the physical path"
+}
+
 test_recorded_endpoint_that_changed_directory_still_tears_down() {
   local dir id=moved-task
 
@@ -1029,9 +1127,8 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   # absent; its metadata is preserved without any process or slot action.
   dir=$(make_case slot-reassigned)
   mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  write_stale_herdr_meta "$dir" "$id" scout
+  write_fake_herdr "$dir" gone
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   # Staged in this shell, not a command substitution: a background child of a
   # $(...) subshell does not outlive it, and the point of this worker is to be
@@ -1063,9 +1160,8 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   rm -f "$dir/worktree/sentinel"
   [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  write_stale_herdr_meta "$dir" "$id" ship
+  write_fake_herdr "$dir" gone
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -1124,9 +1220,8 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
 
   dir=$(make_case slot-reassigned-both-records)
   mark_case_as_treehouse_pool "$dir"
-  fm_write_meta "$dir/home/state/$id.meta" \
-    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  write_stale_herdr_meta "$dir" "$id" scout
+  write_fake_herdr "$dir" gone
   fm_write_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
@@ -1173,13 +1268,26 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
 # archive refuses rather than overwriting a previous incarnation's evidence.
 test_records_only_requires_missing_endpoint_and_preserves_prior_evidence() {
   local dir id=stale-task other=live-task probe rc record_state
-  for probe in present unreadable archive nested-state; do
+  for probe in present unreadable tmux-absent herdr-stopped archive nested-state; do
     dir=$(make_case "records-only-$probe")
     record_state="$dir/home/state"
     mark_case_as_treehouse_pool "$dir"
-    fm_write_meta "$dir/home/state/$id.meta" \
-      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-      "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    case "$probe" in
+      present|unreadable|tmux-absent)
+        fm_write_meta "$dir/home/state/$id.meta" \
+          "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+          "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+        ;;
+      herdr-stopped)
+        write_stale_herdr_meta "$dir" "$id" ship
+        write_fake_herdr "$dir" stopped
+        ;;
+      *)
+        # Provably gone, so only the probe's own condition can refuse.
+        write_stale_herdr_meta "$dir" "$id" ship
+        write_fake_herdr "$dir" gone
+        ;;
+    esac
     fm_write_meta "$dir/home/state/$other.meta" \
       "window=firstmate:fm-$other" "endpoint_task_id=$other" \
       "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
@@ -1231,9 +1339,15 @@ SH
     else
       assert_contains "$(cat "$dir/stderr")" 'not proven missing' "$probe did not refuse on endpoint evidence"
       assert_absent "$dir/home/state/$id.reassigned-record" "$probe archived a still-owned endpoint"
+      case "$probe" in
+        # The window is absent from the only tmux server this process can ask.
+        tmux-absent) assert_contains "$(cat "$dir/stderr")" 'socket identity' "tmux absence did not name why it is unprovable" ;;
+        # A stopped server keeps its panes, and nothing here may start it.
+        herdr-stopped) assert_contains "$(cat "$dir/stderr")" 'stopped server keeps its panes' "stopped Herdr server did not name why absence is unproven" ;;
+      esac
     fi
   done
-  pass "records-only recovery requires a proven missing endpoint and never overwrites retained evidence"
+  pass "records-only recovery requires an endpoint proven gone - never a stopped Herdr server or an unaddressable tmux window - and never overwrites retained evidence"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1655,6 +1769,7 @@ test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
+test_registry_alias_slot_returns_by_its_registered_spelling
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_records_only_requires_missing_endpoint_and_preserves_prior_evidence
@@ -1717,6 +1832,10 @@ SH
       fm_write_meta "$dir/home/state/$id.meta" \
         "window=firstmate:fm-$id" "endpoint_task_id=$id" \
         "worktree=$dir/worktree" "project=$project" "kind=ship"
+      if [ "$scope" = task ]; then
+        write_stale_herdr_meta "$dir" "$id" ship "$project"
+        write_fake_herdr "$dir" gone
+      fi
       if [ "$scope" = child ]; then
         mate="$dir/mate"
         mkdir -p "$mate/state" "$mate/data" "$mate/config"

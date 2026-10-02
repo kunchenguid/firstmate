@@ -341,8 +341,14 @@ fm_control_backend_state_verified() {  # <backend>
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
-fm_control_endpoint_absence_verdict() {  # <backend> <target>
-  local backend=${1-} target=${2-}
+#
+# A third argument of `observe` is the same proof for a caller that may not
+# start anything, which is bin/fm-teardown.sh's records-only retirement: herdr
+# is `gone` only when the recorded session's server is already running and
+# answers that the pane does not exist, and a stopped server - whose panes come
+# back with it - is `unproven` there instead of being started.
+fm_control_endpoint_absence_verdict() {  # <backend> <target> [observe]
+  local backend=${1-} target=${2-} mode=${3-}
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
@@ -350,6 +356,15 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
       printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
       ;;
     herdr)
+      if [ "$mode" = observe ]; then
+        case "$(fm_backend_herdr_answering_agent_state "$target")" in
+          dead) printf 'dead\t' ;;
+          alive) printf 'alive\t' ;;
+          missing) printf 'gone\t' ;;
+          *) printf 'unproven\tthe recorded herdr session'"'"'s server is stopped or did not answer for that pane, and a stopped server keeps its panes; start that session'"'"'s server and retry' ;;
+        esac
+        return 0
+      fi
       # Start the RECORDED session's server (only the server - nothing is
       # created) and re-read the recorded pane. A pane that comes back with the
       # server was never destroyed.

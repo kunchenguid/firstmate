@@ -103,7 +103,10 @@
 # these checks. Before any kill/reset, the slot must share the recorded
 # project's physical Git common directory and appear in that project's resolved
 # Treehouse status --json pool. Return rechecks that identity before invoking
-# Treehouse. A mismatch refuses even with --force; no automatic metadata rewrite
+# Treehouse and hands it the pool's own registered spelling of the slot, because
+# Treehouse matches that string and a pool root reached through a symlink is
+# registered under a different spelling than the physical path a record holds.
+# A mismatch refuses even with --force; no automatic metadata rewrite
 # can establish which task's work survived a historical reassignment.
 # Guarded operator recovery: preserve both records, claims, and working copies;
 # inspect `git -C <slot> rev-parse --path-format=absolute --git-common-dir` and
@@ -115,6 +118,12 @@
 # never remove a claim or clear worktree= to force cleanup. New independent
 # clones need separate Treehouse roots (treehouse.toml root) before dispatch;
 # changing a root must not orphan still-recorded slots in the old pool.
+# A pool already shared by independent clones refuses every allocation, so
+# reconcile it in this order: first run guarded teardown, from its owning home,
+# for every record or claim that names a slot in that pool, resolving duplicate
+# records and project= as above; only once none remains give each clone its own
+# root; then dispatch. Changing the root first leaves those slots outside the
+# pool that return selects, and every return then refuses.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -125,7 +134,15 @@
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment, never proof that this task's work landed or disappeared.
 # The only recovery exception is records-only retirement after the recorded
-# endpoint is authoritatively missing (not merely agent-less). Under the existing
+# endpoint is proven gone, not merely agent-less or unreachable.
+# bin/fm-control-lib.sh's fm_control_endpoint_absence_verdict owns that proof and
+# is asked in its observe mode, so nothing is started: a stopped Herdr session
+# server keeps its panes and refuses until it is running and answers that the
+# pane does not exist, and tmux can never prove it. A tmux record on a
+# reassigned slot is therefore never retired here; confirm on the tmux server
+# that hosts this home's fleet that the window is gone, then, with no lifecycle
+# action running for the task, move state/<id>.meta to
+# state/<id>.reassigned-record by hand and never delete it. Under the existing
 # lifecycle/meta locks, move the exact metadata bytes to state/<id>.reassigned-record
 # through the existing atomic record publisher, then exit before all process,
 # endpoint, slot, claim, tasktmp, and backlog mutations. Preserve every other
@@ -134,7 +151,9 @@
 # outside the entire pool-slot directory, including the checkout's siblings.
 # Unsupported or ambiguous endpoint probes refuse. Inspect the
 # archive and retained task data before reconciling the backlog or reusing the id;
-# do not restore the stale worktree assignment over a successor's live claim.
+# bin/fm-spawn.sh refuses that id while the archive exists, so remove the archive
+# only after its retained work is reconciled.
+# Do not restore the stale worktree assignment over a successor's live claim.
 # Forced whole-home retirement refuses reassigned child slots: recover the child
 # individually first. A retained state/*.reassigned-record also blocks ordinary
 # and forced removal of its home or an ancestor home; reconcile the retained
@@ -3287,7 +3306,7 @@ remove_secondmate_registry_entry() {
 # A retained archive is evidence, not a second ownership record or a completion
 # marker; allocation and destructive cleanup still use the strict shared scan.
 retire_reassigned_task_record() {
-  local slot state_real slot_root endpoint archive="$STATE/$ID.reassigned-record"
+  local slot state_real slot_root endpoint absence archive="$STATE/$ID.reassigned-record"
   slot=$(canonical_existing_dir "$WT") || return 1
   slot_root=${slot%/*}
   state_real=$(canonical_existing_dir "$STATE") || return 1
@@ -3304,6 +3323,11 @@ retire_reassigned_task_record() {
   endpoint=$(fm_backend_agent_state "$BACKEND" "$T") || endpoint=unreadable
   if [ "$endpoint" != missing ]; then
     echo "REFUSED: reassigned task $ID's endpoint is $endpoint, not proven missing; no process or slot action is permitted." >&2
+    return 1
+  fi
+  absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T" observe)
+  if [ "${absence%%$'\t'*}" != gone ]; then
+    echo "REFUSED: reassigned task $ID's endpoint is not proven missing: ${absence#*$'\t'}. Its record stays in place and no process or slot action is permitted; this script's header owns the operator recovery." >&2
     return 1
   fi
   fm_backlog_atomic_transition publish "$META" "$archive" "reassigned task record" "$STATE" || {

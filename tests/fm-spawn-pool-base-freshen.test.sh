@@ -743,6 +743,42 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A records-only retirement leaves state/<id>.reassigned-record beside the
+# id's backlog row and task data. Until that work is reconciled the id must not
+# be dispatched again, or a new worker would inherit the unresolved task's
+# brief and state.
+test_retained_reassigned_record_blocks_dispatch() {
+  local rec id out status before archive
+  id='retained-reassigned-r1'
+  rec=$(make_case retained-reassigned "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  archive="$HOME_DIR/state/$id.reassigned-record"
+  fm_write_meta "$archive" "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+  cp "$archive" "$CASE_DIR/expected-archive"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn dispatched an id whose earlier task is retained unreconciled"
+  assert_contains "$out" "retained reassignment record" \
+    "the refusal did not name the retained record as its reason"
+  assert_contains "$out" "$archive" "the refusal did not name the record to reconcile"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused dispatch published a task record over the retained one"
+  cmp -s "$CASE_DIR/expected-archive" "$archive" || fail "refused dispatch changed the retained record"
+  [ ! -e "$SLOT_CLAIM" ] || fail "refused dispatch claimed a pool slot"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "refused dispatch moved the slot's HEAD"
+
+  # Reconciled and removed, the same id dispatches normally.
+  rm "$archive"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a reconciled id should dispatch again"$'\n'"$out"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the reconciled id did not publish its task record"
+  pass "an id with a retained reassignment record refuses dispatch until that record is reconciled and removed"
+}
+
 test_foreign_pool_refuses_before_allocation() {
   local rec id spelling out status original before
   for spelling in canonical symlink; do
@@ -888,6 +924,7 @@ test_stale_pin_beside_other_dirt_reports_one_verdict
 
 
 test_foreign_pool_refuses_before_allocation
+test_retained_reassigned_record_blocks_dispatch
 
 
 # This optional tool check runs only disposable Git repositories and a private
@@ -940,6 +977,46 @@ test_real_treehouse_same_remote_pool() {
 }
 
 test_real_treehouse_same_remote_pool
+
+
+# The same optional tool check for a pool root reached through a symlink, which
+# is how a relocated default root looks: Treehouse registers the alias spelling
+# and matches it as a string, so a return by the physical path a task record
+# holds is refused as unmanaged while the registered spelling returns.
+test_real_treehouse_symlinked_pool_root() {
+  local treehouse_bin rec id slot physical out rc version user
+  treehouse_bin=$(command -v treehouse || true)
+  if [ -z "$treehouse_bin" ]; then
+    printf 'skip - real Treehouse symlinked pool root check (treehouse not installed)\n'
+    return 0
+  fi
+  version=$("$treehouse_bin" --version)
+  id=real-treehouse-alias-root
+  rec=$(make_case "$id" "$id")
+  read_case_record "$rec"
+  user="$CASE_DIR/treehouse-user"
+  mkdir -p "$user" "$CASE_DIR/relocated-pools"
+  ln -s "$CASE_DIR/relocated-pools" "$user/.treehouse"
+  slot=$(cd "$PROJECT_DIR" && HOME="$user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" get --lease 2> "$CASE_DIR/lease.stderr") \
+    || fail "real Treehouse could not allocate disposable slot: $(cat "$CASE_DIR/lease.stderr")"
+  physical=$(cd "$slot" && pwd -P)
+  [ "$physical" != "$slot" ] || fail "Treehouse $version registered the physical path; refresh this reproduction"
+  out=$(cd "$PROJECT_DIR" && HOME="$user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" return --force "$physical" 2>&1) && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "Treehouse $version returned a slot by its physical path; refresh this reproduction"
+  assert_contains "$out" 'is not managed by treehouse' "physical-path return failed for another reason"
+  out=$(FM_HOME="$HOME_DIR" HOME="$user" TREEHOUSE_NO_UPDATE_CHECK=1 \
+    bash -c '. "$1"; fm_treehouse_return_preflight "$2" "$3" && printf "%s\n" "$FM_TREEHOUSE_RETURN_PATH"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$PROJECT_DIR" "$physical") \
+    || fail "return preflight refused the physical spelling of an alias-registered slot"
+  [ "$out" = "$slot" ] || fail "return preflight did not resolve Treehouse's registered spelling: $out"
+  ( cd "$PROJECT_DIR" && HOME="$user" TREEHOUSE_NO_UPDATE_CHECK=1 "$treehouse_bin" return --force "$out" ) \
+    > "$CASE_DIR/return.stdout" 2> "$CASE_DIR/return.stderr" \
+    || fail "real Treehouse refused its own registered spelling: $(cat "$CASE_DIR/return.stderr")"
+  printf 'Treehouse %s alias root: physical-path return unmanaged; registered spelling returned\n' "$version"
+  pass "real Treehouse $version matches a symlinked pool root by its registered spelling; Firstmate returns by that spelling"
+}
+
+test_real_treehouse_symlinked_pool_root
 
 
 test_available_pool_with_surviving_owner_refuses() {
