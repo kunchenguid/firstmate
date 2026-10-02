@@ -52,6 +52,9 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
+# A send's post-enqueue doorbell attempt is bounded to five seconds; expiry
+# still confirms durable acceptance, not worker acknowledgement or a reply.
+# Enqueue and synchronous lifecycle commands retain their existing bounds.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +72,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -303,11 +308,21 @@ cmd_send() {
       return 0
       ;;
   esac
-  fm_task_inbox_ring "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
+  # A slow backend read or submit must not spend the parent's entire transport
+  # budget after acceptance. Bound the whole best-effort ring, including its
+  # liveness and foreign-composer checks, in a child process group; the timeout
+  # owner also reaps stalled descendants. The durable inbox remains recoverable.
+  fm_run_timed 5 bash -c '
+    . "$1"
+    shift
+    fm_task_inbox_ring "$@"
+  ' _ "$SCRIPT_DIR/fm-task-inbox-lib.sh" \
+    "$REMOTE_ENDPOINT_BACKEND" "$REMOTE_ENDPOINT_TARGET" "$rec" "fm-$id" || ring_rc=$?
   case "$ring_rc" in
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
     3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
+    124) printf 'notice: doorbell attempt exceeded its 5s budget; the steer is durably recorded at %s for recovery\n' "$rec" >&2 ;;
   esac
 }
 

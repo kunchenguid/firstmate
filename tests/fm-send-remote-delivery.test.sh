@@ -29,6 +29,9 @@
 #      slash) keeps its exit-3 delivered-unconfirmed contract, never closes a
 #      --resolve-key decision unconfirmed, and keeps a marked expectation
 #      armed.
+#   9. A post-enqueue notification stalled past the parent's transport budget
+#      cannot turn durable acceptance into unconfirmed delivery; retrying the
+#      same correlated body still produces one record, with no invented ack.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -707,6 +710,90 @@ test_remote_send_budget_bounds_busy_lane() {
   pass "fm-send remote: the remote leg is budget-bounded and stays idempotent across the bound"
 }
 
+test_remote_slow_notification_confirms_acceptance() {
+  local mechanism dir fb ssh_log home rhome rc began elapsed pend rec body
+  for mechanism in default bash; do
+    dir="$TMP_ROOT/remote-slow-ring-$mechanism"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+    # The dependency-free timeout watchdog needs a real sleep too, rather
+    # than the fast submit-settle shim used by the other cases in this suite.
+    ln -sf /bin/sleep "$fb/sleep"
+    rhome=$(setup_remote_secondmate_home "remote-slow-ring-$mechanism")
+    home=$(setup_remote_parent_home "remote-slow-ring-$mechanism" "$rhome")
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+# The first backend read happens inside notification, after durable enqueue.
+# Record that ordering before stalling longer than the parent's whole budget.
+rec=$(find "$FM_FAKE_RING_HOME/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | head -1)
+[ -n "$rec" ] || exit 91
+printf 'notification-start %s record=%s\n' "$(date +%s)" "$rec" >> "$FM_FAKE_RING_LOG"
+/bin/sleep "$FM_FAKE_RING_DELAY"
+printf 'notification-end %s\n' "$(date +%s)" >> "$FM_FAKE_RING_LOG"
+exit 1
+SH
+    chmod +x "$fb/herdr"
+    began=$(date +%s)
+    rc=0
+    send_env "$fb" "$home" "$ssh_log" \
+      FM_TIMEOUT_MECHANISM_OVERRIDE="$mechanism" FM_SEND_REMOTE_BUDGET=12 \
+      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
+      FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" FM_FAKE_RING_DELAY=30 \
+      "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+    elapsed=$(( $(date +%s) - began ))
+    expect_code 0 "$rc" "slow post-enqueue notification must confirm acceptance ($mechanism): $(cat "$dir/err")"
+    [ "$elapsed" -lt 12 ] || fail "notification consumed the enclosing transport budget ($mechanism): ${elapsed}s"
+    assert_grep 'notification-start' "$dir/ring.log" "the delayed backend read must actually start after enqueue"
+    assert_not_contains "$(cat "$dir/ring.log")" 'notification-end' \
+      "the stalled notification must be terminated before it completes"
+    assert_contains "$(cat "$dir/err")" 'doorbell attempt exceeded its 5s budget' \
+      "acceptance must distinguish the expired best-effort notification"
+    pend=$(pending_record "$home")
+    [ -n "$pend" ] || fail "durable acceptance lost its pending reply"
+    [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+      || fail "slow notification left durable acceptance unconfirmed"
+    [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+      || fail "acceptance must await the worker's separate reply"
+    rec=$(remote_inbox_records "$rhome")
+    [ -f "$rec" ] || fail "acceptance must create exactly one durable record"
+    body=$(fm_task_inbox_body "$rec")
+    # Retry the same remote control leg, as a lost transport would do, with
+    # notification no longer stalled. The original correlation is unchanged.
+    send_env "$fb" "$home" "$ssh_log" \
+      FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" FM_FAKE_RING_DELAY=0 \
+      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
+      "$ROOT/bin/fm-on.sh" rsm fm-remote-secondmate-control.sh send rsm "$body" \
+      >"$dir/retry.out" 2>"$dir/retry.err" || fail "the identical remote retry failed"
+    [ "$(remote_inbox_records "$rhome")" = "$rec" ] \
+      || fail "the identical retry duplicated the accepted record"
+    [ "$(fm_task_inbox_body "$rec")" = "$body" ] \
+      || fail "the identical retry changed the correlated request"
+    [ "$(find "$rhome/state/parent-route/rsm.inbox/handled" -name '*.msg' | wc -l | tr -d ' ')" = 0 ] \
+      || fail "notification expiry invented worker acknowledgement"
+    pass "fm-send remote: slow notification confirms durable acceptance and preserves idempotence ($mechanism)"
+  done
+}
+
+test_remote_enqueue_failure_never_confirms_acceptance() {
+  local dir fb ssh_log home rhome rc
+  dir="$TMP_ROOT/remote-enqueue-failure"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-enqueue-failure)
+  home=$(setup_remote_parent_home remote-enqueue-failure "$rhome")
+  # A file where the inbox directory belongs makes the real enqueue fail,
+  # even when run by root, without faking the remote command's exit status.
+  : > "$rhome/state/parent-route/rsm.inbox"
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a failed durable enqueue claimed acceptance"
+  assert_contains "$(cat "$dir/err")" 'steering-inbox record could not be written' \
+    "the real enqueue failure must reach the sender"
+  [ -z "$(pending_record "$home")" ] || fail "a known enqueue failure retained a reply expectation"
+  [ -z "$(remote_inbox_records "$rhome")" ] || fail "a failed enqueue created a durable message"
+  pass "fm-send remote: a real enqueue failure cannot confirm acceptance"
+}
+
 test_local_secondmate_pending_keeps_expectation_armed() {
   local dir fb log home rc rec corr
   dir="$TMP_ROOT/local-pending-expectation"; mkdir -p "$dir"
@@ -798,6 +885,8 @@ test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
+test_remote_slow_notification_confirms_acceptance
+test_remote_enqueue_failure_never_confirms_acceptance
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed
