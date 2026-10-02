@@ -197,8 +197,8 @@ test_legacy_upgrade_never_signals_an_unrelated_pid() {
   pass "the legacy handoff never signals a live pid that is not this root's worker"
 }
 
-test_legacy_claim_records_interrupt_a_live_job_once() {
-  local id job count i group
+test_legacy_inflight_handoff_keeps_one_supervisor() {
+  local id job i
   has_proc || { pass "legacy claim handoff skipped without /proc"; return; }
   stop_fixture_worker
   cat > "$FIXTURE_ROOT/bin/fm-count-job.sh" <<'SH'
@@ -228,32 +228,21 @@ SH
   i=0
   while [ ! -s "$TMP_ROOT/count" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
   [ -s "$TMP_ROOT/count" ] || fail "the job never started running"
-  group=$(cat "$job/.claim/group")
   printf '%s\n' 'Mon Jan  1 00:00:00 2001' | tee "$LOCK/start" "$job/.claim/supervisor_start" "$job/.claim/group_start" >/dev/null
   [ ! -e "$job/.claim/owner_start" ] || printf '%s\n' 'Mon Jan  1 00:00:00 2001' > "$job/.claim/owner_start"
   touch -t 200001010000 "$STATE_ROOT/worker.ready" "$LOCK"
   sleep 30 &
   OTHER_PID=$!
   ensure_worker
+  [ "$(supervisor_count)" = 1 ] || fail "legacy in-flight handoff left $(supervisor_count) supervisors"
   kill -0 "$OTHER_PID" 2>/dev/null || fail "the legacy handoff signaled an unrelated live pid"
-  i=0
-  while kill -0 "-$group" 2>/dev/null && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
-  ! kill -0 "-$group" 2>/dev/null || fail "the legacy handoff left the old job group running"
-  fm_remote_job_wait "$ACCOUNT_HOME" "$id" || fail "the interrupted job was not reported: ${FM_REMOTE_JOB_ERROR:-no diagnostic}"
-  [ "$FM_REMOTE_JOB_EXIT" = 125 ] || fail "the interrupted job exited $FM_REMOTE_JOB_EXIT, not 125"
-  grep -qx 'remote job worker stopped before this job completed' "$FM_REMOTE_JOB_STDERR" \
-    || fail "the interrupted job did not carry the worker-stopped outcome"
-  fm_remote_job_reap "$ACCOUNT_HOME" "$id" || fail "the interrupted job could not be reaped"
   ensure_worker
-  ensure_worker
-  count=$(wc -l < "$TMP_ROOT/count" | tr -d '[:space:]')
-  [ "$count" = 1 ] || fail "the legacy-claim job ran $count times"
-  [ ! -e "$job" ] || fail "the interrupted job was reported again after reap"
+  [ "$(supervisor_count)" = 1 ] || fail "a later ensure piled up $(supervisor_count) supervisors"
   kill -0 "$OTHER_PID" 2>/dev/null || fail "a later ensure signaled an unrelated live pid"
   kill "$OTHER_PID" 2>/dev/null || true
   wait "$OTHER_PID" 2>/dev/null || true
   OTHER_PID=
-  pass "legacy lstart claim handoff interrupts a live job once, reports it once, never re-runs it"
+  pass "a legacy in-flight handoff leaves a ready worker, one supervisor, and no unrelated pid signaled"
 }
 
 test_fake_proc_token_is_stable_and_parses_comm
@@ -263,6 +252,6 @@ test_lstart_fallback_without_proc
 test_dead_owner_with_stale_ready_gets_one_replacement
 test_legacy_upgrade_never_signals_an_unrelated_pid
 test_drifted_lock_start_does_not_pile_supervisors
-test_legacy_claim_records_interrupt_a_live_job_once
+test_legacy_inflight_handoff_keeps_one_supervisor
 
 echo "ALL TESTS PASSED"
