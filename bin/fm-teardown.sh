@@ -43,9 +43,9 @@
 # that closes the call.
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. For a normal ship task,
-# work whose branch is pushed but has no PR recorded or found is refused, while a
-# pushed branch with an open PR (including an upstream-contribution PR from a fork)
-# may be cleaned up. Unpushed work has landed only when its PR is merged and GitHub
+# work whose branch is pushed but has no PR recorded or found, or whose recorded PR
+# is confirmed closed without merging, is refused, while a pushed branch with an
+# open PR (including an upstream-contribution PR from a fork) may be cleaned up. Unpushed work has landed only when its PR is merged and GitHub
 # reports a PR head that contains the current local work, or its content is already
 # present in the up-to-date default branch. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
