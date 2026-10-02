@@ -267,7 +267,7 @@ function taskDispositions(codeRoot, dataRoot, environment) {
   return dispositions;
 }
 
-function lifecycleDispositions(codeRoot, dataRoot, environment) {
+function lifecycleDispositions(dataRoot) {
   const values = new Map();
   let ids = [];
   try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
@@ -278,13 +278,8 @@ function lifecycleDispositions(codeRoot, dataRoot, environment) {
       const directoryInfo = lstatSync(directory);
       if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || !inside(dataRoot, realpathSync(directory))) continue;
       if (!regularNoSymlink(lifecycle)) continue;
-      const raw = execFileSync(join(codeRoot, "bin", "fm-task-state.sh"), ["lifecycle", id], {
-        encoding: "utf8",
-        env: environment,
-        timeout: 3000,
-        maxBuffer: 2 * 1024 * 1024,
-      });
-      const disposition = JSON.parse(raw).disposition;
+      const raw = JSON.parse(readFileSync(lifecycle, "utf8"));
+      const disposition = raw?.disposition;
       if (["open", "accepted", "archived"].includes(disposition)) values.set(id, disposition);
     } catch {
       values.set(id, "unknown");
@@ -307,7 +302,7 @@ function taskOverview(home, roots, codeRoot) {
     throw new Error("unsupported task snapshot");
   }
   const dispositions = taskDispositions(codeRoot, dataRoot, environment);
-  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
+  const lifecycles = lifecycleDispositions(dataRoot);
   const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
   const items = new Map();
   const ensure = id => {

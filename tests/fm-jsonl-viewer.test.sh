@@ -200,6 +200,7 @@ jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
+# Keep a lifecycle-only task visible while the viewer reads lifecycle records without spawning one state reader per data directory.
 jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report"))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null))
