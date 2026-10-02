@@ -202,6 +202,8 @@ T=$RESOLVED_TARGET
 shift
 ACTION_ID=
 IDEMPOTENT=0
+COMPACT_PROGRESS_TOKEN=
+COMPACT_PROGRESS_PAYLOAD_SHA=
 if [ "${1:-}" = --action-id ]; then
   [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
   ACTION_ID=$2
@@ -223,7 +225,15 @@ if [ -n "$TARGET_META" ]; then
     # shellcheck source=bin/fm-task-lifecycle-lib.sh
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     if [ -z "$ACTION_ID" ]; then
-      fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
+      if ! fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK"; then
+        if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ] &&
+          printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -e --arg task "$LEASE_GUARD_TASK" \
+            'type == "object" and (.[$task] | type == "string" and length > 0)' >/dev/null 2>&1; then
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: lifecycle effect requires exact readback or MAIN reconciliation" >&2
+          exit 6
+        fi
+        exit 1
+      fi
       if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
         branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
         printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
@@ -237,16 +247,19 @@ if [ -n "$TARGET_META" ]; then
         . "$SCRIPT_DIR/fm-task-progress-lib.sh"
         branch_current_progress=$(fm_task_progress_read "$LEASE_GUARD_TASK") || exit 1
         [ "$(printf '%s' "$branch_current_progress" | jq -r '.record_token')" = "$branch_progress_token" ] || {
-          echo 'REFUSED: task intent or progress changed after branch admission' >&2; exit 6;
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: task intent, progress, or executor generation changed after branch admission" >&2; exit 6;
         }
         printf '%s' "$branch_current_progress" | jq -e \
           '.task_state == "in_flight" and .remaining_gap != "" and .next_step != ""' >/dev/null || {
-          echo 'REFUSED: compact task progress no longer permits continuation' >&2; exit 6;
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact task progress no longer permits continuation" >&2; exit 6;
         }
-        echo 'REFUSED: compact task progress does not authorize an exact steer; report the required effect to MAIN' >&2
-        exit 6
+        COMPACT_PROGRESS_TOKEN=$branch_progress_token
+        COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
+          'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
+        FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
       fi
-      if [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
+      if [ "$(fm_lease_actor)" = branch ] && [ -z "$COMPACT_PROGRESS_TOKEN" ] &&
+        [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
         fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {
           echo 'REFUSED: delegated steer requires --action-id' >&2; exit 6;
         }
@@ -493,6 +506,10 @@ if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ 
   echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
   exit 6
 fi
+if [ -n "$COMPACT_PROGRESS_TOKEN" ] && [ "${1:-}" = --key ]; then
+  echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation authorizes only its exact MAIN-authored text next_step" >&2
+  exit 6
+fi
 if [ "${1:-}" = "--key" ]; then
   case "$*" in
   *--resolve-key*)
@@ -512,6 +529,13 @@ else
   if [ -z "${MESSAGE//[[:space:]]/}" ]; then
     echo "error: a text steer requires a nonempty message; nothing was sent" >&2
     exit 1
+  fi
+  if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+    compact_message_sha=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+    if [ "$IDEMPOTENT" != 1 ] || [ "$compact_message_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ]; then
+      echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation requires --idempotent with the exact current MAIN-authored next_step" >&2
+      exit 6
+    fi
   fi
   # Keep the answer text for the closing resolved note.
   RESOLVE_ANSWER_TEXT=$MESSAGE
@@ -554,8 +578,30 @@ else
         [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } ||
       [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: task retired or changed executor generation during compact delivery" >&2
+        exit 6
+      fi
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
+    fi
+    if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+      branch_locked_progress=$(fm_task_progress_read "$INBOX_TASK_ID") || {
+        fm_lock_release "$INBOX_META_LOCK"
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: compact task progress became unreadable during delivery" >&2
+        exit 6
+      }
+      branch_locked_payload_sha=$(printf '%s' "$branch_locked_progress" | python3 -c \
+        'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || {
+        fm_lock_release "$INBOX_META_LOCK"
+        exit 1
+      }
+      if [ "$(printf '%s' "$branch_locked_progress" | jq -r '.record_token')" != "$COMPACT_PROGRESS_TOKEN" ] ||
+        [ "$branch_locked_payload_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ]; then
+        fm_lock_release "$INBOX_META_LOCK"
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: task intent, progress, or executor generation changed after branch admission" >&2
+        exit 6
+      fi
     fi
     if [ -n "$ACTION_ID" ]; then
       BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')

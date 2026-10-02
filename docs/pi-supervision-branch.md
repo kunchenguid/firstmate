@@ -54,7 +54,8 @@ Presentation acknowledgement does not establish task acceptance.
 The original in-flight backlog row is the active continuation record.
 Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
-The opaque record token binds the task row to the current authenticated brief and executor generation, preventing a stale MAIN update or stale continuation admission after a concurrent user correction or worker replacement; it does not authorize effects.
+The opaque record token binds the task row to the current authenticated brief and executor generation, preventing a stale MAIN update or stale continuation admission after a concurrent user correction or worker replacement.
+Together with the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
 The branch can read only the exact token-bound compact admission; it cannot write progress or make final semantic acceptance.
 
 The Pi extension uses the existing heartbeat coordinator's tick and `progress-list` to inspect canonical task ids.
@@ -157,7 +158,7 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   That asymmetry is a known limitation of the routine delivery representation rather than of the ordering above, it predates delivery moving off Pi's render thread, and closing it means giving routine delivery a durable idempotent record - tracked as follow-up `fm-pi-routine-delivery-idempotency-followup-r1` and pinned meanwhile by `tests/fm-pi-branch-extension.test.sh`.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
-  During compact continuation, the progress token proves only read freshness; v2 effects still require their exact delegated action id and existing effect, inbox, and receipt owners.
+  During compact continuation, the progress token and exact current MAIN-authored `next_step` permit idempotent same-worker inbox continuation; v2 and cross-task effects still require their exact delegated action id and existing effect, inbox, and receipt owners.
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
   A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below).
   Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.

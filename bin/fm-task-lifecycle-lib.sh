@@ -19,7 +19,7 @@ fm_task_lifecycle() { # <read|reconcile|action|init|mode|due> <task> [arguments.
       # shellcheck source=bin/fm-wake-lib.sh
       . "$FM_TASK_LIFECYCLE_BIN/fm-wake-lib.sh"
       if [ "$(jq -r '.schema' "${FM_DATA_OVERRIDE:-$lifecycle_home/data}/$2/lifecycle.json" 2>/dev/null)" = fm-task-lifecycle.v2 ]; then
-        if [ -z "${FM_BRANCH_GENERATION:-}" ] || ! fm_wake_branch_owner_matches "$STATE/.branch-eligible-owner" "${FM_LEASE_HOLDER_PID:-}" "$FM_BRANCH_GENERATION"; then
+        if [ -z "${FM_BRANCH_GENERATION:-}" ] || ! fm_wake_branch_owner_matches "$STATE/.branch-eligible-owner" '' "$FM_BRANCH_GENERATION"; then
           echo 'REFUSED: delegated mutation has a stale branch generation' >&2; return 6
         fi
       fi

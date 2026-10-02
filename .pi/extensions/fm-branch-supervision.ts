@@ -693,6 +693,7 @@ export default function (pi: ExtensionAPI) {
   let branchTaskBindings: Record<string, { goal_revision: number; brief_sha256: string; execution_generation: string; delegation_revision: number }> = {};
   let branchProgressBindings: Record<string, string> = {};
   let branchProgressSnapshots: Record<string, string> = {};
+  let branchEffectAuthorityNeeded = new Set<string>();
   let branchHandoffObservations: Record<string, Record<string, { target: string; change: "none" | "material" | "uncertain" }>> = {};
   let branchTaskObservations: Record<string, { key?: string; state?: string; reason?: string }> = {};
   let branchTaskAdmissionRevisions: Record<string, number> = {};
@@ -1615,7 +1616,8 @@ export default function (pi: ExtensionAPI) {
             const handoffs = Object.values(branchHandoffObservations[task] || {});
             const after = await compactResumeSnapshot(task);
             safeRoutineContinuation = Boolean(before) && Boolean(after) &&
-              handoffs.every((handoff) => handoff.change !== "uncertain");
+              handoffs.every((handoff) => handoff.change !== "uncertain") &&
+              !branchEffectAuthorityNeeded.has(task);
             continuationChange = after === before && handoffs.every((handoff) => handoff.change === "none")
               ? "none" : "material";
           } else if (binding) {
@@ -1894,7 +1896,7 @@ export default function (pi: ExtensionAPI) {
           }
           const progressToken = branchProgressBindings[task];
           const binding = branchTaskBindings[task];
-          if (progressToken && !binding) {
+          if (progressToken) {
             const current = await runCommandAsync(
               "bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task],
               { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
@@ -1904,8 +1906,12 @@ export default function (pi: ExtensionAPI) {
                 !progress.next_step || progress.task_state === "done") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
+          }
+          if (progressToken && (!binding || !actionId)) {
+            branchEffectAuthorityNeeded.add(task);
             throw new Error("compact task progress does not authorize an exact cross-task handoff; report the required effect to MAIN");
-          } else {
+          }
+          if (binding) {
             const current = await runCommandAsync(
               "bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task],
               { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
@@ -2085,7 +2091,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (!(await actingAsOwner(branchGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
     const leaseHolderPid = ownedLockPid;
-    const bashTool = createBashToolDefinition(fmRoot, {
+    const baseBashTool = createBashToolDefinition(fmRoot, {
       spawnHook: (context) => {
         // Activation has always already happened by the time the branch can
         // run a shell command, so an unactivated generation is refused here
@@ -2118,6 +2124,19 @@ ${context.command}
         };
       },
     });
+    const bashTool = {
+      ...baseBashTool,
+      execute: async (...args: Parameters<typeof baseBashTool.execute>) => {
+        const result = await baseBashTool.execute(...args);
+        const output = result.content
+          .map((item) => item.type === "text" ? item.text : "")
+          .join("\n");
+        for (const match of output.matchAll(/FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:([A-Za-z0-9][A-Za-z0-9._-]{0,159}):/g)) {
+          branchEffectAuthorityNeeded.add(match[1]);
+        }
+        return result;
+      },
+    };
     const created = await createAgentSession({
       cwd: fmRoot,
       sessionManager,
@@ -2345,6 +2364,7 @@ ${context.command}
         branchTaskBindings = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
+        branchEffectAuthorityNeeded = new Set();
         branchHandoffObservations = {};
         branchTaskObservations = {};
         branchTaskAdmissionRevisions = {};
@@ -2400,6 +2420,7 @@ ${context.command}
           branchTaskBindings = {};
           branchProgressBindings = {};
           branchProgressSnapshots = {};
+          branchEffectAuthorityNeeded = new Set();
           branchHandoffObservations = {};
           branchTaskObservations = {};
           branchTaskAdmissionRevisions = {};
@@ -2491,16 +2512,33 @@ ${context.command}
       const entryOffset = sessionManager.getEntries().length;
       wakeTaskScope = { rows: [], tasks: new Set([offer.task]), token: offer.admission };
       branchTaskBindings = {};
+      branchTaskAdmissionRevisions = {};
+      branchTaskAdmissionSnapshots = {};
       branchProgressBindings = { [offer.task]: progress.record_token };
       branchProgressSnapshots = { [offer.task]: await compactResumeSnapshot(offer.task) };
+      branchEffectAuthorityNeeded = new Set();
       branchHandoffObservations = {};
+      const lifecycle = await runCommandAsync(
+        "bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", offer.task],
+        { cwd: fmRoot, env: scriptEnv, maxBuffer: 1024 * 1024 },
+      );
+      if (lifecycle.status === 0) {
+        const record = JSON.parse(lifecycle.stdout);
+        const expiresAt = Date.parse(record?.delegation?.expires_at || "");
+        if (record?.schema === "fm-task-lifecycle.v2" && record.disposition === "open" &&
+            !record.delegation?.revoked && Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+          branchTaskBindings[offer.task] = taskBinding(record);
+          branchTaskAdmissionRevisions[offer.task] = record.revision;
+          branchTaskAdmissionSnapshots[offer.task] = taskContinuationSnapshot(record);
+        }
+      }
       continuationToolsRemaining = 8;
       const timeout = setTimeout(() => { void session.abort(); }, 120_000);
       trace("prompt", "started");
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
-          `Compare the goal and acceptance method with actual task artifacts and current executor state. Continue through an existing exact effect owner when one is already present; the compact token itself does not authorize a same-task steer or cross-task handoff. ` +
+          `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker through fm-send --idempotent; any other same-task text remains unauthorized. Continue a cross-task handoff only through an admitted prepared lifecycle action. ` +
           `For an implementation checkpoint, inspect the same worker and active no-mistakes state. If an exact continuation is required but no prepared effect owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
           `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text; do not run or respond to no-mistakes yourself. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
@@ -2518,8 +2556,11 @@ ${context.command}
         continuationToolsRemaining = null;
         recordContinuationReceipt = null;
         branchTaskBindings = {};
+        branchTaskAdmissionRevisions = {};
+        branchTaskAdmissionSnapshots = {};
         branchProgressBindings = {};
         branchProgressSnapshots = {};
+        branchEffectAuthorityNeeded = new Set();
         branchHandoffObservations = {};
         wakeTaskScope = null;
       }

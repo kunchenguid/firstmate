@@ -130,8 +130,8 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
-test_branch_compact_progress_refuses_unbound_steer() {
-  local dir err token branch_env rc
+test_branch_compact_progress_routes_exact_next_step() {
+  local dir err token branch_env rc count
   dir=$(setup_case branch-idempotent)
   err="$dir/send.err"
   mkdir -p "$dir/home/data/t1"
@@ -156,12 +156,33 @@ test_branch_compact_progress_refuses_unbound_steer() {
     "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
     "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
     t1 --idempotent "Start the existing no-mistakes run"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail 'exact compact next_step did not reach the inbox owner'
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail 'exact compact retry failed'
+  count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "exact compact retry created $count inbox records"
+
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start a different validation run"
   rc=$?
-  expect_code 6 "$rc" "compact progress without prepared effect authority"
-  assert_contains "$(cat "$err")" "does not authorize an exact steer" \
-    'compact progress refusal did not return exact-effect preparation to MAIN'
-  [ ! -d "$dir/home/state/t1.inbox" ] || fail 'compact progress wrote an unbound inbox effect'
-  pass 'Branch compact progress refuses an unbound same-task steer'
+  expect_code 6 "$rc" "compact progress arbitrary payload"
+  assert_contains "$(cat "$err")" "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:t1" \
+    'arbitrary compact payload did not request MAIN authority'
+
+  sed -i 's/^spawn_gen=s1$/spawn_gen=s2/' "$dir/home/state/t1.meta"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run"
+  rc=$?
+  expect_code 6 "$rc" "stale compact executor generation"
+  assert_contains "$(cat "$err")" "executor generation changed" \
+    'stale compact admission did not preserve executor-generation fencing'
+  pass 'Branch compact progress routes only the exact idempotent next_step'
 }
 
 test_pending_composer_does_not_gate_native_prompt() {
@@ -392,7 +413,7 @@ test_empty_message_refused() {
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
-test_branch_compact_progress_refuses_unbound_steer
+test_branch_compact_progress_routes_exact_next_step
 test_pending_composer_does_not_gate_native_prompt
 test_failed_ring_is_still_sent
 test_uncertain_ring_persists_recovery_before_suppression
@@ -474,8 +495,8 @@ test_branch_progress_token_does_not_authorize_v2_effect() {
     "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 "Continue the existing no-mistakes run"
   rc=$?
   expect_code 6 "$rc" "a progress token must not authorize a v2 steer"
-  assert_contains "$(cat "$dir/error")" "does not authorize an exact steer" \
-    "token-only refusal did not preserve the delegated action owner"
+  assert_contains "$(cat "$dir/error")" "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:t1" \
+    "non-idempotent compact text did not preserve the delegated action owner"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail 'token-only effect wrote an inbox record'
 
   payload='Continue the existing no-mistakes run'
@@ -508,6 +529,6 @@ PY
     "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" \
     || fail "explicit delegated steer failed: $(cat "$dir/error")"
   [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail 'explicit delegated steer did not reach the inbox owner'
-  pass 'compact progress is freshness only; the existing delegated action still authorizes its exact effect'
+  pass 'compact progress stays bounded while the existing delegated action authorizes its exact effect'
 }
 test_branch_progress_token_does_not_authorize_v2_effect
