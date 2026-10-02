@@ -20,10 +20,27 @@
 # root, so a fresh pool can clone with the launching user's credentials.
 
 fm_treehouse_pool_root() { # <home> -> <absolute-root>
-  local home=$1 resolved key
+  local home=$1 resolved key base
   resolved=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
-  key=$(printf '%s' "$resolved" | shasum | cut -c1-12) || return 1
-  printf '%s/%s\n' "${FM_TREEHOUSE_POOL_BASE:-$HOME/.firstmate-treehouse}" "$key"
+  if command -v shasum >/dev/null 2>&1; then
+    key=$(printf '%s' "$resolved" | shasum | cut -c1-12) || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    key=$(printf '%s' "$resolved" | sha256sum | cut -c1-12) || return 1
+  else
+    echo "error: shasum or sha256sum is required to resolve the Treehouse pool root" >&2
+    return 1
+  fi
+  [ "${#key}" -eq 12 ] || return 1
+  case "$key" in *[!0-9a-f]*) return 1 ;; esac
+  base=${FM_TREEHOUSE_POOL_BASE:-$HOME/.firstmate-treehouse}
+  case "$base" in
+    /*) ;;
+    *)
+      echo "error: Treehouse pool base must be absolute: $base" >&2
+      return 1
+      ;;
+  esac
+  printf '%s/%s\n' "${base%/}" "$key"
 }
 
 fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty

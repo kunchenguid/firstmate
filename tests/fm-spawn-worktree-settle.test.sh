@@ -185,6 +185,36 @@ test_spawn_refuses_project_treehouse_config() {
   pass "fm-spawn.sh refuses project treehouse.toml before Treehouse acquisition"
 }
 
+test_pool_root_uses_sha256sum_without_shasum() {
+  local toolbin root key status sha256sum_path cut_path
+  toolbin="$HOME_DIR/hash-tools"
+  mkdir -p "$toolbin" "$HOME_DIR/user-home"
+  sha256sum_path=$(command -v sha256sum)
+  cut_path=$(command -v cut)
+  ln -sf "$sha256sum_path" "$toolbin/sha256sum"
+  ln -sf "$cut_path" "$toolbin/cut"
+
+  status=0
+  root=$(PATH="$toolbin" HOME="$HOME_DIR/user-home" fm_treehouse_pool_root "$HOME_DIR") || status=$?
+  expect_code 0 "$status" "pool root should resolve when sha256sum is the only available hasher"
+  key=${root##*/}
+  [ "${#key}" -eq 12 ] || fail "sha256sum fallback produced a pool key with the wrong length: '$key'"
+  case "$key" in
+    *[!0-9a-f]*) fail "sha256sum fallback produced a non-hex pool key: '$key'" ;;
+  esac
+  pass "Treehouse pool roots resolve with sha256sum when shasum is unavailable"
+}
+
+test_pool_root_refuses_relative_override() {
+  local out status
+  status=0
+  out=$(FM_TREEHOUSE_POOL_BASE=relative-pools HOME="$HOME_DIR/user-home" \
+    fm_treehouse_pool_root "$HOME_DIR" 2>&1) || status=$?
+  expect_code 1 "$status" "relative Treehouse pool bases should be refused"
+  assert_contains "$out" "must be absolute" "relative pool-base refusal was not actionable"
+  pass "Treehouse pool roots refuse caller-relative overrides"
+}
+
 # A pane that reports the real worktree from the very first read costs exactly
 # one confirming read - not a whole extra polling cycle on top of it. Counting
 # the pane reads measures the loop itself; wall-clock time would fold in every
@@ -275,6 +305,8 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 test_single_stale_first_read_is_not_accepted
 test_spawn_get_uses_per_home_treehouse_root
 test_spawn_refuses_project_treehouse_config
+test_pool_root_uses_sha256sum_without_shasum
+test_pool_root_refuses_relative_override
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline

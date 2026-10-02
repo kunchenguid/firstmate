@@ -326,6 +326,7 @@ for _teardown_source in \
   fm-backend.sh \
   fm-control-lib.sh \
   fm-lock-lib.sh \
+  fm-treehouse-lib.sh \
   fm-classify-lib.sh \
   fm-gate-refuse-lib.sh \
   fm-pr-lib.sh \

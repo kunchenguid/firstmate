@@ -424,7 +424,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 
-Each firstmate home uses its own absolute Treehouse root at `~/.firstmate-treehouse/<key>` (`FM_TREEHOUSE_POOL_BASE` overrides the base), keyed by the home's resolved path, so new pooled slots can link only to that home's project clone.
+Each firstmate home uses its own absolute Treehouse root at `~/.firstmate-treehouse/<key>` (`FM_TREEHOUSE_POOL_BASE` overrides the base with another absolute path), keyed by the home's resolved path, so new pooled slots can link only to that home's project clone.
 The root lives outside the home on purpose: a pooled checkout nested under the home would sit below firstmate's own `CLAUDE.md`, and a harness walking up from it would import firstmate's job description into a project worker.
 Because Treehouse is driven with `HOME` pointed at that root, the root links the launching user's `~/Library`, `~/.gitconfig`, `~/.ssh`, and `~/.config` so git and its credential helpers (the macOS keychain included) keep working inside the pool; `firstmate-home` in the root records which home owns it.
 New acquisitions use this root, while returns derive the root from a recorded `.treehouse` path so legacy shared slots drain safely and paths without that marker fall back to the home root.

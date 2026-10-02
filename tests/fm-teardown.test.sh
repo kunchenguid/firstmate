@@ -660,7 +660,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps readlink realpath rm sed sh sha256sum shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -4228,6 +4228,18 @@ test_missing_startup_source_refuses_before_cleanup() {
   pass "a missing teardown startup source refuses before cleanup"
 }
 
+test_missing_treehouse_source_refuses_before_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case missing-treehouse-source)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-treehouse-lib.sh"
+  rc=0
+  run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  assert_source_refusal_preserved_state "$case_dir" "missing-treehouse-source" "required source fm-treehouse-lib.sh"
+  pass "a missing Treehouse helper refuses before cleanup"
+}
+
 test_unreadable_startup_source_refuses_before_cleanup() {
   local case_dir rc
   case_dir=$(make_case unreadable-startup-source)
@@ -4340,6 +4352,7 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
 }
 
 test_missing_startup_source_refuses_before_cleanup
+test_missing_treehouse_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
