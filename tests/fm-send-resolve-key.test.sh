@@ -15,7 +15,10 @@
 #      scenario where the worker never writes a matching resolved line.
 #   2. A routine steer without the flag never closes anything, and a working:
 #      line still cannot clear a captain decision.
-#   3. A key that is not open refuses BEFORE anything is sent (mistype safety).
+#   3. A key that is not open still delivers the answer - an unmatched key must
+#      never silently eat the message - and the miss is reported after the
+#      durable write, closing nothing; a mixed send closes only its matched
+#      keys and reports the rest.
 #   4. The close happens at enqueue: a failed doorbell ring still closes the
 #      answered key (the record is durably sent), while a failed ENQUEUE - the
 #      real local failure - closes nothing and leaves the decision open.
@@ -315,13 +318,23 @@ test_routine_steer_never_closes() {
   printf '%s' "$out" | grep -F '[key=schema]' >/dev/null \
     || fail "a routine steer or later working line cleared an unanswered captain decision: $out"
   printf 'done: task complete\nnote: cleanup complete\n' >> "$home/state/t3.status"
-  run_send "$fb" "$home" "$log" t3 --resolve-key schema "answer to a stale decision" > "$dir/terminal.out" 2> "$dir/terminal.err"; rc=$?
-  expect_code 1 "$rc" "an answer to a terminally superseded decision must refuse"
-  [ ! -e "$home/state/t3.inbox/002.msg" ] || fail "a stale decision answer was delivered"
-  pass "fm-send preserves decisions through routine work and refuses superseded terminal decisions"
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t3 --resolve-key schema "answer to a stale decision" >/dev/null 2> "$dir/terminal.err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an answer to a terminally superseded decision must report the unmatched key"
+  grep -qF "answer to a stale decision" "$home/state/t3.inbox/002.msg" \
+    || fail "even a superseded decision's answer must be delivered, not silently lost"
+  assert_contains "$(cat "$dir/terminal.err")" "schema" "the report should name the unmatched key"
+  pass "fm-send preserves decisions through routine work and delivers-but-reports superseded decision answers"
 }
 
-test_not_open_key_refuses_before_send() {
+# Regression for the lost-answer defect: a --resolve-key key that matches no
+# open decision used to refuse BEFORE anything was sent, which silently ate the
+# answer itself - the transport reported a send attempt while the recipient had
+# nothing. The answer must now ALWAYS be delivered; the unmatched key is
+# reported after the durable write, closing nothing.
+test_unmatched_key_still_delivers() {
   local dir fb log home err rc out
   dir="$TMP_ROOT/not-open"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
@@ -333,18 +346,47 @@ test_not_open_key_refuses_before_send() {
   env PATH="$fb:$PATH" \
     FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
     "$SEND" t4 --resolve-key mistyped "the answer" >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a not-open key should refuse"
-  assert_contains "$(cat "$err")" "--resolve-key 'mistyped'" "the refusal should name the bad key"
-  assert_contains "$(cat "$err")" "nothing was sent" "the refusal should state nothing was sent"
-  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
-  [ ! -d "$home/state/t4.inbox" ] || fail "a refused answer still enqueued an inbox record"
+  [ "$rc" -ne 0 ] || fail "an unmatched key should still exit nonzero: its decision was not closed"
+  assert_contains "$(cat "$err")" "--resolve-key" "the report should name the flag"
+  assert_contains "$(cat "$err")" "mistyped" "the report should name the unmatched key"
+  assert_contains "$(cat "$err")" "Do not resend" "the report should forbid resending the delivered answer"
+  grep -qF "the answer" "$home/state/t4.inbox/001.msg" \
+    || fail "the answer must land in the durable inbox record even when the key matches nothing"
+  assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should still be rung for an unmatched-key answer"
   if grep -F 'resolved' "$home/state/t4.status" >/dev/null; then
-    fail "a refused answer still closed something: $(cat "$home/state/t4.status")"
+    fail "an unmatched key still closed something: $(cat "$home/state/t4.status")"
   fi
   out=$(drain_out "$home")
   printf '%s' "$out" | grep -F '[key=real-key]' >/dev/null \
-    || fail "the real decision disappeared after a refused answer: $out"
-  pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
+    || fail "the real decision disappeared after an unmatched-key answer: $out"
+  pass "fm-send --resolve-key: an unmatched key still delivers the answer, then reports the miss"
+}
+
+# One matched and one unmatched key in the same send: the answer delivers, the
+# matched key closes, and only the miss is reported.
+test_mixed_matched_and_unmatched_keys() {
+  local dir fb log home err rc out
+  dir="$TMP_ROOT/mixed"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home mixed)
+  fm_write_meta "$home/state/t6.meta" "window=sess:fm-t6" "kind=ship"
+  printf 'needs-decision [key=real-key]: choose\n' > "$home/state/t6.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" t6 --resolve-key real-key --resolve-key ghost "covering answer" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a send carrying an unmatched key should exit nonzero"
+  grep -qF "covering answer" "$home/state/t6.inbox/001.msg" \
+    || fail "the answer must be durably recorded"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t6.status" | grep -qF 'resolved [key=real-key]: answered: covering answer' \
+    || fail "the matched key must still close: $(cat "$home/state/t6.status")"
+  assert_contains "$(cat "$err")" "ghost" "the report should name the unmatched key"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the matched key is still open after a mixed answer: $out"
+  fi
+  pass "fm-send --resolve-key: a mixed send delivers, closes the matched key, and reports the miss"
 }
 
 # The close is an enqueue-time fact: the durable record IS the delivery, so a
@@ -534,6 +576,30 @@ test_remote_secondmate_answer_closes_locally() {
     fail "the answered remote-secondmate decision still lists as open: $out"
   fi
   pass "fm-send --resolve-key: a remote-secondmate answer closes the same local ledger, transport-only difference"
+}
+
+# A close failure must not hide an unmatched key: the remote path used to exit
+# on the failed close before reporting the miss, so the operator never learned
+# the second key closed nothing.
+test_remote_failed_close_still_reports_unmatched_key() {
+  local dir fb log home ssh_log err rc
+  dir="$TMP_ROOT/remote-close-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; ssh_log="$dir/ssh.log"; : > "$ssh_log"; err="$dir/send.err"
+  home=$(setup_remote_home remote-close-fail)
+  printf 'needs-decision [key=upgrade-window]: tonight or the weekend\n' > "$home/state/rsm.status"
+  chmod 0400 "$home/state/rsm.status"
+
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
+    "$SEND" rsm --resolve-key upgrade-window --resolve-key ghost "the weekend" >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$home/state/rsm.status"
+  [ "$rc" -ne 0 ] || fail "a failed close plus an unmatched key should exit nonzero"
+  assert_grep 'fm-remote-entrypoint.sh' "$ssh_log" "the answer should still cross the remote transport"
+  assert_contains "$(cat "$err")" "Close it manually with:" "the close failure should be reported"
+  assert_contains "$(cat "$err")" "'ghost' matched no open decision" "the unmatched key should still be reported"
+  pass "fm-send --resolve-key: a failed remote close still reports the unmatched key"
 }
 
 # The reported failure: a remote secondmate reply line prepends a
@@ -911,13 +977,15 @@ test_separate_resolve_key_answers_do_not_rewake
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
-test_not_open_key_refuses_before_send
+test_unmatched_key_still_delivers
+test_mixed_matched_and_unmatched_keys
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_multiple_keys_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
+test_remote_failed_close_still_reports_unmatched_key
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close
 test_flag_misuse_refuses

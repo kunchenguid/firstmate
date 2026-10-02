@@ -27,8 +27,10 @@
 # durably sent (recorded); nonzero = nothing was confirmed delivered and a
 # resend is appropriate (unresolvable target, an endpoint that cannot be
 # locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or a decision-close append failed after
-# delivery (the error then carries the exact manual close). The remote enqueue
+# failed or lost remote transport) or a post-delivery bookkeeping failure: a
+# decision-close append failed after delivery (the error then carries the
+# exact manual close) or a --resolve-key key matched no open decision (the
+# error names the key and says the delivered answer must not be resent). The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
@@ -47,7 +49,15 @@
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/. The
+# ordinary record by the worker's acknowledgement move into handled/. That
+# acknowledgement model makes a raw pending-record count ambiguous delivery
+# evidence: zero unhandled records can mean the worker already consumed the
+# message into handled/ just as easily as that no record was ever queued, so
+# tell the two apart by listing state/<id>.inbox/ itself, including handled/,
+# never by the pending count alone. This is not hypothetical: a supervising
+# firstmate read an empty pending glob as "never delivered" when its
+# instruction had landed seconds earlier and already moved to handled/, and
+# nearly sent a duplicate. The
 # watcher re-rings an unacknowledged message while its endpoint remains
 # available, escalates after the bounded ladder, and instead routes a positively
 # dead or missing endpoint directly to recovery without typing. An explicit
@@ -197,11 +207,15 @@
 # transferred from the live status log to its durable captain-held task, which
 # the status ledger alone can no longer close.
 #
-# Each named key must therefore currently be open in ONE of the two ledgers: open
+# Each named key is therefore expected to be open in ONE of the two ledgers: open
 # in this home's status log per status_open_decisions (bin/fm-classify-lib.sh), or
-# a still-open captain-held task resolved as above. A key in neither is refused
-# before sending, so a mistyped key cannot deliver an answer while silently
-# orphaning the decision. A failed or unconfirmed send never closes a key; a
+# a still-open captain-held task resolved as above. A key in neither does NOT
+# refuse the send: refusing before delivery would silently eat the answer
+# itself, which is the worst message to lose. The answer is delivered
+# normally, and only after the durable write does the send exit nonzero,
+# naming each unmatched key and stating that those keys were not closed and the
+# delivered answer must not be resent, so a mistyped or already-closed key
+# cannot orphan its decision unnoticed. A failed or unconfirmed send never closes a key; a
 # delivered answer whose closing append fails exits nonzero with the exact
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
@@ -548,11 +562,11 @@ if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARG
 fi
 
 # Validate the answerer-closes request before any durable mutation or send: the
-# target must have a task ledger in THIS home, the send must carry an answer
-# message, and every named key must be open right now in that ledger per the
-# ONE authoritative fold (status_open_decisions). Refusing here, before the
-# send, is what keeps a mistyped key loud instead of delivering an answer that
-# silently leaves its decision open.
+# target must have a task ledger in THIS home and the send must carry an answer
+# message. Each named key is then classified against the ONE authoritative fold
+# (status_open_decisions): open keys are closed after delivery, and a key that
+# matches nothing never refuses the send - the answer is still delivered and
+# the miss is reported loudly afterward with a nonzero exit.
 RESOLVE_STATUS_FILE=
 # Which ledger each answered key belongs to. A key still open in the status log
 # is owned by the status log: fm-captain-hold's `complete` closes that live copy
@@ -562,6 +576,10 @@ RESOLVE_STATUS_FILE=
 # longer owns also keeps the common path free of any backlog read.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
+# Keys that matched no open decision in either ledger. They never refuse the
+# send: the answer must still be delivered, and the miss is reported after the
+# durable write (fm_send_report_unmatched_keys).
+RESOLVE_UNMATCHED_KEYS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 
 # Resolve a --resolve-key key that the status log no longer owns to the
@@ -582,6 +600,17 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
     printf '%s\n' "$id"
     return 0
   done
+  return 1
+}
+
+# Report --resolve-key keys that matched no open decision or blocker in the
+# status log and no open captain-held task. This runs only after the answer is
+# durably delivered: a ledger miss must never silently eat the message itself.
+# The send still exits nonzero so the caller learns the decision was NOT
+# closed, but the delivered answer must not be resent.
+fm_send_report_unmatched_keys() {
+  [ -n "$RESOLVE_UNMATCHED_KEYS" ] || return 0
+  echo "error: the answer was delivered to $T, but --resolve-key key(s) '$RESOLVE_UNMATCHED_KEYS' matched no open decision or blocker in $RESOLVE_STATUS_FILE and no open captain-held task (already closed or mistyped), so those key(s) were not closed; any other --resolve-key keys were handled as reported separately. Do not resend the answer; re-check the OPEN DECISIONS listing and close the decision manually if it is still open." >&2
   return 1
 }
 
@@ -645,8 +674,11 @@ if [ -n "$RESOLVE_KEYS" ]; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
-    echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
-    exit 1
+    # Open in neither ledger. Refusing here would lose the answer itself: the
+    # sender is told the send ran, yet the recipient never gets the message.
+    # Collect the miss and deliver first; the key is reported after the durable
+    # write by fm_send_report_unmatched_keys.
+    RESOLVE_UNMATCHED_KEYS="${RESOLVE_UNMATCHED_KEYS}${RESOLVE_UNMATCHED_KEYS:+ }$k"
   done
   # The decision-answer partition (the header's "Answering a decision"
   # contract): a key that is an open needs-decision, or already a captain-held
@@ -1001,11 +1033,15 @@ else
         fi
       fi
     fi
+    # Every post-delivery failure is reported: a close failure must not hide
+    # an unmatched key, so collect the status instead of exiting early.
+    post_delivery_rc=0
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" &&
+        fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || post_delivery_rc=1
     fi
-    exit 0
+    fm_send_report_unmatched_keys || post_delivery_rc=1
+    exit "$post_delivery_rc"
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -1078,9 +1114,12 @@ else
     fi
     # The answer is durably sent: close each answered decision at enqueue time
     # (answerer-closes; see the header contract).
+    # A bookkeeping failure here never skips the doorbell: the answer is
+    # already queued, so ring first and surface the failure as the exit status.
+    post_delivery_rc=0
     if [ -n "$RESOLVE_KEYS" ]; then
-      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+      fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" &&
+        fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || post_delivery_rc=1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
@@ -1105,7 +1144,9 @@ else
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
-    exit 0
+    # A key that matched nothing still left its answer durably queued and rung.
+    fm_send_report_unmatched_keys || post_delivery_rc=1
+    exit "$post_delivery_rc"
   fi
   # Slash commands open a completion popup in some TUIs (verified on codex);
   # submitting too fast selects nothing, so give the popup time to settle before
@@ -1203,10 +1244,15 @@ else
   fi
   # Delivery is fully confirmed: close each answered decision in this home's
   # ledger (answerer-closes; see the header contract).
+  # Report every post-delivery failure before exiting: a close failure must
+  # not hide an unmatched key.
+  post_delivery_rc=0
   if [ -n "$RESOLVE_KEYS" ]; then
-    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
-    fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
+    fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" &&
+      fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || post_delivery_rc=1
   fi
+  fm_send_report_unmatched_keys || post_delivery_rc=1
+  [ "$post_delivery_rc" = 0 ] || exit 1
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
