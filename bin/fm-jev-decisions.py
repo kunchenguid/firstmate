@@ -14,6 +14,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import json
+import math
 import os
 import re
 import shlex
@@ -245,7 +246,9 @@ def classify_decision(
         item.probabilities = cat_ans.get("probabilities", {})
 
         noul = (answers.get("actionable_now") or {}).get("noul")
-        if isinstance(noul, bool) or not isinstance(noul, (int, float)):
+        if isinstance(noul, bool) or not isinstance(noul, (int, float)) or not (
+            math.isfinite(noul) and 0.0 <= noul <= 1.0
+        ):
             item.category = "unavailable"
             item.error = f"Jev returned no valid actionable_now noul: {noul!r}"
             return item
@@ -429,6 +432,7 @@ def main() -> None:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
             classified_items = [f.result() for f in futures]
+        ledger_open: dict[Path, set[tuple[str, str, str]]] = {}
         for item in classified_items:
             if not item.resolve_cmd:
                 continue
@@ -440,6 +444,17 @@ def main() -> None:
             elif ledger.resolve() != origin.resolve():
                 item.resolve_cmd = ""
                 item.suggested_action += f" (fm-send would close {ledger}, not {origin}; close it by hand)"
+            else:
+                # A TSV or --key row carries no origin: it is proven to come from this
+                # ledger only when the ledger itself holds exactly this decision open.
+                if ledger not in ledger_open:
+                    ledger_open[ledger] = {
+                        (d.key, d.verb, d.note)
+                        for d in extract_decisions_from_bash("status_open_decisions", classify_lib, ledger, item.task)
+                    }
+                if (item.key, item.verb, item.note) not in ledger_open[ledger]:
+                    item.resolve_cmd = ""
+                    item.suggested_action += f" (not an open decision in {ledger}; close it by hand)"
 
     # Filters
     filtered_items = classified_items
@@ -458,7 +473,11 @@ def main() -> None:
         sys.exit(0)
 
     if args.json:
-        payload = [dataclasses.asdict(it) for it in filtered_items]
+        # The note gets the request's redaction; an unreadable never-send list withholds it whole.
+        payload = [
+            dataclasses.asdict(it) | {"note": "[withheld]" if withheld_reason else withhold(it.note, never_send)}
+            for it in filtered_items
+        ]
         print(json.dumps(payload, indent=2))
         sys.exit(0)
 

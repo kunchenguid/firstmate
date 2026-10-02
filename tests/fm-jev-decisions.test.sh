@@ -112,24 +112,34 @@ urgent=$("$DECISION_SH" --input "$TSV" --min-noul 0.35 --json)
 [ "$(printf '%s' "$urgent" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin))))')" = active-fix,net-down ] ||
   fail "--min-noul must keep only items at or above the threshold: $urgent"
 
-# 4. Resolve commands are shell-safe for hostile task and key values.
-EVIL="$TDIR/evil.tsv"
+# 4. Resolve commands are shell-safe for a hostile task name.
 EVIL_TASK='t;touch pwned-task'
-# shellcheck disable=SC2016
-EVIL_KEY='old-$(touch pwned-key)'
 EVIL_STATE="$TDIR/evil-state"; mkdir -p "$EVIL_STATE"
 : > "$EVIL_STATE/$EVIL_TASK.meta"
-printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" "$EVIL_KEY" blocked "superseded" > "$EVIL"
+printf 'blocked [key=old-dep]: superseded\n' > "$EVIL_STATE/$EVIL_TASK.status"
 FAKE="$TDIR/fakeroot"; mkdir -p "$FAKE/bin"
 cp -R "$ROOT/bin/." "$FAKE/bin/"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"; chmod +x "$FAKE/bin/fm-send.sh"
 RUNDIR="$TDIR/elsewhere"; mkdir -p "$RUNDIR"
-cmds=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$EVIL" --resolve-cmds)
+cmds=$(FM_HOME="$FAKE" "$DECISION_SH" --all --state-dir "$EVIL_STATE" --resolve-cmds)
 assert_contains "$cmds" "$FAKE/bin/fm-send.sh" "resolve cmd names the home's own fm-send.sh by absolute path"
 (cd "$RUNDIR" && bash -c "$cmds")
-[ ! -e "$RUNDIR/pwned-task" ] && [ ! -e "$RUNDIR/pwned-key" ] || fail "resolve cmds executed injected shell"
+[ ! -e "$RUNDIR/pwned-task" ] || fail "resolve cmds executed injected shell"
 [ "$(sed -n 1p "$TDIR/argv")" = "$EVIL_TASK" ] || fail "resolve cmd must pass the task verbatim"
-[ "$(sed -n 3p "$TDIR/argv")" = "$EVIL_KEY" ] || fail "resolve cmd must pass the key verbatim"
+[ "$(sed -n 3p "$TDIR/argv")" = old-dep ] || fail "resolve cmd must pass the key verbatim"
+
+# 4b. A TSV row gets a resolve cmd only when the selected ledger holds that exact decision open.
+printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" old-dep blocked "superseded" > "$TDIR/same.tsv"
+same=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/same.tsv" --resolve-cmds)
+assert_contains "$same" "--resolve-key old-dep" "a TSV row open in the selected ledger keeps its resolve cmd"
+printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" old-dep blocked "a stale decision from another home" > "$TDIR/foreign.tsv"
+foreign=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/foreign.tsv" --resolve-cmds)
+[ "$foreign" = "# No actionable resolve commands generated." ] ||
+  fail "a foreign TSV row whose task and key are open locally must not get a resolve cmd: $foreign"
+adhoc=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --task "$EVIL_TASK" --key old-dep --verb blocked --note "not in the ledger" --resolve-cmds)
+[ "$adhoc" = "# No actionable resolve commands generated." ] || fail "a --key row not open in the ledger must not get a resolve cmd: $adhoc"
+assert_contains "$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/foreign.tsv")" "close it by hand" \
+  "an unproven TSV row is flagged for manual close"
 
 # 5. Pending replies may still be owed: stale ones get no auto-resolve command.
 WORDING="$TDIR/wording.tsv"
@@ -142,6 +152,10 @@ printf '%s\t%s\t%s\t%s\n' \
   w old-dep blocked "superseded dependency" \
   > "$WORDING"
 : > "$EVIL_STATE/w.meta"
+printf '%s\n' \
+  "blocked [key=pending-reply-cfg]: pending-reply-missed: task=w request=CONFIG_REREAD" \
+  "blocked [key=pending-reply-other]: pending-reply-missed: task=w request=STATUS_PING" \
+  "blocked [key=old-dep]: superseded dependency" > "$EVIL_STATE/w.status"
 wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$WORDING" --json)
 [ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin) if i["resolve_cmd"])))')" = "old-dep" ] ||
   fail "only non-pending stale items may get a resolve command: $wording"
@@ -203,6 +217,32 @@ noul=$("$DECISION_SH" --input "$TDIR/noul.tsv" --json)
 [ "$(printf '%s' "$noul" | python3 -c 'import json,sys; print(",".join(i["category"] for i in json.load(sys.stdin)))')" = unavailable,unavailable ] ||
   fail "a rejected noul answer must report unavailable: $noul"
 
+# 7e. Only a finite noul within 0..1 is a score; anything else is unavailable to --min-noul.
+python3 - "$TDIR" <<'PY'
+import sys
+p = sys.argv[1] + "/stub.py"
+s = open(p).read()
+s = s.replace('if key.startswith("noul-dropped"):', '''if key.startswith("noul-raw-"):
+            answers = {"category": {"choice": "actionable_now", "confidence": 0.8},
+                       "actionable_now": {"noul": json.loads(body["state"]["note"])}}
+        if key.startswith("noul-dropped"):''')
+open(sys.argv[1] + "/stub-range.py", "w").write(s)
+PY
+python3 "$TDIR/stub-range.py" "$TDIR/port-range" "$TDIR/requests-range.log" &
+RANGE_PID=$!
+trap 'kill "$STUB_PID" "$RANGE_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
+for _ in $(seq 50); do [ -s "$TDIR/port-range" ] && break; sleep 0.1; done
+[ -s "$TDIR/port-range" ] || fail "range stub Jev server did not start"
+for v in NaN Infinity -Infinity -0.5 1.5 0 0.5 1; do
+  printf '%s\t%s\t%s\t%s\n' r "noul-raw-$v" needs-decision "$v"
+done > "$TDIR/range.tsv"
+range_run() { FM_JEV_TS_BASE="http://127.0.0.1:$(cat "$TDIR/port-range")" "$DECISION_SH" --input "$TDIR/range.tsv" --json "$@"; }
+range_keys() { python3 -c 'import json,sys; print(",".join(i["key"] + "=" + i["category"] for i in json.load(sys.stdin)))'; }
+[ "$(range_run | range_keys)" = "noul-raw-NaN=unavailable,noul-raw-Infinity=unavailable,noul-raw--Infinity=unavailable,noul-raw--0.5=unavailable,noul-raw-1.5=unavailable,noul-raw-0=actionable_now,noul-raw-0.5=actionable_now,noul-raw-1=actionable_now" ] ||
+  fail "only finite noul within 0..1 may be valid: $(range_run)"
+[ "$(range_run --min-noul 0.01 | range_keys)" = "noul-raw-0.5=actionable_now,noul-raw-1=actionable_now" ] ||
+  fail "--min-noul must see only valid scores: $(range_run --min-noul 0.01)"
+
 # 8. A key configured only in the home's .env is used.
 ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"
 printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$ENVHOME/.env"
@@ -220,6 +260,10 @@ if grep -qi "example client" "$TDIR/requests.log"; then
   fail "never-send value reached the Jev request"
 fi
 assert_contains "$(cat "$TDIR/requests.log")" "[withheld]" "never-send value is replaced in the request"
+if printf '%s' "$ns" | grep -qi "example"; then
+  fail "never-send value printed in --json output: $ns"
+fi
+assert_contains "$ns" '"note": "decide for [withheld] Ltd now"' "--json note carries the request's redaction"
 printf 'Acme\nAcme Health Partners\nHealth Partners Group\n' > "$TDIR/ns-config/dispatch-never-send"
 printf '%s\t%s\t%s\t%s\n' ns active-overlap needs-decision "acme health partners group owes X" > "$TDIR/ns.tsv"
 : > "$TDIR/requests.log"
@@ -230,6 +274,7 @@ mkdir -p "$TDIR/bad-config/dispatch-never-send"
 : > "$TDIR/requests.log"
 bad=$(FM_CONFIG_OVERRIDE="$TDIR/bad-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json 2>/dev/null)
 assert_contains "$bad" '"category": "unavailable"' "unreadable never-send list sends nothing"
+assert_contains "$bad" '"note": "[withheld]"' "unreadable never-send list withholds the --json note"
 [ ! -s "$TDIR/requests.log" ] || fail "unreadable never-send list must not reach Jev"
 
 # 10. A missing classify lib is an error, not an empty triage.
