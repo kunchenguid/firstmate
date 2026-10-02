@@ -363,6 +363,119 @@ test_home_seed_warns_when_acquired_home_return_fails() {
   pass "home seed rollback warns when treehouse-acquired return fails"
 }
 
+# A leased home that is a real Treehouse pool slot of the code root: the slot's
+# previous task left its claim and a completed scout record behind.
+make_claim_seed_fixture() {  # <name> -> prints "<root> <pool> <slot> <home>"
+  local name=$1 root pool slot home
+  root="$TMP_ROOT/$name-root"
+  pool="$TMP_ROOT/$name-pool"
+  home="$TMP_ROOT/$name-home"
+  mkdir -p "$root/bin" "$pool/1" "$home/data" "$home/state" "$home/projects"
+  printf '# fixture firstmate\n' > "$root/AGENTS.md"
+  printf 'fixture\n' > "$root/bin/README"
+  git -C "$root" init -q -b main
+  git -C "$root" add AGENTS.md bin/README
+  git -C "$root" -c user.name=test -c user.email=test@example.invalid commit -qm fixture
+  git -C "$root" worktree add -q --detach "$pool/1/firstmate"
+  slot=$(cd "$pool/1/firstmate" && pwd -P)
+  home=$(cd "$home" && pwd -P)
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$slot" > "$pool/treehouse-state.json"
+  printf 'task=old-scout\nhome=%s\n' "$home" > "$pool/1/.fm-slot-owner"
+  mkdir -p "$home/data/old-scout"
+  printf 'Complete fixture report.\n' > "$home/data/old-scout/report.md"
+  fm_write_meta "$home/state/old-scout.meta" \
+    "window=firstmate:fm-old-scout" "endpoint_task_id=old-scout" \
+    "worktree=$slot" "project=$root" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys="
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='claim fixture scope' FM_SECONDMATE_SCOPE='claim fixture scope' \
+    "$ROOT/bin/fm-brief.sh" mate --secondmate --no-projects >/dev/null \
+    || fail "could not scaffold the claim fixture's charter brief"
+  printf '%s %s %s %s\n' "$root" "$pool" "$slot" "$home"
+}
+
+# Every file in a fixture pool except the slot checkout's own Git pointer.
+claim_pool_fingerprint() {  # <pool>
+  (
+    cd "$1" || exit 1
+    find . -path ./1/firstmate/.git -prune -o -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+      printf '%s %s\n' "$(cksum < "$path")" "$path"
+    done
+  )
+}
+
+test_home_seed_claims_its_leased_pool_slot() {
+  local root pool slot home fakebin log out snapshot
+  read -r root pool slot home <<EOF
+$(make_claim_seed_fixture claim-seed)
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/claim-seed-fake")
+  log="$TMP_ROOT/claim-seed-fake/tmux.log"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_HOME="$slot" FM_FAKE_TREEHOUSE_STATE="$pool/treehouse-state.json" \
+    FM_FAKE_TMUX_LOG="$log" "$ROOT/bin/fm-home-seed.sh" mate - --no-projects) \
+    || fail "seed failed for a leased pool slot"
+  printf '%s\n' "$out" | grep -F "home=$slot" >/dev/null || fail "seed did not report the leased slot"
+  [ "$(cat "$pool/1/.fm-slot-owner")" = "$(printf 'task=mate\nhome=%s' "$home")" ] \
+    || fail "seed did not claim its leased pool slot: $(cat "$pool/1/.fm-slot-owner")"
+  [ "$(cat "$pool/1/.fm-slot-owner.prior")" = "$(printf 'task=old-scout\nhome=%s' "$home")" ] \
+    || fail "seed did not keep the replaced claim as recovery evidence"
+
+  # The real operator path continues: the old scout's completed record is
+  # cleaned up without touching the seeded home, with no reconciliation step.
+  snapshot=$(claim_pool_fingerprint "$pool")
+  : > "$log"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-teardown.sh" old-scout > "$TMP_ROOT/claim-seed.out" 2> "$TMP_ROOT/claim-seed.err" \
+    || fail "the old scout on a freshly seeded home did not finish: $(cat "$TMP_ROOT/claim-seed.err")"
+  assert_absent "$home/state/old-scout.meta" "the old scout's record was not removed"
+  [ "$(claim_pool_fingerprint "$pool")" = "$snapshot" ] \
+    || fail "cleaning up the old scout changed the freshly seeded home, its lease, or its claim"
+  ! grep -F 'treehouse return' "$log" >/dev/null \
+    || fail "cleaning up the old scout returned the freshly seeded home: $(cat "$log")"
+  pass "home seeding claims its leased pool slot under the project lock, so earlier scouts clean up without touching the home"
+}
+
+test_home_seed_rollback_releases_its_slot_claim() {
+  local root pool slot home fakebin log err
+  read -r root pool slot home <<EOF
+$(make_claim_seed_fixture claim-rollback)
+EOF
+  fakebin=$(make_fake_tmux "$TMP_ROOT/claim-rollback-fake")
+  log="$TMP_ROOT/claim-rollback-fake/tmux.log"
+  err="$TMP_ROOT/claim-rollback.err"
+
+  # The charter still carries its placeholder, which fails after the claim.
+  cp "$home/data/mate/brief.md" "$TMP_ROOT/claim-rollback-brief.md"
+  printf '\n{TASK}\n' >> "$home/data/mate/brief.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_HOME="$slot" FM_FAKE_TREEHOUSE_STATE="$pool/treehouse-state.json" \
+    FM_FAKE_TMUX_LOG="$log" "$ROOT/bin/fm-home-seed.sh" mate - --no-projects >/dev/null 2>"$err"; then
+    fail "seed succeeded with a placeholder charter"
+  fi
+  grep -F "treehouse return --force $slot" "$log" >/dev/null \
+    || fail "the failed seed did not return its leased slot"
+  assert_absent "$pool/1/.fm-slot-owner" "the failed seed left its claim on the returned slot"
+  [ "$(cat "$pool/1/.fm-slot-owner.prior")" = "$(printf 'task=old-scout\nhome=%s' "$home")" ] \
+    || fail "the failed seed lost the replaced claim's evidence"
+
+  # Treehouse leased the slot but its pool state does not show the lease: the
+  # seed refuses to claim a home whose ownership it cannot prove, and returns it.
+  : > "$log"
+  printf 'task=old-scout\nhome=%s\n' "$home" > "$pool/1/.fm-slot-owner"
+  cp "$TMP_ROOT/claim-rollback-brief.md" "$home/data/mate/brief.md"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_HOME="$slot" FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-home-seed.sh" mate - --no-projects >/dev/null 2>"$err"; then
+    fail "seed claimed a pool slot whose pool state records no lease"
+  fi
+  grep -F 'does not record a durable lease held by mate' "$err" >/dev/null \
+    || fail "the unproved-lease refusal was not explained: $(cat "$err")"
+  [ "$(cat "$pool/1/.fm-slot-owner")" = "$(printf 'task=old-scout\nhome=%s' "$home")" ] \
+    || fail "the unproved-lease refusal rewrote the slot's claim"
+  pass "home seed rollback returns its slot and drops only its own claim, and an unrecorded lease refuses the claim"
+}
+
 test_home_seed_does_not_return_unsafe_acquired_home() {
   local home descendant fakebin log err
   home="$TMP_ROOT/dash-active-home"
@@ -2058,6 +2171,75 @@ EOF
   pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
+# A forced retirement discards its own children's work, never another
+# secondmate's persistent home that a child's stale record still names.
+test_secondmate_force_teardown_refuses_child_slot_that_is_a_persistent_home() {
+  local home subhome childproj childwt fakebin log err rc
+  home="$TMP_ROOT/force-persistent-slot-home"
+  subhome="$TMP_ROOT/force-persistent-slot-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-persistent-slot-pool/1/alpha"
+  err="$TMP_ROOT/force-persistent-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" persistent-child
+  childwt=$(cd "$childwt" && pwd -P)
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"other-mate"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-persistent-slot-pool/treehouse-state.json"
+  printf 'other-mate\n' > "$childwt/.fm-secondmate-home"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  cat > "$subhome/state/stale-child.meta" <<EOF
+window=firstmate:fm-stale-child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  printf 'task=stale-child\nhome=%s\n' "$subhome" > "$TMP_ROOT/force-persistent-slot-pool/1/.fm-slot-owner"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-persistent-slot-fake")
+  log="$TMP_ROOT/force-persistent-slot-fake/tmux.log"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-persistent-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a child slot that is a persistent home"
+  [ -f "$childwt/.fm-secondmate-home" ] || fail "forced secondmate teardown removed the persistent home in a child slot"
+  [ -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown removed the stale child record"
+  grep -F 'kill-window' "$log" >/dev/null && fail "forced secondmate teardown killed a child before refusing its persistent-home slot"
+  grep -F 'treehouse return' "$log" >/dev/null && fail "forced secondmate teardown returned a persistent-home slot"
+  grep -F 'persistent secondmate home' "$err" >/dev/null \
+    || fail "forced secondmate teardown did not explain the persistent-home refusal: $(cat "$err")"
+
+  # Once that secondmate retires, the pool records the slot unleased while its
+  # gitignored marker stays behind; the child's slot is then ordinary again.
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-persistent-slot-pool/treehouse-state.json"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-persistent-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "forced secondmate teardown refused a child slot holding only a retired secondmate's marker: $(cat "$err")"
+  grep -F "treehouse return --force $childwt" "$log" >/dev/null \
+    || fail "forced secondmate teardown did not return the child's reused slot: $(cat "$log")"
+  [ ! -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown left the child record"
+  pass "forced secondmate teardown refuses a child slot that is another secondmate's persistent home, and returns it once that home is retired"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -3035,6 +3217,8 @@ test_home_seed_uses_treehouse_acquired_home
 test_home_seed_returns_treehouse_acquired_home_on_assignment_failure
 test_home_seed_warns_when_acquired_home_return_fails
 test_home_seed_does_not_return_unsafe_acquired_home
+test_home_seed_claims_its_leased_pool_slot
+test_home_seed_rollback_releases_its_slot_claim
 test_home_seed_rolls_back_failed_clone
 test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
@@ -3081,6 +3265,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
+test_secondmate_force_teardown_refuses_child_slot_that_is_a_persistent_home
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

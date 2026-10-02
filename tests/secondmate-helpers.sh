@@ -14,7 +14,10 @@
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
 # to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
-# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
+# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). With FM_FAKE_TREEHOUSE_STATE, the home
+# is instead a real pool slot: `get` records the lease in that pool state file
+# and `return` clears it, leaving the slot's checkout in place as Treehouse
+# does. Echoes the fakebin dir.
 make_fake_tmux() {
   local dir=$1 fakebin capture
   fakebin=$(fm_fakebin "$dir")
@@ -106,6 +109,9 @@ case "${1:-}" in
     if [ -n "${FM_FAKE_TREEHOUSE_HOME:-}" ]; then
       mkdir -p "$FM_FAKE_TREEHOUSE_HOME"
       [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && printf '%s\n' "$holder" > "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+      [ -z "${FM_FAKE_TREEHOUSE_STATE:-}" ] \
+        || printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+          "$FM_FAKE_TREEHOUSE_HOME" "$holder" > "$FM_FAKE_TREEHOUSE_STATE"
       printf 'leased worktree for %s\n' "${holder:-unknown}" >&2
       printf '%s\n' "$FM_FAKE_TREEHOUSE_HOME"
     fi
@@ -123,6 +129,10 @@ case "${1:-}" in
     done
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
+    if [ -n "${FM_FAKE_TREEHOUSE_STATE:-}" ]; then
+      printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$target" > "$FM_FAKE_TREEHOUSE_STATE"
+      exit 0
+    fi
     [ -n "$target" ] && rm -rf -- "$target"
     exit 0
     ;;

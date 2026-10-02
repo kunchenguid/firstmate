@@ -1420,6 +1420,498 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+# --- A persistent secondmate home seeded into a reused pool slot -------------
+#
+# Seeding a secondmate durably leases a pool slot that completed scouts used
+# before, so their stale records - and, for a home seeded before seeding
+# published its own claim, the slot's old owner claim - still name what is now
+# the secondmate's home. Returning or resetting that slot would discard the
+# seeded home. These cases drive the real bin/fm-home-seed.sh claim-slot and
+# bin/fm-teardown.sh interfaces: the claim is reconciled only after the
+# persistent owner is proved, a completed scout whose endpoint is gone then
+# finishes its own cleanup without touching the home, and every unproved,
+# contradictory, live, or incomplete shape refuses before any mutation.
+
+PERSISTENT_MATE=harbor
+
+# Lays the committed seed of a local secondmate over the case's pool slot: a
+# durable Treehouse lease, the identity marker, the local parent binding, the
+# home's operational files and project clone, and the registering route.
+seed_slot_as_persistent_home() {  # <case> [lease-holder] [registered-home] [parent-home]
+  local dir=$1 slot home holder registered parent
+  slot=$(cd "$dir/pool/1/project" && pwd -P)
+  home=$(cd "$dir/home" && pwd -P)
+  holder=${2:-$PERSISTENT_MATE}
+  registered=${3:-$slot}
+  parent=${4:-$home}
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$slot" "$holder" > "$dir/pool/treehouse-state.json"
+  printf '%s\n' "$PERSISTENT_MATE" > "$slot/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$slot/.fm-secondmate-parent"
+  mkdir -p "$slot/data" "$slot/state" "$slot/config" "$slot/projects"
+  printf 'Persistent fixture charter\n' > "$slot/data/charter.md"
+  printf 'saved review\n' > "$slot/data/review.md"
+  [ -d "$slot/projects/harbor/.git" ] || fm_git_init_commit "$slot/projects/harbor" >/dev/null
+  printf -- '- %s - Persistent fixture domain (home: %s; scope: persistent work; projects: harbor; added 2026-09-29)\n' \
+    "$PERSISTENT_MATE" "$registered" > "$dir/home/data/secondmates.md"
+}
+
+# A completed scout record naming the seeded slot: a report, a captain-call
+# inventory that verifies, and an endpoint the fake tmux reports as gone.
+write_persistent_scout() {  # <case> <id> [decision-keys]
+  local dir=$1 id=$2 keys=${3:-}
+  mkdir -p "$dir/home/data/$id"
+  printf 'Complete fixture report with no unresolved choices.\n' > "$dir/home/data/$id/report.md"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "decisions_reviewed=1" "decision_keys=$keys"
+  printf 'done [at=123]: fixture report complete\n' > "$dir/home/state/$id.status"
+}
+
+make_persistent_case() {  # <name> <claim-owner> <scout-id>...
+  local dir claimant=$2
+  dir=$(make_case "$1")
+  shift 2
+  mark_case_as_treehouse_pool "$dir"
+  seed_slot_as_persistent_home "$dir"
+  while [ "$#" -gt 0 ]; do
+    write_persistent_scout "$dir" "$1"
+    shift
+  done
+  claim_pool_slot "$dir" "$claimant" "$(cd "$dir/home" && pwd -P)"
+  printf '%s\n' "$dir"
+}
+
+# Every byte of the pool - the seeded home, its clone, its lease, the claim and
+# any retained prior claim - plus both checkouts' commits.
+persistent_home_fingerprint() {  # <case>
+  (
+    cd "$1/pool" || exit 1
+    find . \( -type f -o -type l \) -print | LC_ALL=C sort | while IFS= read -r path; do
+      printf '%s %s\n' "$(cksum < "$path")" "$path"
+    done
+    git -C 1/project rev-parse HEAD
+    git -C 1/project/projects/harbor rev-parse HEAD
+  )
+}
+
+run_persistent_teardown() {  # <case> <id> [teardown flags...]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" "$@" > "$dir/stdout" 2> "$dir/stderr"
+}
+
+run_claim_slot() {  # <case> [mate]
+  local dir=$1 mate=${2:-$PERSISTENT_MATE}
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/project" \
+    "$ROOT/bin/fm-home-seed.sh" claim-slot "$mate" > "$dir/claim.out" 2> "$dir/claim.err"
+}
+
+assert_persistent_teardown_refused() {  # <case> <id> <before-fingerprint> <description> [teardown flags...]
+  local dir=$1 id=$2 before=$3 description=$4 meta_before rc=0
+  shift 4
+  meta_before=$(cksum < "$dir/home/state/$id.meta")
+  : > "$dir/runtime.log"
+  run_persistent_teardown "$dir" "$id" "$@" || rc=$?
+  [ "$rc" -ne 0 ] || fail "$description: teardown succeeded: $(cat "$dir/stdout")"
+  [ "$(cksum < "$dir/home/state/$id.meta")" = "$meta_before" ] \
+    || fail "$description: the task record changed before the refusal"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "$description: the seeded home, its clone, lease, or claim changed"
+  ! grep -Eq 'treehouse|kill-|send-keys' "$dir/runtime.log" \
+    || fail "$description: a runtime close or pool command ran before the refusal: $(cat "$dir/runtime.log")"
+}
+
+assert_claim_slot_refused() {  # <case> <before-fingerprint> <description> <expected-diagnostic>
+  local dir=$1 before=$2 description=$3 expected=$4 rc=0
+  run_claim_slot "$dir" || rc=$?
+  [ "$rc" -ne 0 ] || fail "$description: claim-slot succeeded: $(cat "$dir/claim.out")"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "$description: claim-slot changed the seeded home, its lease, or its claim"
+  assert_contains "$(cat "$dir/claim.err")" "$expected" "$description: claim-slot diagnostic"
+}
+
+test_seeded_home_named_by_stale_scout_records_is_never_returned() {
+  local dir before id
+
+  # The live shape before reconciliation: both completed scouts still name the
+  # seeded home and the claim still names the first. Neither order may proceed.
+  for id in old-scout-a old-scout-b; do
+    dir=$(make_persistent_case "stale-claim-$id" old-scout-a old-scout-a old-scout-b)
+    before=$(persistent_home_fingerprint "$dir")
+    assert_persistent_teardown_refused "$dir" "$id" "$before" "stale claim, two records, cleanup of $id"
+    assert_present "$dir/home/state/old-scout-a.meta" "stale claim: old-scout-a's record was removed"
+    assert_present "$dir/home/state/old-scout-b.meta" "stale claim: old-scout-b's record was removed"
+  done
+
+  # The last stale record alone: its old claim reads as its own, which used to
+  # take the pool-return path against the seeded home. The durable lease is
+  # proof the slot is a persistent home, so the refusal holds even with --force
+  # and names the reconciliation to run.
+  for id in unforced --force; do
+    dir=$(make_persistent_case "stale-claim-sole$id" old-scout-a old-scout-a)
+    before=$(persistent_home_fingerprint "$dir")
+    if [ "$id" = --force ]; then
+      assert_persistent_teardown_refused "$dir" old-scout-a "$before" "stale claim, sole record, --force" --force
+    else
+      assert_persistent_teardown_refused "$dir" old-scout-a "$before" "stale claim, sole record"
+    fi
+    assert_contains "$(cat "$dir/stderr")" "claim-slot $PERSISTENT_MATE" \
+      "stale claim, sole record: the refusal should name the claim reconciliation"
+  done
+
+  pass "fm-teardown: a seeded persistent home named by stale scout records and an old claim is never returned, reset, or reaped"
+}
+
+test_reconciled_seeded_home_lets_completed_dead_scouts_finish() {
+  local dir before home unrelated_before mate_before
+
+  dir=$(make_persistent_case reconciled old-scout-a old-scout-a old-scout-b)
+  home=$(cd "$dir/home" && pwd -P)
+  # An unrelated task with its own endpoint must be left entirely alone.
+  fm_write_meta "$dir/home/state/unrelated.meta" \
+    "window=firstmate:fm-unrelated" "endpoint_task_id=unrelated" \
+    "worktree=$dir/unrelated-worktree" "project=$dir/project" "kind=ship"
+  unrelated_before=$(cksum < "$dir/home/state/unrelated.meta")
+
+  run_claim_slot "$dir" || fail "claim-slot refused a proved persistent home: $(cat "$dir/claim.err")"
+  [ "$(cat "$dir/pool/1/.fm-slot-owner")" = "$(printf 'task=%s\nhome=%s' "$PERSISTENT_MATE" "$home")" ] \
+    || fail "claim-slot did not publish the secondmate's claim: $(cat "$dir/pool/1/.fm-slot-owner")"
+  [ "$(cat "$dir/pool/1/.fm-slot-owner.prior")" = "$(printf 'task=old-scout-a\nhome=%s' "$home")" ] \
+    || fail "claim-slot did not retain the replaced claim as recovery evidence"
+  before=$(persistent_home_fingerprint "$dir")
+
+  : > "$dir/runtime.log"
+  run_persistent_teardown "$dir" old-scout-a \
+    || fail "a completed dead scout on a reconciled persistent home did not finish: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/old-scout-a.meta" "old-scout-a's own record was not removed"
+  assert_present "$dir/home/state/old-scout-b.meta" "old-scout-a's cleanup removed the other stale record"
+  assert_contains "$(cat "$dir/stdout")" "left to task $PERSISTENT_MATE" \
+    "the completion line should name the persistent owner the slot was left to"
+  assert_contains "$(cat "$dir/stderr")" "old-scout-b" \
+    "the cleanup should name the other stale record it left alone"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "cleanup of old-scout-a changed the seeded home, its clone, lease, or claim"
+  ! grep -Fq 'treehouse' "$dir/runtime.log" \
+    || fail "cleanup of old-scout-a ran a pool operation: $(cat "$dir/runtime.log")"
+  ! grep -Eq 'kill-[a-z]* <-t> <[^>]*(fm-unrelated|fm-old-scout-b)' "$dir/runtime.log" \
+    || fail "cleanup of old-scout-a closed an unrelated endpoint: $(cat "$dir/runtime.log")"
+  [ "$(cksum < "$dir/home/state/unrelated.meta")" = "$unrelated_before" ] \
+    || fail "cleanup of old-scout-a changed an unrelated task record"
+
+  : > "$dir/runtime.log"
+  run_persistent_teardown "$dir" old-scout-b \
+    || fail "the second completed dead scout did not finish: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/old-scout-b.meta" "old-scout-b's own record was not removed"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "cleanup of old-scout-b changed the seeded home, its clone, lease, or claim"
+  ! grep -Fq 'treehouse' "$dir/runtime.log" \
+    || fail "cleanup of old-scout-b ran a pool operation: $(cat "$dir/runtime.log")"
+
+  # Launching the secondmate first adds its own record naming the home. That
+  # record is the proved owner itself, so a stale scout still finishes and the
+  # secondmate's record and endpoint are untouched.
+  dir=$(make_persistent_case reconciled-launched old-scout-a old-scout-a)
+  run_claim_slot "$dir" || fail "claim-slot refused before launch: $(cat "$dir/claim.err")"
+  fm_write_meta "$dir/home/state/$PERSISTENT_MATE.meta" \
+    "window=firstmate:fm-$PERSISTENT_MATE" "endpoint_task_id=$PERSISTENT_MATE" \
+    "kind=secondmate" "home=$dir/worktree" "worktree=$dir/worktree"
+  mate_before=$(cksum < "$dir/home/state/$PERSISTENT_MATE.meta")
+  before=$(persistent_home_fingerprint "$dir")
+  : > "$dir/runtime.log"
+  run_persistent_teardown "$dir" old-scout-a \
+    || fail "a stale scout beside the launched secondmate's record did not finish: $(cat "$dir/stderr")"
+  [ "$(cksum < "$dir/home/state/$PERSISTENT_MATE.meta")" = "$mate_before" ] \
+    || fail "cleanup changed the launched secondmate's record"
+  ! grep -Eq "kill-[a-z]* <-t> <[^>]*fm-$PERSISTENT_MATE" "$dir/runtime.log" \
+    || fail "cleanup closed the launched secondmate's endpoint: $(cat "$dir/runtime.log")"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "cleanup beside the launched secondmate changed its home"
+
+  # A second secondmate record naming the same home contradicts the proof.
+  dir=$(make_persistent_case reconciled-contradicted old-scout-a old-scout-a)
+  run_claim_slot "$dir" || fail "claim-slot refused before the contradiction: $(cat "$dir/claim.err")"
+  fm_write_meta "$dir/home/state/other-mate.meta" \
+    "window=firstmate:fm-other-mate" "endpoint_task_id=other-mate" \
+    "kind=secondmate" "home=$dir/worktree" "worktree=$dir/worktree"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "another secondmate record naming the home"
+  assert_contains "$(cat "$dir/stderr")" "other-mate" \
+    "the contradiction refusal should name the other secondmate record"
+
+  pass "fm-teardown: after a proved claim reconciliation, completed scouts with dead endpoints finish without touching the seeded home"
+}
+
+test_persistent_home_reconciliation_refuses_unproved_ownership() {
+  local dir before elsewhere
+
+  # Each shape breaks one element of the proof. claim-slot refuses without
+  # writing, and the stale scout's cleanup still refuses without touching.
+  dir=$(make_persistent_case unproved-lease-holder old-scout-a old-scout-a old-scout-b)
+  seed_slot_as_persistent_home "$dir" other-mate
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "mismatched lease holder" "lease"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "mismatched lease holder"
+
+  # A claim already naming the secondmate is a different owner, but on a
+  # persistent home that alone must not skip the duplicate-record scan the
+  # failed proof leaves in force.
+  dir=$(make_persistent_case unproved-lease-reconciled-claim "$PERSISTENT_MATE" old-scout-a old-scout-b)
+  seed_slot_as_persistent_home "$dir" other-mate
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "mismatched lease holder under a secondmate claim"
+  assert_contains "$(cat "$dir/stderr")" "is also task old-scout-b's recorded worktree" \
+    "mismatched lease holder under a secondmate claim: the duplicate-record refusal should stand"
+
+  dir=$(make_persistent_case unproved-no-lease old-scout-a old-scout-a)
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$(cd "$dir/pool/1/project" && pwd -P)" \
+    > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "no durable lease" "lease"
+
+  dir=$(make_persistent_case unproved-pool-state old-scout-a old-scout-a)
+  printf 'not json\n' > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "unreadable pool state" "lease"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "unreadable pool state"
+
+  dir=$(make_persistent_case unproved-registry old-scout-a old-scout-a old-scout-b)
+  elsewhere="$dir/elsewhere-home"
+  mkdir -p "$elsewhere/state" "$elsewhere/data"
+  seed_slot_as_persistent_home "$dir" "$PERSISTENT_MATE" "$(cd "$elsewhere" && pwd -P)"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "registry route naming another home" "registered"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "registry route naming another home"
+
+  dir=$(make_persistent_case unproved-parent old-scout-a old-scout-a old-scout-b)
+  elsewhere="$dir/elsewhere-parent"
+  mkdir -p "$elsewhere/state" "$elsewhere/data"
+  seed_slot_as_persistent_home "$dir" "$PERSISTENT_MATE" "" "$(cd "$elsewhere" && pwd -P)"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "parent binding naming another home" "parent"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "parent binding naming another home"
+
+  dir=$(make_persistent_case unproved-identity old-scout-a old-scout-a)
+  printf 'other-mate\n' > "$dir/pool/1/project/.fm-secondmate-home"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "identity marker naming another secondmate" "identity"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "identity marker naming another secondmate"
+
+  dir=$(make_persistent_case unproved-unsafe-claim old-scout-a old-scout-a)
+  rm -f "$dir/pool/1/.fm-slot-owner"
+  mkdir "$dir/pool/1/.fm-slot-owner"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_claim_slot_refused "$dir" "$before" "unsafe claim" "claim"
+  [ -d "$dir/pool/1/.fm-slot-owner" ] || fail "unsafe claim: claim-slot replaced a directory claim"
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "unsafe claim"
+
+  pass "fm-teardown: a mismatched, missing, unreadable, or contradictory persistent-home proof refuses reconciliation and cleanup without mutation"
+}
+
+test_persistent_home_cleanup_keeps_completion_and_endpoint_gates() {
+  local dir before rc mode
+
+  # Absent report and a failing decision inventory keep refusing: reconciling
+  # the home never completes a scout on its behalf.
+  dir=$(make_persistent_case gate-report old-scout-a old-scout-a old-scout-b)
+  run_claim_slot "$dir" || fail "claim-slot refused: $(cat "$dir/claim.err")"
+  rm -f "$dir/home/data/old-scout-a/report.md"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" old-scout-a "$before" "absent scout report"
+  assert_contains "$(cat "$dir/stderr")" "has no report" "absent report: the refusal should name the report"
+
+  dir=$(make_persistent_case gate-decisions old-scout-a old-scout-a old-scout-b)
+  run_claim_slot "$dir" || fail "claim-slot refused: $(cat "$dir/claim.err")"
+  write_persistent_scout "$dir" old-scout-b fixture-unheld-decision
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" old-scout-b "$before" "failing captain-call inventory"
+  assert_contains "$(cat "$dir/stderr")" "captain-call completion gate" \
+    "failing inventory: the refusal should name the completion gate"
+
+  # A live or unreadable old endpoint cannot use the reconciled path: the
+  # duplicate-record refusal stands until the endpoint is conclusively gone.
+  # The scripted tmux reports each window listed in live-windows as running a
+  # claude process; the real-backend death evidence is pinned separately by
+  # tests/fm-teardown-persistent-slot-herdr-e2e.test.sh.
+  dir=$(make_persistent_case gate-endpoint old-scout-a old-scout-a old-scout-b)
+  run_claim_slot "$dir" || fail "claim-slot refused: $(cat "$dir/claim.err")"
+  printf 'fm-old-scout-a\nfm-unrelated\n' > "$dir/live-windows"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+target=
+prev=
+for arg in "$@"; do
+  [ "$prev" != -t ] || target=$arg
+  prev=$arg
+done
+window=${target##*:}
+window=${window#=}
+case "${1:-}" in
+  list-windows)
+    if [ -n "${FM_TEST_UNREADABLE_LIST:-}" ]; then
+      echo "lost server" >&2
+      exit 1
+    fi
+    cat "${FM_TEST_LIVE_WINDOWS:?}"
+    ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_command}'*)
+        ! grep -Fqx -- "$window" "$FM_TEST_LIVE_WINDOWS" || echo claude
+        ;;
+    esac
+    ;;
+  kill-window)
+    grep -Fvx -- "$window" "$FM_TEST_LIVE_WINDOWS" > "$FM_TEST_LIVE_WINDOWS.next" || true
+    mv "$FM_TEST_LIVE_WINDOWS.next" "$FM_TEST_LIVE_WINDOWS"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/tmux"
+  before=$(persistent_home_fingerprint "$dir")
+  for mode in live unreadable; do
+    : > "$dir/runtime.log"
+    rc=0
+    if [ "$mode" = unreadable ]; then
+      FM_TEST_UNREADABLE_LIST=1 FM_TEST_LIVE_WINDOWS="$dir/live-windows" \
+        run_persistent_teardown "$dir" old-scout-a || rc=$?
+    else
+      FM_TEST_LIVE_WINDOWS="$dir/live-windows" run_persistent_teardown "$dir" old-scout-a || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "$mode old endpoint: teardown finished on a reconciled home"
+    assert_present "$dir/home/state/old-scout-a.meta" "$mode old endpoint: the record was removed"
+    [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+      || fail "$mode old endpoint: the seeded home changed"
+    ! grep -Eq 'treehouse|kill-' "$dir/runtime.log" \
+      || fail "$mode old endpoint: a pool or close operation ran: $(cat "$dir/runtime.log")"
+    grep -Fqx fm-old-scout-a "$dir/live-windows" || fail "$mode old endpoint: the live endpoint was closed"
+    assert_contains "$(cat "$dir/stderr")" "is also task old-scout-b's recorded worktree" \
+      "$mode old endpoint: the duplicate-record refusal should stand and name the other record"
+  done
+
+  # The interrupted cleanup retried once the endpoint is really gone finishes.
+  printf 'fm-unrelated\n' > "$dir/live-windows"
+  : > "$dir/runtime.log"
+  FM_TEST_LIVE_WINDOWS="$dir/live-windows" run_persistent_teardown "$dir" old-scout-a \
+    || fail "the retried cleanup after the endpoint died did not finish: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/old-scout-a.meta" "the retried cleanup left the record"
+  [ "$(persistent_home_fingerprint "$dir")" = "$before" ] \
+    || fail "the retried cleanup changed the seeded home"
+  ! grep -Fq 'treehouse' "$dir/runtime.log" \
+    || fail "the retried cleanup ran a pool operation: $(cat "$dir/runtime.log")"
+  grep -Fqx fm-unrelated "$dir/live-windows" || fail "the retried cleanup closed an unrelated endpoint"
+
+  pass "fm-teardown: reconciliation keeps the report, decision-inventory, and live or unreadable endpoint refusals, and a retry after endpoint death finishes"
+}
+
+test_persistent_home_claim_reconciliation_is_idempotent_and_recoverable() {
+  local dir home claim prior lock_project lock_registry holder
+
+  dir=$(make_persistent_case claim-idempotent old-scout-a old-scout-a)
+  home=$(cd "$dir/home" && pwd -P)
+  run_claim_slot "$dir" || fail "first claim-slot refused: $(cat "$dir/claim.err")"
+  claim=$(cksum < "$dir/pool/1/.fm-slot-owner")
+  prior=$(cksum < "$dir/pool/1/.fm-slot-owner.prior")
+  run_claim_slot "$dir" || fail "repeated claim-slot refused: $(cat "$dir/claim.err")"
+  assert_contains "$(cat "$dir/claim.out")" "unchanged" "a repeated claim-slot should report the claim unchanged"
+  [ "$(cksum < "$dir/pool/1/.fm-slot-owner")" = "$claim" ] || fail "a repeated claim-slot rewrote the claim"
+  [ "$(cksum < "$dir/pool/1/.fm-slot-owner.prior")" = "$prior" ] \
+    || fail "a repeated claim-slot overwrote the retained prior claim"
+
+  # A claim-slot killed after retaining the prior claim but before publishing
+  # the new one: its temp file and both locks are left behind by a dead process.
+  dir=$(make_persistent_case claim-interrupted old-scout-a old-scout-a)
+  home=$(cd "$dir/home" && pwd -P)
+  cp "$dir/pool/1/.fm-slot-owner" "$dir/pool/1/.fm-slot-owner.prior"
+  printf 'task=%s\nhome=%s\n' "$PERSISTENT_MATE" "$home" > "$dir/pool/1/.fm-slot-owner.tmp.4242"
+  lock_project=$(FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+    "$ROOT/bin/fm-wake-lib.sh" "$dir/project") || fail "could not resolve the project lock"
+  lock_registry="$dir/home/state/.secondmate-registry.lock"
+  # shellcheck disable=SC2016 # Expanded by the inner shells, not this one.
+  FM_HOME="$dir/home" bash -c '
+    bash -c ". \"\$1\"; fm_lock_try_acquire \"\$2\" && fm_lock_try_acquire \"\$3\" && kill -KILL \"\$BASHPID\"" _ "$@"
+    exit 0
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock_project" "$lock_registry" 2>/dev/null
+  [ -e "$lock_project" ] && [ -e "$lock_registry" ] || fail "could not stage the abandoned locks"
+  holder=$(cat "$lock_project/pid" 2>/dev/null || true)
+  ! kill -0 "$holder" 2>/dev/null || fail "the staged lock holder is still alive"
+  run_claim_slot "$dir" || fail "claim-slot did not recover an interrupted reconciliation: $(cat "$dir/claim.err")"
+  [ "$(cat "$dir/pool/1/.fm-slot-owner")" = "$(printf 'task=%s\nhome=%s' "$PERSISTENT_MATE" "$home")" ] \
+    || fail "the recovered claim-slot did not publish the secondmate's claim"
+  [ "$(cat "$dir/pool/1/.fm-slot-owner.prior")" = "$(printf 'task=old-scout-a\nhome=%s' "$home")" ] \
+    || fail "the recovered claim-slot lost the replaced claim's evidence"
+  run_persistent_teardown "$dir" old-scout-a \
+    || fail "the stale scout did not finish after a recovered reconciliation: $(cat "$dir/stderr")"
+  ! grep -Fq 'treehouse' "$dir/runtime.log" \
+    || fail "cleanup after a recovered reconciliation ran a pool operation: $(cat "$dir/runtime.log")"
+
+  pass "fm-home-seed claim-slot: a repeated reconciliation is a no-op and an interrupted one converges without losing prior-claim evidence"
+}
+
+# A retired secondmate's slot goes back to the pool unleased, but Treehouse
+# keeps gitignored files across a return, so its identity marker and parent
+# binding stay in the slot. The next ordinary task the pool hands it to must
+# still tear down and return it; the same markers keep refusing while the pool
+# records a durable lease or cannot answer.
+make_retired_home_slot_case() {  # <name> <task-id>
+  local dir slot home id=$2
+  dir=$(make_case "$1")
+  mark_case_as_treehouse_pool "$dir"
+  slot=$(cd "$dir/pool/1/project" && pwd -P)
+  home=$(cd "$dir/home" && pwd -P)
+  printf '%s\n' "$PERSISTENT_MATE" > "$slot/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
+    > "$slot/.fm-secondmate-parent"
+  fm_git_init_commit "$slot/projects/harbor" >/dev/null
+  write_persistent_scout "$dir" "$id"
+  claim_pool_slot "$dir" "$id" "$home"
+  printf '%s\n' "$dir"
+}
+
+test_retired_secondmate_markers_do_not_hold_a_reused_slot() {
+  local dir mode before
+
+  for mode in unforced --force; do
+    dir=$(make_retired_home_slot_case "retired-home-reused$mode" next-crew)
+    : > "$dir/runtime.log"
+    if [ "$mode" = --force ]; then
+      run_persistent_teardown "$dir" next-crew --force \
+        || fail "forced teardown of a crewmate in a retired secondmate's slot refused: $(cat "$dir/stderr")"
+    else
+      run_persistent_teardown "$dir" next-crew \
+        || fail "teardown of a crewmate in a retired secondmate's slot refused: $(cat "$dir/stderr")"
+    fi
+    assert_absent "$dir/home/state/next-crew.meta" "$mode reused retired slot: the task record was left"
+    assert_absent "$dir/pool/1/.fm-slot-owner" "$mode reused retired slot: the spent claim was left"
+    grep -Fq "treehouse <return>" "$dir/runtime.log" \
+      || fail "$mode reused retired slot: the pool slot was not returned: $(cat "$dir/runtime.log")"
+  done
+
+  dir=$(make_retired_home_slot_case retired-home-still-leased next-crew)
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"%s"}]}\n' \
+    "$(cd "$dir/pool/1/project" && pwd -P)" "$PERSISTENT_MATE" > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" next-crew "$before" "markers on a still-leased slot" --force
+  assert_contains "$(cat "$dir/stderr")" "persistent secondmate home" \
+    "markers on a still-leased slot: the refusal should name the persistent home"
+
+  dir=$(make_retired_home_slot_case retired-home-unreadable-pool next-crew)
+  printf 'not json\n' > "$dir/pool/treehouse-state.json"
+  before=$(persistent_home_fingerprint "$dir")
+  assert_persistent_teardown_refused "$dir" next-crew "$before" "markers with an unreadable pool state" --force
+  assert_contains "$(cat "$dir/stderr")" "persistent secondmate home" \
+    "markers with an unreadable pool state: the refusal should name the persistent home"
+
+  pass "fm-teardown: a retired secondmate's leftover markers do not hold a reused unleased slot, while a leased or unreadable pool still refuses"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1442,6 +1934,12 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_own_and_absent_slot_claims_still_tear_down
+test_seeded_home_named_by_stale_scout_records_is_never_returned
+test_reconciled_seeded_home_lets_completed_dead_scouts_finish
+test_persistent_home_reconciliation_refuses_unproved_ownership
+test_persistent_home_cleanup_keeps_completion_and_endpoint_gates
+test_persistent_home_claim_reconciliation_is_idempotent_and_recoverable
+test_retired_secondmate_markers_do_not_hold_a_reused_slot
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_remote_seeded_home_returns_its_uncontested_slot
