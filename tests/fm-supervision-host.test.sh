@@ -1104,6 +1104,22 @@ SH
   chmod +x "$1/fakebin/node"
 }
 
+# Make the downtime publication fail only at the turn-boundary offer, so the
+# hand-back of a close that turned main-only cannot restore the marker.
+fail_downtime_write_at_second_offer() {  # <home>
+  local real_mktemp
+  real_mktemp=$(command -v mktemp)
+  cat > "$1/fakebin/mktemp" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *'/state/.watcher-down.tmp.'*)
+    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
+esac
+exec "$real_mktemp" "\$@"
+SH
+  chmod +x "$1/fakebin/mktemp"
+}
+
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   local home
   home=$(make_home attended-turns-main-only attended)
@@ -1127,6 +1143,26 @@ test_attended_close_that_turns_main_only_before_its_turn_passes_to_main() {
   assert_re '	pass-through	attended	main-only	signal:' "$home/state/.supervision-host.log" "the ledger must record why the close went to main"
   watcher_live "$home" || fail "the pass-through left no successor watcher"
   pass "host: an attended close whose task turns main-only before its turn still reaches main unchanged"
+}
+
+# A hand-back that cannot restore the downtime marker exits nonzero, and its
+# output must say so: an owner reads an empty output as a host that died
+# without a close and starts another host instead of telling main.
+test_unrestored_downtime_hand_back_reports_its_failure() {
+  local home
+  home=$(make_home attended-downtime-unrestored attended)
+  turn_main_only_at_second_offer "$home"
+  fail_downtime_write_at_second_offer "$home"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "downtime-unrestored: the host never started a watcher cycle"
+  append_status "$home" 'step one'
+  wait_until 250 host_exited "$home" || fail "downtime-unrestored: the host never exited: $(cat "$home/state/.supervision-host.log")"
+  assert_re 'pass-through[[:space:]]+downtime-unrestored' "$home/state/.supervision-host.log" "fixture: downtime publication did not fail"
+  expect_code 1 "$(cat "$home/host.rc")" "an undelivered hand-back must exit nonzero"
+  assert_re '^supervision-host failed: .*undelivered' "$home/host.out" "an undelivered hand-back must print its failed result"
+  assert_no_re '^supervision-host:' "$home/host.out" "the failed result must not read as a wake"
+  [ "$(engine_calls "$home")" -eq 0 ] || fail "downtime-unrestored: the engine ran on a stale offer"
+  pass "host: a hand-back that cannot restore its downtime marker exits nonzero with a failed result"
 }
 
 # --- the Claude re-arm owner around the host ----------------------------------
@@ -1396,19 +1432,10 @@ test_claude_stop_hook_delivers_a_close_that_turns_main_only_at_its_turn() {
 # If the at-turn hand-back cannot publish downtime, the healthy successor
 # cannot turn that undelivered close into a silent Stop-hook success.
 test_claude_stop_hook_notifies_when_at_turn_downtime_write_fails() {
-  local home real_mktemp
+  local home
   home=$(make_primary_home hook-turns-main-only-write-fails)
   turn_main_only_at_second_offer "$home"
-  real_mktemp=$(command -v mktemp)
-  cat > "$home/fakebin/mktemp" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *'/state/.watcher-down.tmp.'*)
-    [ "\$(cat "\$FM_HOME/offer-count" 2>/dev/null)" != 2 ] || exit 1 ;;
-esac
-exec "$real_mktemp" "\$@"
-SH
-  chmod +x "$home/fakebin/mktemp"
+  fail_downtime_write_at_second_offer "$home"
   start_hook_session "$home"
   turn_end "$home"
   wait_until 150 watcher_live "$home" || fail "hook write failure: no watcher started"
@@ -1419,6 +1446,7 @@ SH
   assert_re '^(pending|announced):handling:' "$home/state/.watcher-down" "fixture: the marker unexpectedly became downtime"
   expect_code 2 "$(cat "$home/hook.rc")" "the Stop hook must notify main instead of dropping the close"
   assert_grep 'firstmate watcher auto-arm FAILED' "$home/hook.err" "main must receive the failure notification"
+  assert_re '^supervision-host failed: ' "$home/hook.err" "the failure notification must carry the host's failed result"
   assert_re 'outcome=failed ' "$home/state/.claude-autoarm-epoch" "the failure must be committed"
   pass "host+hook: failed at-turn downtime write notifies main despite a healthy successor"
 }
@@ -2920,6 +2948,7 @@ test_main_only_pass_through_leaves_the_successor_watcher_running
 test_attended_close_with_unidentified_main_session_passes_to_main
 test_close_accepted_away_that_turns_attended_passes_to_main
 test_attended_close_that_turns_main_only_before_its_turn_passes_to_main
+test_unrestored_downtime_hand_back_reports_its_failure
 test_claude_stop_hook_delivers_a_main_only_pass_through
 test_claude_stop_hook_rewakes_a_present_captain_beside_a_quiet_record
 test_claude_stop_hook_runs_the_host_without_the_file_and_off_opts_out

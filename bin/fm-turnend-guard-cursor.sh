@@ -36,7 +36,10 @@
 # actionable like a wake line, and the follow-up carries every such line in
 # order while wake lines keep the eight-line cap; "supervision-host stood
 # down:" ends the park silently; a host that died without a close is retried
-# instead of being judged by the healthy-watcher predicate. On a home that does not run the host nothing below changes.
+# instead of being judged by the healthy-watcher predicate; a host that exited
+# nonzero with a "supervision-host failed:" result could not hand its close
+# back, so the repair follow-up tells main even when a successor watcher is
+# healthy. On a home that does not run the host nothing below changes.
 #
 # LOOP BOUNDING IS DOUBLE, because either bound alone is insufficient:
 #   - `loop_limit` in .cursor/hooks.json is Cursor's own ceiling. Once
@@ -312,6 +315,7 @@ HEALTHY=0
 STAND_DOWN=0
 HOST_MODE=0
 HOST_RC=0
+HOST_FAILED=0
 ACTIONABLE_RE='^(signal:|stale:|check:|heartbeat($|:))'
 if fm_supervision_host_enabled "$CONFIG" cursor; then
   HOST_MODE=1
@@ -376,6 +380,13 @@ while [ "$attempt" -lt "$ARM_ATTEMPTS" ]; do
       ARM_OUT=
       continue
     fi
+    # A failed hand-back cannot be dismissed just because its successor
+    # watcher is healthy: the close is still undelivered. Any other nonzero
+    # exit (a first watcher cycle that never started) falls through to retry.
+    if [ "$HOST_RC" -ne 0 ] && grep -q '^supervision-host failed:' "$ARM_OUT" 2>/dev/null; then
+      HOST_FAILED=1
+      break
+    fi
   fi
 
   # A non-actionable close is benign when another verified watcher already owns
@@ -430,11 +441,12 @@ printf '%s' "$PAYLOAD" | "$SCRIPT_DIR/fm-turnend-guard.sh" --cursor 2>"$GUARD_ER
 GUARD_RC=$?
 REASON=$(cat "$GUARD_ERR" 2>/dev/null || true)
 rm -f "$GUARD_ERR" 2>/dev/null || true
-[ "$GUARD_RC" -eq 2 ] || exit 0
+[ "$GUARD_RC" -eq 2 ] || [ "$HOST_FAILED" -eq 1 ] || exit 0
 
 # Bounded so a persistent failure nags a few times and then stops, instead of
 # turning every turn end into another unproductive continuation.
+[ "$HOST_FAILED" -eq 0 ] || REASON='the supervision host could not hand an undelivered close back to main - investigate the host result above and drain the wake before ending the turn'
 [ -n "$REASON" ] || REASON='tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn'
 ARM_TAIL=
-[ -n "$ARM_OUT" ] && ARM_TAIL=$(grep -E '^watcher:' "$ARM_OUT" 2>/dev/null | head -4)
+[ -n "$ARM_OUT" ] && ARM_TAIL=$(grep -E '^(watcher:|supervision-host)' "$ARM_OUT" 2>/dev/null | head -4)
 emit_repair_followup "$REASON" "$ARM_TAIL" "$attempt"

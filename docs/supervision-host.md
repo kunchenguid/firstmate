@@ -267,6 +267,12 @@ When the host loses session-lock ownership or its auto-arm generation, it stands
 A host that starts without that ownership stands down before activation.
 So it never stops the owner's host or watcher or releases its leases.
 
+### A close the host cannot hand back
+
+When a close turns main-only and the host cannot restore the watcher's downtime marker, the re-arm owner would not deliver that close.
+The host then prints one `supervision-host failed: ...` line, not a wake, and exits nonzero.
+The Claude Stop hook and the Cursor turn-end guard treat that result as a failed hand-back and tell main, even when a healthy successor watcher exists, so the close is not silently lost.
+
 ### A host that dies without a close
 
 The host's owner retries it.
