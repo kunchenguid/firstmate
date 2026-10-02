@@ -16,9 +16,10 @@
 # Because the Treehouse command runs with HOME pointed at the root, everything
 # git and its credential helpers read from HOME must be reachable there too:
 # fm_treehouse_prepare_root links the real ~/Library (macOS keychain for
-# credential.helper=osxkeychain), ~/.gitconfig, ~/.git-credentials, ~/.netrc,
-# ~/.ssh and ~/.config into the root, so a fresh pool can clone with the
-# launching user's credentials.
+# credential.helper=osxkeychain), ~/.gitconfig, ~/.git-credentials and ~/.netrc
+# into the root. It also bridges each ~/.config entry except Treehouse's own
+# configuration, so credentials remain available without exposing a configured
+# shared Treehouse root.
 
 fm_treehouse_pool_root() { # <home> -> <absolute-root>
   local home=$1 resolved key base
@@ -45,13 +46,37 @@ fm_treehouse_pool_root() { # <home> -> <absolute-root>
 }
 
 fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
-  local home=$1 root=$2 entry
+  local home=$1 root=$2 entry config_entry config_name
   mkdir -p -- "$root" || return 1
   printf '%s\n' "$home" > "$root/firstmate-home" || return 1
-  for entry in Library .gitconfig .git-credentials .netrc .ssh .config; do
+  for entry in Library .gitconfig .git-credentials .netrc .ssh; do
     [ -e "$HOME/$entry" ] || continue
     [ -e "$root/$entry" ] || [ -L "$root/$entry" ] || ln -s -- "$HOME/$entry" "$root/$entry" || return 1
   done
+  if [ -L "$root/.config" ]; then
+    rm -- "$root/.config" || return 1
+  fi
+  mkdir -p -- "$root/.config" || return 1
+  for config_entry in "$root/.config"/* "$root/.config"/.[!.]* "$root/.config"/..?*; do
+    [ -L "$config_entry" ] || continue
+    rm -- "$config_entry" || return 1
+  done
+  if [ -e "$root/.config/treehouse" ]; then
+    echo "error: prepared Treehouse root contains an unsafe real .config/treehouse entry: $root/.config/treehouse" >&2
+    return 1
+  fi
+  if [ -d "$HOME/.config" ]; then
+    for config_entry in "$HOME/.config"/* "$HOME/.config"/.[!.]* "$HOME/.config"/..?*; do
+      [ -e "$config_entry" ] || [ -L "$config_entry" ] || continue
+      config_name=${config_entry##*/}
+      [ "$config_name" = treehouse ] && continue
+      if [ -e "$root/.config/$config_name" ] || [ -L "$root/.config/$config_name" ]; then
+        echo "error: prepared Treehouse root contains an unsafe real .config entry: $root/.config/$config_name" >&2
+        return 1
+      fi
+      ln -s -- "$config_entry" "$root/.config/$config_name" || return 1
+    done
+  fi
 }
 
 fm_treehouse_require_config_free_project() { # <project> -> empty

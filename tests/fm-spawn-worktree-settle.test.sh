@@ -229,6 +229,32 @@ test_pool_root_refuses_relative_override() {
   pass "Treehouse pool roots refuse caller-relative overrides"
 }
 
+test_prepare_root_filters_treehouse_user_config() {
+  local user_home pool_root
+  user_home="$HOME_DIR/config-user-home"
+  pool_root="$HOME_DIR/prepared-pool"
+  mkdir -p "$user_home/.config/git" "$user_home/.config/treehouse" "$pool_root"
+  printf 'root = "/shared"\n' > "$user_home/.config/treehouse/config.toml"
+  ln -s "$user_home/.config" "$pool_root/.config"
+
+  HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
+    fail "pool preparation failed while migrating the existing .config link"
+  [ -d "$pool_root/.config" ] && [ ! -L "$pool_root/.config" ] || \
+    fail "pool preparation did not replace the broad .config link with a real directory"
+  [ -L "$pool_root/.config/git" ] || fail "pool preparation did not bridge non-Treehouse user config"
+  [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
+    fail "pool preparation exposed the user's Treehouse root configuration"
+
+  mkdir -p "$user_home/.config/gh"
+  ln -s "$user_home/.config/treehouse" "$pool_root/.config/treehouse"
+  HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" || \
+    fail "pool preparation failed while refreshing filtered user config"
+  [ -L "$pool_root/.config/gh" ] || fail "pool preparation did not bridge a newly added user config entry"
+  [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
+    fail "pool preparation retained a stale Treehouse config link"
+  pass "Treehouse pool preparation bridges user config without exposing Treehouse root settings"
+}
+
 test_pool_root_recovery_uses_fixed_treehouse_layout() {
   local pool_root worktree recovered
   pool_root="$HOME_DIR/user-home/.treehouse/firstmate/0123456789ab"
@@ -332,6 +358,7 @@ test_spawn_get_uses_per_home_treehouse_root
 test_spawn_refuses_project_treehouse_config
 test_pool_root_keeps_sha1_key_with_sha1sum_fallback
 test_pool_root_refuses_relative_override
+test_prepare_root_filters_treehouse_user_config
 test_pool_root_recovery_uses_fixed_treehouse_layout
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
