@@ -118,6 +118,8 @@ fm_herdr_lab_session_list() { # <session>
 
 # Fleet observation never changes the named runtime's HOME or XDG context.
 fm_herdr_lab_fleet_session_list() ( # <session>
+  # This override intentionally ends with the fleet-observation subshell.
+  # shellcheck disable=SC2030
   local FM_HERDR_LAB_ISOLATED_XDG=0
   if [ "${FM_HERDR_LAB_FLEET_HOME+x}" = x ]; then
     case "$FM_HERDR_LAB_FLEET_HOME" in
@@ -360,6 +362,8 @@ fm_herdr_lab_viewer_start() { # <session>
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
     trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
   fi
+  # Fleet observation's subshell override cannot change the caller's setting.
+  # shellcheck disable=SC2031
   if [ "${FM_HERDR_LAB_ISOLATED_XDG:-0}" = 1 ]; then
     base=$(fm_herdr_lab_ensure_isolated_xdg "$name") || return 1
     XDG_CONFIG_HOME="$base/config" XDG_DATA_HOME="$base/data" \
