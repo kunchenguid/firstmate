@@ -2253,6 +2253,7 @@ test_reminder_leaves_state_alone_without_escalations() {
   corr=$(fm_pending_reply_create "$home" "$state" mate "still waiting")
   rec=$(fm_pending_reply_path "$state" "$corr")
   (
+    # shellcheck disable=SC2030
     export FM_PENDING_REPLY_SESSION=s1
     before=$(cat "$rec")
     "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || exit 1
@@ -2420,6 +2421,7 @@ test_resurface_stays_off_without_the_flag() {
   export FM_HOME="$home"
   export FM_PENDING_REPLY_NOW=1000
   export FM_PENDING_REPLY_SEND_HOOK='true'
+  # shellcheck disable=SC2031
   export FM_PENDING_REPLY_SESSION=s1
   corr=$(escalate_new "$home" "$state" "once only")
   rec=$(fm_pending_reply_path "$state" "$corr")
