@@ -77,6 +77,7 @@ import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder, promisify } from "node:util";
+import { legacyIdentityMatches, lstartParts } from "./fm-pid-identity.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const CODE_ROOT = path.dirname(path.dirname(SELF));
@@ -913,7 +914,8 @@ async function sleep(milliseconds) {
 
 async function capturedProcessOutput(command, args, maxBytes = 8192) {
   const child = spawn(command, args, {
-    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C" },
+    // TZ=UTC0 keeps a ps lstart read independent of the host time zone.
+    env: { PATH: sanitizedPath(), LANG: "C", LC_ALL: "C", TZ: "UTC0" },
     shell: false,
     stdio: ["ignore", "pipe", "ignore"],
   });
@@ -933,6 +935,8 @@ async function capturedProcessOutput(command, args, maxBytes = 8192) {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
+// Mirrors fm_pid_identity in bin/fm-pid-identity-lib.sh, which owns the
+// format: the shell records a claim identity that this host compares.
 async function pidIdentity(pid) {
   if (process.platform === "linux") {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => fail("process-identity-uncertain", "cannot inspect extension process identity"));
@@ -944,7 +948,19 @@ async function pidIdentity(pid) {
     }
     return `linux-starttime=${fields[19]} cmdline-hex=${cmdline.toString("hex")}`;
   }
-  return capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="]);
+  return `lstart-utc=${await capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="])}`;
+}
+
+// Mirrors fm_pid_identity_matches: true while pid is still the process the
+// recorded identity names. Throws when the identity cannot be read.
+async function pidIdentityMatches(pid, expected) {
+  const actual = await pidIdentity(pid);
+  if (actual === expected) return true;
+  if (!lstartParts(expected)) return false;
+  const utc = actual.startsWith("lstart-utc=")
+    ? actual.slice("lstart-utc=".length)
+    : await capturedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="]);
+  return legacyIdentityMatches(expected, utc);
 }
 
 async function selfIdentity() {
@@ -977,13 +993,13 @@ async function processIdentityState(pid, expected) {
       return pidAlive(pid) ? 2 : 1;
     }
   }
-  let actual;
+  let matches;
   try {
-    actual = await pidIdentity(pid);
+    matches = await pidIdentityMatches(pid, expected);
   } catch {
     return pidAlive(pid) ? 2 : 1;
   }
-  return actual === expected ? 0 : 2;
+  return matches ? 0 : 2;
 }
 
 async function barrierProcessGroupState(pid, expectedIdentity) {
@@ -1011,13 +1027,13 @@ async function processGroupState(pid, expectedIdentity = null, trustedChild = fa
   if (!pidAlive(pid)) return groupAlive(pid) ? 3 : 1;
   if (expectedIdentity?.startsWith("barrier-token:")) return barrierProcessGroupState(pid, expectedIdentity);
   if (expectedIdentity) {
-    let actual;
+    let matches;
     try {
-      actual = await pidIdentity(pid);
+      matches = await pidIdentityMatches(pid, expectedIdentity);
     } catch {
       return pidAlive(pid) ? 2 : (groupAlive(pid) ? 3 : 1);
     }
-    if (actual !== expectedIdentity) return 2;
+    if (!matches) return 2;
   } else if (!trustedChild) {
     return 2;
   }

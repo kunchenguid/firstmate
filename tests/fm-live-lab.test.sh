@@ -112,8 +112,8 @@ make_lab() {
 # Recorded fixture roots must not share the runner's process group.
 start_group() { perl -e 'setpgrp(0,0); exec @ARGV' "$@" >/dev/null 2>&1 & }
 
-record_pid() {  # <root> <pid>
-  printf 'launch_pid=%s\nlaunch_start=%s\n' "$2" "$(ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
+record_pid() {  # <root> <pid>: the launch record up writes, its start time in UTC
+  printf 'launch_pid=%s\nlaunch_start_utc=%s\n' "$2" "$(TZ=UTC0 ps -o lstart= -p "$2" | awk '{$1=$1; print}')" >> "$1/.fm-live-lab"
 }
 
 lab_tmux() {  # <root> <tmux args...>
@@ -363,11 +363,12 @@ printf '%s\n' "$SIBLING" >> "$TMP_ROOT/pids"
 # The worker spawn failed after keeping its task temp dirs, before its meta.
 rm -f "$CH/state/$WORKER_ID.meta"
 C_TMUX=$(sed -n 's/^tmux_dir=//p' "$C/.fm-live-lab")
-out=$(HOME="$LATER_HOME" "$LIVE_LAB" down "$C" 2>&1)
+# Down runs from a host time zone other than the one up recorded in.
+out=$(HOME="$LATER_HOME" TZ="$FM_TEST_TZ_WEST" "$LIVE_LAB" down "$C" 2>&1)
 expect_code 0 "$?" "down of a clean Claude lab succeeds from a shell with another HOME: $out"
 kill -0 "$STRAY" 2>/dev/null || fail "down leaves unrelated processes opening the lab path alone"
 kill -0 "$STRAY_CHILD" 2>/dev/null || fail "down leaves their descendants alone"
-! kill -0 "$OWNED" 2>/dev/null || fail "down stops recorded launch processes"
+! kill -0 "$OWNED" 2>/dev/null || fail "down stops recorded launch processes, whatever the host time zone"
 kill -0 "$UNRELATED" 2>/dev/null || fail "down signalled an unrelated process outside recorded groups"
 assert_absent "$C" "down removes the lab root"
 kill -0 "$SIBLING" 2>/dev/null || fail "down leaves a sibling root's process running"
@@ -493,6 +494,49 @@ expect_code 0 "$?" "down skips the mismatched root: $out"
 kill -0 "$REUSED" 2>/dev/null || fail "down killed a reused PID"
 kill -0 "$REUSED_CHILD" 2>/dev/null || fail "down killed the reused PID's child"
 pass "down ignores roots with mismatched start times"
+
+# The root check and the process tree must come from one snapshot. The ps shim
+# answers a per-pid lstart query for the root with its recorded start, as if
+# the recorded root were still alive at that check; the process table then
+# holds a replacement with a different start under that pid, plus its child.
+RACE=$(make_lab race claude)
+# shellcheck disable=SC2016 # Positional parameters expand in the launched shell.
+start_group bash -c 'sleep 600 & echo $! > "$1"; wait' _ "$TMP_ROOT/race-child"; RACE_ROOT=$!
+until [ -s "$TMP_ROOT/race-child" ]; do sleep 0.1; done
+RACE_CHILD=$(cat "$TMP_ROOT/race-child")
+printf '%s\n%s\n' "$RACE_ROOT" "$RACE_CHILD" >> "$TMP_ROOT/pids"
+printf 'launch_pid=%s\nlaunch_start_utc=Mon Jan 1 00:00:00 1990\n' "$RACE_ROOT" >> "$RACE/.fm-live-lab"
+mkdir -p "$TMP_ROOT/race-ps-bin"
+cat > "$TMP_ROOT/race-ps-bin/ps" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -o ] && [ "${2:-}" = lstart= ] && [ "${3:-}" = -p ] && [ "${4:-}" = "$PS_RACE_ROOT" ]; then
+  echo 'Mon Jan 1 00:00:00 1990'
+else
+  "$REAL_PS" "$@"
+fi
+SH
+chmod +x "$TMP_ROOT/race-ps-bin/ps"
+out=$(REAL_PS="$(command -v ps)" PS_RACE_ROOT="$RACE_ROOT" PATH="$TMP_ROOT/race-ps-bin:$PATH" "$LIVE_LAB" down "$RACE" 2>&1)
+expect_code 0 "$?" "down skips a root replaced before its tree snapshot: $out"
+kill -0 "$RACE_ROOT" 2>/dev/null || fail "down killed the process that reused a checked root's PID"
+kill -0 "$RACE_CHILD" 2>/dev/null || fail "down killed the child of the process that reused a checked root's PID"
+pass "down checks recorded roots against the snapshot that selects their descendants"
+
+# A lab that a build before the UTC pin started recorded its launch start in
+# the host's local time. Down from another host time zone still stops it.
+LEGACY=$(make_lab legacy claude)
+start_group sleep 600
+LEGACY_ROOT=$!
+printf '%s\n' "$LEGACY_ROOT" >> "$TMP_ROOT/pids"
+printf 'launch_pid=%s\nlaunch_start=%s\n' "$LEGACY_ROOT" \
+  "$(TZ="$FM_TEST_TZ_EAST" ps -o lstart= -p "$LEGACY_ROOT" | awk '{$1=$1; print}')" >> "$LEGACY/.fm-live-lab"
+[ "$(sed -n 's/^launch_start=//p' "$LEGACY/.fm-live-lab")" != "$(TZ="$FM_TEST_TZ_WEST" ps -o lstart= -p "$LEGACY_ROOT" | awk '{$1=$1; print}')" ] \
+  || fail "the legacy fixture must record a start time that the down time zone renders differently"
+out=$(TZ="$FM_TEST_TZ_WEST" "$LIVE_LAB" down "$LEGACY" 2>&1)
+expect_code 0 "$?" "down of a pre-upgrade lab succeeds: $out"
+! kill -0 "$LEGACY_ROOT" 2>/dev/null || fail "down missed a launch process recorded in local time before the UTC pin"
+assert_absent "$LEGACY" "down removes the pre-upgrade lab root"
+pass "down stops launch processes of a lab recorded in local time before the UTC pin"
 
 # A group observed empty must not be admitted again if its id is later reused.
 # The ps shim hides the first group's only member on pass 2, then presents an

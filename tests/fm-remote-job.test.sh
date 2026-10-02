@@ -55,7 +55,7 @@ cleanup_remote_job_fixture() {
 trap cleanup_remote_job_fixture EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
-  "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-pid-identity-lib.sh" "$ROOT/bin/fm-remote-delta-read.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
 #!/bin/bash
@@ -1470,7 +1470,7 @@ RESTART_HOME="$TMP_ROOT/restart-account"
 RESTART_STATE="$TMP_ROOT/restart-state"
 RESTART_CHILD_LOG="$TMP_ROOT/restart-children"
 mkdir -p "$RESTART_ROOT/bin" "$RESTART_HOME"
-cp "$ROOT/bin/fm-remote-job-lib.sh" "$RESTART_ROOT/bin/"
+cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-pid-identity-lib.sh" "$RESTART_ROOT/bin/"
 cp "$ROOT/bin/fm-remote-job-worker.sh" "$RESTART_ROOT/bin/fm-remote-job-supervisor-under-test.sh"
 printf 'fixture\n' > "$RESTART_ROOT/AGENTS.md"
 cat > "$RESTART_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
@@ -1508,5 +1508,55 @@ RESTART_SUPERVISOR_PID=
 assert_grep "remote job worker exited 3 times; stopping the supervisor" "$TMP_ROOT/restart-supervisor.err" \
   "the restart guard did not explain why it stopped"
 pass "barely healthy worker failures remain bounded by the restart guard"
+
+# A host time-zone change between a worker or staging owner recording its start
+# and the next ownership check must not make the live owner look dead, or a
+# second worker would start beside it. A start a build before the UTC pin
+# recorded in local time must still name its live owner, and only it.
+TZ_STATE_ROOT="$TMP_ROOT/tz-remote-jobs"
+TZ_CHECKS="$TMP_ROOT/tz-remote-checks.sh"
+cat > "$TZ_CHECKS" <<'SH'
+#!/usr/bin/env bash
+# <lib> <account-home> <live|dead> <owner-pid> <start> <stage>: record the
+# owner's worker lock and staging records (live), then check both read as live
+# (exit 0) or, for an owner that has exited, both read as gone (exit 0).
+set -u
+. "$1"
+account=$2 mode=$3 owner=$4 start=$5 stage=$6
+fm_remote_job_prepare_state "$account" || exit 1
+lock=$(fm_remote_job_worker_lock_path)
+if [ "$mode" = live ]; then
+  mkdir -p "$lock" "$stage"
+  printf '%s\n' "$owner" > "$lock/pid"
+  printf '%s\n' "$start" > "$lock/start"
+  fm_remote_job_process_command "$owner" > "$lock/command" || exit 1
+  printf '%s\n' "$owner" > "$stage/.owner-pid"
+  printf '%s\n' "$start" > "$stage/.owner-start"
+  fm_remote_job_lock_owner_matches_process "$account" || exit 2
+  fm_remote_job_stage_owner_alive "$stage" || exit 3
+else
+  ! fm_remote_job_lock_owner_matches_process "$account" || exit 2
+  ! fm_remote_job_stage_owner_alive "$stage" || exit 3
+fi
+SH
+sleep 60 &
+TZ_OWNER_PID=$!
+fm_test_wait_exec "$TZ_OWNER_PID" "sleep 60" || fail "the time-zone remote job owner never started"
+for tz_form in current legacy; do
+  if [ "$tz_form" = legacy ]; then
+    tz_start=$(TZ="$FM_TEST_TZ_EAST" LC_ALL=C /bin/ps -p "$TZ_OWNER_PID" -o lstart=)
+  else
+    tz_start=$(TZ="$FM_TEST_TZ_EAST" fm_remote_job_process_start "$TZ_OWNER_PID")
+  fi
+  FM_REMOTE_JOB_STATE_ROOT="$TZ_STATE_ROOT" TZ="$FM_TEST_TZ_WEST" bash "$TZ_CHECKS" \
+    "$ROOT/bin/fm-remote-job-lib.sh" "$ACCOUNT_HOME" live "$TZ_OWNER_PID" "$tz_start" "$TMP_ROOT/tz-stage-$tz_form" \
+    || fail "a host time-zone change made the live $tz_form remote job owner read as dead (check $?)"
+done
+kill "$TZ_OWNER_PID" 2>/dev/null || true
+wait "$TZ_OWNER_PID" 2>/dev/null || true
+FM_REMOTE_JOB_STATE_ROOT="$TZ_STATE_ROOT" TZ="$FM_TEST_TZ_WEST" bash "$TZ_CHECKS" \
+  "$ROOT/bin/fm-remote-job-lib.sh" "$ACCOUNT_HOME" dead "$TZ_OWNER_PID" "$tz_start" "$TMP_ROOT/tz-stage-legacy" \
+  || fail "a remote job ownership record kept a dead owner alive (check $?)"
+pass "remote job ownership survives a host time-zone change, current or legacy, and releases a dead owner"
 
 echo "ALL TESTS PASSED"

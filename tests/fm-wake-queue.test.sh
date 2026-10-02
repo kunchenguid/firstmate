@@ -1756,6 +1756,39 @@ test_main_reclaims_a_grant_whose_branch_owner_exited() {
   pass "main reclaims rows granted to an exited branch owner"
 }
 
+# A host time-zone change between granting rows to a live branch owner and the
+# next main drain must not let main reclaim them, whether this build recorded
+# the owner or a build before the UTC pin recorded it in local time.
+test_time_zone_change_keeps_a_live_branch_grant() {
+  local form dir state owner no_proc
+  for form in current legacy; do
+    dir=$(make_case "tz-branch-grant-$form")
+    state="$dir/state"
+    no_proc="$dir/no-proc"
+    append_wake "$state" signal "task-a.status" "signal: task-a" || fail "signal append failed"
+    sleep 60 &
+    owner=$!
+    fm_test_wait_exec "$owner" "sleep 60" || fail "the $form branch owner never started"
+    TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+      "$GRANT" activate "$owner" tz-grant || fail "branch owner activation failed ($form)"
+    if [ "$form" = legacy ]; then
+      printf 'fm-branch-eligible-owner-v1\n%s\n%s\ntz-grant\n' "$owner" \
+        "$(fm_test_legacy_pid_identity "$owner" "$FM_TEST_TZ_EAST")" > "$state/.branch-eligible-owner"
+    fi
+    TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+      "$GRANT" publish tz-grant 1 || fail "branch grant publication failed ($form)"
+    TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$no_proc" FM_STATE_OVERRIDE="$state" \
+      "$DRAIN" > "$dir/main.out" 2> "$dir/main.err" || fail "main drain failed ($form): $(cat "$dir/main.err")"
+    kill "$owner" 2>/dev/null || true
+    wait "$owner" 2>/dev/null || true
+    ! grep -Fq "$(printf '\tsignal\ttask-a.status\t')" "$dir/main.out" \
+      || fail "main reclaimed a live branch owner's $form grant after a zone change"
+    [ -e "$state/.branch-eligible-owner" ] && [ -e "$state/.branch-eligible-rows" ] \
+      || fail "a zone change cost a live branch owner its $form grant"
+  done
+  pass "a host time-zone change keeps a live branch grant, current or legacy"
+}
+
 # A branch-actor drain or ack without a snapshot is a wiring bug, never
 # "nothing eligible": it must refuse loudly rather than silently draining or
 # acking nothing.
@@ -3464,6 +3497,7 @@ test_branch_grant_refuses_rows_already_claimed_by_main
 test_main_ack_leaves_a_row_that_arrived_after_its_drain_unclaimed
 test_actor_filter_precedes_same_key_deduplication
 test_main_reclaims_a_grant_whose_branch_owner_exited
+test_time_zone_change_keeps_a_live_branch_grant
 test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst

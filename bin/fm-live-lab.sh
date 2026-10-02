@@ -111,6 +111,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 BUILDER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LAB_HOME_HELPER="$SCRIPT_DIR/fm-lab-home.sh"
+# shellcheck source=bin/fm-pid-identity-lib.sh
+. "$SCRIPT_DIR/fm-pid-identity-lib.sh"
 CLAUDE_TRUST="$SCRIPT_DIR/fm-claude-trust.sh"
 RECORD_NAME=.fm-live-lab
 RECORD_TOKEN='fm-live-lab v1'
@@ -598,32 +600,47 @@ cmd_up() {
 
 # ---- down -------------------------------------------------------------------
 
+# Every lstart read below pins TZ=UTC0, so a host time-zone change between up
+# and down cannot disown a live lab process (bin/fm-pid-identity-lib.sh).
 record_launch_pid() {
   local start
   case "${1:-}" in ''|*[!0-9]*) die "cannot record lab process: missing or invalid PID '${1:-}'" ;; esac
-  start=$(ps -o lstart= -p "$1" | awk '{$1=$1; print}')
+  start=$(TZ=UTC0 ps -o lstart= -p "$1" | awk '{$1=$1; print}')
   [ -n "$start" ] || die "cannot record start time for lab process $1"
-  printf 'launch_pid=%s\nlaunch_start=%s\n' "$1" "$start" >> "$ROOT/$RECORD_NAME"
+  printf 'launch_pid=%s\nlaunch_start_utc=%s\n' "$1" "$start" >> "$ROOT/$RECORD_NAME"
+}
+
+# Print the recorded launch PIDs whose start time in <snapshot> (pid= ppid=
+# lstart= rows read under TZ=UTC0) still matches. A launch_start_utc record
+# must match exactly; a bare launch_start record is a pre-upgrade local-time
+# rendering, checked by fm_pid_identity_legacy_matches.
+lab_roots() {  # <snapshot>
+  local line root="" start
+  while IFS= read -r line; do
+    case "$line" in
+      launch_pid=*) root=${line#launch_pid=}; case "$root" in ''|*[!0-9]*) root="" ;; esac ;;
+      launch_start_utc=*|launch_start=*)
+        [ -n "$root" ] || continue
+        start=$(printf '%s\n' "$1" | awk -v pid="$root" '$1 == pid { print $3, $4, $5, $6, $7 }')
+        case "$line" in
+          launch_start_utc=*) [ -n "$start" ] && [ "${line#launch_start_utc=}" = "$start" ] && echo "$root" ;;
+          *) fm_pid_identity_legacy_matches "${line#launch_start=}" "$start" && echo "$root" ;;
+        esac
+        root="" ;;
+    esac
+  done < "$ROOT/$RECORD_NAME"
 }
 
 # Resolve recorded roots only while their start times match, before tmux
-# reparents their descendants.
+# reparents their descendants. The root check and the tree walk read one
+# snapshot, so a root PID reused between them cannot adopt a new tree.
 lab_pids() {
-  ps -axo pid=,ppid=,lstart= | awk -v record="$ROOT/$RECORD_NAME" '
-    BEGIN {
-      while ((getline line < record) > 0) {
-        if (line ~ /^launch_pid=[0-9]+$/) { sub(/^launch_pid=/, "", line); root=line }
-        else if (line ~ /^launch_start=/ && root != "") {
-          sub(/^launch_start=/, "", line); starts[root]=line; root=""
-        }
-      }
-      close(record)
-    }
-    {
-      pid[NR]=$1; ppid[$1]=$2
-      start=$3 " " $4 " " $5 " " $6 " " $7
-      if ($1 in starts && start == starts[$1]) roots[$1]=1
-    }
+  local snapshot roots
+  snapshot=$(TZ=UTC0 ps -axo pid=,ppid=,lstart=)
+  roots=$(lab_roots "$snapshot" | tr '\n' ' ')
+  printf '%s\n' "$snapshot" | awk -v matched="$roots" '
+    BEGIN { split(matched, ids, /[[:space:]]+/); for (i in ids) if (ids[i] != "") roots[ids[i]]=1 }
+    { pid[NR]=$1; ppid[$1]=$2 }
     END {
       for (i = 1; i <= NR; i++) {
         p = pid[i]
@@ -674,7 +691,7 @@ prune_groups() {
 
 refresh_pairs() {
   local snapshot
-  snapshot=$(ps -axo pid=,ppid=,pgid=,stat=,lstart=)
+  snapshot=$(TZ=UTC0 ps -axo pid=,ppid=,pgid=,stat=,lstart=)
   pairs=$(expand_pairs "$pairs" "$groups" "$snapshot")
   groups=$(prune_groups "$groups" "$pairs" "$snapshot")
 }
@@ -685,7 +702,7 @@ live_pids() {
   local pid start current
   while IFS=$'\t' read -r pid start; do
     [ -n "$pid" ] || continue
-    current=$(ps -o stat=,lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')
+    current=$(TZ=UTC0 ps -o stat=,lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')
     case "$current" in ''|Z*) ;; *)
       [ "${current#* }" = "$start" ] && echo "$pid"
       ;;
@@ -750,10 +767,10 @@ cmd_down() {
   own_group=$(ps -o pgid= -p "$$" | awk '{$1=$1; print}')
   caller_group=$(ps -o pgid= -p "$PPID" | awk '{$1=$1; print}')
   for pid in $pids; do
-    start=$(ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')
+    start=$(TZ=UTC0 ps -o lstart= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')
     [ -n "$start" ] || continue
     pairs+="$pid"$'\t'"$start"$'\n'
-    pgid=$(ps -o pgid=,lstart= -p "$pid" 2>/dev/null | awk -v start="$start" '{ if ($2 " " $3 " " $4 " " $5 " " $6 == start) print $1 }')
+    pgid=$(TZ=UTC0 ps -o pgid=,lstart= -p "$pid" 2>/dev/null | awk -v start="$start" '{ if ($2 " " $3 " " $4 " " $5 " " $6 == start) print $1 }')
     case "$pgid" in ''|0|1|*[!0-9]*) continue ;; esac
     [ "$pgid" = "$own_group" ] || [ "$pgid" = "$caller_group" ] || groups+="$pgid "
   done

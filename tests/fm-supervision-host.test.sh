@@ -2304,6 +2304,55 @@ test_restarted_host_stops_what_a_killed_predecessor_left() {
   pass "host: a restarted host stops, by recorded identity, the cycle a killed predecessor left running"
 }
 
+# A host time-zone change between a killed host recording its cycle and the
+# restarted host reading that record must not leave the old cycle running
+# beside the new one, whether this build recorded it or a build before the UTC
+# pin recorded it in local time.
+test_restarted_host_stops_a_predecessor_cycle_across_a_time_zone_change() {
+  local form home first_host arm watcher legacy
+  for form in current legacy; do
+    home=$(make_home "away-crash-tz-$form" away)
+    TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$home/no-proc" start_host "$home"
+    wait_until 150 watcher_live "$home" || fail "crash ($form): the host never started a watcher cycle"
+    first_host=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+    arm=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
+    watcher=$(cat "$home/state/.watch.lock/pid")
+    kill -KILL "$first_host"
+    sleep 1
+    kill -0 "$arm" 2>/dev/null || fail "crash ($form): fixture error: the arm died with its host, so this case proves nothing"
+    if [ "$form" = legacy ]; then
+      legacy=$(fm_test_legacy_pid_identity "$arm" "$FM_TEST_TZ_EAST")
+      awk -F '\t' -v OFS='\t' -v pid="$arm" -v id="$legacy" '$2 == pid { $3 = id } { print }' \
+        "$home/state/.supervision-host" > "$home/host-record.tmp" \
+        && mv "$home/host-record.tmp" "$home/state/.supervision-host"
+    fi
+    TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$home/no-proc" start_host "$home"
+    wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$arm" "$watcher" \
+      || fail "a host restarted after a zone change left its killed predecessor's $form-recorded arm or watcher running"
+  done
+  pass "host: a restarted host stops a killed predecessor's cycle across a host time-zone change, current or legacy"
+}
+
+# The main-session key keys the host's engine conversation and broken-session
+# latch, so a host time-zone change must not make one session look new.
+test_main_session_key_survives_a_time_zone_change() {
+  local home session east west
+  home=$(make_home main-key-tz attended)
+  sleep 60 &
+  session=$!
+  fm_test_wait_exec "$session" "sleep 60" || fail "the main-session fixture never started"
+  printf '%s\n' "$session" > "$home/state/.lock"
+  east=$(TZ="$FM_TEST_TZ_EAST" FM_PROC_ROOT_OVERRIDE="$home/no-proc" FM_HOME="$home" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-engine-lib.sh"; fm_supervision_host_main_key "$2"' _ "$ROOT" "$home/state")
+  west=$(TZ="$FM_TEST_TZ_WEST" FM_PROC_ROOT_OVERRIDE="$home/no-proc" FM_HOME="$home" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-supervision-engine-lib.sh"; fm_supervision_host_main_key "$2"' _ "$ROOT" "$home/state")
+  kill "$session" 2>/dev/null || true
+  wait "$session" 2>/dev/null || true
+  [ -n "$east" ] || fail "the main-session key could not be read for a live session"
+  [ "$west" = "$east" ] || fail "a host time-zone change changed the main-session key ('$east' -> '$west')"
+  pass "host: the main-session key survives a host time-zone change"
+}
+
 test_park_exit_probe_uses_half_second_child_sleeps() {
   local home host_pid
   home=$(make_home park-cadence attended)
@@ -2950,6 +2999,8 @@ test_latch_keeps_attended_closes_on_main_and_skips_unopted_homes
 test_attended_latch_keeps_closes_on_main_and_records_recovery_off_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
+test_restarted_host_stops_a_predecessor_cycle_across_a_time_zone_change
+test_main_session_key_survives_a_time_zone_change
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
 test_park_boundary_rechecked_just_before_the_engine_turn

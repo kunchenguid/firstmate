@@ -323,14 +323,14 @@ forget_process() {  # <pid>
 stop_recorded() {  # <pid> <identity> <seconds>
   local pid=$1 identity=$2 limit=$(( ${3:-10} * 10 )) i
   fm_pid_alive "$pid" || return 0
-  [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ] || return 0
+  _fm_engine_identity_matches "$pid" "$identity" || return 0
   kill -TERM "$pid" 2>/dev/null || return 0
   i=0
   while [ "$i" -lt "$limit" ] && fm_pid_alive "$pid"; do
     sleep 0.1
     i=$((i + 1))
   done
-  if fm_pid_alive "$pid" && [ "$(identity_of "$pid")" = "$identity" ]; then
+  if fm_pid_alive "$pid" && _fm_engine_identity_matches "$pid" "$identity"; then
     kill -KILL "$pid" 2>/dev/null || true
   fi
 }
@@ -383,7 +383,7 @@ activate() {
   if [ -f "$LEFT_RECORD" ]; then
     pid='' identity=''
     IFS="$(printf '\t')" read -r pid identity < "$LEFT_RECORD" || true
-    if fm_pid_alive "$pid" && [ -n "$identity" ] && [ "$(identity_of "$pid")" = "$identity" ]; then
+    if fm_pid_alive "$pid" && _fm_engine_identity_matches "$pid" "$identity"; then
       LEFT_ARM=$pid
     else
       rm -f "$LEFT_RECORD"
@@ -399,7 +399,7 @@ activate() {
 stop_engine_turn() {
   local pid='' identity='' i limit
   [ -f "$ENGINE_PID_FILE" ] && IFS="$(printf '\t')" read -r pid identity < "$ENGINE_PID_FILE"
-  if [ -n "$pid" ] && fm_pid_alive "$pid" && [ "$(identity_of "$pid")" = "$identity" ]; then
+  if [ -n "$pid" ] && fm_pid_alive "$pid" && _fm_engine_identity_matches "$pid" "$identity"; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
   limit=$(( (ENGINE_GRACE + 10) * 10 ))

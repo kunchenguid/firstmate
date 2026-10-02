@@ -365,6 +365,7 @@ Branch acknowledgement retiring the check-row receipts of exactly its granted se
 
 An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one.
 It does this because it holds no handle on the watcher's stdout and cannot read the reason line itself.
+The arm never attaches to a watcher whose parent is an away daemon while `state/.afk` is absent: before any health or beacon check, it stops that leftover daemon and this home's watcher, then owns a fresh cycle, or prints a typed `watcher: FAILED - ... leftover away daemon ...` line when the daemon survives ([architecture.md](architecture.md#event-driven-supervision)).
 
 ### Terminal-delivery ledger
 

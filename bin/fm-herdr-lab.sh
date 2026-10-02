@@ -37,6 +37,9 @@
 # absent; teardown refuses when that stop cannot be confirmed.
 set -u
 
+# shellcheck source=bin/fm-pid-identity-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fm-pid-identity-lib.sh"
+
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
 }
@@ -207,8 +210,10 @@ fm_herdr_lab_viewer_reason() { # <session>
   printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null
 }
 
+# Read in UTC, as bin/fm-herdr-lab-viewer.py records it, so a host time-zone
+# change cannot disown a live viewer (bin/fm-pid-identity-lib.sh).
 fm_herdr_lab_process_start() { # <pid>
-  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  LC_ALL=C TZ=UTC0 ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 fm_herdr_lab_process_parent() { # <pid>
@@ -224,19 +229,29 @@ fm_herdr_lab_viewer_recorded_value() { # <session> <key>
   printf '%s' "$value"
 }
 
+# True while <pid> still has the start time recorded under <key>. A <key>_utc
+# record must match exactly; a bare <key> record is a pre-upgrade local-time
+# rendering, checked by fm_pid_identity_legacy_matches.
+fm_herdr_lab_viewer_start_matches() { # <session> <key> <pid>
+  local recorded current
+  current=$(fm_herdr_lab_process_start "$3") && [ -n "$current" ] || return 1
+  if recorded=$(fm_herdr_lab_viewer_recorded_value "$1" "$2_utc"); then
+    [ "$current" = "$recorded" ]
+  else
+    recorded=$(fm_herdr_lab_viewer_recorded_value "$1" "$2") || return 1
+    fm_pid_identity_legacy_matches "$recorded" "$current"
+  fi
+}
+
 fm_herdr_lab_viewer_owned_pair() { # <session>
-  local launcher_pid viewer_pid launcher_start viewer_start current_start parent_pid
+  local launcher_pid viewer_pid parent_pid
   launcher_pid=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_pid) || return 1
   viewer_pid=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_pid) || return 1
   case "$launcher_pid:$viewer_pid" in
     *[!0-9:]*) return 1 ;;
   esac
-  launcher_start=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_start) || return 1
-  viewer_start=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_start) || return 1
-  current_start=$(fm_herdr_lab_process_start "$launcher_pid") || return 1
-  [ -n "$current_start" ] && [ "$current_start" = "$launcher_start" ] || return 1
-  current_start=$(fm_herdr_lab_process_start "$viewer_pid") || return 1
-  [ -n "$current_start" ] && [ "$current_start" = "$viewer_start" ] || return 1
+  fm_herdr_lab_viewer_start_matches "$1" launcher_start "$launcher_pid" || return 1
+  fm_herdr_lab_viewer_start_matches "$1" viewer_start "$viewer_pid" || return 1
   parent_pid=$(fm_herdr_lab_process_parent "$viewer_pid") || return 1
   [ "$parent_pid" = "$launcher_pid" ] || return 1
   printf '%s %s' "$launcher_pid" "$viewer_pid"
