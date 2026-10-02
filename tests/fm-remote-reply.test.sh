@@ -1018,9 +1018,95 @@ assert_grep "offset=$replay_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the recapture did not rebuild the lost cursor"
 pass "a cursor-loss whole-log recapture is acknowledged quietly with no duplicate wake"
 
+# The old log can lose a few bytes from an already ingested final line. Its
+# terminal continuity break is correct, but recovery must prove that the
+# retained complete tail matches the acknowledged raw delta before rewinding.
+stop_reply_listener || fail "the reply listener did not stop before the rebase fixture"
+printf 'note: rebase anchor stays intact\n' >> "$REMOTE/state/parent-replies.status"
+rebase_anchor_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+printf 'done [corr=0123456789abcdef]: rebase tail is complete\n' \
+  >> "$REMOTE/state/parent-replies.status"
+rebase_old_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the two-line rebase tail was not ingested"
+rebase_delta_gen=$GEN
+assert_grep "offset=$rebase_old_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "the rebase fixture did not commit the full tail"
+stop_reply_listener || fail "the reply listener did not stop before its suffix was shortened"
+cp "$REMOTE/state/parent-replies.status" "$TMP_ROOT/rebase-full-source"
+perl -e 'my $p=shift; my $n=-s $p; truncate($p,$n-5) or die $!' \
+  "$REMOTE/state/parent-replies.status" || fail "could not shorten the rebase fixture by five bytes"
+cp "$REMOTE/state/parent-replies.status" "$TMP_ROOT/rebase-short-source"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/rebase-break.out" 2>&1 &
+RUNNER=$!
+wait "$RUNNER" || fail "the shortened reply log did not produce a terminal result"
+rebase_break="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$rebase_break" "the shortened reply log produced no captured break"
+assert_present "${rebase_break%.result}.handled" "the truncation result was not acknowledged"
+[ "$(remote_env "$ADAPTER" classify "$rebase_break")" = continuity-broken ] \
+  || fail "a five-byte shrink did not break continuity"
+assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" \
+  "the five-byte shrink did not publish a continuity block"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "the shortened source stayed registered before a guarded rebase"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$((rebase_old_offset - 1))" \
+  > "$TMP_ROOT/rebase-wrong-offset.out" 2>&1; then
+  fail "rebase accepted a stale expected cursor offset"
+fi
+mv "$PARENT/state/remote-replies/ios.$rebase_delta_gen.ingested" \
+  "$TMP_ROOT/rebase-ingest-receipt"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-no-proof.out" 2>&1; then
+  fail "rebase accepted a tail without its ingestion receipt"
+fi
+assert_grep 'last ingested delta is unavailable' "$TMP_ROOT/rebase-no-proof.out" \
+  "missing durable ingestion proof did not explain the rebase refusal"
+mv "$TMP_ROOT/rebase-ingest-receipt" \
+  "$PARENT/state/remote-replies/ios.$rebase_delta_gen.ingested"
+perl -0pi -e 's/rebase anchor/rebase Anchor/' "$REMOTE/state/parent-replies.status"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-changed-tail.out" 2>&1; then
+  fail "rebase accepted changed bytes in the retained complete tail"
+fi
+assert_grep 'retained remote tail differs' "$TMP_ROOT/rebase-changed-tail.out" \
+  "changed retained bytes did not explain the rebase refusal"
+assert_grep "offset=$rebase_old_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "a refused rebase changed the committed cursor"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "a refused rebase registered a source"
+cp "$TMP_ROOT/rebase-short-source" "$REMOTE/state/parent-replies.status"
+remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-success.out" \
+  || fail "a verified five-byte suffix trim could not rebase: $(cat "$TMP_ROOT/rebase-success.out")"
+assert_grep "rebased: ios offset=$rebase_anchor_offset" "$TMP_ROOT/rebase-success.out" \
+  "rebase did not stop at the last verified complete line"
+rebase_backup=$(sed -n 's/^rebased: ios offset=[0-9]* prior-cursor=//p' "$TMP_ROOT/rebase-success.out")
+assert_grep "offset=$rebase_old_offset" "$rebase_backup" \
+  "rebase did not preserve the prior cursor for inspection"
+assert_grep "offset=$rebase_anchor_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "rebase did not commit its verified complete-line cursor"
+assert_grep 'resolved [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" \
+  "rebase did not publish a continuity resolution"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "rebase did not register the reply source"
+cp "$TMP_ROOT/rebase-full-source" "$REMOTE/state/parent-replies.status"
+printf 'done [corr=abcdef0123456789]: reply after verified rebase\n' \
+  >> "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the rebased listener did not ingest the restored tail and next reply"
+assert_grep 'reply after verified rebase' "$PARENT/state/ios.status" \
+  "the next reply after rebase did not reach the parent"
+[ "$(grep -cF 'rebase tail is complete' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "rebase replay duplicated an already ingested tail line"
+pass "a five-byte suffix trim rebases only after exact tail proof and resumes without duplicate mirroring"
+
 # The adapter re-armed at the committed cursor. Truncation is detected from the
 # next blocking source and escalated once; it is never silently treated as a new
 # log or re-armed past the break.
+continuity_before=$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")
 stop_reply_listener || fail "the reply listener did not stop before the continuity break"
 printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/parent-replies.status"
 GEN=$((GEN + 1))
@@ -1041,9 +1127,9 @@ set -e
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
-[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
-  || fail "continuity replay duplicated the escalation"
-status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq "$((continuity_before + 1))" ] \
+  || fail "a new continuity episode was lost or replay duplicated its escalation"
+status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1)" >/dev/null \
   || fail "new continuity escalation has unknown emission time"
 if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
   printf '\nNew continuity escalation after ingest retry:\n'

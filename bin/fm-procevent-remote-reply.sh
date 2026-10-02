@@ -11,6 +11,7 @@
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh relisten
 #   fm-procevent-remote-reply.sh lag-check <secondmate-id>
+#   fm-procevent-remote-reply.sh rebase <secondmate-id> --expect-offset <offset>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
@@ -41,6 +42,13 @@
 # completely quiet. Only a capture autohandle could NOT
 # fully apply is published as a `check` wake for the manual handler, and
 # running `handle` on that wake is idempotent.
+# A shortened log remains a continuity break. `rebase` is the explicit recovery
+# after the terminal result was handled: it requires the exact current cursor,
+# an acknowledged truncation result, and the last ingested delta result. It
+# re-reads the remote log from that delta's verified start, compares every
+# retained complete byte with the ingested payload, rewinds only to that proven
+# complete-line boundary, and re-arms the listener. It refuses changed bytes,
+# missing receipts, an active registration, and a non-shortened source.
 #
 # This channel is a status-stream MIRROR, not a correlated-reply channel. A local
 # secondmate appends its whole status stream straight into the parent's
@@ -390,6 +398,167 @@ cmd_lag_check() {  # <secondmate-id>
   printf '%s\n' "$reason"
 }
 
+# Pick the acknowledged truncation and the last ingested delta that justify
+# changing this exact cursor. Captured result bodies, including their raw
+# payload bytes, remain durable after handling; their ingestion receipts bind
+# those bytes to the committed cursor. A digest alone cannot prove a trimmed
+# prefix, so missing capture evidence is a refusal.
+rebase_find_evidence() {  # <id>
+  local id=$1 sid result base seq class path from to hash reason
+  sid=$(source_id "$id")
+  REBASE_DELTA=
+  REBASE_FROM=
+  REBASE_FROM_HASH=
+  REBASE_BREAK=0
+  for result in "$STATE/procevent-inbox/$sid".*.result; do
+    [ -e "$result" ] || continue
+    [ -f "$result" ] && [ ! -L "$result" ] || die "unsafe remote reply result: $result"
+    base=${result%.result}
+    [ -f "$base.handled" ] && [ ! -L "$base.handled" ] || continue
+    seq=${base##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    class=$(classify_result "$result")
+    path=$(result_field "$result" path 2>/dev/null || true)
+    [ "$path" = "$REMOTE_LOG" ] || continue
+    from=$(result_field "$result" from_offset 2>/dev/null || true)
+    hash=$(result_field "$result" from_prefix_sha256 2>/dev/null || true)
+    if [ "$class" = continuity-broken ]; then
+      reason=$(result_field "$result" reason 2>/dev/null || true)
+      [ "$reason" = truncated ] && [ "$from" = "$CURSOR_OFFSET" ] \
+        && [ "$hash" = "$CURSOR_HASH" ] && REBASE_BREAK=1
+      continue
+    fi
+    [ "$class" = delta ] || continue
+    to=$(result_field "$result" to_offset 2>/dev/null || true)
+    hash=$(result_field "$result" to_prefix_sha256 2>/dev/null || true)
+    [ "$to" = "$CURSOR_OFFSET" ] && [ "$hash" = "$CURSOR_HASH" ] || continue
+    ingest_receipt_matches "$id" "$seq" "$result" || continue
+    from=$(result_field "$result" from_offset) || die "last ingested delta has no start offset"
+    case "$from" in ''|*[!0-9]*) die "last ingested delta has an invalid start offset" ;; esac
+    if [ -z "$REBASE_FROM" ] || [ "$from" -gt "$REBASE_FROM" ]; then
+      REBASE_DELTA=$result
+      REBASE_FROM=$from
+      REBASE_FROM_HASH=$(result_field "$result" from_prefix_sha256) \
+        || die "last ingested delta has no start hash"
+    fi
+  done
+  [ "$REBASE_BREAK" -eq 1 ] || die "no acknowledged truncation matches the current cursor"
+  [ -n "$REBASE_DELTA" ] || die "last ingested delta is unavailable; cannot prove the retained tail"
+}
+
+cmd_rebase() {  # <id> --expect-offset <offset>
+  local id=${1:-} expected=${3:-} sid source cursor status_file remote_size
+  local probe old_payload new_payload old_bytes new_bytes new_to new_hash new_from new_from_hash
+  local blank rc=0 backup rollback tmp arm_out line
+  [ "$#" -eq 3 ] && [ "$2" = --expect-offset ] \
+    || die "usage: fm-procevent-remote-reply.sh rebase <secondmate-id> --expect-offset <offset>"
+  validate_id "$id"
+  case "$expected" in ''|*[!0-9]*) die "expected offset must be numeric" ;; esac
+  sid=$(source_id "$id")
+  source="$STATE/procevent/$sid.source"
+  cursor=$(cursor_path "$id")
+  status_file="$STATE/$id.status"
+  (
+    REBASE_LIFECYCLE_LOCK=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+    fm_lock_acquire_wait "$REBASE_LIFECYCLE_LOCK" || die "cannot lock remote reply lifecycle"
+    trap 'fm_lock_release "$REBASE_LIFECYCLE_LOCK"' EXIT
+    remote_route_exists "$id"
+    [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] \
+      || die "remote reply cursor directory is unavailable or unsafe"
+    [ ! -e "$source" ] && [ ! -L "$source" ] \
+      || die "reply source is still registered; rebase requires a terminal continuity break"
+    [ -f "$cursor" ] && [ ! -L "$cursor" ] || die "reply cursor is unavailable or unsafe"
+    [ -f "$status_file" ] && [ ! -L "$status_file" ] \
+      || die "reply status is unavailable or unsafe"
+    read_cursor "$id"
+    [ "$CURSOR_OFFSET" = "$expected" ] || die "reply cursor changed from the expected offset"
+    [ "${#CURSOR_OFFSET}" -le 18 ] || die "reply cursor exceeds the rebase size bound"
+    retirement_capture_scan "$id" || die "cannot inspect captured reply results"
+    [ "$RETIREMENT_PENDING" -eq 0 ] \
+      || die "rebase refused with unhandled captured reply results"
+    rebase_find_evidence "$id"
+    remote_size=$(fm_run_timed 15 "$SCRIPT_DIR/fm-on.sh" "$id" \
+      fm-remote-delta-read.sh size "$REMOTE_LOG" 2>/dev/null) \
+      || die "cannot read remote reply size for rebase"
+    case "$remote_size" in ''|*[!0-9]*) die "remote reply size is invalid" ;; esac
+    [ "${#remote_size}" -le 18 ] && [ "$remote_size" -lt "$CURSOR_OFFSET" ] \
+      && [ "$remote_size" -ge "$REBASE_FROM" ] \
+      || die "remote log is not a verifiable suffix trim of the ingested delta"
+    tmp=$(umask 077; mktemp -d "$CURSOR_DIR/.rebase.XXXXXX") \
+      || die "cannot stage rebase proof"
+    REBASE_TMP=$tmp
+    trap 'rm -rf -- "$REBASE_TMP"; fm_lock_release "$REBASE_LIFECYCLE_LOCK"' EXIT
+    probe="$tmp/remote-result"
+    fm_run_timed 30 "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+      "$REMOTE_LOG" "$REBASE_FROM" "$REBASE_FROM_HASH" 0 \
+      > "$probe" 2> "$tmp/remote-error" || rc=$?
+    new_to=$REBASE_FROM
+    new_hash=$REBASE_FROM_HASH
+    case "$rc" in
+      75) [ ! -s "$probe" ] || die "remote rebase probe returned an ambiguous empty window" ;;
+      0)
+        [ "$(classify_result "$probe")" = delta ] \
+          || die "remote tail changed or no longer has the ingested prefix"
+        new_from=$(result_field "$probe" from_offset) || die "remote rebase start is ambiguous"
+        new_from_hash=$(result_field "$probe" from_prefix_sha256) \
+          || die "remote rebase start hash is ambiguous"
+        new_to=$(result_field "$probe" to_offset) || die "remote rebase end is ambiguous"
+        new_hash=$(result_field "$probe" to_prefix_sha256) \
+          || die "remote rebase end hash is ambiguous"
+        new_bytes=$(result_field "$probe" payload_bytes) \
+          || die "remote rebase payload size is ambiguous"
+        old_bytes=$(result_field "$REBASE_DELTA" payload_bytes) \
+          || die "ingested payload size is ambiguous"
+        case "$new_to$new_bytes$old_bytes" in *[!0-9]*) die "rebase evidence has an invalid size" ;; esac
+        [ "$new_from" = "$REBASE_FROM" ] && [ "$new_from_hash" = "$REBASE_FROM_HASH" ] \
+          && [ "$new_to" -lt "$CURSOR_OFFSET" ] && [ "$new_bytes" -le "$old_bytes" ] \
+          && [ "$new_to" -eq $((REBASE_FROM + new_bytes)) ] \
+          || die "remote rebase result is outside the last ingested delta"
+        blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$REBASE_DELTA")
+        case "$blank" in ''|*[!0-9]*) die "ingested delta has no payload boundary" ;; esac
+        old_payload="$tmp/ingested-payload"
+        tail -n "+$((blank + 1))" "$REBASE_DELTA" > "$old_payload" \
+          || die "cannot read ingested tail"
+        blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$probe")
+        case "$blank" in ''|*[!0-9]*) die "remote probe has no payload boundary" ;; esac
+        new_payload="$tmp/remote-payload"
+        tail -n "+$((blank + 1))" "$probe" > "$new_payload" \
+          || die "cannot read remote tail"
+        [ "$(LC_ALL=C wc -c < "$new_payload" | tr -d ' ')" = "$new_bytes" ] \
+          || die "remote probe payload size changed"
+        head -c "$new_bytes" "$old_payload" | cmp -s - "$new_payload" \
+          || die "retained remote tail differs from the ingested bytes"
+        ;;
+      *) die "remote rebase probe failed (exit $rc)" ;;
+    esac
+    backup=$(umask 077; mktemp "$CURSOR_DIR/$id.rebase-prior.XXXXXX") \
+      || die "cannot preserve prior cursor"
+    cp -P "$cursor" "$backup" || die "cannot preserve prior cursor"
+    rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")" \
+      || die "cannot clear stale remote-channel caught-up evidence"
+    write_cursor "$id" "$new_to" "$new_hash" || die "cannot commit verified rebase cursor"
+    arm_out="$tmp/arm.out"
+    if ! cmd_arm_locked "$id" > "$arm_out"; then
+      if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+        rollback=$(umask 077; mktemp "$CURSOR_DIR/.cursor.rollback.XXXXXX") \
+          || die "rebase registration failed and prior cursor could not be restored: $backup"
+        cp -P "$backup" "$rollback" && mv -f -- "$rollback" "$cursor" \
+          || die "rebase registration failed and prior cursor could not be restored: $backup"
+        die "rebase registration failed; prior cursor restored from $backup"
+      fi
+      die "registration returned failure after a source appeared; rebased cursor retained and prior cursor backed up at $backup"
+    fi
+    fm_lock_release "$REBASE_LIFECYCLE_LOCK" || die "cannot release remote reply lifecycle lock"
+    trap 'rm -rf -- "$REBASE_TMP"' EXIT
+    "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$sid" >/dev/null \
+      || die "rebased cursor and registered source, but listener is not confirmed; run bin/fm-procevent.sh ensure-listening $sid"
+    line="resolved [key=remote-reply-continuity-$id] [at=$(date +%s)]: verified retained remote reply tail and re-armed at offset $new_to"
+    append_status_once "$status_file" "$line" \
+      || die "rebase succeeded but could not publish its resolution"
+    printf 'rebased: %s offset=%s prior-cursor=%s\n' "$id" "$new_to" "$backup"
+  )
+}
+
 safe_doc_path() {
   case "$1" in
     data/*.md) ;;
@@ -652,7 +821,7 @@ cmd_ingest() {
     die "result does not continue the current cursor for $id"
   fi
   if [ "$class" = continuity-broken ]; then
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason; cursor=$from remote_bytes=$to generation=${seq:-manual})"
     append_rc=0
     if status_event_recorded "$status_file" "$line"; then
       append_rc=1
@@ -895,6 +1064,7 @@ case "${1:-}" in
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   lag-check) shift; [ "$#" -eq 1 ] || usage; cmd_lag_check "$@" ;;
+  rebase) shift; cmd_rebase "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;

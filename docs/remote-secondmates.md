@@ -569,7 +569,7 @@ A mirrored line that carries a correlation token settles its pending-reply recor
 
 A remote reply reaches the primary only through this asynchronous mirror.
 The listener retains its process-event owner across transient read failures and retries three times; when all three fail it queues one actionable failure for a continuing episode and exits, leaving recovery to the reconcile launch floor.
-The primary watcher also samples the remote log size against the committed local cursor on a bounded cadence; when the remote log stays ahead beyond the configured threshold it runs `fm-procevent.sh ensure-listening` for that source once in the episode and queues one stalled-channel wake.
+The primary watcher schedules a detached probe of the remote log size against the committed local cursor on a bounded cadence; when the remote log stays ahead beyond the configured threshold the adapter runs `fm-procevent.sh ensure-listening` for that source once in the episode and queues one stalled-channel wake.
 Cursor progress or catchup resets that lag episode.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
 A remote mate that did answer is therefore never asked to repost while its answer is still in flight.
@@ -579,8 +579,10 @@ The [process-to-event operating contract](configuration.md#process-to-event-sour
 
 ### Source log continuity
 
-The source log is never truncated or consumed.
-A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+The relay never truncates or consumes the source log.
+A source shortened or changed by another writer stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+For a shortened source, `bin/fm-procevent-remote-reply.sh rebase` requires an expected cursor and compares the retained complete remote tail with its acknowledged ingested bytes before rewinding and re-arming; its script header owns the exact command and refusal contract.
+Changed bytes or missing ingestion evidence remain blocked for investigation.
 
 ### SSH exit 255 and unavailable homes
 
