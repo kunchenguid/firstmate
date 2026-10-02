@@ -2,7 +2,11 @@
 # Relaunch a REMOTE secondmate onto a new harness, model, or effort, then
 # republish this parent's own route record to match what the host confirmed.
 #
-# Usage: fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|->
+# Usage: fm-remote-secondmate-relaunch.sh <id> <harness> <model|default|-> <effort|default|-> [<handoff-sha256> | --abandon-live-context]
+#   A handoff digest streams the context handoff from stdin to the host;
+#   bin/fm-remote-secondmate-control.sh owns transport-copy retention.
+#   Context abandonment requires current explicit captain authority.
+#   Omit custody only when recovering an already-dead agent.
 #
 # bin/fm-remote-secondmate-control.sh's relaunch verb runs entirely on the
 # secondmate's own host and can only rewrite that host's own endpoint record;
@@ -31,13 +35,14 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
-[ "$#" -eq 4 ] || usage
+[ "$#" -ge 4 ] && [ "$#" -le 5 ] || usage
 ID=$1
 HARNESS=$2
 MODEL=$3
 EFFORT=$4
+CUSTODY=${5:-}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $ID" ;; esac
 
 META="$STATE/$ID.meta"
@@ -46,12 +51,33 @@ REMOTE_HOST=$(fm_meta_get "$META" remote_host)
 [ -n "$REMOTE_HOST" ] \
   || die "task $ID is not a remotely placed secondmate; use bin/fm-control.sh $ID relaunch instead"
 
-RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
-  relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT" </dev/null 2>&1) || {
-  rc=$?
-  printf '%s\n' "$RELAUNCH_OUT" >&2
-  exit "$rc"
-}
+# Custody is the host verb's own contract; this wrapper only forwards it. A
+# handoff digest needs the handoff bytes on stdin, so only that form forwards
+# this process's stdin through fm-on.sh; every other form keeps the remote
+# command's stdin closed.
+STREAM_HANDOFF=no
+RELAUNCH_ARGS=(relaunch "$ID" "$HARNESS" "$MODEL" "$EFFORT")
+case "$CUSTODY" in
+  '') ;;
+  --abandon-live-context) RELAUNCH_ARGS+=("$CUSTODY") ;;
+  -) die "remote context-handoff argument must be a SHA-256 or --abandon-live-context" ;;
+  *) STREAM_HANDOFF=yes; RELAUNCH_ARGS+=("$CUSTODY") ;;
+esac
+if [ "$STREAM_HANDOFF" = yes ]; then
+  RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" --stdin "$ID" fm-remote-secondmate-control.sh \
+    "${RELAUNCH_ARGS[@]}" 2>&1) || {
+    rc=$?
+    printf '%s\n' "$RELAUNCH_OUT" >&2
+    exit "$rc"
+  }
+else
+  RELAUNCH_OUT=$("$SCRIPT_DIR/fm-on.sh" "$ID" fm-remote-secondmate-control.sh \
+    "${RELAUNCH_ARGS[@]}" </dev/null 2>&1) || {
+    rc=$?
+    printf '%s\n' "$RELAUNCH_OUT" >&2
+    exit "$rc"
+  }
+fi
 printf '%s\n' "$RELAUNCH_OUT"
 
 # The confirmed identity comes from the route block the host prints after a

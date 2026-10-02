@@ -34,13 +34,14 @@
 #     that same tip whose runtime CANNOT prove a restart, so the older re-read
 #     steer is all that is honest for them)
 #
-# The two sets are disjoint, and restart is UNCONDITIONAL on a successful update
-# of that home. It is deliberately not gated on the git diff: replacing the agent
-# is the only thing that re-resolves the launch-time wiring - turn-end hooks,
+# The two sets are disjoint, and restart SELECTION is unconditional on a
+# successful update of that home; bin/fm-secondmate-restart.sh owns its persist gate.
+# Selection is deliberately not gated on the git diff: replacing the agent is
+# the only thing that re-resolves the launch-time wiring - turn-end hooks,
 # harness flags, per-harness feature switches - which a running agent froze when
 # it started and which no changed_instr list describes. An unchanged tracked
 # surface therefore is NOT evidence that the running agent is already on the
-# current behavior, so an ALREADY-CURRENT home restarts too.
+# current behavior, so an ALREADY-CURRENT home is selected for a restart too.
 #
 # Only two things keep a live mate out of the restart set, and neither is papered
 # over as a reload:
@@ -105,9 +106,9 @@ if [ "$FF_STATUS" = "updated" ]; then
 fi
 
 # --- secondmates -----------------------------------------------------------
-# Every live secondmate this pass leaves on origin's tip is restarted, whether it
-# advanced or was already there. The header above owns why the git diff does not
-# gate that, and which two conditions - a skipped home, an unprovable runtime -
+# Every eligible live secondmate this pass leaves on origin's tip is selected for
+# a restart attempt, whether it advanced or was already there. The header above
+# owns why the git diff does not gate that, and which two conditions - a skipped home, an unprovable runtime -
 # are the only ways a live mate stays out of the restart set.
 
 # FF_NUDGE_WINDOWS and FF_SEEN_HOMES are the sweep's own accumulators and are
@@ -142,7 +143,7 @@ selector_claimed() {  # <selector>
 }
 
 # Route one secondmate whose home this pass left on the target commit. Restart is
-# the outcome unless its runtime cannot prove one, in which case it keeps the
+# selected unless its runtime cannot prove one, in which case it keeps the
 # re-read steer and is reported as a nudge rather than as a reload. A stopped
 # endpoint has no agent to replace and is left to startup recovery.
 claim_settled_secondmate() {  # <id>

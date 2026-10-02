@@ -189,4 +189,51 @@ fm_pr_poll_artifacts_valid "$HOME_DIR/state" ios "$ROOT/bin/fm-pr-poll.sh" \
   || fail "a remote relaunch broke PR poll authentication by writing harness/model/effort after pr="
 pass "a remote relaunch keeps an already-armed PR poll authenticating"
 
+test_host_local_relative_home_streams_absolute_handoff() {
+  local host="$TMP/host" digest out rc handoff
+  mkdir -p "$host"
+  cp -R "$ROOT/bin" "$host/bin"
+  mkdir -p "$host/state/parent-route" "$host/data/.parent-route"
+  printf 'ios\n' > "$host/.fm-secondmate-home"
+  printf '# agents\n' > "$host/AGENTS.md"
+  printf 'Retained streamed remote context.\n' > "$TMP/host-handoff.md"
+  digest=$(fm_pr_sha256 "$TMP/host-handoff.md")
+  fm_write_meta "$host/state/parent-route/ios.meta" \
+    "window=fm-remote:w1:p1" "endpoint_task_id=ios" "worktree=$host" "project=$host" \
+    "backend=herdr" "herdr_session=fm-remote" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" "harness=claude" \
+    "model=default" "effort=default" "kind=secondmate"
+  cat > "$host/bin/fm-control.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "$1" = ios ] && [ "$2" = relaunch ]
+shift 2
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --handoff-file) handoff=$2 ;;
+    --handoff-sha256) digest=$2 ;;
+  esac
+  shift 2
+done
+case "$handoff" in /*) ;; *) exit 91 ;; esac
+cmp -s "$handoff" "$FM_TEST_EXPECTED_HANDOFF"
+[ "$(shasum -a 256 "$handoff" | awk '{print $1}')" = "$digest" ]
+printf '%s\n' "$handoff" > "$FM_TEST_CAPTURE"
+SH
+  out=$(
+    cd "$TMP" || exit 1
+    export FM_TEST_EXPECTED_HANDOFF="$TMP/host-handoff.md"
+    PATH="/usr/bin:/bin:$PATH" FM_HOME=host FM_TEST_CAPTURE="$TMP/host-path" \
+      bash "$host/bin/fm-remote-secondmate-control.sh" relaunch ios claude default default \
+      "$digest" < "$TMP/host-handoff.md" 2>&1
+  ); rc=$?
+  expect_code 0 "$rc" "relative remote home must deliver an absolute integrity-bound handoff"$'\n'"$out"
+  handoff=$(cat "$TMP/host-path")
+  assert_absent "$handoff" "confirmed remote resumption must retire the streamed raw copy"
+  assert_contains "$out" "target=fm-remote:w1:p1" "remote relaunch must still return the confirmed route"
+  pass "host-local relaunch: relative home produces an absolute streamed handoff"
+}
+
+test_host_local_relative_home_streams_absolute_handoff
+
 echo "ALL TESTS PASSED"
