@@ -132,4 +132,4 @@ tests/fm-tmux-submit-busy.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process and submit evidence.
+[`verification/runtime-backends.md`](verification/runtime-backends.md#tmux) records the active foreground-process, submit, and server-birth launch-environment evidence.

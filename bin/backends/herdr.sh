@@ -1719,8 +1719,9 @@ fm_backend_herdr_server_owner_name() {  # <owner-marker>
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# inherited from whichever agent happened to start it, plus the launcher's
+# color control (the shared list in bin/fm-backend-launch-env-lib.sh). Bounded
+# poll for the server to report running.
 #
 # A running server returns after one marker check in the session directory,
 # unless that directory holds a replacement marker. While the session directory
