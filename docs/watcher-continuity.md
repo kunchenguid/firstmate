@@ -97,8 +97,8 @@ The hook handles the session lock as follows:
 Whether the session owns that lock is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
 That verdict accepts either of two cases:
 
-- A recorded pid inside the current harness ancestry.
-- A live lock recorded under this same trusted Claude session id.
+- A recorded pid inside the current harness ancestry, unless it is a managed Codex app-server shared across threads.
+- A live lock recorded under this same trusted Claude session id or Codex thread id.
 
 With that verdict, a background session keeps arming after its transient helper chain is recycled.
 [`turnend-guard.md`](turnend-guard.md#guard-predicates) owns the Claude guard's behavior when that live owner is genuinely another session.
