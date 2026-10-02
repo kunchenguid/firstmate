@@ -195,6 +195,27 @@ test_spawn_refuses_project_treehouse_config() {
   pass "fm-spawn.sh refuses project treehouse.toml before Treehouse acquisition"
 }
 
+test_spawn_refuses_repository_treehouse_config_for_subdirectory_project() {
+  local rec id out status config project_root
+  id=settle-repository-config-z5
+  rec=$(make_settle_case settle-repository-config "$id" 0)
+  read_settle_record "$rec"
+  project_root=$PROJ_DIR
+  mkdir -p "$project_root/subdirectory"
+  PROJ_DIR=$project_root/subdirectory
+  config=$project_root/treehouse.toml
+  : > "$config"
+  : > "$HOME_DIR/launch.log"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 1 "$status" "spawn should refuse a repository-root treehouse.toml for a subdirectory project"
+  assert_contains "$out" "$config" "spawn refusal did not name the repository-root treehouse.toml"
+  assert_no_grep "treehouse get" "$HOME_DIR/launch.log" \
+    "spawn attempted Treehouse acquisition despite the repository-root treehouse.toml"
+  pass "fm-spawn.sh refuses repository-root treehouse.toml for a subdirectory project"
+}
+
 test_pool_root_keeps_sha1_key_with_sha1sum_fallback() {
   local shasum_bin sha1sum_bin root_with_shasum root_with_sha1sum status cut_path
   shasum_bin="$HOME_DIR/shasum-tools"
@@ -227,6 +248,16 @@ test_pool_root_refuses_relative_override() {
   expect_code 1 "$status" "relative Treehouse pool bases should be refused"
   assert_contains "$out" "must be absolute" "relative pool-base refusal was not actionable"
   pass "Treehouse pool roots refuse caller-relative overrides"
+}
+
+test_pool_root_refuses_filesystem_root_override() {
+  local out status
+  status=0
+  out=$(FM_TREEHOUSE_POOL_BASE=/ HOME="$HOME_DIR/user-home" \
+    fm_treehouse_pool_root "$HOME_DIR" 2>&1) || status=$?
+  expect_code 1 "$status" "the filesystem root should not be accepted as a Treehouse pool base"
+  assert_contains "$out" "must not be the filesystem root" "filesystem-root pool-base refusal was not actionable"
+  pass "Treehouse pool roots refuse the filesystem root as an override"
 }
 
 test_prepare_root_filters_treehouse_user_config() {
@@ -264,6 +295,22 @@ test_prepare_root_filters_treehouse_user_config() {
   [ ! -e "$pool_root/.config/treehouse" ] && [ ! -L "$pool_root/.config/treehouse" ] || \
     fail "pool preparation retained a stale Treehouse config link"
   pass "Treehouse pool preparation bridges user config without exposing Treehouse root settings"
+}
+
+test_prepare_root_preserves_existing_real_treehouse_config() {
+  local user_home pool_root marker out status
+  user_home="$HOME_DIR/existing-config-user-home"
+  pool_root="$HOME_DIR/existing-config-pool"
+  marker="$pool_root/.config/treehouse/keep"
+  mkdir -p "$user_home" "${marker%/*}"
+  printf 'operator data\n' > "$marker"
+
+  status=0
+  out=$(HOME="$user_home" fm_treehouse_prepare_root "$HOME_DIR" "$pool_root" 2>&1) || status=$?
+  expect_code 1 "$status" "pool preparation should refuse an existing real .config/treehouse directory"
+  assert_contains "$out" "$pool_root/.config/treehouse" "pool preparation refusal did not name the preserved directory"
+  assert_grep "operator data" "$marker" "pool preparation deleted data from a real .config/treehouse directory"
+  pass "Treehouse pool preparation preserves an existing real .config/treehouse directory"
 }
 
 test_pool_root_recovery_uses_fixed_treehouse_layout() {
@@ -367,9 +414,12 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
 test_single_stale_first_read_is_not_accepted
 test_spawn_get_uses_per_home_treehouse_root
 test_spawn_refuses_project_treehouse_config
+test_spawn_refuses_repository_treehouse_config_for_subdirectory_project
 test_pool_root_keeps_sha1_key_with_sha1sum_fallback
 test_pool_root_refuses_relative_override
+test_pool_root_refuses_filesystem_root_override
 test_prepare_root_filters_treehouse_user_config
+test_prepare_root_preserves_existing_real_treehouse_config
 test_pool_root_recovery_uses_fixed_treehouse_layout
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted

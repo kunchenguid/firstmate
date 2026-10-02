@@ -36,6 +36,10 @@ fm_treehouse_pool_root() { # <home> -> <absolute-root>
   case "$key" in *[!0-9a-f]*) return 1 ;; esac
   base=${FM_TREEHOUSE_POOL_BASE:-$HOME/.firstmate-treehouse}
   case "$base" in
+    /)
+      echo "error: Treehouse pool base must not be the filesystem root" >&2
+      return 1
+      ;;
     /*) ;;
     *)
       echo "error: Treehouse pool base must be absolute: $base" >&2
@@ -57,8 +61,11 @@ fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
     rm -- "$root/.config" 2>/dev/null || [ ! -L "$root/.config" ] || return 1
   fi
   mkdir -p -- "$root/.config" || return 1
-  if [ -e "$root/.config/treehouse" ] || [ -L "$root/.config/treehouse" ]; then
-    rm -rf -- "$root/.config/treehouse" || return 1
+  if [ -L "$root/.config/treehouse" ]; then
+    rm -- "$root/.config/treehouse" || return 1
+  elif [ -e "$root/.config/treehouse" ]; then
+    echo "error: prepared Treehouse root contains a real .config/treehouse entry: $root/.config/treehouse" >&2
+    return 1
   fi
   for config_entry in "$root/.config"/* "$root/.config"/.[!.]* "$root/.config"/..?*; do
     [ -L "$config_entry" ] || continue
@@ -89,9 +96,16 @@ fm_treehouse_prepare_root() { # <home> <absolute-root> -> empty
 }
 
 fm_treehouse_require_config_free_project() { # <project> -> empty
-  local project=$1 config="$1/treehouse.toml"
+  local project=$1 config="$1/treehouse.toml" repository
   if [ -e "$config" ] || [ -L "$config" ]; then
     echo "error: treehouse get refused for '$project': '$config' exists; per-home pools require a project without treehouse.toml" >&2
+    return 1
+  fi
+  repository=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || repository=
+  [ -n "$repository" ] || return 0
+  config=$repository/treehouse.toml
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    echo "error: treehouse get refused for '$project': '$config' exists; per-home pools require a repository without treehouse.toml" >&2
     return 1
   fi
 }
