@@ -29,6 +29,23 @@
 # Space-separated exact `pi --version` first-line values (no "pi " prefix).
 FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'0.85.1 0.87.1 0.99.2 1.0.0'}
 
+# The terminal provider-error banner pi draws directly above its composer once
+# a turn has ended on Codex's usage limit. Why it may relax the separated
+# shape's idle/done status requirement (issue #5000): herdr learns pi's status
+# only from pi's own lifecycle integration, so a status that never followed the
+# failed turn parks at `working` or at herdr's `unknown` placeholder for as long
+# as the worker sits on the banner, and every lifecycle verb then refuses a
+# composer that is provably empty. The banner is structural evidence that the
+# turn ENDED: a running pi retitles its opening rule (`── ⠏ Working ──`), which
+# is no longer a solid separator and dissolves the pair, and a new prompt pushes
+# transcript rows between the banner and the rule. The match is exact and
+# case-sensitive, so a similar message from another provider, a worker
+# discussing this text, or a wrapped copy of it never qualifies.
+# From pi 0.87.1 on, pi draws the fixed bug-report hint directly below EVERY
+# error banner. It is vendor boilerplate attached to the banner, not a
+# transcript row proving a new turn, so the scan skips at most one occurrence.
+# FM_COMPOSER_PI_TERMINAL_ERROR_RE and FM_COMPOSER_PI_ERROR_HINT_RE override
+# for an unverified rendering.
 # Fixed banner Pi draws once a turn ended on Codex's usage limit.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
 # Fixed bug-report hint row pi 0.87.1 draws under every error banner.
