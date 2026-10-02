@@ -7,13 +7,13 @@
 # both use this owner without duplicating lint configuration.
 # The explicit --fast mode is local-only and disables ShellCheck's extended
 # dataflow analysis while preserving ordinary shell lint checks and source
-# following. CI, main, and merge-base-less runs keep --norc --external-sources
-# with full dataflow over the whole canonical set. An ordinary local branch
-# (changed-file mode, including the no-mistakes lint step) drops
+# following. CI, main, and merge-base-less runs attempt --norc
+# --external-sources with full dataflow for each canonical root. An ordinary
+# local branch (changed-file mode, including the no-mistakes lint step) drops
 # --external-sources, keeps dataflow, and excludes SC1091, SC2034, SC2153,
-# and SC2329, the codes that need library context. Those codes still run in
-# CI over the whole set. Explicit paths keep --external-sources with the
-# selected dataflow mode.
+# and SC2329, the codes that need library context. CI checks those codes
+# on source-following attempts (see the memory fallback below). Explicit
+# paths attempt --external-sources with the selected dataflow mode.
 # Tests stop source analysis at imported production modules because CI analyzes
 # every production shell separately as a canonical, source-aware root.
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
@@ -25,8 +25,8 @@
 #   - In CI (GITHUB_ACTIONS=true or CI=true), on the main branch, or when no
 #     merge-base against origin/main (or local main) can be found, it lints
 #     the full canonical set: bin/*.sh bin/backends/*.sh tests/*.sh, with
-#     --external-sources and full dataflow. This is what CI always runs, so
-#     CI coverage never depends on a local diff.
+#     --external-sources and full dataflow first. CI coverage never depends
+#     on a local diff; memory failures may take the narrower retry below.
 #   - Otherwise (an ordinary local branch with a real merge-base) it lints
 #     only the canonical-set files changed since that merge-base, including
 #     uncommitted local edits, via plain local `git diff` (no network, no
@@ -50,9 +50,10 @@
 # two CI runners, each with those same concurrency-limited workers.
 # Partitions are complete, disjoint, and byte-weight balanced; --list-files
 # exposes their actual roots.
-# Partition mode is always full source-aware analysis, never changed-only or
-# --fast, and does not accept explicit paths. Each partition also runs workflow
-# lint and backend-purity checks, keeping either invocation independently useful.
+# Partition mode starts with full source-aware analysis, never changed-only
+# or --fast, and does not accept explicit paths. Each partition also runs
+# workflow lint and backend-purity checks, keeping either invocation
+# independently useful.
 #
 # With FM_LINT_REQUIRE_BOUNDS=1, which CI sets, every per-root ShellCheck
 # process runs under an enforced envelope: a wall deadline
@@ -72,26 +73,32 @@
 # own ShellCheck process with identical diagnostics, just unbounded.
 #
 # If a source-following root exits with a memory failure, it is retried once
-# without --external-sources. A clean retry passes with an explicit
-# memory-fallback reason and warning; the retry excludes only the same
-# cross-file-dependent codes omitted in local no-source lint, and other findings
-# still fail lint.
+# without --external-sources under the same bounds. A clean retry passes
+# with an explicit memory-fallback reason and warning; only the same
+# cross-file-dependent codes omitted in local no-source lint are excluded.
+# Other findings and failed retries still fail lint. The retry's diagnostics
+# replace the failed attempt's output; peak RSS is the maximum of both attempts.
+#
 # Per-root evidence is incremental: workers append begin/end records (root,
-# mode, shard, start, end, duration, exit status, reason, and peak RSS when
-# measured) to a roots log as each root completes, so a mid-run kill still
-# leaves the completed record and names the root in flight as
-# begun-but-unfinished. With --telemetry the log is retained at
+# mode, shard, start, end, duration, final exit status, reason, peak RSS when
+# measured, and whether the final attempt followed sources) to a roots log
+# as each root completes, so a mid-run kill still leaves the completed record
+# and names the root in flight as begun-but-unfinished. With --telemetry the
+# log is retained at
 # <telemetry-without-.tsv>.roots.tsv (or <telemetry>.roots.tsv if there is no
 # .tsv suffix); otherwise it lives only in the
-# run's scratch dir. Reason values are ok, findings, timeout, memory,
-# signal:<sig>, limit-unavailable, or error:<rc>. Memory requires process-level
-# evidence (a GHC exhaustion status or runtime error on stderr), not an echoed
-# source excerpt or an OOM phrase in a filename. In partition mode begin/end
+# run's scratch dir. Reason values are ok, findings, memory-fallback,
+# timeout, memory, signal:<sig>, limit-unavailable, or error:<rc>.
+# Memory requires process-level evidence (a GHC exhaustion status or runtime
+# error on stderr), not an echoed source excerpt or an OOM phrase in a
+# filename. In partition mode begin/end
 # lines also stream to stderr, and an abnormal root end is always reported
 # there.
 #
 # Optional quiet telemetry writes one bounded TSV snapshot of content and source
 # graph identity, wall/CPU/RSS, shard load, and competing ShellCheck processes.
+# source_followed_directives counts directives only for roots whose final
+# attempt followed sources, not roots that passed or failed a no-source retry.
 #
 # Usage:
 #   fm-lint.sh                         lint the context-selected file set (see above)
