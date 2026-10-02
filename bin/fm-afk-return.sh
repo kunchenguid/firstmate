@@ -70,6 +70,8 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 # advertised read-only guard stays literal.
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$SCRIPT_DIR/fm-hold-status-lib.sh"
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
 # Functions only: decodes the stored hold reasons the catch-up listing shows.
 # shellcheck source=bin/fm-hold-reason-lib.sh
@@ -325,7 +327,7 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age state lines="" note=""
+  local evidence=$1 beat_age state report="" note=""
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
@@ -339,28 +341,28 @@ health_snapshot() {  # <evidence-file>
       case "$FM_RECOVERY_MARKER_TOKEN" in
         acked:*) : ;;
         pending:handling:*|announced:handling:*) note="a wake was being handled at return (recovery marker $state); not a gap" ;;
-        *) lines="GAP: watcher downtime was detected during the away window (recovery marker present)" ;;
+        *) report="GAP: watcher downtime was detected during the away window (recovery marker present)" ;;
       esac
     else
-      lines="GAP: watcher downtime was detected during the away window (recovery marker present)"
+      report="GAP: watcher downtime was detected during the away window (recovery marker present)"
     fi
   fi
   if [ -e "$STATE/.afk" ] && ! fm_afk_daemon_owns_supervision "$STATE"; then
-    lines="$lines
+    report="$report
 GAP: the away daemon was not running at return (the away flag stood with no live daemon)"
   fi
   if [ "$beat_age" -ge "$RETURN_GRACE" ]; then
-    lines="$lines
+    report="$report
 GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   fi
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
-    lines="$lines
+    report="$report
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
   fi
-  if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
-    lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
+  if [ -z "$(printf '%s' "$report" | tr -d '[:space:]')" ]; then
+    report="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"
   fi
-  append_evidence health "$lines
+  append_evidence health "$report
 $note" "$evidence"
 }
 
