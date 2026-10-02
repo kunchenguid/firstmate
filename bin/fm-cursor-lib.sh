@@ -230,7 +230,7 @@ fm_cursor_resolve_binary() {
       return 0
     fi
   done
-  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. Every candidate must pass one bounded --help probe: Cursor Agent CLI identity, or Cursor install-tree structure with a successful non-refusal run. A name or install-tree match alone is never enough." >&2
+  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. Every candidate must pass one bounded --help probe: Cursor Agent CLI identity, or a canonical cursor-agent name or Cursor versioned install-tree path with a successful, non-empty, non-refusal response. A name or install-tree match alone is never enough." >&2
   return 1
 }
 

@@ -244,6 +244,39 @@ test_verify_executable_refuses_ide_shim_refusal_text() {
   pass "fm_cursor_verify_executable: IDE-shim refusal text is never launchable"
 }
 
+test_verify_executable_accepts_basename_outside_tree() {
+  # Structural launch evidence is the canonical basename OR the versioned
+  # install tree. A cursor-agent outside any Cursor tree with a successful,
+  # non-empty, non-refusal --help must verify; empty success must not, and a
+  # total miss must diagnose both structural shapes plus the non-empty rule.
+  local odd err
+  odd="$TMP_ROOT/basename-only"
+  mkdir -p "$odd"
+  printf '#!/bin/sh\necho "generic help"\nexit 0\n' > "$odd/cursor-agent"
+  chmod +x "$odd/cursor-agent"
+  fm_cursor_path_is_cursor "$odd/cursor-agent" \
+    || fail "basename cursor-agent outside the tree must still be structural"
+  fm_cursor_verify_executable "$odd/cursor-agent" \
+    || fail "basename cursor-agent with non-empty unmarked --help must verify"
+
+  printf '#!/bin/sh\nexit 0\n' > "$odd/cursor-agent"
+  chmod +x "$odd/cursor-agent"
+  ! fm_cursor_verify_executable "$odd/cursor-agent" \
+    || fail "basename cursor-agent with empty --help must not verify"
+
+  err=$(PATH="/usr/bin:/bin" HOME="$odd/no-home" fm_cursor_resolve_binary 2>&1) && \
+    fail "resolve with no candidates must fail"
+  case "$err" in
+    *"canonical cursor-agent name or Cursor versioned install-tree path"*) : ;;
+    *) fail "resolve diagnostic must name both structural shapes, got: $err" ;;
+  esac
+  case "$err" in
+    *"non-empty, non-refusal"*) : ;;
+    *) fail "resolve diagnostic must require non-empty non-refusal output, got: $err" ;;
+  esac
+  pass "fm_cursor_verify_executable: basename outside the tree needs non-empty successful probe"
+}
+
 test_isolated_fixture_timeout_sibling_contract() {
   # Hook fixtures copy fm-cursor-lib into a temp bin. Process identity must
   # stay silent with no timeout sibling (no probe), a launch probe without the
@@ -572,6 +605,7 @@ test_resolve_binary_skips_broken_cursor_agent
 test_resolve_binary_skips_broken_without_coreutils_timeout
 test_verify_executable_single_successful_probe
 test_verify_executable_refuses_ide_shim_refusal_text
+test_verify_executable_accepts_basename_outside_tree
 test_isolated_fixture_timeout_sibling_contract
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
