@@ -2104,6 +2104,51 @@ test_uncertain_native_prompt_is_recorded_and_never_replayed() {
   pass "uncertain native prompt is recorded durably and retired without blind replay"
 }
 
+test_uncertain_marker_failure_preserves_buffer() {
+  local dir state rc
+  dir=$(make_bordered_case native-prompt-marker-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: retain this exact payload"
+  mkdir "$state/.subsuper-inject-wedged"
+  rc=0
+  (
+    inject_msg() { return 2; }
+    LOG="$dir/daemon.log" escalate_flush "$state"
+  ) || rc=$?
+  [ "$rc" -eq 1 ] || fail "marker persistence failure returned $rc instead of retryable failure"
+  grep -Fx 'needs-decision: retain this exact payload' "$state/.subsuper-escalations" >/dev/null \
+    || fail "marker persistence failure discarded the buffered payload"
+  [ -s "$state/.subsuper-escalations.since" ] \
+    || fail "marker persistence failure discarded the buffer age"
+  assert_contains "$(cat "$dir/daemon.log")" 'uncertainty marker could not be written; buffer preserved for recovery' \
+    "marker persistence failure was not reported"
+  pass "uncertain marker failure preserves the buffered payload and age"
+}
+
+test_uncertain_buffer_clear_failure_preserves_age() {
+  local dir state rc
+  dir=$(make_bordered_case native-prompt-buffer-clear-failure)
+  state="$dir/state"
+  printf '%s\n' 'needs-decision: retain this payload in the marker' > "$state/.subsuper-escalations"
+  chmod 400 "$state/.subsuper-escalations"
+  printf '%s\n' "$(( $(date +%s) - 600 ))" > "$state/.subsuper-escalations.since"
+  rc=0
+  (
+    inject_msg() { return 2; }
+    LOG="$dir/daemon.log" escalate_flush "$state"
+  ) || rc=$?
+  [ "$rc" -eq 1 ] || fail "buffer clear failure returned $rc instead of recovery failure"
+  [ -s "$state/.subsuper-inject-wedged" ] \
+    || fail "buffer clear failure discarded the durable uncertainty marker"
+  grep -F 'needs-decision: retain this payload in the marker' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "buffer clear failure discarded the payload from the uncertainty marker"
+  [ -s "$state/.subsuper-escalations.since" ] \
+    || fail "buffer clear failure discarded the buffer age"
+  assert_contains "$(cat "$dir/daemon.log")" 'uncertainty marker was written but the escalation buffer could not be cleared' \
+    "buffer clear failure was not reported"
+  pass "uncertain buffer clear failure preserves its marker and age"
+}
+
 test_max_defer_flushes_empty_idle_pane() {
   local dir state fakebin sent
   dir=$(make_bordered_case maxdefer-recover)
@@ -2861,6 +2906,8 @@ test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_native_prompt_success_reports_submitted_once
 test_uncertain_native_prompt_is_recorded_and_never_replayed
+test_uncertain_marker_failure_preserves_buffer
+test_uncertain_buffer_clear_failure_preserves_age
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker

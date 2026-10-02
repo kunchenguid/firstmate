@@ -560,9 +560,15 @@ else
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     3) echo "fm-send: doorbell native submission skipped because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     4)
-      fm_task_inbox_record_escalated "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD" || true
-      fm_wake_append stale "$T" "stale: $T (doorbell submission outcome is uncertain for $INBOX_RECORD; do not replay blindly; inspect the worker)" || true
-      echo "fm-send: doorbell submission to $T is uncertain; the steer remains at $INBOX_RECORD and will not be replayed blindly" >&2
+      if fm_wake_append stale "$T" "stale: $T (doorbell submission outcome is uncertain for $INBOX_RECORD; do not replay blindly; inspect the worker)"; then
+        if ! fm_task_inbox_record_escalated "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
+          echo "fm-send: uncertainty wake was queued for $T, but its inbox escalation marker could not be recorded; the watcher may report it again" >&2
+        else
+          echo "fm-send: doorbell submission to $T is uncertain; the steer remains at $INBOX_RECORD and will not be replayed blindly" >&2
+        fi
+      else
+        echo "fm-send: uncertainty wake could not be queued for $T; leaving $INBOX_RECORD unmarked so the watcher can retry" >&2
+      fi
       ;;
     esac
     exit 0

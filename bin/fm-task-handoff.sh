@@ -413,9 +413,15 @@ _handoff_deliver_locked() {  # <id>
   case "$ring_rc" in
     2) echo "fm-task-handoff: doorbell did not reach $endpoint; delivered at $inbox_record and the watcher will re-ring" >&2 ;;
     4)
-      fm_task_inbox_record_escalated "$STATE" "$target" "$inbox_record" || true
-      fm_wake_append stale "$endpoint" "stale: $endpoint (handoff doorbell submission outcome is uncertain for $inbox_record; do not replay blindly; inspect the worker)" || true
-      echo "fm-task-handoff: doorbell submission is uncertain; delivered at $inbox_record and will not be replayed blindly" >&2
+      if fm_wake_append stale "$endpoint" "stale: $endpoint (handoff doorbell submission outcome is uncertain for $inbox_record; do not replay blindly; inspect the worker)"; then
+        if ! fm_task_inbox_record_escalated "$STATE" "$target" "$inbox_record"; then
+          echo "fm-task-handoff: uncertainty wake was queued for $endpoint, but its inbox escalation marker could not be recorded; the watcher may report it again" >&2
+        else
+          echo "fm-task-handoff: doorbell submission is uncertain; delivered at $inbox_record and will not be replayed blindly" >&2
+        fi
+      else
+        echo "fm-task-handoff: uncertainty wake could not be queued for $endpoint; leaving $inbox_record unmarked so the watcher can retry" >&2
+      fi
       ;;
   esac
   printf 'task handoff %s delivered at %s\n' "$id" "$inbox_record"

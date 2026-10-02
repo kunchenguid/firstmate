@@ -159,6 +159,36 @@ test_failed_ring_is_still_sent() {
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
 }
 
+test_uncertain_ring_persists_recovery_before_suppression() {
+  local dir err rc record
+  dir=$(setup_case uncertain-marker-failure)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/state/t1.inbox/.escalated"
+  run_send "$dir" "$err" FM_FAKE_HERDR_TIMEOUT=1 -- t1 "retain the uncertain steer"
+  rc=$?
+  expect_code 0 "$rc" "an uncertain doorbell must keep the durable enqueue contract"
+  record="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$record" ] || fail "the uncertain steer lost its durable inbox record"
+  grep -F "$record" "$dir/home/state/.wake-queue" >/dev/null \
+    || fail "marker failure occurred before the uncertainty wake was durable"
+  assert_contains "$(cat "$err")" 'uncertainty wake was queued' \
+    "marker failure did not report the durable recovery path"
+
+  dir=$(setup_case uncertain-wake-failure)
+  err="$dir/send.err"
+  mkdir "$dir/home/state/.wake-queue"
+  run_send "$dir" "$err" FM_FAKE_HERDR_TIMEOUT=1 -- t1 "retain after wake failure"
+  rc=$?
+  expect_code 0 "$rc" "a wake persistence failure must not revoke the durable steer"
+  record="$dir/home/state/t1.inbox/001.msg"
+  [ -f "$record" ] || fail "wake persistence failure lost the durable inbox record"
+  [ ! -e "$dir/home/state/t1.inbox/.escalated" ] \
+    || fail "wake persistence failure suppressed recovery before a wake existed"
+  assert_contains "$(cat "$err")" 'uncertainty wake could not be queued' \
+    "wake persistence failure was not reported"
+  pass "fm-send uncertainty keeps recovery durable before suppressing replay"
+}
+
 test_transcript_variants_are_never_opened_by_send() {
   local variant dir err rc marker transcript body
   for variant in missing unreadable huge malformed; do
@@ -331,6 +361,7 @@ test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_does_not_gate_native_prompt
 test_failed_ring_is_still_sent
+test_uncertain_ring_persists_recovery_before_suppression
 test_transcript_variants_are_never_opened_by_send
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed

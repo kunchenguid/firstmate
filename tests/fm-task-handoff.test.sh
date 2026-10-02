@@ -16,6 +16,15 @@ make_fake_backend() {  # <case-dir>
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
+  'agent --help') printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
+  'pane get') jq -n --arg p "$3" '{result:{pane:{pane_id:$p}}}' ;;
+  'pane process-info') jq -n --arg p "${4:-}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:"pi",argv0:"pi"}]}}}' ;;
+  'agent get') jq -n --arg pane "$3" '{result:{agent:{agent:"pi",pane_id:$pane,agent_status:"idle"}}}' ;;
+  'agent prompt')
+    if [ "${FM_FAKE_PROMPT_TIMEOUT:-0}" = 1 ]; then echo 'timeout waiting for response' >&2; exit 1; fi
+    printf '%s\n' "$*" >> "${FM_TEST_SEND_LOG:-/dev/null}"
+    jq -n --arg pane "$3" '{result:{type:"agent_prompted",pane_id:$pane}}'
+    ;;
   'pane read') printf '╭────╮\n│    │\n╰────╯\n' ;;
   'pane send-text') printf '%s\n' "$*" >> "${FM_TEST_SEND_LOG:-/dev/null}" ;;
   *) echo '{}' ;;
@@ -172,6 +181,42 @@ test_local_runtime_backend_matrix_uses_one_durable_plane() {
     [ "$count" -eq 1 ] || fail "$backend delivery created $count inbox records"
   done
   pass "task-handoff: Herdr delivers durably; retired backends reject without losing the requested body"
+}
+
+test_uncertain_handoff_persists_recovery_before_suppression() {
+  local dir home fakebin id out rc record
+  dir="$TMP_ROOT/uncertain-marker-failure"
+  fakebin=$(make_fake_backend "$dir")
+  home=$(make_home "$dir" source target)
+  mkdir -p "$home/state/target.inbox/.escalated"
+  id=uncertain-marker-failure
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PROMPT_TIMEOUT=1 FM_HOME="$home" \
+    "$HANDOFF" send source target --id "$id" "retain the uncertain handoff" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "uncertain handoff exited $rc: $out"
+  record="$home/state/target.inbox/001.msg"
+  [ -f "$record" ] || fail "the uncertain handoff lost its inbox record"
+  grep -F "$record" "$home/state/.wake-queue" >/dev/null \
+    || fail "handoff marker failure occurred before the uncertainty wake was durable"
+  assert_contains "$out" 'uncertainty wake was queued' \
+    "handoff marker failure did not report the durable recovery path"
+
+  dir="$TMP_ROOT/uncertain-wake-failure"
+  fakebin=$(make_fake_backend "$dir")
+  home=$(make_home "$dir" source target)
+  mkdir "$home/state/.wake-queue"
+  id=uncertain-wake-failure
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_FAKE_PROMPT_TIMEOUT=1 FM_HOME="$home" \
+    "$HANDOFF" send source target --id "$id" "retain after handoff wake failure" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "handoff wake persistence failure exited $rc: $out"
+  record="$home/state/target.inbox/001.msg"
+  [ -f "$record" ] || fail "handoff wake persistence failure lost its inbox record"
+  [ ! -e "$home/state/target.inbox/.escalated" ] \
+    || fail "handoff wake persistence failure suppressed recovery before a wake existed"
+  assert_contains "$out" 'uncertainty wake could not be queued' \
+    "handoff wake persistence failure was not reported"
+  pass "task-handoff uncertainty keeps recovery durable before suppressing replay"
 }
 
 test_terminal_refusal_is_durable() {
@@ -695,6 +740,7 @@ test_conflict_preserves_then_delivers_exactly_once
 test_restart_sweep_recovers_pending_handoff
 test_sweep_without_handoffs_is_a_noop
 test_local_runtime_backend_matrix_uses_one_durable_plane
+test_uncertain_handoff_persists_recovery_before_suppression
 test_terminal_refusal_is_durable
 test_bound_terminal_source_is_permanently_rejected
 test_same_task_send_and_reminder_contract_stay_ordinary

@@ -699,8 +699,14 @@ escalate_flush() {  # <state>
       printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown as of %s; not replayed\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
       printf 'Submitted-at-most-once buffered items:\n'
       cat "$buf" 2>/dev/null
-    } > "$marker" 2>/dev/null || true
-    : > "$buf"
+    } > "$marker" 2>/dev/null || {
+      log "inject uncertain: uncertainty marker could not be written; buffer preserved for recovery"
+      return 1
+    }
+    if ! : > "$buf"; then
+      log "inject uncertain: uncertainty marker was written but the escalation buffer could not be cleared"
+      return 1
+    fi
     rm -f "${buf}.since"
     return 2
   fi

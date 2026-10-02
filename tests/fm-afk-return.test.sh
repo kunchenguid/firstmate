@@ -113,7 +113,11 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   } > "$dir/home/data/backlog.md"
   date +%s > "$dir/home/state/.afk"
   printf 'repair-task.status: blocked synthetic dependency\n' > "$dir/home/state/.subsuper-escalations"
-  printf 'fm away-mode inject WEDGED: 4555s undelivered\n' > "$dir/home/state/.subsuper-inject-wedged"
+  {
+    printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown; not replayed\n'
+    printf 'Submitted-at-most-once buffered items:\n'
+    printf 'needs-decision: choose the retained release target\n'
+  } > "$dir/home/state/.subsuper-inject-wedged"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
@@ -130,7 +134,9 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   grep -F $'evidence\twake\t1784074271' "$gate" >/dev/null || fail "drained wake evidence was not retained in the durable gate"
   grep -F $'evidence\twake\twake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency' "$gate" >/dev/null \
     || fail "the separate drain annotation was not retained as away-return evidence"
-  grep -F $'evidence\twedge\tfm away-mode inject WEDGED: 4555s undelivered' "$gate" >/dev/null || fail "wedge evidence was not retained in the durable gate"
+  grep -F $'evidence\twedge\tfm away-mode inject UNCERTAIN: native prompt outcome unknown; not replayed' "$gate" >/dev/null || fail "wedge evidence was not retained in the durable gate"
+  grep -F $'evidence\twedge\tneeds-decision: choose the retained release target' "$gate" >/dev/null || fail "the uncertain payload was not retained in the durable gate"
+  assert_contains "$out" 'catch-up wedge: needs-decision: choose the retained release target' "the return catch-up hid the uncertain payload"
   grep -F $'evidence\tescalation\trepair-task.status: blocked synthetic dependency' "$gate" >/dev/null || fail "buffered escalation evidence was not retained in the durable gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "return begin did not stop away mode exactly once"
   [ -s "$dir/home/state/.fake-drain" ] || fail "blocked return acknowledged its emitted wake before handling completed"
@@ -181,7 +187,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "repeated begin stopped an already-stopped daemon twice"
   wake_count=$(grep -c $'^evidence\twake\t1784074271' "$gate" || true)
   [ "$wake_count" -eq 1 ] || fail "repeated begin duplicated retained wake evidence ($wake_count copies)"
-  [ "$(grep -c $'^evidence\twedge\t' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated retained wedge evidence"
+  [ "$(grep -c $'^evidence\twedge\t' "$gate" || true)" -eq 3 ] || fail "repeated begin duplicated or dropped retained wedge evidence"
   [ "$(grep -c $'^evidence\tescalation\t' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated retained escalation evidence"
 
   printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$dir/home/state/repair-task.status"
