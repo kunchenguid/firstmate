@@ -166,8 +166,8 @@ Pi push-source passes poll `state/<id>.busy-state`; Codex and TraeX use the publ
 | Codex | codex-cli 0.159.1 | Herdr native status plus exact process liveness | 2026-10-02 portable public-interface coverage: native working/idle/blocked/waiting, live native-unknown, exited and unproven process cases; a forbidden reader beside a 64 MiB transcript binding was not executed. |
 | TraeX | 0.207.1 internal | Herdr native status plus exact process liveness | The same 2026-10-02 public-interface contract passed; native unknown with an exact live TraeX process is deliberately idle. |
 
-The retired 2026-09-29 transcript lifecycle evidence is recorded in [runtime backend verification](runtime-backends.md#historical-transcript-input-observation-not-a-send-prerequisite).
-It remains recovery evidence, not the current ordinary state contract.
+Retained transcript recovery evidence is recorded in [runtime backend verification](runtime-backends.md#transcript-recovery-and-ordinary-state-isolation).
+It does not define the current ordinary state contract.
 
 The earlier Codex 0.145.0 probe on 2026-07-28 tried two push paths, both refused:
 

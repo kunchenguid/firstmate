@@ -65,7 +65,8 @@
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
+#                          budget while the worker was not classified busy and
+#                          still produced no acknowledgement
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate
@@ -386,8 +387,8 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
+# durable and the worker will reach a turn boundary - any other live or
+# inconclusive state gets one delivery attempt. A spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
 # or missing skips the ladder altogether: it receives no prompt and surfaces
 # as that same stale wake exactly once. If the attempt's ladder write fails while

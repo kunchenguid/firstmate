@@ -220,9 +220,9 @@ for _ in $(seq 1 80); do
   sleep 0.1
 done
 [ "$composer" = empty ] || fail "real Pi composer was not ready for the unmarked return request"
-# Type once, then submit with Enter retried until Pi starts the turn, the same
-# Enter-only retry the production submit primitive uses (a lone Enter on a
-# freshly typed Pi composer can be swallowed while the composer settles).
+# This fixture deliberately uses terminal input for the synthetic captain
+# return request and retries only Enter if Pi's composer swallows the first key.
+# Production message submission uses the separate native prompt API.
 "$LAB_HELPER" run "$SESSION" pane send-text "$PRIMARY_PANE" 'Synthetic Bearings request' >/dev/null
 sleep 0.5
 RETURN_SEEN=0

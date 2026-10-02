@@ -2,9 +2,9 @@
 # tests/fm-task-inbox.test.sh - the per-task steering inbox
 # (bin/fm-task-inbox-lib.sh) and the watcher's re-ring ladder.
 #
-# The inbox+doorbell design replaces typed steer payloads with durable
-# sequenced records acknowledged by an atomic mv into handled/; the terminal
-# carries only a constant doorbell line, and the watcher re-rings an
+# The inbox+doorbell design replaces direct steer payloads with durable
+# sequenced records acknowledged by an atomic mv into handled/; the native
+# prompt carries only a constant doorbell line, and the watcher re-rings an
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
@@ -23,8 +23,8 @@
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
 #      one stale wake once the ring budget is spent.
-#   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
-#      shell, the ring skips an agent the backend classifies dead, and the
+#   6. Dead panes: the doorbell line remains shell-safe for historical clients,
+#      the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
 set -u
 
