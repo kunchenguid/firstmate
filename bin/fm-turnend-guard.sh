@@ -125,10 +125,21 @@ done
 # Read the whole payload, including multiline JSON and an unterminated last
 # line, with a two-second input budget. A hook caller can leave its pipe open
 # after writing: waiting for EOF with cat would spend the harness's entire Stop
-# timeout before checking supervision. Bash read preserves bytes received on
-# timeout or EOF; jq below still rejects incomplete or malformed JSON.
-PAYLOAD=
-IFS= read -r -d '' -t 2 PAYLOAD 2>/dev/null || true
+# timeout before checking supervision. Stock Bash 3.2 discards partial input
+# from a timed-out read, so retain each successful one-byte read separately,
+# using the same -d '' -n form as fm-remote-job-worker.sh. The shared deadline
+# bounds the entire payload, not each byte; jq still rejects incomplete JSON.
+read_hook_payload() {
+  local deadline=$((SECONDS + 2)) remaining char LC_ALL=C
+  PAYLOAD=
+  while :; do
+    remaining=$((deadline - SECONDS))
+    [ "$remaining" -gt 0 ] || break
+    IFS= read -r -d '' -n 1 -t "$remaining" char 2>/dev/null || break
+    PAYLOAD+=$char
+  done
+}
+read_hook_payload
 [ -n "$PAYLOAD" ] || exit 0
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same

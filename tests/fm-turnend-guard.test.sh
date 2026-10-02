@@ -977,12 +977,17 @@ run_stop_with_open_stdin() {
 }
 
 test_hook_evaluates_payload_without_stdin_eof() {
-  local dir
-  dir=$(make_primary_dir "$TMP_ROOT/hook-open-stdin")
-  : > "$dir/state/task1.meta"
-  run_stop_with_open_stdin "$dir" 'exec bash bin/fm-turnend-guard.sh' \
-    '{"stop_hook_active":false}' 2
-  pass "fm-turnend-guard: received JSON still blocks missing supervision without stdin EOF"
+  local dir interpreter index=0
+  # /bin/bash is stock Bash 3.2 on supported macOS hosts, even when PATH
+  # selects Homebrew Bash for the suite and the tracked hook command.
+  for interpreter in bash /bin/bash; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-open-stdin-$index")
+    : > "$dir/state/task1.meta"
+    run_stop_with_open_stdin "$dir" "exec $interpreter bin/fm-turnend-guard.sh" \
+      '{"stop_hook_active":false}' 2
+    index=$((index + 1))
+  done
+  pass "fm-turnend-guard: PATH and stock Bash retain JSON and block missing supervision without stdin EOF"
 }
 
 test_codex_stop_preserves_verdicts_without_stdin_eof() {
