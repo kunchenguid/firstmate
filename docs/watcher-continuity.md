@@ -185,8 +185,9 @@ The bounded turn-end guard enforces recovery at Stop when no watcher is live and
 So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 
 The recovery-episode contract below owns once-per-generation announcement.
-A handling successor does not re-announce.
+A handling successor does not re-announce the generation handed off at its start.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+A later generation, such as an `fm-inbox.sh` note appended after the handoff was acknowledged, is announced once like any other.
 
 ### Manual recovery and other harnesses
 

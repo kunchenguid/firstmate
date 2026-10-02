@@ -2453,8 +2453,14 @@ if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
   exit 1
 fi
+SUCCESSOR_HANDOFF_GEN=
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   WATCHER_RECOVERY_PENDING=0
+  # The generation live at successor start is the one the predecessor's wake
+  # already carries; resurface_after_downtime skips only that generation.
+  if fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER"; then
+    SUCCESSOR_HANDOFF_GEN=${FM_RECOVERY_MARKER_TOKEN##*:}
+  fi
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -2611,11 +2617,20 @@ rerecord_device_shifted_pr_poll() {  # <id>
 }
 
 resurface_after_downtime() {
-  # Handling successors already have a predecessor-delivered wake on the way.
-  # Re-announcing from this cycle is what turned a lost handshake into an
+  # Handling successors already have a predecessor-delivered wake on the way
+  # for the generation handed off at start.
+  # Re-announcing that generation is what turned a lost handshake into an
   # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # A later generation (an out-of-band append after the handoff was
+  # acknowledged, such as an fm-inbox.sh note) has no wake on the way, so it
+  # falls through to the ordinary once-per-generation announcement.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    fm_recovery_marker_read "$WATCHER_DOWNTIME_MARKER" || return 0
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      pending:downtime:*) ;;
+      *) return 0 ;;
+    esac
+    [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "$SUCCESSOR_HANDOFF_GEN" ] || return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
