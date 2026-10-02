@@ -207,6 +207,14 @@ printf 'x\n' >> "$1"
 sleep 8
 SH
   chmod 755 "$FIXTURE_ROOT/bin/fm-count-job.sh"
+  # The worker only runs commands tracked by the root's git index.
+  if [ ! -d "$FIXTURE_ROOT/.git" ]; then
+    git -C "$FIXTURE_ROOT" init -q -b main || fail "could not initialize the fixture root"
+    git -C "$FIXTURE_ROOT" config user.email test@example.com
+    git -C "$FIXTURE_ROOT" config user.name Test
+  fi
+  git -C "$FIXTURE_ROOT" add AGENTS.md bin || fail "could not track the fixture job"
+  git -C "$FIXTURE_ROOT" commit -qm 'fixture job' || fail "could not commit the fixture job"
   : > "$TMP_ROOT/count"
   ensure_worker
   id=$(fm_remote_job_stage "$ACCOUNT_HOME" "$FIXTURE_ROOT" "$TMP_ROOT/home" fm-count-job.sh "$TMP_ROOT/count" </dev/null) \
@@ -215,6 +223,11 @@ SH
   i=0
   while [ ! -s "$job/.claim/group_start" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
   [ -s "$job/.claim/group_start" ] || fail "the job never recorded a running group"
+  # The group is recorded before it is armed, so wait for the job's own side
+  # effect to know it is really running before its records are made legacy.
+  i=0
+  while [ ! -s "$TMP_ROOT/count" ] && [ "$i" -lt 100 ]; do i=$((i + 1)); sleep 0.1; done
+  [ -s "$TMP_ROOT/count" ] || fail "the job never started running"
   group=$(cat "$job/.claim/group")
   printf '%s\n' 'Mon Jan  1 00:00:00 2001' | tee "$LOCK/start" "$job/.claim/supervisor_start" "$job/.claim/group_start" >/dev/null
   [ ! -e "$job/.claim/owner_start" ] || printf '%s\n' 'Mon Jan  1 00:00:00 2001' > "$job/.claim/owner_start"
