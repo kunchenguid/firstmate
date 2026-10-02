@@ -1080,12 +1080,15 @@ cmd_start() {
   CLAIM_STATE_DEVICE=$FM_PROCEVENT_CLAIM_STATE_DEVICE
   CLAIM_STATE_INODE=$FM_PROCEVENT_CLAIM_STATE_INODE
   STAGED_OUTPUT=
+  CAPTURE_IN_FLIGHT=0
   # Exit cleanup must not wait for the source lock: retire and reconcile hold it
   # while waiting for this runner, so blocking here creates a circular wait
   # broken only by KILL. On contention, leave the generation-bound claim for
   # the stopper or subsequent reconciliation to reclaim.
   release_start_claim() {
     extension_lifecycle_lock_release 2>/dev/null || true
+    # The helper retains the process group and claim until capture stops.
+    [ "$CAPTURE_IN_FLIGHT" -eq 0 ] || return 0
     [ -z "$STAGED_OUTPUT" ] || rm -f -- "$STAGED_OUTPUT"
     fm_procevent_source_lock_try_acquire "$CLAIM_ID" 2>/dev/null || return 0
     if fm_procevent_claim_load_locked "$CLAIM_ID" 2>/dev/null \
@@ -1230,6 +1233,7 @@ cmd_start() {
       fm_procevent_source_lock_release "$id"
       die "cannot prepare the source launch boundary: $id"
     }
+    CAPTURE_IN_FLIGHT=1
     perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
@@ -1244,6 +1248,7 @@ cmd_start() {
       rm -f -- "$REG/$launch_ready" "$launch_reply"
       die "cannot safely stage the extension result"
     }
+    CAPTURE_IN_FLIGHT=0
     [ -s "$REG/$launch_ready" ] || {
       rm -f -- "$REG/$launch_ready" "$launch_reply"
       die "cannot establish the source launch boundary: $id"
