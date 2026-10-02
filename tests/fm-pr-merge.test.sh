@@ -3654,7 +3654,7 @@ test_red_and_unreported_checks_are_reported_together() {
 test_unreadable_required_set_refuses() {
   local case_dir head label
   head=a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4
-  for label in branch-read-fails branch-shape rules-read-fails rules-forbidden rules-shape; do
+  for label in branch-read-fails branch-shape branch-missing-protection branch-missing-required rules-read-fails rules-forbidden rules-shape; do
     case_dir=$(make_case "github-required-unreadable-$label")
     add_gh_mocks "$case_dir" "$head"
     case "$label" in
@@ -3662,9 +3662,15 @@ test_unreadable_required_set_refuses() {
         printf 'gh: Not Found (HTTP 404)\n' > "$case_dir/github-branch-fail"
         ;;
       branch-shape)
-        # Non-null, non-object required_status_checks is unreadable; null/absent
-        # means "no classic required checks" and is handled separately below.
+        # Non-null, non-object required_status_checks is unreadable; only an
+        # explicit null is "no classic required checks" (covered separately).
         printf '{"name":"main","protected":true,"protection":{"required_status_checks":"bogus"}}\n' > "$case_dir/github-branch.json"
+        ;;
+      branch-missing-protection)
+        printf '{"name":"main","protected":true}\n' > "$case_dir/github-branch.json"
+        ;;
+      branch-missing-required)
+        printf '{"name":"main","protected":true,"protection":{"enabled":true}}\n' > "$case_dir/github-branch.json"
         ;;
       rules-read-fails)
         printf 'gh: Not Found (HTTP 404)\n' > "$case_dir/github-required-rules-fail"
