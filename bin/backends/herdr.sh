@@ -94,8 +94,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
 
 # Shared color-control launch scrub (bin/fm-backend-launch-env-lib.sh): the one
-# list every backend's server-start path drops, so tmux, Herdr, and zellij
-# cannot drift apart on which color variables must not reach a crew pane.
+# list tmux, Herdr, and zellij drop before they start a long-lived server, so
+# those three adapters cannot drift apart on which color variables must not
+# reach a crew pane.
 # shellcheck source=bin/fm-backend-launch-env-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-backend-launch-env-lib.sh"
 
