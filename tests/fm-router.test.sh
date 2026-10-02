@@ -129,6 +129,15 @@ assert json.loads((home / 'data' / 'failed' / 'route.json').read_text())['launch
 assert log.read_text().count('fm-spawn.sh failed ') == 1
 assert any(value['session'] == 'failed' for value in json.loads(run('sessions', cli=code / 'bin/fm').stdout))
 env.pop('FIXTURE_SPAWN_EXIT')
+(home / 'data' / 'damaged').mkdir()
+(home / 'data' / 'damaged' / 'route.json').write_text('{"task_class": "bug')
+for command in ('sessions', 'status'):
+    listed = {value['session']: value for value in json.loads(run(command, cli=code / 'bin/fm').stdout)}
+    assert 'damaged routing evidence' in listed['damaged']['error']
+    assert 'routing' in listed['failed'] and 'routing' in listed['launched'] or 'record' in listed['launched']
+run(cli=code / 'bin/fm')
+assert (home / 'data' / 'damaged' / 'route.json').read_text() == '{"task_class": "bug'
+shutil.rmtree(home / 'data' / 'damaged')
 run('resume', 'known', '--note', 'saved progress', cli=code / 'bin/fm')
 assert (home / 'data' / 'known' / 'progress.md').read_text().strip() == 'saved progress'
 assert 'fm-control.sh known relaunch --note saved progress' in log.read_text()

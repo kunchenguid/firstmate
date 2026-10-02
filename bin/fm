@@ -332,7 +332,16 @@ def sessions():
     seen = {value["session"] for value in values}
     for path in sorted(DATA.glob("*/route.json")):
         if path.parent.name not in seen:
-            values.append({"session": path.parent.name, "home": str(HOME), "routing": json.loads(path.read_text()),
+            try:
+                routing = json.loads(path.read_text())
+                if not isinstance(routing, dict):
+                    raise ValueError("not an object")
+            except (OSError, ValueError) as exc:
+                values.append({"session": path.parent.name, "home": str(HOME),
+                               "error": f"damaged routing evidence at {path}: {exc}",
+                               "liveness": "no launch record; inspect preserved queued task"})
+                continue
+            values.append({"session": path.parent.name, "home": str(HOME), "routing": routing,
                            "liveness": "no launch record; inspect preserved queued task"})
     return values
 
