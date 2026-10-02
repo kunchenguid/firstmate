@@ -464,7 +464,12 @@ assert call('fm-task-state.sh','observe','target')['state']=='pending'
 before=(home/'data/target/lifecycle.json').read_bytes()
 assert call('fm-task-state.sh','observe','target')['state']=='running', 'ordinary published launch lost its brief receipt'
 assert (home/'data/target/lifecycle.json').read_bytes()==before, 'readback changed semantic authority'
-(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: run-step · validating (running)\\n"\n')
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: pane · doing: harness busy (herdr-native)\\n"\n')
+assert call('fm-task-state.sh','observe','target')['state']=='running', 'authoritative Herdr native activity was not accepted as actual start proof'
+for provider_state in ('idle', 'dead', 'unknown'):
+    (bin/'fm-crew-state.sh').write_text(f'#!/bin/sh\nprintf "state: {provider_state} · source: pane · doing: harness {provider_state} (herdr-native)\\n"\n')
+    assert call('fm-task-state.sh','observe','target')['state']=='pending', provider_state + ' Herdr state became running execution proof'
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: run-step · validating (running) · harness idle (herdr-native)\\n"\n')
 assert call('fm-task-state.sh','observe','target')['state']=='running', 'active validation run-step was not accepted as actual start proof'
 (bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: status-log · validating (running)\\n"\n')
 assert call('fm-task-state.sh','observe','target')['state']=='pending', 'status history became actual start proof'
@@ -473,6 +478,14 @@ for phase in ('prepared','unconfirmed'):
     m.write_text(original.replace('launch_state=confirmed','launch_state='+phase))
     assert call('fm-task-state.sh','observe','target')['state']=='pending', 'uncertain launch became execution proof'
 m.write_text(original)
+(bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · source: pane · doing: harness busy (herdr-native)\\n"\n')
+m.write_text(original.replace('spawn_gen=g1','spawn_gen=wrong-generation'))
+call('fm-task-state.sh','observe','target',ok=False)
+m.write_text(original)
+brief=home/'data/target/brief.md';brief_text=brief.read_text()
+brief.write_text('Different brief identity must not inherit execution proof.\n')
+call('fm-task-state.sh','observe','target',ok=False)
+brief.write_text(brief_text)
 (bin/'fm-crew-state.sh').write_text('#!/bin/sh\nprintf "state: working · doing: harness busy (fm-spawn)\\n"\n')
 assert call('fm-task-state.sh','observe','target')['state']=='pending', 'synthetic busy seed became execution proof'
 t['next_action_seq']=2

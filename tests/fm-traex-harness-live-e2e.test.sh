@@ -209,7 +209,7 @@ pass 'real TraeX processed the benign initial instruction after guarded trust ac
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 # Native status can remain unknown after a completed turn. Exercise the
-# production transcript binding instead of skipping steering on that host.
+# production Herdr status plus exact process-liveness path on that host.
 . "$ROOT/bin/fm-busy-lib.sh"
 fm_backend_source herdr || fail 'could not load the retained Herdr adapter'
 wait_semantic() {
@@ -228,7 +228,7 @@ send_text "Run sleep 5, then touch '$SECOND_ACTED', then reply with exactly TRAE
 wait_semantic busy || fail 'steered TraeX turn never became semantically busy'
 wait_acted "$SECOND_ACTED" || fail 'TraeX did not process durable generic steer'
 wait_semantic idle || fail 'steered TraeX turn never settled'
-pass 'real TraeX durable steering and current state use the verified transcript binding'
+pass 'real TraeX durable steering and current state use native Herdr status plus exact process liveness'
 
 send_text 'Run sleep 20, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE.'
 wait_semantic busy || fail 'interrupt probe never reached a live TraeX turn'

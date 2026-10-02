@@ -1786,7 +1786,7 @@ class Task:
             return 'pending', 'executor receipt exists but current state is ' + match[1]
         if continuation.get('brief_sha256'):
             active_run = re.search(r'(?:^|\n)state: working · source: run-step(?: ·|$)', result.stdout)
-            harness_busy = re.search(r'harness busy \((?:pi-ext|codex-transcript|traex-transcript)\)', result.stdout)
+            harness_busy = re.search(r'harness busy \((?:pi-ext|herdr-native)\)', result.stdout)
             if not active_run and not harness_busy:
                 return 'pending', 'spawn brief is assigned but actual harness start is not observed'
             return 'running', 'bound spawn brief and authoritative activity observed'

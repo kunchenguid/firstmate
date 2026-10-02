@@ -155,16 +155,15 @@ test_pi_extension_stale_incarnation_rejected() {
   pass "pi extension events from a superseded incarnation are rejected as stale"
 }
 
-test_codex_task_bound_transcript_wiring() {
-  local rec id=busy-cx-1 out state
-  rec=$(make_spawn_case codex-unverified codex "$id")
+test_codex_task_bound_native_process_wiring() {
+  local rec id=busy-cx-1 out state marker transcript
+  rec=$(make_spawn_case codex-native codex "$id")
   read_case_record "$rec"
   export FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "codex spawn should succeed: $out"
   state="$HOME_DIR/state"
   assert_present "$state/$id.busy-gen" "codex must mint a launch generation"
-  assert_present "$state/$id.busy-session" "codex must bind its transcript source"
   local launch
   launch=$(grep 'FIRSTMATE_BUSY_GENERATION=' "$FM_FAKE_LAUNCH_LOG")
   unset FM_FAKE_LAUNCH_LOG
@@ -186,16 +185,42 @@ assert record['home'] == sys.argv[3]
 PY
   assert_absent "$WT_DIR/.codex/hooks.json" "codex must not install unverified busy hooks"
   assert_contains "$out" 'spawned '"$id"' harness=codex' "codex spawn did not complete normally"
+
+  marker="$state/forbidden-transcript-read"
+  transcript="$state/vendor-transcript.jsonl"
+  truncate -s $((64 * 1024 * 1024)) "$transcript"
+  printf '{"path":"%s"}\n' "$transcript" > "$state/$id.busy-session"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf '%s' "$FAKE_PROCESS_STATE"; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE_STATE"; }
+  # shellcheck disable=SC2329 # forbidden-read tripwire for the retired path
+  python3() { printf 'opened\n' > "$marker"; return 97; }
+
+  FAKE_PROCESS_STATE=alive FAKE_NATIVE_STATE=busy
   out=$(classify codex "$id" "$state")
-  [ "$out" = "unknown codex-transcript" ] || fail "codex must classify 'unknown codex-transcript', got '$out'"
+  [ "$out" = "busy herdr-native" ] || fail "codex native working state was not busy: $out"
+  FAKE_NATIVE_STATE=idle
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "idle herdr-native" ] || fail "codex native idle state was not idle: $out"
+  FAKE_NATIVE_STATE=unknown
   out=$(fm_busy_classify herdr fake:w codex "$id" "$state" '• Working (6s • esc to interrupt)')
-  [ "$out" = "unknown codex-transcript" ] || fail "codex must not fall back to footer text, got '$out'"
-  pass "codex binds its transcript but remains unknown without task lifecycle evidence"
+  [ "$out" = "idle herdr-native-live" ] || fail "codex live process with unknown native status was not idle: $out"
+  FAKE_PROCESS_STATE=dead
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "dead endpoint-gone" ] || fail "codex exited process was not dead: $out"
+  FAKE_PROCESS_STATE=unreadable
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "unknown herdr-process-unverified" ] || fail "codex unverified process did not stay unknown: $out"
+  [ ! -e "$marker" ] || fail "codex native/process classification opened the forbidden 64 MiB transcript"
+  unset -f fm_backend_agent_state fm_backend_busy_state python3
+  unset FAKE_PROCESS_STATE FAKE_NATIVE_STATE
+  pass "codex spawn uses native Herdr status plus exact process liveness without reading its vendor transcript"
 }
 
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
-test_codex_task_bound_transcript_wiring
+test_codex_task_bound_native_process_wiring
 
 echo "all fm-busy-adapter-wiring tests passed"
