@@ -6,6 +6,40 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## OpenCode V2 native integration
+
+Verified on 2026-10-02 with OpenCode 2.0.22 on macOS arm64.
+The token-free guard starts the real foreground server with private HOME, XDG directories, database, Firstmate home, and a loopback scripted provider.
+It does not attach to the operator's managed service or use provider credentials.
+The public plugin registry must report all five Firstmate plugins active before session creation, because port readiness precedes asynchronous location initialization.
+The agent registry supplies the parsed build-agent model variant, and explicit session model selection proves that variant reaches the provider.
+This is API selection evidence, not proof that every TUI model-selection path applies the configured agent variant.
+
+Refresh command:
+
+```sh
+tests/fm-opencode-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - OpenCode 2.0.22 loaded all five V2 Firstmate plugins
+ok - V2 parses the build-agent model variant and applies it when selected
+ok - native shell execute.before rejects persistent-cd before execution
+ok - native shell execute.before rejects watcher-redirection before execution
+ok - native terminal event admits a turn-end guard follow-up
+ok - native watcher prompt delivery preserves a live successor
+ok - native interrupted turn retains watcher supervision
+ok - native failed turn retains supervision and startup remains exactly once
+ok - private OpenCode server, provider, watcher, configuration and database cleaned
+```
+
+The fixture drives real native shell tool calls and checks their rejection and absent filesystem side effects.
+It also observes native follow-up admission, a real watcher notification and successor, interrupted and failed native turns, and exactly one startup input.
+The provider's scripted replies do not prove a model interprets the supervision instructions correctly.
+Credentialed TUI continuity and Ahoy rendering remain separate opt-in checks through `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh`.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

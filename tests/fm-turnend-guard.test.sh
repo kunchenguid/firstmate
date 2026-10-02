@@ -1002,14 +1002,13 @@ EOF
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
-  local plugin parent worktree_dir wrong_dir out status
+  local plugin parent worktree_dir out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
   parent="$TMP_ROOT/opencode-plugin-parent"
   git init -q "$parent"
   worktree_dir="$parent/nested/opencode-plugin-worktree"
-  wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
-  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  mkdir -p "$worktree_dir/bin"
   cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -1017,31 +1016,41 @@ printf 'guard-fired\n' >&2
 exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  wrong_dir="$parent/wrong-cwd"
+  mkdir -p "$wrong_dir/bin"
+  cat > "$wrong_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'wrong-guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$wrong_dir/bin/fm-turnend-guard.sh"
   # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  out=$(cd "$wrong_dir" && NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let promptBody = "";
-const client = {
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
     },
   },
 };
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
-});
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const handleEvent = await mod.createTurnendGuardHandler(ctx);
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
 }
 if (!promptBody.includes("guard-fired")) {
   console.error(`missing prompt body: ${promptBody}`);
+  process.exit(1);
+}
+if (promptBody.includes("wrong-guard-fired")) {
+  console.error(`guard ran from the process cwd instead of the worktree: ${promptBody}`);
   process.exit(1);
 }
 if (!promptBody.includes("watcher cycle is missing, failed, or unhealthy")) {
@@ -1058,6 +1067,95 @@ EOF
   expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
   [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
   pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
+}
+
+test_opencode_plugin_guards_failed_turn_boundary() {
+  local plugin worktree_dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  worktree_dir="$TMP_ROOT/opencode-failed-turn"
+  mkdir -p "$worktree_dir/bin"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  session: { prompt: async (request) => { prompts.push(request.text); } },
+};
+const handleEvent = await mod.createTurnendGuardHandler(ctx);
+await handleEvent({ type: "session.execution.failed", data: { sessionID: "session-failed" } });
+if (prompts.length !== 1 || !prompts[0].includes("guard-fired")) {
+  console.error(`a failed turn must still raise the guard: ${JSON.stringify(prompts)}`);
+  process.exit(1);
+}
+await handleEvent({ type: "session.step.ended", data: { sessionID: "session-failed" } });
+if (prompts.length !== 1) {
+  console.error(`a mid-turn step must not raise the guard: ${JSON.stringify(prompts)}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must treat a failed execution as a turn boundary"
+  [ -z "$out" ] || fail "OpenCode failed-turn test printed output: $out"
+  pass ".opencode primary plugin: failed execution ends a turn, mid-turn steps do not"
+}
+
+test_opencode_plugin_rearms_after_interrupted_followup() {
+  local plugin worktree_dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
+  worktree_dir="$TMP_ROOT/opencode-interrupted-followup"
+  mkdir -p "$worktree_dir/bin"
+  cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'guard-fired\n' >&2
+exit 2
+EOF
+  chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const prompts = [];
+const ctx = {
+  location: { project: { directory: process.env.WORKTREE } },
+  session: { prompt: async (request) => { prompts.push(request.text); } },
+};
+const handleEvent = await mod.createTurnendGuardHandler(ctx);
+const sessionID = "session-interrupted";
+
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID } });
+if (prompts.length !== 1) {
+  console.error(`first turn end must raise the guard: ${JSON.stringify(prompts)}`);
+  process.exit(1);
+}
+
+await handleEvent({ type: "session.execution.interrupted", data: { sessionID } });
+if (prompts.length !== 1) {
+  console.error(`an interrupted turn must not be guarded: ${JSON.stringify(prompts)}`);
+  process.exit(1);
+}
+
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID } });
+if (prompts.length !== 2) {
+  console.error(`guard stayed silenced after an interrupted follow-up: ${JSON.stringify(prompts)}`);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode plugin must re-arm the guard after an interrupted injected follow-up"
+  [ -z "$out" ] || fail "OpenCode interrupted-followup test printed output: $out"
+  pass ".opencode primary plugin: interrupted follow-up stays unguarded and re-arms the next turn"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {
@@ -2244,6 +2342,8 @@ test_tracked_claude_entries_inert_under_grok
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
+test_opencode_plugin_guards_failed_turn_boundary
+test_opencode_plugin_rearms_after_interrupted_followup
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
