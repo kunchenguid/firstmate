@@ -3,6 +3,7 @@
 #
 # Usage: fm-pending-reply-remind.sh <state-dir>
 #        fm-pending-reply-remind.sh --token <state-dir>
+#        fm-pending-reply-remind.sh --decisions <state-dir>
 #
 # The reminder is one check wake per later live session, with no second recovery
 # and no second status line. It runs only when config/pending-reply-resurface
