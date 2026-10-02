@@ -12,8 +12,8 @@
 # directory component silently classifies as this harness. That widening would
 # let firstmate launch an unrelated executable with Cursor flags.
 #
-# Two independent kinds of Cursor evidence are accepted, and either alone
-# carries a positive verdict, so no single vendor string is load-bearing:
+# Two independent kinds of Cursor evidence are accepted, so no single vendor
+# string is load-bearing:
 #
 #   Structural (no subprocess, safe during a process scan): the canonical path
 #   is named cursor-agent or lives under Cursor's versioned install tree.
@@ -28,9 +28,12 @@
 #   timeout, a non-zero exit, or missing markers - a bare zero exit is never
 #   accepted as proof.
 #
-# Resolving an executable to LAUNCH additionally requires a structural match to
-# run its --help successfully (see fm_cursor_verify_executable), because a
-# right-looking path can hold a broken file.
+# Launch resolution is stricter than process identity (see
+# fm_cursor_verify_executable): a probe alone may accept a candidate, but a
+# name or install-tree match alone is not enough when a bounded runner is
+# available, because a right-looking path can hold a broken file. Without a
+# bounded runner neither launch check can run, so structural evidence alone
+# still stands there, as it always has.
 #
 # Process detection deliberately uses the structural signal only. Probing an
 # arbitrary pid's executable during an ancestry walk or a liveness poll would
