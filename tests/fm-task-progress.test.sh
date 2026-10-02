@@ -43,7 +43,7 @@ out=$(progress update-progress twin --expected-token "$token" --progress \
 rc=$?
 expect_code 6 "$rc" "cross-task progress token"
 assert_contains "$out" "task record changed" "an identical task accepted another task's progress token"
-task_cmd done twin >/dev/null || fail "twin fixture completion failed"
+task_cmd 'done' twin >/dev/null || fail "twin fixture completion failed"
 
 task_cmd add dash-body "Preserve a dash body" --kind ship --body "-" --start >/dev/null \
   || fail "dash-body fixture task add failed"
@@ -58,7 +58,7 @@ case "$dash_body" in
   $'-\n\n<!-- firstmate-progress:v1 context='*) ;;
   *) fail "a literal dash task body was discarded by the progress update" ;;
 esac
-task_cmd done dash-body >/dev/null || fail "dash-body fixture completion failed"
+task_cmd 'done' dash-body >/dev/null || fail "dash-body fixture completion failed"
 
 record='{"acceptance":"The requested behavior passes its public fixture","current_state":"Implementation returned an intermediate result","remaining_gap":"Validation has not passed","next_step":"Run the authorized validation and review its result"}'
 updated=$(progress update-progress ordinary --expected-token "$token" --progress "$record") \
