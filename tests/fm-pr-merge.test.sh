@@ -3144,6 +3144,158 @@ test_away_posture_refuses_asynchronous_merge_paths() {
   pass "away posture permits immediate merges but refuses every asynchronous path"
 }
 
+# A sibling-branch mock gh that extends add_gh_mocks: it answers headRefName
+# for the requested PR, and answers the GraphQL record read
+# (fm_pr_github_read_record_with_gh, bin/fm-pr-lib.sh) for the recorded PR by
+# its own number, distinct from the queue-aware outcome read the new PR's own
+# merge uses (which carries isInMergeQueue and baseRefName and is matched by
+# shape instead). Args: case_dir head recorded_number recorded_merged
+# new_head_ref
+add_sibling_branch_gh_mocks() {
+  local case_dir=$1 head=$2 recorded_number=$3 recorded_merged=$4
+  local new_head_ref=$5
+  add_gh_mocks "$case_dir" "$head"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *statusCheckRollup*)
+        cat "\$FM_TEST_GH_VIEW_JSON"
+        exit 0
+        ;;
+      *headRefOid*)
+        cat "\$FM_TEST_GH_HEAD"
+        exit 0
+        ;;
+      *isDraft*)
+        cat "\$FM_TEST_GH_VIEW_JSON"
+        exit 0
+        ;;
+      *headRefName*)
+        printf '%s\n' "$new_head_ref"
+        exit 0
+        ;;
+    esac
+    ;;
+  "pr merge")
+    printf 'merged:\n  number: %s\n  status: ok\n' "\${3:-}"
+    exit 0
+    ;;
+  "api graphql")
+    case " \$* " in
+      *"number=$recorded_number"*)
+        printf 'state=MERGED\nmerged=$recorded_merged\n'
+        exit 0
+        ;;
+      *)
+        printf 'state=MERGED\nmerged=true\nqueued=false\nbase=main\n'
+        exit 0
+        ;;
+    esac
+    ;;
+  api\ *)
+    case " \$* " in
+      *" repos/"*"/rules/branches/"*merge_queue*) ;;
+      *" repos/"*"/rules/branches/"*)
+        printf '[{"type":"deletion"}]\n'
+        exit 0
+        ;;
+      *" repos/"*"/branches/"*)
+        printf '{"name":"main","protected":false,"protection":{"enabled":false,"required_status_checks":{"enforcement_level":"off","contexts":[],"checks":[]}}}\n'
+        exit 0
+        ;;
+      *" repos/"*)
+        printf 'main\n'
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
+# A task that opens a second PR on a sibling branch (fm/<id>-b) after its
+# first PR (fm/<id>) already merged is the exact lloegrys-retro-navegacao case
+# from 02/10: #847 integrated, #848/#849/#855/#858 green and ready, and the
+# guarded merge path refusing every one of them because only #847 was
+# recorded. Once the recorded PR reads back as merged and the new PR's own
+# branch is a sibling, the merge is accepted and pr= is rebound to it.
+test_sibling_branch_pr_accepted_after_recorded_pr_merged() {
+  local case_dir rc
+  case_dir=$(make_case sibling-branch-accepted)
+  mkdir -p "$case_dir/wt"
+  printf '\npr=https://github.com/example/repo/pull/847\n' >> "$case_dir/state/task-x1.meta"
+  add_sibling_branch_gh_mocks "$case_dir" cececececececececececececececececececece \
+    847 true fm/task-x1-b
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/848 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "sibling-branch-accepted: a sibling-branch PR after the first merged should succeed"
+  assert_grep 'pr=https://github.com/example/repo/pull/848' "$case_dir/state/task-x1.meta" \
+    "sibling-branch-accepted: pr= was not rebound to the sibling-branch PR"
+  assert_logged_gh_merge "$case_dir" 848 example/repo --squash
+  pass "fm-pr-merge accepts a second PR on a sibling branch once the first recorded PR has merged"
+}
+
+# The same sibling branch is refused while the first PR has not merged yet:
+# rebinding away from a still-open PR would abandon it mid-flight rather than
+# recording a genuine second PR for the task.
+test_sibling_branch_pr_refused_while_recorded_pr_still_open() {
+  local case_dir rc
+  case_dir=$(make_case sibling-branch-still-open)
+  mkdir -p "$case_dir/wt"
+  printf '\npr=https://github.com/example/repo/pull/847\n' >> "$case_dir/state/task-x1.meta"
+  add_sibling_branch_gh_mocks "$case_dir" cececececececececececececececececececece \
+    847 false fm/task-x1-b
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/848 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "sibling-branch-still-open: a sibling branch must still refuse while the first PR is open"
+  assert_grep 'is bound to https://github.com/example/repo/pull/847' "$case_dir/stderr" \
+    "sibling-branch-still-open: refusal did not name the still-open recorded PR"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "sibling-branch-still-open: gh pr merge ran before the first PR landed"
+  pass "fm-pr-merge keeps refusing a sibling-branch PR while the recorded PR has not merged"
+}
+
+# A PR on a branch that is not a sibling of the task's own branch - a
+# stranger's work, or another task's branch - must still refuse exactly as
+# before, even once the recorded PR has merged.
+test_foreign_branch_pr_still_refused_after_recorded_pr_merged() {
+  local case_dir rc
+  case_dir=$(make_case foreign-branch-still-refused)
+  mkdir -p "$case_dir/wt"
+  printf '\npr=https://github.com/example/repo/pull/847\n' >> "$case_dir/state/task-x1.meta"
+  add_sibling_branch_gh_mocks "$case_dir" cececececececececececececececececececece \
+    847 true someone-elses-branch
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/848 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "foreign-branch-still-refused: a non-sibling branch must still refuse"
+  assert_grep 'is bound to https://github.com/example/repo/pull/847' "$case_dir/stderr" \
+    "foreign-branch-still-refused: refusal did not name the recorded PR"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "foreign-branch-still-refused: gh pr merge ran for a foreign-branch PR"
+  pass "fm-pr-merge still refuses a non-sibling branch even after the recorded PR has merged"
+}
+
 test_away_record_does_not_bypass_red_or_identity() {
   local case_dir rc head
   head=adadadadadadadadadadadadadadadadadadadad
@@ -3797,6 +3949,9 @@ test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
+test_sibling_branch_pr_accepted_after_recorded_pr_merged
+test_sibling_branch_pr_refused_while_recorded_pr_still_open
+test_foreign_branch_pr_still_refused_after_recorded_pr_merged
 test_away_record_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
 test_away_record_cannot_change_between_the_authority_read_and_the_merge

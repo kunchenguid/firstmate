@@ -155,14 +155,20 @@ fi
 # headRefName to equal this task's own recorded branch (default fm/<id> when
 # none was recorded), so --adopt-external cannot bind a task to a stranger's
 # branch either.
+# A task that opens several PRs for itself, each on its own branch
+# (<base> for the first, <base>-<suffix> for the next ones, e.g. fm/<id>-b),
+# is never "outside this task": fm_pr_task_branch_family_member accepts any
+# sibling of the task's own recorded branch without --adopt-external, while a
+# branch that is not a sibling still needs it, exactly as before.
 RECORDED_BRANCH=$(grep '^branch=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -n "$RECORDED_BRANCH" ] || RECORDED_BRANCH="fm/$ID"
 if [ "$PROVIDER" = github ] && command -v gh >/dev/null 2>&1; then
   if PR_HEAD_REF=$(gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) \
     && [ -n "$PR_HEAD_REF" ]; then
-    if [ "$PR_HEAD_REF" != "$RECORDED_BRANCH" ]; then
+    if [ "$PR_HEAD_REF" != "$RECORDED_BRANCH" ] \
+      && ! fm_pr_task_branch_family_member "$RECORDED_BRANCH" "$PR_HEAD_REF"; then
       if [ "$ADOPT_EXTERNAL" != 1 ]; then
-        echo "error: $URL's branch is $PR_HEAD_REF, not $ID's own branch $RECORDED_BRANCH; this looks like a PR opened outside this task - pass --adopt-external to bind $ID to it anyway only if $PR_HEAD_REF really is this task's work" >&2
+        echo "error: $URL's branch is $PR_HEAD_REF, not $ID's own branch $RECORDED_BRANCH or one of its siblings; this looks like a PR opened outside this task - pass --adopt-external to bind $ID to it anyway only if $PR_HEAD_REF really is this task's work" >&2
         exit 1
       fi
     fi

@@ -116,8 +116,12 @@
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
 # URL, nor --sha or --match-head-commit because the head comes only from the
-# live read. An existing task-meta pr= must equal the requested canonical URL;
-# a task cannot be rebound here. Auto-merge (--auto), a protection bypass
+# live read. An existing task-meta pr= must equal the requested canonical URL,
+# unless that recorded pull request has already landed and the requested one
+# is on a sibling branch of the same task opened for a further PR
+# (require_recorded_pr_identity below, bin/fm-pr-lib.sh's
+# fm_pr_task_branch_family_member); a task is never rebound to another task's
+# or a stranger's work this way. Auto-merge (--auto), a protection bypass
 # (--admin), and branch
 # deletion (--delete-branch, -d and short-flag clusters, and GitLab's
 # --remove-source-branch) are refused by default; --attended-override, parsed
@@ -1080,8 +1084,14 @@ METHODS
   fi
 }
 
+# A sibling-branch rebind (require_recorded_pr_identity above) already proved
+# this PR's branch belongs to the task, so it is recorded the same way
+# bin/fm-pr-check.sh's own --adopt-external path is meant for: a confirmed
+# branch disagreement from the forge, not a silent bind.
 record_pr_metadata() {
-  if ! FM_PR_CHECK_MERGE=1 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
+  local adopt_args=()
+  [ "$FM_PR_REBIND_SIBLING_BRANCH" != true ] || adopt_args=(--adopt-external)
+  if ! FM_PR_CHECK_MERGE=1 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL" "${adopt_args[@]+"${adopt_args[@]}"}"; then
     return 1
   fi
   grep -qxF "pr=$URL" "$META" || {
@@ -1200,11 +1210,69 @@ refuse_github_queue_while_away() {
   return 2
 }
 
+# A task that opens several PRs on its own branch family (fm/<id> for the
+# first, fm/<id>-<suffix> for a next one, e.g. #847 then #848/#849/#855/#858
+# on lloegrys-retro-navegacao, retro 02/10) is bound to only one pr= at a
+# time, so a later PR for the same task is accepted here, never refused as a
+# foreign rebind, once two live facts both hold: the recorded PR has already
+# landed, and the requested PR's own branch is a sibling of the task's
+# recorded branch (fm_pr_task_branch_family_member, bin/fm-pr-lib.sh). Reading
+# "already landed" never trusts the recorded pr= alone - a merge in flight
+# right now must still refuse - so it is read live via the same
+# provider-specific record readers bin/fm-crew-state.sh uses, scoped to the
+# recorded PR's own provider, owner/repo or host/path, and number parsed fresh
+# from the recorded URL. A sibling branch on a different repository, a
+# differently hosted GitLab instance, or a provider mismatch between the two
+# PRs never qualifies, because fm_pr_url_parse's own identity fields are
+# compared, not assumed. Any read that cannot prove the recorded PR landed, or
+# cannot prove the requested PR's branch is a sibling, keeps the original
+# refusal: a task is never rebound to another task's or a stranger's work.
+FM_PR_REBIND_SIBLING_BRANCH=false
 require_recorded_pr_identity() {
-  local existing
+  local existing recorded_branch head_ref
+  FM_PR_REBIND_SIBLING_BRANCH=false
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$existing" ] || return 0
   [ "$existing" = "$URL" ] && return 0
+  if fm_pr_url_parse "$existing" \
+    && [ "$FM_PR_PROVIDER" = "$PROVIDER" ] \
+    && { [ "$PROVIDER" != github ] \
+      || { [ "$FM_PR_OWNER" = "$PR_OWNER" ] && [ "$FM_PR_REPO" = "$PR_REPO" ]; }; } \
+    && { [ "$PROVIDER" != gitlab ] \
+      || { [ "$FM_PR_HOST" = "$PR_HOST" ] && [ "$FM_PR_PATH" = "$PR_PATH" ]; }; }; then
+    case "$PROVIDER" in
+      github)
+        if command -v gh >/dev/null 2>&1 \
+          && fm_pr_github_read_record "$FM_PR_OWNER" "$FM_PR_REPO" "$FM_PR_NUMBER" \
+          && [ "$FM_PR_RECORD_MERGED" = true ] \
+          && head_ref=$(gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) \
+          && [ -n "$head_ref" ]; then
+          recorded_branch=$(grep '^branch=' "$META" | tail -1 | cut -d= -f2- || true)
+          [ -n "$recorded_branch" ] || recorded_branch="fm/$ID"
+          if fm_pr_task_branch_family_member "$recorded_branch" "$head_ref"; then
+            FM_PR_REBIND_SIBLING_BRANCH=true
+            return 0
+          fi
+        fi
+        ;;
+      gitlab)
+        if fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+          && [ "$FM_PR_RECORD_MERGED" = true ]; then
+          recorded_branch=$(grep '^branch=' "$META" | tail -1 | cut -d= -f2- || true)
+          [ -n "$recorded_branch" ] || recorded_branch="fm/$ID"
+          if head_ref=$(GITLAB_HOST="$PR_HOST" glab mr view "$PR_NUMBER" \
+              -R "$PROJECT_URL" -F json 2>/dev/null | jq -r \
+              'if (.source_branch | type) == "string" then .source_branch else "" end' \
+              2>/dev/null) \
+            && [ -n "$head_ref" ] \
+            && fm_pr_task_branch_family_member "$recorded_branch" "$head_ref"; then
+            FM_PR_REBIND_SIBLING_BRANCH=true
+            return 0
+          fi
+        fi
+        ;;
+    esac
+  fi
   echo "error: task $ID is bound to $existing, not $URL" >&2
   return 1
 }

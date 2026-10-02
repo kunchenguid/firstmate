@@ -115,6 +115,32 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
+# 0 when <branch> is exactly <base> (a task's own recorded ship branch) or one
+# of its sibling branches opened for a second PR on the same task
+# (<base>-<suffix>, e.g. fm/<id>-b, fm/<id>-c): a task that opens several PRs
+# names each one with the same base branch and a distinct dash-separated
+# suffix, never a branch that merely happens to start with <base> some other
+# way (<base>x does not match). The suffix is restricted to the characters a
+# task id already allows (fm_pr_task_id_valid's own class), so this stays
+# exactly as narrow as the single-branch case it extends, whatever ship-branch
+# prefix <base> itself carries.
+fm_pr_task_branch_family_member() {  # <base> <branch>
+  local base=$1 branch=$2 suffix
+  [ -n "$base" ] && [ -n "$branch" ] || return 1
+  case "$branch" in
+    "$base") return 0 ;;
+    "$base"-*)
+      suffix=${branch#"$base"-}
+      [ -n "$suffix" ] || return 1
+      case "$suffix" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # GitLab and Gerrit both serve self-hosted instances, so the host is part of the
 # identity rather than a constant. It is accepted only as a lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
