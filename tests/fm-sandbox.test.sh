@@ -223,6 +223,28 @@ test_masked_and_failed_denied_reads_both_preserve_readiness() {
   pass "empty successful reads and failed reads both preserve sandbox readiness"
 }
 
+test_opencode_proof_refuses_an_incompatible_cli_before_discovery() {
+  local home fakebin out status
+  home=$(new_home incompatible-opencode)
+  fakebin=$(fm_fakebin "$home")
+  fm_test_fake_srt "$fakebin"
+  cat > "$fakebin/opencode" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then printf 'opencode v2.0.18\n'; exit 0; fi
+touch '$home/discovery-called'
+exit 1
+SH
+  chmod +x "$fakebin/opencode"
+  out=$(PATH="$fakebin:$PATH" FM_LIVE_SANDBOX_OPENCODE=1 \
+    FM_SANDBOX_OPENCODE_MODEL=zai/glm-5.3 FM_SANDBOX_OPENCODE_URL=http://127.0.0.1:8000/v1 \
+    bash "$ROOT/tests/fm-sandbox-opencode-live-e2e.test.sh" 2>&1)
+  status=$?
+  expect_code 1 "$status" "an incompatible CLI must refuse the proof: $out"
+  assert_contains "$out" "requires OpenCode 1.18.32; found opencode v2.0.18" "the refusal must name both CLI versions"
+  assert_absent "$home/discovery-called" "version refusal must precede discovery and worker execution"
+  pass "OpenCode proof refuses incompatible versions before catalog discovery or worker execution"
+}
+
 test_enabled_exec_runs_the_command_through_the_runtime() {
   local home srt log out status
   home=$(new_home enabled-exec)
@@ -266,6 +288,7 @@ test_enabled_empty_settings_refuses
 test_enabled_invalid_settings_refuses
 test_runtime_rejects_supplied_settings_for_every_consumer
 test_masked_and_failed_denied_reads_both_preserve_readiness
+test_opencode_proof_refuses_an_incompatible_cli_before_discovery
 test_enabled_probe_reports_ready_and_prefix_is_exact
 test_enabled_exec_runs_the_command_through_the_runtime
 test_enabled_unenforced_isolation_refuses

@@ -5306,6 +5306,9 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+  LAUNCH="$SANDBOX_PREFIX $(shell_quote "$LAUNCH")"
+fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
@@ -5338,15 +5341,6 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
-fi
-# Opt-in worker command sandbox (config/worker-sandbox; header and
-# docs/configuration.md own the contract). Off by default: while the flag is
-# absent the launch text is byte-for-byte unchanged. When enabled the wrapper
-# refuses rather than launching unsandboxed, and its refusal surfaces here,
-# before anything is staged into the pane. This is the single launch boundary
-# both a fresh spawn and a relaunch pass through, so the two stay identical.
-if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
-  LAUNCH="$SANDBOX_PREFIX $(shell_quote "$LAUNCH")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in

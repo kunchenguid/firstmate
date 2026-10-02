@@ -111,6 +111,43 @@ test_unusable_runtime_refuses_before_launching() {
   pass "spawn with config/worker-sandbox and no runtime: refused before any launch"
 }
 
+test_filtering_preserves_runtime_transport_environment() {
+  local setting rec out status launch result expected
+  for setting in absent empty; do
+    rec=$(make_case "transport-$setting" "sp-transport-$setting")
+    read_case "$rec"
+    enable_sandbox "$HOME_DIR"
+    [ "$setting" != empty ] || : > "$HOME_DIR/config/launch-env-allowlist"
+    fm_test_fake_srt "$FAKEBIN_DIR"
+    mv "$FAKEBIN_DIR/srt" "$FAKEBIN_DIR/srt-inner"
+    cat > "$FAKEBIN_DIR/srt" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\${FM_TEST_AMBIENT-unset}" > '$CASE_DIR/runtime-env'
+export HTTP_PROXY=http://sandbox-proxy.invalid:8888
+export HTTPS_PROXY=http://sandbox-proxy.invalid:8888
+export ALL_PROXY=socks5://sandbox-proxy.invalid:8889
+exec '$FAKEBIN_DIR/srt-inner' "\$@"
+SH
+    chmod +x "$FAKEBIN_DIR/srt"
+    cat > "$CASE_DIR/probe.sh" <<'SH'
+#!/bin/sh
+printf '%s\n' "${HTTP_PROXY-unset}" "${HTTPS_PROXY-unset}" "${ALL_PROXY-unset}" "${FM_TEST_AMBIENT-unset}"
+SH
+    out=$(run_spawn "sp-transport-$setting" "$PROJ_DIR" --mode no-mistakes --yolo off --harness "/bin/sh '$CASE_DIR/probe.sh'")
+    status=$?
+    expect_code 0 "$status" "sandbox transport fixture must spawn: $out"
+    launch=$(cat "$LAUNCH_LOG")
+    result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" FM_TEST_AMBIENT=synthetic /bin/sh -c "$launch") ||
+      fail "the emitted sandbox transport launch must execute"
+    expected=synthetic
+    [ "$setting" != empty ] || expected=unset
+    assert_equals "$expected" "$(cat "$CASE_DIR/runtime-env")" "filtering must happen before entering the runtime"
+    assert_equals "$(printf '%s\n' http://sandbox-proxy.invalid:8888 http://sandbox-proxy.invalid:8888 socks5://sandbox-proxy.invalid:8889 "$expected")" \
+      "$result" "runtime transport must survive while ambient values follow the allowlist"
+  done
+  pass "environment filtering precedes sandboxing and preserves generated transport variables"
+}
+
 test_cleanup_never_routes_through_the_sandbox() {
   local rec rec2 out_off out_on status_off status_on srtlog
   rec=$(make_case cleanup-off sp-co)
@@ -141,4 +178,5 @@ test_cleanup_never_routes_through_the_sandbox() {
 test_absent_flag_leaves_the_launch_unchanged
 test_enabled_flag_wraps_the_launch_in_the_pinned_runtime
 test_unusable_runtime_refuses_before_launching
+test_filtering_preserves_runtime_transport_environment
 test_cleanup_never_routes_through_the_sandbox

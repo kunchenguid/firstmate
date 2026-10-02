@@ -46,7 +46,9 @@ isolated() {
 config=$(jq -nc --arg provider "$provider" \
   '{enabled_providers:[$provider],provider:{($provider):{options:{apiKey:"fixture-not-a-secret"}}}}')
 cd "$lab/project"
-isolated "$opencode_bin" --version
+version=$(isolated "$opencode_bin" --version)
+[ "$version" = 1.18.32 ] || fail "this proof requires OpenCode 1.18.32; found $version (use the worktree-local pinned executable on PATH)"
+printf 'OpenCode %s\n' "$version"
 isolated "$opencode_bin" models "$provider" --refresh > "$lab/catalog.txt"
 grep -Fxq "$model" "$lab/catalog.txt" || fail "OpenCode catalog does not contain $model; refusing substitution"
 isolated curl -q --fail --silent --show-error --noproxy '*' --max-time 10 "$endpoint/models" \

@@ -37,7 +37,10 @@ Before launching, it refreshes the actual OpenCode catalog and requires the supp
 It checks completed bash tool events, successful allowed writes, nonzero denied-write exits, and denied reads that either fail or return empty tool output, as well as the allowed file contents, absence of the denied file, and absence of the synthetic secret in the transcript.
 An agent declining to attempt a denied operation fails the guard rather than counting as enforcement evidence.
 
-Prerequisites are the pinned `srt` 0.0.78, a working bubblewrap executable, OpenCode, and an operator-provided unauthenticated OpenAI-compatible endpoint serving real GLM 5.3 at `http://127.0.0.1:<port>/v1`.
+Prerequisites are the pinned `srt` 0.0.78, a working bubblewrap executable, OpenCode 1.18.32, and an operator-provided unauthenticated OpenAI-compatible endpoint serving real GLM 5.3 at `http://127.0.0.1:<port>/v1`.
+The guard refuses any other OpenCode version before catalog discovery or model requests.
+OpenCode 1.18.32's tagged [models command](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/cli/cmd/models.ts), [run command](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/cli/cmd/run.ts), and [global `--pure` option](https://github.com/anomalyco/opencode/blob/v1.18.32/packages/opencode/src/index.ts) define this proof's interface.
+The available OpenCode v2.0.18 uses a different CLI and is not compatible with this guard; no live proof with the pinned version is claimed here.
 The endpoint's `/models` response must advertise `glm-5.3`; a canned server does not qualify as real model evidence.
 Provider base URL overrides follow the [OpenCode provider interface](https://opencode.ai/docs/providers/#base-url).
 The operator must verify the endpoint serves those actual weights; advertising a model identifier alone does not establish model identity.
@@ -46,7 +49,7 @@ Provisioning a model server is outside the guard, which neither starts nor chang
 ### Scoped prerequisite proposal, not applied
 
 Stage the pinned runtime and a non-setuid bubblewrap binary inside the worktree, with the latter at `.sandbox-e2e-tools/bwrap`, and prepend that directory to PATH for the guards only.
-For example, `npm install --prefix "$PWD/.sandbox-e2e-tools" @anthropic-ai/sandbox-runtime@0.0.78` installs the runtime locally rather than changing global packages.
+For example, `npm install --prefix "$PWD/.sandbox-e2e-tools" @anthropic-ai/sandbox-runtime@0.0.78 opencode-ai@1.18.32` installs both pinned CLIs locally rather than changing global packages.
 Obtain bubblewrap from a reviewed distribution package extracted locally; do not install a system package or reuse a setuid binary.
 The proposed admin change is loading exactly one AppArmor profile attached only to that staged executable, using Ubuntu's scoped `userns` permission:
 
