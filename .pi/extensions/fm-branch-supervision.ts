@@ -1708,26 +1708,11 @@ export default function (pi: ExtensionAPI) {
       name: "fm_task_continuation",
       label: "Task continuation",
       description:
-        "Operate only the exact task admitted to this supervision-branch turn. Compact original-row continuation uses read only; MAIN remains the sole progress writer. " +
-        "Historical delegated lifecycle work may use the legacy inspect/refresh/observe/patch/readback/observe_receipt operations below. " +
-        "inspect binds evidence, refresh/observe maintain current evidence, patch performs the canonical CAS for a precheck or already-authorized next action, " +
-        "readback checks an uncertain existing effect, and observe_receipt confirms an identical pre-existing handled steer. " +
-        "The admission already contains a refreshed observation: do not call this after every action or for an unchanged healthy wait. Automatic effect owners retain receipts without a follow-up call. " +
-        "This tool cannot enroll, assess, accept, archive, change policy or authority, launch, relaunch, interrupt, merge, or clean up.",
+        "Read only the exact task admitted to this supervision-branch turn. MAIN remains the sole progress writer and final semantic acceptance owner. " +
+        "This tool cannot discover tasks, update progress or intent, mutate rich history, grant authority, execute effects, accept, archive, launch, relaunch, interrupt, merge, or clean up.",
       parameters: Type.Object({
-        action: Type.Union([
-          Type.Literal("read"),
-          Type.Literal("inspect"), Type.Literal("refresh"), Type.Literal("observe"),
-          Type.Literal("patch"), Type.Literal("readback"), Type.Literal("observe_receipt"),
-        ]),
+        action: Type.Literal("read"),
         task: Type.String(),
-        evidence: Type.Optional(Type.Array(Type.String())),
-        expected_revision: Type.Optional(Type.Number()),
-        patch_json: Type.Optional(Type.String({
-          description: "For patch only: JSON object containing delegation_revision and only precheck and/or next_action",
-        })),
-        action_id: Type.Optional(Type.String()),
-        receipt_ref: Type.Optional(Type.String()),
       }),
       execute: async (_toolCallId, params) => {
         const task = String((params as { task?: unknown }).task || "").trim();
@@ -1741,8 +1726,8 @@ export default function (pi: ExtensionAPI) {
           }
           const progressToken = branchProgressBindings[task];
           const action = String((params as { action?: unknown }).action || "");
+          if (action !== "read") throw new Error("branch continuation permits admitted-task read only");
           if (progressToken) {
-            if (action !== "read") throw new Error("compact task progress is MAIN-owned; branch continuation permits read only");
             const current = await run(["progress", task]);
             if (current.status !== 0) throw new Error(current.stderr.trim() || "task progress read refused");
             const progress = JSON.parse(current.stdout);
@@ -1760,92 +1745,7 @@ export default function (pi: ExtensionAPI) {
               record.delegation?.revoked || Date.parse(record.delegation?.expires_at || "") <= Date.now()) {
             throw new Error("task intent, execution, or delegation changed after branch admission");
           }
-          // observe is the canonical delegated-authority read: it validates
-          // authority bytes, policy revision/digest/expiry, branch generation,
-          // and the exact task binding without granting a new effect.
-          const authority = await run(["observe", task]);
-          const observation = authority.status === 0 ? JSON.parse(authority.stdout) : null;
-          if (!observation?.delegated) {
-            throw new Error(authority.stderr.trim() || "current continuation authority does not permit branch maintenance");
-          }
-
-          let args: string[];
-          let patchFile = "";
-          if (action === "inspect") {
-            const evidence = (params as { evidence?: unknown }).evidence;
-            if (evidence !== undefined && (!Array.isArray(evidence) || evidence.some((ref) => typeof ref !== "string"))) {
-              throw new Error("inspect evidence must be an array of paths");
-            }
-            args = ["inspect", task, ...((evidence as string[] | undefined) || []).flatMap((ref) => ["--evidence", ref])];
-          } else if (action === "refresh" || action === "observe" || action === "readback") {
-            args = [action, task];
-          } else if (action === "observe_receipt") {
-            const actionId = String((params as { action_id?: unknown }).action_id || "");
-            const receiptRef = String((params as { receipt_ref?: unknown }).receipt_ref || "");
-            if (!actionId || !receiptRef) throw new Error("observe_receipt requires action_id and receipt_ref");
-            args = ["observe-receipt", task, "--action-id", actionId, "--receipt-ref", receiptRef];
-          } else if (action === "patch") {
-            const revision = (params as { expected_revision?: unknown }).expected_revision;
-            const patchJson = (params as { patch_json?: unknown }).patch_json;
-            if (!Number.isSafeInteger(revision) || Number(revision) < 1 || typeof patchJson !== "string") {
-              throw new Error("patch requires expected_revision and patch_json");
-            }
-            const patch = JSON.parse(patchJson);
-            if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
-                Object.keys(patch).some((key) => !["delegation_revision", "precheck", "next_action"].includes(key)) ||
-                !Object.hasOwn(patch, "delegation_revision")) {
-              throw new Error("patch_json contains fields outside the branch patch contract");
-            }
-            let effectiveRevision = Number(revision);
-            if (effectiveRevision !== record.revision) {
-              if (effectiveRevision !== branchTaskAdmissionRevisions[task] ||
-                  taskContinuationSnapshot(record) !== branchTaskAdmissionSnapshots[task]) {
-                throw new Error("task continuation changed after branch admission");
-              }
-              // The persistent coordination owner can append the admission
-              // receipt while this turn is deliberating. That bookkeeping is
-              // outside semantic task state, so rebase this one CAS onto the
-              // freshly read revision only when every other lifecycle byte is
-              // still identical to admission.
-              effectiveRevision = record.revision;
-            }
-            patchFile = join(state, `.branch-continuation-${randomUUID()}.json`);
-            writeFileSync(patchFile, `${JSON.stringify(patch)}\n`, { mode: 0o600, flag: "wx" });
-            args = ["branch-patch", task, "--expected-revision", String(effectiveRevision), "--record", patchFile];
-          } else {
-            throw new Error("unsupported branch continuation action");
-          }
-          try {
-            const result = await run(args);
-            if (result.status !== 0) throw new Error(result.stderr.trim() || "continuation operation refused");
-            if (!(await generationOwnsLock(toolGeneration))) {
-              throw new Error("continuation effect may have completed while branch ownership changed; read back without replay");
-            }
-            const parsed = JSON.parse(result.stdout);
-            let compact: unknown = parsed;
-            if (action === "observe" || action === "refresh") {
-              let value = action === "observe" ? parsed : null;
-              if (!value) {
-                const readback = await run(["observe", task]);
-                if (readback.status !== 0) throw new Error(readback.stderr.trim() || "post-refresh observation refused");
-                value = JSON.parse(readback.stdout);
-              }
-              const baseline = branchTaskObservations[task];
-              compact = { task_id: task, change: baseline?.key === value.key ? "none" : "material",
-                state: value.state, reason: value.reason, key: value.key, revision: value.revision };
-              branchTaskObservations[task] = { key: value.key, state: value.state, reason: value.reason };
-            } else if (action !== "inspect") {
-              compact = { task_id: parsed.task_id, change: parsed.revision === record.revision ? "none" : "material", revision: parsed.revision,
-                disposition: parsed.disposition,
-                next_action: parsed.next_action && { id: parsed.next_action.id, kind: parsed.next_action.kind,
-                  phase: parsed.next_action.phase, attempts: parsed.next_action.attempts },
-                precheck: parsed.precheck && { conclusion: parsed.precheck.conclusion,
-                  summary: parsed.precheck.summary, basis_key: parsed.precheck.basis_key } };
-            }
-            return { content: [{ type: "text", text: JSON.stringify(compact) }], details: undefined };
-          } finally {
-            if (patchFile) rmSync(patchFile, { force: true });
-          }
+          return { content: [{ type: "text", text: JSON.stringify(record) }], details: undefined };
         } catch (error) {
           return { content: [{ type: "text", text: String(error) }], details: undefined, isError: true };
         }
@@ -1936,6 +1836,7 @@ export default function (pi: ExtensionAPI) {
           args.push(instruction);
           const sent = await run(args);
           const inspected = await run(["inspect", id]);
+          if (sent.status === 7) branchEffectAuthorityNeeded.add(task);
           let after: Awaited<ReturnType<typeof exactHandoffState>> | null = null;
           try {
             after = await exactHandoffState(id, target);
@@ -1949,8 +1850,8 @@ export default function (pi: ExtensionAPI) {
           } else if (sent.status === 0 && after) {
             change = after.state === "delivered" && before.state === "delivered" ? "none" :
               after.fingerprint === before.fingerprint ? "none" : "uncertain";
-          } else if (sent.status === 7 && after?.fingerprint === before.fingerprint) {
-            change = "none";
+          } else if (sent.status === 7) {
+            change = "uncertain";
           } else if (after && after.receipt === "absent" && (after.state === "absent" || inspected.status === 0)) {
             change = "none";
           } else {

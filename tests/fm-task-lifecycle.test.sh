@@ -126,6 +126,24 @@ test "$(jq -r .revision "$FM_HOME/data/unchanged/lifecycle.json")" = "$unchanged
   || fail 'unchanged branch acknowledgement lost the open goal obligation'
 pass 'exact routine branch outcome acknowledges an unchanged wake without fabricated goal progress'
 
+# Ordinary task records need no lifecycle enrollment before their already
+# handled result notification can advance through the existing outcome owner.
+mkdir -p "$FM_HOME/data/ordinary"
+printf 'Continue this ordinary task from its original row\n' > "$FM_HOME/data/ordinary/brief.md"
+printf 'spawn_gen=ordinary-g1\nkind=ship\n' > "$FM_HOME/state/ordinary.meta"
+test ! -e "$FM_HOME/data/ordinary/lifecycle.json" || fail 'ordinary acknowledgement fixture unexpectedly has lifecycle state'
+FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-branch-outcome.sh" append --task ordinary --verdict captain \
+  --summary 'The ordinary handled result is ready for MAIN.' >/dev/null
+ordinary_outcome=$("$ROOT/bin/fm-branch-outcome.sh" list --recent 50)
+ordinary_seq=$(printf '%s\n' "$ordinary_outcome" | jq -r 'select(.task=="ordinary") | .seq' | tail -1)
+[ -n "$ordinary_seq" ] || fail 'ordinary handled result was not preserved in the outcome owner'
+"$ROOT/bin/fm-branch-outcome.sh" mark-read --through "$ordinary_seq" >/dev/null \
+  || fail 'ordinary lifecycle-free result notification could not be marked read'
+"$ROOT/bin/fm-branch-outcome.sh" mark-processed --through "$ordinary_seq" >/dev/null \
+  || fail 'ordinary lifecycle-free result notification could not be acknowledged'
+test ! -e "$FM_HOME/data/ordinary/lifecycle.json" || fail 'ordinary acknowledgement reenrolled rich lifecycle state'
+pass 'ordinary lifecycle-free result stays preserved and can be acknowledged without reenrollment'
+
 # The prior receipt is generation/goal-state exact. A real intent edit creates
 # a new lifecycle revision that the old report cannot acknowledge.
 cp "$FM_HOME/data/unchanged/lifecycle.json" "$TMP_ROOT/unchanged-update.json"

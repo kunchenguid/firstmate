@@ -76,14 +76,17 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD
   esac
 }
 
-fm_task_progress_read() { # <task>
+fm_task_progress_read() ( # <task>
   local context
+  # Keep configured-backend reads off the unbounded Pi event path.
+  # shellcheck disable=SC2030 # This reader is intentionally isolated in a subshell.
+  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   fm_task_progress_detail "$1" || return $?
   context=$(fm_task_progress_context "$1") || return $?
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
     read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
     --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
-}
+)
 
 fm_task_progress_execution_generation() { # <task>
   local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
@@ -93,7 +96,13 @@ fm_task_progress_execution_generation() { # <task>
   executor=$(sed -n 's/^executor=//p' "$meta" | tail -1)
   case "${executor:-local-agent}" in
     local-agent)
-      generation=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)
+      # Match the metadata owner's canonical last-value semantics without
+      # importing the wider backend surface into this focused helper.
+      generation=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+      [ -n "$generation" ] || {
+        echo "REFUSED: task $id has no current local execution generation" >&2
+        return 1
+      }
       printf '%s' "$generation"
       ;;
     cloud-worker)
@@ -179,12 +188,18 @@ fm_task_progress_context() { # <task>
     brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
   fi
   generation=$(fm_task_progress_execution_generation "$id") || return 1
-  printf '%s:%s:%s:%s' "$brief_digest" "$generation" "$FM_TASK_PROGRESS_HELD" "$FM_TASK_PROGRESS_BLOCKED"
+  jq -cn --arg goal "$FM_TASK_PROGRESS_GOAL" --arg brief_sha256 "$brief_digest" \
+    --arg execution_generation "$generation" --arg task_state "$FM_TASK_PROGRESS_STATE" \
+    --arg held "$FM_TASK_PROGRESS_HELD" \
+    --arg blocked "$FM_TASK_PROGRESS_BLOCKED" \
+    '{goal:$goal,brief_sha256:$brief_sha256,execution_generation:$execution_generation,task_state:$task_state,held:$held,blocked:$blocked}'
 }
 
 fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   local id=$1 expected=$2 progress=$3 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
   local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} lock tmp current context rc=0
+  # shellcheck disable=SC2030,SC2031 # This mutator is intentionally isolated in a subshell.
+  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
     echo 'REFUSED: task progress belongs to MAIN' >&2
     exit 6
@@ -221,8 +236,10 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   fm_task_progress_read "$id"
 )
 
-fm_task_progress_list() { # active task ids, one per line
+fm_task_progress_list() ( # active task ids, one per line
   local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing
+  # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
+  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   listing=$(fm_backlog_row_list "$data" --state in_flight --limit 10000) || return $?
   printf '%s\n' "$listing" | awk '
     /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
@@ -231,4 +248,54 @@ fm_task_progress_list() { # active task ids, one per line
     }
     rows { rows=0 }
   ' | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
-}
+)
+
+# Legacy teardown remains available for records that never adopted compact
+# continuation. Once the ordinary task body contains compact progress, cleanup
+# requires the exact current MAIN-owned satisfied state. Explicit archives pass
+# through the lifecycle owner's archived mode before this helper is consulted.
+fm_task_progress_completion_guard() ( # <task>
+  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
+  local context projection detail_error detail_status root backend file
+  # shellcheck disable=SC2031 # This guard is intentionally isolated in a subshell.
+  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+  root=$(fm_backlog_root "$data") || return $?
+  backend=$(fm_tasks_axi_backend "$root") || return $?
+  if [ "$backend" = markdown ]; then
+    file=$(fm_backlog_file "$data") || return $?
+    # Legacy teardown historically supports homes that keep no backlog. Do not
+    # introduce a tasks-axi runtime dependency when no ordinary record exists.
+    [ -e "$file" ] || [ -L "$file" ] || return 0
+  fi
+  detail_error=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-guard.XXXXXX") || {
+    echo 'REFUSED: could not allocate compact progress guard state' >&2
+    return 1
+  }
+  trap 'rm -f "$detail_error"' EXIT
+  fm_task_progress_detail "$id" 2>"$detail_error"
+  detail_status=$?
+  if [ "$detail_status" -ne 0 ]; then
+    # Historical landed tasks may already have no ordinary backlog row. With
+    # no row there can be no active compact progress block to accept; all
+    # other backend/read failures remain safety-significant and fail closed.
+    if grep -qx 'code: NOT_FOUND' "$detail_error"; then
+      return 0
+    fi
+    cat "$detail_error" >&2
+    return "$detail_status"
+  fi
+  case "$FM_TASK_PROGRESS_BODY" in
+    *'<!-- firstmate-progress:v1'*|*'<!-- /firstmate-progress -->'*) ;;
+    *) return 0 ;;
+  esac
+  context=$(fm_task_progress_context "$id") || return $?
+  projection=$(printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
+    read --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
+    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context") || return $?
+  printf '%s' "$projection" | jq -e \
+    '.recorded == true and .task_state == "in_flight" and .task_held == "no" and
+     .task_blocked == "no" and .remaining_gap == "" and .next_step == ""' >/dev/null || {
+    echo "REFUSED: compact task $id is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2
+    return 6
+  }
+)

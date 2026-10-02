@@ -14,11 +14,8 @@ export default function(pi) {
     const message=context.messages.findLast(m=>JSON.stringify(m.content).includes('FIRSTMATE TASK CONTINUATION:'));
     const text=typeof message?.content==='string'?message.content:message?.content?.filter(x=>x.type==='text').map(x=>x.text).join('')||'';
     const admitted=JSON.parse(text.slice(text.lastIndexOf('\n{')+1));
-    if(admitted.assessment?.remaining_gap!=='Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.'||admitted.next_action?.kind!=='readback'||admitted.next_action?.payload_ref!=='data/readback-action.md')throw Error('branch admission omitted current lifecycle context');
-    const evidence=[...new Set([admitted.assessment.authority_ref,...admitted.assessment.evidence.map(item=>item.ref),admitted.next_action.payload_ref])];
-    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'fm_task_continuation',arguments:{action:'inspect',task:'routine',evidence}});log({event:'tool',branch,name:'fm_task_continuation',action:'inspect',evidence});
-   } else if (!branch && last.includes('Live task continuation obligations') && context.messages.at(-1)?.role !== 'toolResult') {
-    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'bash',arguments:{command:`python3 '${root}/tests/delegation-host-precheck.py' --main`,timeout:20}});log({event:'tool',branch,name:'bash'});
+    if(admitted.remaining_gap!=='Inspect the current result, then preserve final semantic acceptance for MAIN.'||admitted.next_step!=='Read the current result through the existing task owner.')throw Error('branch admission omitted compact progress context');
+    output.stopReason='toolUse';output.content.push({type:'toolCall',id:'check-'+Date.now(),name:'fm_task_continuation',arguments:{action:'read',task:'routine'}});log({event:'tool',branch,name:'fm_task_continuation',action:'read'});
    } else if (branch && context.messages.at(-1)?.toolName === 'fm_task_continuation') {
     output.stopReason='toolUse'; output.content.push({type:'toolCall',id:'report-'+Date.now(),name:'fm_branch_report',arguments:{task:'routine',verdict:'routine',summary:'Current prepared readback inspected; final semantic acceptance remains MAIN-owned.'}});log({event:'tool',branch,name:'fm_branch_report'});
    }
@@ -31,6 +28,7 @@ export default function(pi) {
  pi.registerCommand('fixture-start',{description:'Seed isolated comparison',handler(){
   const task='routine';mkdirSync(home+'/data/'+task,{recursive:true});writeFileSync(home+'/data/'+task+'/brief.md','Inspect progress and retain final acceptance for MAIN.\n');writeFileSync(home+'/state/'+task+'.meta','spawn_gen=g1\nkind=scout\nexecutor=local-agent\n');
   function run(...args){const p=spawnSync('bash',[root+'/bin/fm-task-state.sh',...args],{encoding:'utf8'});if(p.status!==0)throw Error(p.stderr);return JSON.parse(p.stdout);}
+  const taskAdd=spawnSync('bash',[root+'/bin/fm-tasks-axi.sh','add',task,'Inspect progress and retain final acceptance for MAIN','--kind','scout','--body','Keep the original task record resumable.','--start'],{encoding:'utf8'});if(taskAdd.status!==0)throw Error(taskAdd.stderr);
   const r=run('enroll',task);
   if(process.env.FM_HOST_VARIANT==='after'){
    writeFileSync(home+'/data/routine-policy-authority.md','Standing routine continuation authority for this isolated fixture.\n');
@@ -43,6 +41,8 @@ export default function(pi) {
    const inspected=run('inspect',task,'--evidence','data/'+task+'/brief.md','--evidence','data/current-readback.md','--evidence','data/readback-action.md');
    const judgment={disposition:'open',outcome:'Rollout enabled; current branch readback remains pending.',remaining_gap:'Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.',authority_ref:'data/'+task+'/brief.md',evidence:['data/'+task+'/brief.md','data/current-readback.md'],next_action:{kind:'readback',payload_ref:'data/readback-action.md',recheck_at:'2000-01-01T00:00:00Z',deadline:'2099-01-01T00:00:00Z',attempt_limit:2}};
    run('assess',task,'--basis',inspected.basis,'--judgment',JSON.stringify(judgment));
+   const progress=run('progress',task);
+   run('update-progress',task,'--expected-token',progress.record_token,'--progress',JSON.stringify({acceptance:'MAIN verifies the current task result against the requested outcome.',current_state:'The worker returned an intermediate result.',remaining_gap:'Inspect the current result, then preserve final semantic acceptance for MAIN.',next_step:'Read the current result through the existing task owner.'}));
   }
   pi.sendMessage({customType:'fixture-seed',content:'Fixture seed for same input comparison',display:false},{triggerTurn:true});
  }});

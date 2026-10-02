@@ -259,11 +259,15 @@ if [ -n "$TARGET_META" ]; then
           'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
         FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
       fi
-      if [ "$(fm_lease_actor)" = branch ] && [ -z "$COMPACT_PROGRESS_TOKEN" ] &&
+      if [ "$(fm_lease_actor)" = branch ] &&
         [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
-        fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {
-          echo 'REFUSED: delegated steer requires --action-id' >&2; exit 6;
-        }
+        branch_lifecycle=$(fm_task_lifecycle read "$LEASE_GUARD_TASK") || exit 1
+        if printf '%s' "$branch_lifecycle" | jq -e \
+          '.schema == "fm-task-lifecycle.v2" and (.next_action.phase == "prepared" or
+           .next_action.phase == "attempted" or .next_action.phase == "uncertain")' >/dev/null; then
+          echo 'REFUSED: delegated steer with an active lifecycle action requires --action-id' >&2
+          exit 6
+        fi
       fi
     fi
   fi
@@ -619,7 +623,8 @@ else
         fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
       fi
     elif [ "$IDEMPOTENT" = 1 ]; then
-      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
+      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' \
+        "$CURRENT_INBOX_SPAWN_GEN" "$COMPACT_PROGRESS_TOKEN") || inbox_write_rc=$?
       case "$INBOX_RECORD" in
         "$STATE/$INBOX_TASK_ID.inbox/handled/"*) INBOX_ALREADY_HANDLED=1 ;;
       esac

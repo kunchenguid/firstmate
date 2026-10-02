@@ -103,7 +103,17 @@ corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$
 printf '%s' "$corrected" | jq -e '.recorded==true and .next_step=="Run the corrected validation"' >/dev/null \
   || fail "MAIN did not reactivate corrected progress"
 
-sed -i 's/^spawn_gen=g1$/spawn_gen=g2/' "$HOME_DIR/state/ordinary.meta"
+task_cmd update ordinary --title "Corrected requested outcome" >/dev/null \
+  || fail "title-only correction fixture failed"
+after_title=$(progress progress ordinary) || fail "progress read after title-only correction failed"
+printf '%s' "$after_title" | jq -e '
+  .goal=="Corrected requested outcome" and .recorded==false and .acceptance=="" and
+  .current_state=="" and .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "title-only goal correction left stale progress active"
+corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_title" | jq -r .record_token)" \
+  --progress "$corrected_record") || fail "title-corrected progress update failed"
+
+printf '%s\n' 'spawn_gen=g2' >> "$HOME_DIR/state/ordinary.meta"
 after_generation=$(progress progress ordinary) || fail "progress read after executor replacement failed"
 printf '%s' "$after_generation" | jq -e '
   .recorded==false and .acceptance=="" and .current_state=="" and
@@ -114,6 +124,30 @@ regenerated=$(progress update-progress ordinary --expected-token "$(printf '%s' 
 printf '%s' "$regenerated" | jq -e '.recorded==true and .next_step=="Run the corrected validation"' >/dev/null \
   || fail "MAIN did not reactivate replacement executor progress"
 token=$(printf '%s' "$regenerated" | jq -r .record_token)
+
+sed -i '/^spawn_gen=/d' "$HOME_DIR/state/ordinary.meta"
+out=$(progress progress ordinary 2>&1)
+rc=$?
+expect_code 1 "$rc" "missing local execution generation"
+assert_contains "$out" "no current local execution generation" \
+  "compact progress admitted a local task without exact execution identity"
+printf '%s\n' 'spawn_gen=g2' >> "$HOME_DIR/state/ordinary.meta"
+
+task_cmd "done" ordinary >/dev/null || fail "disposition completion fixture failed"
+task_cmd reopen ordinary >/dev/null || fail "disposition reopen fixture failed"
+queued=$(progress progress ordinary) || fail "queued progress read failed"
+printf '%s' "$queued" | jq -e '
+  .task_state=="queued" and .recorded==false and .acceptance=="" and
+  .current_state=="" and .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "queued task retained in-flight compact progress authority"
+[ "$(printf '%s' "$queued" | jq -r .record_token)" != "$token" ] \
+  || fail "task disposition change retained the old compact authority token"
+out=$(progress update-progress ordinary --expected-token "$token" --progress "$corrected_record" 2>&1)
+rc=$?
+expect_code 6 "$rc" "stale pre-completion task token"
+assert_contains "$out" "task record changed" "queued task accepted stale in-flight progress authority"
+task_cmd start ordinary >/dev/null || fail "disposition restart fixture failed"
+token=$(progress progress ordinary | jq -r .record_token)
 
 task_cmd hold ordinary --reason "captain decision pending" --kind captain >/dev/null \
   || fail "compact hold fixture failed"
@@ -206,8 +240,7 @@ assert_contains "$out" "no current cloud execution generation" \
 task_cmd "done" remote >/dev/null || fail "remote fixture completion failed"
 task_cmd "done" legacy-cloud >/dev/null || fail "legacy cloud fixture completion failed"
 
-task_cmd update ordinary --title "Corrected requested outcome" \
-  --body "User corrected the task body while MAIN was working." >/dev/null \
+task_cmd update ordinary --body "User corrected the task body while MAIN was working." >/dev/null \
   || fail "concurrent correction fixture failed"
 out=$(progress update-progress ordinary --expected-token "$token" --progress "$record" 2>&1)
 rc=$?
@@ -229,6 +262,42 @@ listed=$(progress progress-list) || fail "active task discovery failed"
 assert_equals "ordinary" "$(printf '%s' "$listed" | jq -r '.tasks[]')" \
   "monitoring did not discover the unfinished original task record"
 
+mkdir -p "$TMP_ROOT/fakebin"
+# shellcheck disable=SC2016 # These variables expand when the generated fixture runs.
+printf '%s\n' '#!/usr/bin/env bash' \
+  'printf "%s\\n" "$*" >> "$FM_TIMEOUT_LOG"' \
+  'mode=${FM_TIMEOUT_MODE:?}' \
+  'shift 3' \
+  'case "$mode:${2:-}" in list:list|read:-c|update:update) exit 124 ;; esac' \
+  'exec "$@"' > "$TMP_ROOT/fakebin/timeout"
+chmod +x "$TMP_ROOT/fakebin/timeout"
+export FM_TIMEOUT_LOG="$TMP_ROOT/timeout.log"
+: > "$FM_TIMEOUT_LOG"
+out=$(FM_TIMEOUT_MODE=list PATH="$TMP_ROOT/fakebin:$PATH" progress progress-list 2>&1)
+rc=$?
+expect_code 124 "$rc" "bounded progress-list backend read"
+assert_grep '-k 10 10 tasks-axi list ' "$FM_TIMEOUT_LOG" \
+  "progress-list did not apply its default backend bound"
+
+: > "$FM_TIMEOUT_LOG"
+out=$(FM_TIMEOUT_MODE=read PATH="$TMP_ROOT/fakebin:$PATH" progress progress ordinary 2>&1)
+rc=$?
+expect_code 124 "$rc" "bounded direct progress read"
+assert_grep '-k 1 10 bash -c ' "$FM_TIMEOUT_LOG" \
+  "progress read did not apply the backlog row backend bound"
+assert_grep 'exec tasks-axi show ' "$FM_TIMEOUT_LOG" \
+  "progress read did not use the bounded backlog row owner"
+
+: > "$FM_TIMEOUT_LOG"
+out=$(FM_TIMEOUT_MODE=update PATH="$TMP_ROOT/fakebin:$PATH" progress update-progress ordinary \
+  --expected-token "$(printf '%s' "$complete" | jq -r .record_token)" --progress "$record" 2>&1)
+rc=$?
+expect_code 1 "$rc" "bounded progress update"
+assert_contains "$out" "did not finish within 10s" "progress update did not report its backend bound"
+assert_grep '-k 10 10 tasks-axi update ' "$FM_TIMEOUT_LOG" \
+  "progress update did not apply its default backend bound"
+progress progress ordinary >/dev/null || fail "timed-out progress update retained the metadata lock"
+
 out=$(FM_SUPERVISION_ACTOR=branch progress update-progress ordinary \
   --expected-token "$(printf '%s' "$complete" | jq -r .record_token)" --progress "$record" 2>&1)
 rc=$?
@@ -241,4 +310,4 @@ out=$(progress update-progress ordinary --expected-token "$(printf '%s' "$comple
 rc=$?
 expect_code 6 "$rc" "completed task progress update"
 
-pass "task progress: goal/acceptance/state/gap/next step live in the original row with MAIN-only CAS updates and no unchanged writes"
+pass "task progress: goal/acceptance/state/gap/next step live in the original row with MAIN-only token-checked updates and no unchanged writes"

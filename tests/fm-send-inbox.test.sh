@@ -131,7 +131,7 @@ test_resend_enqueues_new_sequence() {
 }
 
 test_branch_compact_progress_routes_exact_next_step() {
-  local dir err token branch_env rc count
+  local dir err token branch_env rc count current
   dir=$(setup_case branch-idempotent)
   err="$dir/send.err"
   mkdir -p "$dir/home/data/t1"
@@ -171,6 +171,31 @@ test_branch_compact_progress_routes_exact_next_step() {
   [ ! -s "$dir/send.log" ] || fail "an acknowledged compact retry rang the worker again: $(cat "$dir/send.log")"
   count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail "acknowledged compact retry changed the inbox record count"
+
+  # A material MAIN update may deliberately retain the same next-step text.
+  # Its new progress token is a new authorization, while retries of that exact
+  # token still collapse to one inbox record.
+  current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1) \
+    || fail 'updated compact progress read failed'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 \
+    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"A later material checkpoint is ready","remaining_gap":"Validation still has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
+    || fail 'same-text material progress update failed'
+  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
+  branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" \
+    || fail 'new compact token with the same text was not delivered'
+  [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail 'new compact token reused an older handled receipt'
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" \
+    || fail 'same-token retry failed'
+  count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
+  [ "$count" = 2 ] || fail "same-token retry created $count total inbox records"
 
   run_send "$dir" "$err" \
     "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
@@ -531,6 +556,17 @@ PY
   executor_state=$(env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
     "$ROOT/bin/fm-task-state.sh" t1)
   case "$executor_state" in state:\ working*) ;; *) fail "delegated action fixture is not runnable: $executor_state" ;; esac
+  run_send "$dir" "$dir/error" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "FM_BRANCH_TASK_BINDINGS=$binding" "FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}" \
+    "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 --idempotent "$payload"
+  rc=$?
+  expect_code 6 "$rc" "compact send while a v2 action is active"
+  assert_contains "$(cat "$dir/error")" "active lifecycle action requires --action-id" \
+    "compact idempotency bypassed the delegated action receipt owner"
+  [ "$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 | jq -r .next_action.phase)" = prepared ] \
+    || fail 'refused compact send changed the active lifecycle action phase'
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail 'refused compact send wrote an inbox record'
   run_send "$dir" "$dir/error" \
     "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
     "FM_BRANCH_TASK_BINDINGS=$binding" "FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}" \

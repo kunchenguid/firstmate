@@ -19,7 +19,7 @@ fm_task_lifecycle() { # <read|reconcile|action|init|mode|due> <task> [arguments.
       # shellcheck source=bin/fm-wake-lib.sh
       . "$FM_TASK_LIFECYCLE_BIN/fm-wake-lib.sh"
       if [ "$(jq -r '.schema' "${FM_DATA_OVERRIDE:-$lifecycle_home/data}/$2/lifecycle.json" 2>/dev/null)" = fm-task-lifecycle.v2 ]; then
-        if [ -z "${FM_BRANCH_GENERATION:-}" ] || ! fm_wake_branch_owner_matches "$STATE/.branch-eligible-owner" '' "$FM_BRANCH_GENERATION"; then
+        if [ -z "${FM_BRANCH_GENERATION:-}" ] || ! fm_wake_branch_owner_matches "$STATE/.branch-eligible-owner" "${FM_LEASE_HOLDER_PID:-}" "$FM_BRANCH_GENERATION"; then
           echo 'REFUSED: delegated mutation has a stale branch generation' >&2; return 6
         fi
       fi
@@ -103,9 +103,11 @@ fm_task_lifecycle_execution_allowed() { # <task>; legacy behavior stays compatib
 # under the lease/meta lock before retrying the acknowledgement.
 fm_task_lifecycle_ack_guard() { # <task>
   [ "${PI_CODING_AGENT:-}" = true ] || return 0
-  local id=$1 data="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" record
+  local id=$1 data="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" path record
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   [ -f "$data/$id/brief.md" ] || return 0
+  path="$data/$id/lifecycle.json"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   record=$(fm_task_lifecycle read "$id") || return 1
   [ "$record" != null ] || {
     printf 'REFUSED: retain task %s with fm-task-state.sh enroll before acknowledging its outcome\n' "$id" >&2

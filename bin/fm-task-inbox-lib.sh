@@ -37,6 +37,7 @@
 #   execution_generation=<id> present when the writer has a bound executor
 #   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
 #   handoff=<id>               present only for an idempotent cross-task handoff
+#   idempotency=<id>           optional identity for same-effect retries
 #   --
 #   <exact message text; newlines are legal>
 #
@@ -144,10 +145,13 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-id] [execution-generation]
-  local dir=$1 text=$2 delivery_mode=${3:-} handoff_id=${4:-} execution_generation=${5:-} seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [handoff-id] [execution-generation] [idempotency-id]
+  local dir=$1 text=$2 delivery_mode=${3:-} handoff_id=${4:-} execution_generation=${5:-} idempotency_id=${6:-}
+  local seq tmp rec status=0
   case "$execution_generation" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$idempotency_id" in *[!A-Za-z0-9._-]*) return 1 ;; esac
   [ "${#execution_generation}" -le 160 ] || return 1
+  [ "${#idempotency_id}" -le 160 ] || return 1
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
@@ -157,6 +161,7 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [ha
     [ -z "$execution_generation" ] || printf 'execution_generation=%s\n' "$execution_generation"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     [ -z "$handoff_id" ] || printf 'handoff=%s\n' "$handoff_id"
+    [ -z "$idempotency_id" ] || printf 'idempotency=%s\n' "$idempotency_id"
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
@@ -188,6 +193,20 @@ fm_task_inbox_execution_generation() {  # <record-path>
     [ "$line" != -- ] || { printf ''; return 0; }
     case "$line" in
       execution_generation=*) printf '%s' "${line#execution_generation=}"; return 0 ;;
+    esac
+  done < "$rec"
+  return 1
+}
+
+# Read the optional same-effect retry identity. Older records have an empty
+# identity and retain their existing body+generation deduplication behavior.
+fm_task_inbox_idempotency_id() {  # <record-path>
+  local rec=$1 line
+  [ -f "$rec" ] || return 1
+  while IFS= read -r line; do
+    [ "$line" != -- ] || { printf ''; return 0; }
+    case "$line" in
+      idempotency=*) printf '%s' "${line#idempotency=}"; return 0 ;;
     esac
   done < "$rec"
   return 1
@@ -262,8 +281,9 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode] [executi
 # worker would act on twice. The local plane keeps plain fm_task_inbox_write:
 # its outcome is synchronous, so a repeated identical local steer is a
 # deliberate new instruction.
-fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [execution-generation]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} dir lock want have f found_generation rec='' status=0
+fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode] [execution-generation] [idempotency-id]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} execution_generation=${5:-} idempotency_id=${6:-}
+  local dir lock want have f found_generation found_idempotency rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -295,6 +315,8 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
           esac
         fi
         [ "$found_generation" = "$execution_generation" ] || continue
+        found_idempotency=$(fm_task_inbox_idempotency_id "$f" 2>/dev/null || true)
+        [ "$found_idempotency" = "$idempotency_id" ] || continue
         if ! fm_task_inbox_body "$f" > "$have" 2>/dev/null; then
           case "$f" in
             "$dir"/*.msg)
@@ -318,7 +340,8 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
     status=1
   fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" '' "$execution_generation") || status=1
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode" '' \
+      "$execution_generation" "$idempotency_id") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1

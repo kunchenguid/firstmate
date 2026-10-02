@@ -14,7 +14,8 @@ type Observation = { task_id: string; state: string; reason: string; key: string
   task_state: string; task_held: string; task_blocked: string; executor_state: string };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string;
-  update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string };
+  update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string;
+  brief_before_sha256?: string; brief_after_sha256?: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
   canNotify: () => boolean; canContinue: () => boolean };
 type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
@@ -374,76 +375,78 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the original task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step with the record_token returned by read. Unchanged waits and individual commands need no update. route appends a selected original user message through the existing authenticated intent owner. legacy reads a historical rich lifecycle record but never makes it active progress. No operation executes work or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the original task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step with the record_token returned by read. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
     executionMode: "sequential",
-    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("route"), Type.Literal("read"), Type.Literal("update"), Type.Literal("legacy")]),
-      task: Type.Optional(Type.String()), input: Type.Optional(Type.String()),
-      update_brief: Type.Optional(Type.Boolean()), record_token: Type.Optional(Type.String()),
+    parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
+      task: Type.String(), record_token: Type.Optional(Type.String()),
       progress: Type.Optional(Type.Object({ acceptance: Type.String(), current_state: Type.String(),
         remaining_gap: Type.String(), next_step: Type.String() })) }),
     async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
       try {
         if (!owns()) throw new Error("this session does not own the fleet lock");
         let result: unknown;
-        if (params.action === "list") {
-          // Recover presentation after a successful canonical commit followed by
-          // interruption. This acknowledges persistence, never goal acceptance.
-          for (const routed of [...inputs.values()].filter(value => value.pending)) {
-            try {
-              const readback = await command(["lifecycle", routed.task!]);
-              const update = Object.values(readback.intent_updates || {}).find((value: any) =>
-                value.phase === "confirmed" && value.proof?.input === routed.id &&
-                value.proof?.entry_id === routed.route_entry_id &&
-                value.proof?.session_file === _ctx.sessionManager.getSessionFile());
-              if (update) {
-                const confirmed = { ...routed, pending: false };
-                pi.appendEntry(INPUT_ENTRY, confirmed);
-                inputs.set(routed.id, confirmed);
-              }
-            } catch { /* Exact recovery stays pending until its owner can read it. */ }
-          }
-          const listed = await command(["progress-list"]);
-          result = { tasks: listed.tasks || [], pending_updates: [...inputs.values()].filter(value => value.task && value.pending),
-            instructions: "Use read, then update only after a material change. The original task title is the goal; acceptance, current state, remaining gap and next step stay in that task record. A report or provider terminal state is not acceptance. Unchanged healthy waits need no write." };
-        } else if (params.action === "read") {
-          if (!atom(params.task || "")) throw new Error("read requires an existing canonical task id");
-          result = await command(["progress", params.task!]);
+        if (params.action === "read") {
+          if (!atom(params.task)) throw new Error("read requires an existing canonical task id");
+          result = await command(["progress", params.task]);
         } else if (params.action === "update") {
-          if (!atom(params.task || "") || !params.record_token || !params.progress) {
+          if (!atom(params.task) || !params.record_token || !params.progress) {
             throw new Error("update requires task, the record_token returned by read, and compact progress fields");
           }
-          result = await command(["update-progress", params.task!, "--expected-token", params.record_token,
+          result = await command(["update-progress", params.task, "--expected-token", params.record_token,
             "--progress", JSON.stringify(params.progress)]);
-        } else if (params.action === "legacy") {
-          if (!atom(params.task || "")) throw new Error("legacy requires a canonical task id");
-          result = await command(["lifecycle", params.task!]);
         } else {
-          if (params.action !== "route" || !atom(params.task || "") || params.update_brief !== true) {
-            throw new Error("Task updates require an explicit existing task and update_brief:true; chat is answered normally.");
-          }
-          const input = params.input && inputs.get(params.input) || originalInput(_ctx, params.input);
-          const sessionFile = _ctx.sessionManager.getSessionFile();
-          if (!sessionFile) throw new Error("task update requires a persisted original session");
-          // Existing prepared updates must reach their owner before normal reads,
-          // which deliberately refuse while the atomic intent transaction is pending.
-          if (!inputs.has(input.id)) await enroll(params.task!);
-          let routed = inputs.get(input.id);
-          if (routed && routed.task !== params.task) throw new Error("original intent update belongs to another task");
-          if (!routed) {
-            routed = { ...input, task: params.task, update_brief: true, pending: true };
+          throw new Error("unsupported compact continuation action");
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
+      } catch (error) {
+        return { content: [{ type: "text" as const, text: String(error) }], details: undefined, isError: true };
+      }
+    },
+  });
+  // Authenticated intent updates require native-session provenance, so they
+  // retain one separate purpose-specific tool. Discovery and history already
+  // remain available from fm-task-state.sh progress-list/lifecycle.
+  registerFirstmateTool(pi, {
+    name: "fm_task_intent_update", label: "Update task intent",
+    description: "Append one selected original user message to an existing task through the authenticated intent owner. This does not update progress, execute work, or accept the goal.",
+    executionMode: "sequential",
+    parameters: Type.Object({ task: Type.String(), input: Type.Optional(Type.String()) }),
+    async execute(_id, params, _signal, _update, ctx: ExtensionContext) {
+      try {
+        if (!owns()) throw new Error("this session does not own the fleet lock");
+        if (!atom(params.task)) throw new Error("intent update requires an existing canonical task id");
+        const input = params.input && inputs.get(params.input) || originalInput(ctx, params.input);
+        const sessionFile = ctx.sessionManager.getSessionFile();
+        if (!sessionFile) throw new Error("task update requires a persisted original session");
+        let routed = inputs.get(input.id);
+        if (routed && routed.task !== params.task) throw new Error("original intent update belongs to another task");
+        if (!routed) {
+          routed = { ...input, task: params.task, update_brief: true, pending: true };
+          pi.appendEntry(INPUT_ENTRY, routed);
+          const entry = ctx.sessionManager.getBranch().at(-1);
+          if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent receipt was not persisted");
+          routed = { ...routed, route_entry_id: entry.id };
+          inputs.set(input.id, routed);
+        }
+        if (!routed.brief_before_sha256 || !routed.brief_after_sha256) {
+          const plan = await command(["intent-plan", params.task, "--session-file", sessionFile,
+            "--entry-id", routed.route_entry_id!, "--input", input.id]);
+          if (plan.mode === "compact") {
+            routed = { ...routed, route_entry_id: undefined,
+              brief_before_sha256: plan.before_sha256, brief_after_sha256: plan.after_sha256 };
             pi.appendEntry(INPUT_ENTRY, routed);
-            const entry = _ctx.sessionManager.getBranch().at(-1);
-            if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent receipt was not persisted");
+            const entry = ctx.sessionManager.getBranch().at(-1);
+            if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent plan was not persisted");
             routed = { ...routed, route_entry_id: entry.id };
             inputs.set(input.id, routed);
           }
-          result = await command(["update-brief", params.task!, "--session-file", sessionFile,
-            "--entry-id", routed.route_entry_id!, "--input", input.id]);
-          if (routed.pending) {
-            routed = { ...routed, pending: false };
-            pi.appendEntry(INPUT_ENTRY, routed);
-            inputs.set(input.id, routed);
-          }
+        }
+        const result = await command(["update-brief", params.task, "--session-file", sessionFile,
+          "--entry-id", routed.route_entry_id!, "--input", input.id]);
+        if (routed.pending) {
+          routed = { ...routed, pending: false };
+          pi.appendEntry(INPUT_ENTRY, routed);
+          inputs.set(input.id, routed);
         }
         return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
       } catch (error) {

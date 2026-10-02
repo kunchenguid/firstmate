@@ -54,7 +54,8 @@ Presentation acknowledgement does not establish task acceptance.
 The original in-flight backlog row is the active continuation record.
 Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
-The opaque record token binds the task row to the current authenticated brief, backlog hold/block flags, and the generation from its existing local or remote execution owner, preventing a stale MAIN update or stale continuation admission after a concurrent user correction, explicit hold, dependency block or worker replacement.
+The opaque record token binds the task row to the current task state, authenticated brief, backlog hold/block flags, and the generation from its existing local or remote execution owner.
+It rejects stale MAIN updates and continuation admissions when those changes are visible at token validation; the task owner's documented ordinary-writer publication window remains an accepted limitation.
 Together with the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
 The branch can read only the exact token-bound compact admission while its original task remains unheld, unblocked and `in_flight`; it cannot write progress or make final semantic acceptance.
 
@@ -80,8 +81,10 @@ A queued handoff, successful send, provider terminal state, report or pull reque
 An unreadable task record produces a scoped reconciliation request without inventing an executor or progress state.
 
 Ordinary chat creates no progress record.
-For an authenticated follow-up, `route` with `update_brief:true` appends the selected original input through the existing interruption-safe intent owner.
-The native `legacy` action keeps an existing rich lifecycle record readable, but historical records are not scanned or reactivated as current work.
+For an authenticated follow-up, MAIN uses the separate `fm_task_intent_update` tool, which appends the selected original input through the existing interruption-safe intent owner.
+Discovery stays in the heartbeat owner's `progress-list` call and read-only history stays in the lifecycle owner's CLI; neither appears in MAIN's daily read/update schema.
+The Branch registration exposes only `read` for the exact admitted task, whether that admission is compact or a retained historical lifecycle record.
+Historical records are not scanned, mutated or reactivated as current work through this tool.
 No continuation path creates a second scheduler, task store or lifecycle progress record.
 [`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/lifecycle-native.mjs` cover original-row persistence, MAIN-only updates, canonical identity reminders, restart recovery, quiet unchanged execution and compact native calls.
 

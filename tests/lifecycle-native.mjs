@@ -76,6 +76,9 @@ async function install() {
 async function rawTool(params) {
   return tools.get('fm_task_continuation').execute('call', params, undefined, undefined, context());
 }
+async function rawIntent(params) {
+  return tools.get('fm_task_intent_update').execute('call', params, undefined, undefined, context());
+}
 async function tool(params, ok = true) {
   const result = await rawTool(params);
   assert.equal(Boolean(result.isError), !ok, JSON.stringify(result));
@@ -83,7 +86,11 @@ async function tool(params, ok = true) {
 }
 
 let continuation = await install();
-assert.deepEqual((await tool({ action: 'list' })).tasks, ['task']);
+const mainSchema = tools.get('fm_task_continuation').parameters;
+assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'record_token', 'task']);
+assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
+assert.deepEqual(Object.keys(tools.get('fm_task_intent_update').parameters.properties).sort(), ['input', 'task']);
+assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, ['task']);
 const empty = await tool({ action: 'read', task: 'task' });
 assert.equal(empty.goal, 'Deliver compact continuation');
 assert.equal(empty.recorded, false);
@@ -139,16 +146,32 @@ assert.equal(completed.next_step, '');
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
   'accepted compact result remained an active reminder');
 
-command('fm-task-state.sh', ['enroll', 'task']);
-const historical = await tool({ action: 'legacy', task: 'task' });
-assert.equal(historical.task_id, 'task');
-assert.ok(existsSync(home + '/data/task/lifecycle.json'));
-assert.equal((await tool({ action: 'read', task: 'task' })).current_state, finalProgress.current_state,
-  'historical rich record replaced active progress');
 session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Clarify the acceptance wording.' }], timestamp: Date.now() });
 const correction = session.getLeafId();
-await tool({ action: 'route', task: 'task', input: correction, update_brief: true });
-assert.match(readFileSync(home + '/data/task/brief.md', 'utf8'), /Clarify the acceptance wording\./);
+const appendIntentEntry = session.appendCustomEntry.bind(session);
+let interruptConfirmation = true;
+session.appendCustomEntry = (name, value) => {
+  if (name === 'fm-continuation-input' && value.pending === false && interruptConfirmation) {
+    interruptConfirmation = false;
+    throw new Error('fixture: interrupted after compact brief commit');
+  }
+  return appendIntentEntry(name, value);
+};
+const interruptedIntent = await rawIntent({ task: 'task', input: correction });
+assert.equal(interruptedIntent.isError, true, 'compact intent interruption was not exposed');
+assert.match(interruptedIntent.content[0].text, /interrupted after compact brief commit/);
+assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
+  'compact intent correction enrolled a rich lifecycle');
+session.appendCustomEntry = appendIntentEntry;
+await fire('session_shutdown', { reason: 'intent-recovery' });
+session = SessionManager.open(session.getSessionFile());
+continuation = await install();
+const intentResult = await rawIntent({ task: 'task', input: correction });
+assert.equal(Boolean(intentResult.isError), false, JSON.stringify(intentResult));
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split('Clarify the acceptance wording.').length, 2,
+  'compact intent retry duplicated or lost the authenticated correction');
+assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
+  'compact intent recovery created a rich lifecycle record');
 const correctedRead = await tool({ action: 'read', task: 'task' });
 assert.notEqual(correctedRead.record_token, completed.record_token,
   'authenticated intent change did not invalidate the old progress scope');
@@ -167,6 +190,13 @@ const repermitted = await tool({ action: 'update', task: 'task', record_token: c
   progress: correctedProgress });
 assert.equal(repermitted.next_step, correctedProgress.next_step,
   'fresh MAIN scope did not permit the revised next step');
+
+command('fm-task-state.sh', ['enroll', 'task']);
+const historical = JSON.parse(command('fm-task-state.sh', ['lifecycle', 'task']).stdout);
+assert.equal(historical.task_id, 'task');
+assert.ok(existsSync(home + '/data/task/lifecycle.json'));
+assert.equal((await tool({ action: 'read', task: 'task' })).current_state, correctedProgress.current_state,
+  'historical rich record replaced active progress');
 
 const oldInspect = command('fm-task-state.sh', ['inspect', 'task']);
 const compactRead = await rawTool({ action: 'read', task: 'task' });

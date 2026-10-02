@@ -15,9 +15,10 @@ No task directory, lifecycle JSON, evidence list, scheduler or mirrored progress
 
 The task title remains the canonical goal and is returned with every progress read.
 The compact block contains only `acceptance`, `current_state`, `remaining_gap` and `next_step`, plus an opaque context version in its marker.
-The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a concurrent title/body correction refuses the stale update, while an authenticated brief update or executor-generation replacement also makes the recorded fields inactive until MAIN publishes corrected progress.
+The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a title/body correction already visible at update-time refuses the stale update, while a task-state change, authenticated brief update, executor-generation replacement, hold or block also makes the recorded fields inactive until MAIN publishes corrected progress.
 Executor identity comes from the existing local `spawn_gen`, native remote-agent generation, or legacy AIME execution generation owner, and an unreadable or unsupported active identity fails closed.
-The token is only a compare-and-swap guard and is not an evidence reference or semantic assessment fingerprint.
+The token is an optimistic stale-read guard, not an evidence reference, semantic assessment fingerprint or atomic compare-and-swap guarantee.
+The supported task owner cannot combine token comparison with publication, so an ordinary writer that changes the task body after the check but before `update --body-file` may be overwritten; this narrow publication race is an accepted limitation.
 An identical update performs no task-record write.
 MAIN is the only progress writer, and it writes only after a material change.
 The branch may read one token-bound compact admission while the original task remains exactly `in_flight` and route work already authorized through an existing owner, but it cannot update these fields or make final semantic acceptance.
@@ -43,11 +44,13 @@ Only goal-ready evidence, a genuine blocker, or an authority decision is deliver
 These transcript entries are delivery receipts only and never become another progress source.
 Topic switches, session reload and compaction therefore recover from the original task row, while ordinary commands and unchanged observations add no progress writes.
 
-The native `fm_task_continuation` tool exposes `list`, `read`, `update`, `route` and read-only `legacy` actions.
+MAIN's native `fm_task_continuation` tool exposes only `read` and `update`.
 `read` followed by a material `update` replaces the former evidence-heavy `inspect` then `assess` routine.
 No progress action accepts evidence paths, authority references, lifecycle JSON or caller-reconstructed judgments.
-`route` remains the authenticated path for appending a selected original user correction to the task brief and retains its existing interruption-safe transaction.
-`legacy` keeps rich historical lifecycle records readable without enrolling them into active monitoring.
+The separate `fm_task_intent_update` tool retains the interruption-safe, native-session-authenticated path for appending a selected original user correction.
+Discovery remains with `fm-task-state.sh progress-list`, which the heartbeat adapter calls automatically; read-only rich history remains with `fm-task-state.sh lifecycle`.
+Neither is duplicated into the daily progress schema.
+Branch receives its own actual `fm_task_continuation` registration with only `read` for the exact admitted task.
 
 Neither the monitor nor the branch replaces an action owner.
 The branch may call that owner's existing interface for an already-authorized routine next step, while MAIN handles genuine scope/product/architecture, destructive, security, merge and cleanup decisions, reviews actual artifacts, writes material progress changes, and alone accepts the goal.
@@ -70,6 +73,7 @@ For a historical cleanup observation recorded before retained-copy preservation 
 Present preservation fields, every other fact in the cleanup observation and each separately assessed evidence item remain bound, so this compatibility does not admit changed evidence.
 Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
+A lifecycle-free task whose body contains compact progress must have the exact current MAIN-authored empty gap and next step before the legacy cleanup path can run.
 When a ship retains multiple merge receipts from its current execution generation, completion requires exactly one receipt matching the task metadata's current PR URL and head; absent, duplicate or conflicting identity refuses without pruning history.
 With a single current-generation receipt, delivery metadata may be absent, but any supplied URL or head must agree and duplicate identity fields still refuse.
 The selected receipt supplies the backlog completion reference, independently of receipt ordering, while all merge history remains intact.
@@ -130,7 +134,7 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 ## Verification
 
-[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers original-row reuse, explicit goal and acceptance projection, MAIN-only compare-and-swap updates, concurrent task and authenticated-intent correction refusal, local and remote execution-generation invalidation, unchanged-write suppression, terminal safety and absence of a second progress store.
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers original-row reuse, explicit goal and acceptance projection, MAIN-only token-checked updates, task-state and authenticated-intent invalidation, visible concurrent-correction refusal, local and remote execution-generation invalidation, unchanged-write suppression, terminal safety and absence of a second progress store.
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, routine-policy grant fencing and renewal, exact handled-receipt recovery, lost wake recovery, unchanged-wake outcome coverage, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, relevant-change-only terminal observations and exact outcome replay.
 [`tests/fm-task-handoff.test.sh`](../tests/fm-task-handoff.test.sh) covers durable rejection when an exact pending handoff's bound source becomes terminal.
 [`tests/lifecycle-native.mjs`](../tests/lifecycle-native.mjs), run by [`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh), covers topic-switch restart, intermediate-result continuation, canonical task identity reminders, compact call and response measurements, quiet unchanged work and read-only historical lifecycle access through the installed Pi SDK.

@@ -96,7 +96,7 @@ case "${1:-}" in
       python3 "$SCRIPT_DIR/fm-task-lifecycle.py" policy "$@"
     exit $?
     ;;
-  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|observe-receipt|readback|modes)
+  lifecycle|inspect|assess|intent-plan|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|observe-receipt|readback|modes)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift

@@ -6052,12 +6052,12 @@ test_compact_progress_drives_branch_same_worker_continuation() {
 await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot }; })()`);
 const { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot } = globalThis.__t;
 const { createHash } = await import("node:crypto");
-const { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
+const { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
 
 mkdirSync(`${home}/state`, { recursive: true });
 mkdirSync(`${home}/data`, { recursive: true });
-writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 writeFileSync(`${home}/.tasks.toml`, 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
 writeFileSync(`${home}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
 mkdirSync(`${home}/fakebin`, { recursive: true });
@@ -6067,7 +6067,8 @@ case "$1 $2" in
   "agent --help") printf 'Commands:\\n  prompt  Submit a prompt to an agent\\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\\n' "$3" ;;
   "pane process-info") printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":101,"foreground_processes":[{"pid":102,"name":"pi","argv0":"pi"}]}}}\\n' "$4" ;;
-  "agent get") printf '{"result":{"agent":{"agent":"pi","pane_id":"%s","agent_status":"idle"}}}\\n' "$3" ;;
+  "agent get") status=idle; [ "$3" = "w1:p2" ] && [ -f '${home}/state/other-working' ] && status=working
+    printf '{"result":{"agent":{"agent":"pi","pane_id":"%s","agent_status":"%s"}}}\\n' "$3" "$status" ;;
   "agent prompt") printf '{"result":{"type":"agent_prompted","pane_id":"%s"}}\\n' "$3" ;;
   "pane read") printf 'ready\\n' ;;
   *) printf '{}\\n' ;;
@@ -6087,6 +6088,17 @@ for (const args of [
 }
 const candidateBranch = spawnSync("git", ["-C", projectDir, "branch", "--show-current"], { encoding: "utf8" }).stdout.trim();
 const candidateHead = spawnSync("git", ["-C", projectDir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout.trim();
+const otherProjectDir = `${home}/other-project`;
+mkdirSync(otherProjectDir, { recursive: true });
+writeFileSync(`${otherProjectDir}/fixture.txt`, "other fixture\n");
+for (const args of [
+  ["init", "-q", "-b", "other-branch", otherProjectDir],
+  ["-C", otherProjectDir, "add", "fixture.txt"],
+  ["-C", otherProjectDir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "fixture"],
+]) {
+  const git = spawnSync("git", args, { encoding: "utf8" });
+  if (git.status !== 0) throw new Error(`other project fixture failed: ${git.stderr}`);
+}
 writeFileSync(`${home}/fakebin/no-mistakes`, `#!/bin/sh
 case "$1 $2" in
   "axi status") [ -f '${home}/nm-status' ] || exit 1; cat '${home}/nm-status' ;;
@@ -6110,7 +6122,7 @@ if (result.status !== 0) throw new Error(result.stderr);
 writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${projectDir}\nworktree=${projectDir}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 mkdirSync(`${home}/data/viewer`, { recursive: true });
 writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive.\n");
-writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${otherProjectDir}\nworktree=${otherProjectDir}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 writeFileSync(`${home}/state/archive-target.meta`, `window=fixture:w1:p3\nendpoint_task_id=archive-target\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t3\nherdr_pane_id=w1:p3\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 let progress = run("fm-task-state.sh", ["progress", "viewer"]);
 if (progress.status !== 0) throw new Error(progress.stderr);
@@ -6169,6 +6181,8 @@ let reportResult;
 let scopedRefusal;
 let staleRead;
 let staleHandoff;
+let rejectedObservation;
+let spoofedObservation;
 globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   promptCount += 1;
   const expectedStep = recordedNextStep;
@@ -6190,8 +6204,12 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   if (readResult.isError || JSON.parse(readResult.content[0].text).next_step !== expectedStep) {
     throw new Error(`bound compact read failed: ${JSON.stringify(readResult)}`);
   }
-  deniedUpdate = await continuation.execute("update", { action: "patch", task: "viewer" });
-  if (!deniedUpdate.isError || !deniedUpdate.content[0].text.includes("permits read only")) {
+  const schema = continuation.parameters;
+  if (Object.keys(schema.properties).sort().join(",") !== "action,task" || schema.properties.action.const !== "read") {
+    throw new Error(`branch continuation schema is not admitted-task read only: ${JSON.stringify(schema)}`);
+  }
+  deniedUpdate = await continuation.execute("update", { action: "update", task: "viewer" });
+  if (!deniedUpdate.isError || !deniedUpdate.content[0].text.includes("read only")) {
     throw new Error(`branch gained progress-write authority: ${JSON.stringify(deniedUpdate)}`);
   }
   if (promptCount === 1) {
@@ -6244,23 +6262,17 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
         throw new Error(`oversized history bypassed compact handoff authority: ${JSON.stringify(refused)}`);
       }
     } else if (promptCount === 9) {
-      const replay = await handoff.execute("settled-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
-        instruction: "Continue the second approved dependent step." });
-      if (!replay.isError || !replay.content[0].text.includes("does not authorize an exact cross-task handoff")) {
-        throw new Error(`compact handoff replay gained authority: ${JSON.stringify(replay)}`);
-      }
-      const collision = await handoff.execute("handoff-collision", { task: "viewer", target: "other", id: "viewer-to-other-r2",
-        instruction: "A different instruction must not reuse this id." });
-      if (!collision.isError || !collision.content[0].text.includes("does not authorize an exact cross-task handoff")) {
-        throw new Error(`changed compact payload gained authority: ${JSON.stringify(collision)}`);
-      }
-      const rejected = await handoff.execute("rejected-handoff", { task: "viewer", target: "missing", id: "viewer-to-missing-r1",
-        instruction: "This target does not exist." });
-      if (!rejected.isError || !rejected.content[0].text.includes("does not authorize an exact cross-task handoff")) {
-        throw new Error(`missing target changed compact handoff authority: ${JSON.stringify(rejected)}`);
+      const rejected = await handoff.execute("rejected-handoff", { task: "viewer", target: "doomed", id: "viewer-to-doomed-r1",
+        instruction: "Continue the authorized dependency before it retires.", action_id: "viewer.g1.a2" });
+      rejectedObservation = rejected;
+      const rejectedResult = JSON.parse(rejected.content[0].text);
+      if (!rejected.isError || rejectedResult.status !== 7 || rejectedResult.state !== "rejected" ||
+          rejectedResult.change !== "uncertain") {
+        throw new Error(`terminal handoff rejection did not remain MAIN-owned: ${JSON.stringify(rejected)}`);
       }
       const spoofed = await handoff.execute("spoofed-source", { task: "other", target: "viewer", id: "spoofed-r1",
         instruction: "Spoof the admitted source." });
+      spoofedObservation = spoofed;
       if (!spoofed.isError || !spoofed.content[0].text.includes("outside this exact branch admission")) {
         throw new Error(`typed handoff accepted a spoofed source: ${JSON.stringify(spoofed)}`);
       }
@@ -6284,7 +6296,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
       : promptCount === 7 ? "Arbitrary same-task text requires MAIN effect authority."
       : promptCount === 8 ? "Oversized history did not authorize a compact cross-task handoff."
-      : promptCount === 9 ? "Repeated compact handoff requests remained unauthorized."
+      : promptCount === 9 ? "Terminal handoff rejection requires MAIN reconciliation."
       : "The exact MAIN-authored next step reached the same worker idempotently." });
   if (promptCount === 10) {
     if (!reportResult.isError || !reportResult.content[0].text.includes("invalidated this branch result")) {
@@ -6499,7 +6511,21 @@ recordedNextStep = handoff.next_step;
 writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
 mkdirSync(`${home}/data/other`, { recursive: true });
 writeFileSync(`${home}/data/other/brief.md`, "Continue the already-approved dependent step.\n");
-for (const task of ["viewer", "other"]) {
+mkdirSync(`${home}/data/doomed`, { recursive: true });
+writeFileSync(`${home}/data/doomed/brief.md`, "Continue the authorized dependency before it retires.\n");
+writeFileSync(`${home}/state/doomed.meta`, `window=fixture:w1:p4
+endpoint_task_id=doomed
+project=${home}/project
+backend=herdr
+herdr_session=fixture
+herdr_workspace_id=w1
+herdr_tab_id=w1:t4
+herdr_pane_id=w1:p4
+harness=pi
+kind=ship
+spawn_gen=g1
+`);
+for (const task of ["viewer", "other", "doomed"]) {
   result = run("fm-task-state.sh", ["enroll", task]);
   if (result.status !== 0) throw new Error(`lifecycle enrollment failed for ${task}: ${result.stderr}`);
 }
@@ -6507,14 +6533,20 @@ const handoffInstruction = "Continue the already-approved dependent step.";
 writeFileSync(`${home}/data/viewer/handoff.txt`, handoffInstruction);
 let lifecycle = JSON.parse(readFileSync(`${home}/data/viewer/lifecycle.json`, "utf8"));
 const targetLifecycle = JSON.parse(readFileSync(`${home}/data/other/lifecycle.json`, "utf8"));
+const doomedLifecycle = JSON.parse(readFileSync(`${home}/data/doomed/lifecycle.json`, "utf8"));
 const authoritySha = createHash("sha256").update(readFileSync(`${home}/data/viewer/brief.md`)).digest("hex");
 lifecycle.schema = "fm-task-lifecycle.v2";
 lifecycle.delegation = {
   revision: 1, issuer: "main", authority_ref: "data/viewer/brief.md", authority_sha256: authoritySha,
   allowed: ["inspect", "precheck", "steer-same-intent", "observe-receipt", "handoff"],
-  edges: [{ target: "other", goal_revision: targetLifecycle.goal_revision,
-    execution_generation: targetLifecycle.execution_generation, authority_ref: "data/viewer/brief.md",
-    authority_sha256: authoritySha, scope: "Existing approved dependent step" }],
+  edges: [
+    { target: "other", goal_revision: targetLifecycle.goal_revision,
+      execution_generation: targetLifecycle.execution_generation, authority_ref: "data/viewer/brief.md",
+      authority_sha256: authoritySha, scope: "Existing approved dependent step" },
+    { target: "doomed", goal_revision: doomedLifecycle.goal_revision,
+      execution_generation: doomedLifecycle.execution_generation, authority_ref: "data/viewer/brief.md",
+      authority_sha256: authoritySha, scope: "Authorized dependency before retirement" },
+  ],
   expires_at: "2099-01-01T00:00:00Z", revoked: false,
 };
 lifecycle.next_action = {
@@ -6638,10 +6670,37 @@ if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".ms
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
+const deliveredReceipt = readdirSync(`${home}/state/other.inbox`).find((name) => name.endsWith(".msg"));
+const deliveredPath = `${home}/state/other.inbox/${deliveredReceipt}`;
+mkdirSync(`${home}/state/other.inbox/handled`, { recursive: true });
+const handledDeliveredPath = `${home}/state/other.inbox/handled/${deliveredReceipt}`;
+renameSync(deliveredPath, handledDeliveredPath);
+writeFileSync(`${home}/state/other-working`, "working\n");
+writeFileSync(`${home}/state/other.status`, "working: acknowledged the exact prepared handoff\n");
+const otherState = run("fm-task-state.sh", ["other"]);
+result = run("fm-task-state.sh", ["action", "viewer", "--action-id", "viewer.g1.a1", "--phase", "confirmed",
+  "--receipt-ref", handledDeliveredPath,
+  "--receipt-sha256", createHash("sha256").update(readFileSync(handledDeliveredPath)).digest("hex")]);
+if (result.status !== 0) throw new Error(`first handoff confirmation failed: ${result.stderr}; target=${otherState.stdout}; target-error=${otherState.stderr}`);
+lifecycle = JSON.parse(readFileSync(`${home}/data/viewer/lifecycle.json`, "utf8"));
+const rejectedInstruction = "Continue the authorized dependency before it retires.";
+writeFileSync(`${home}/data/viewer/rejected-handoff.txt`, rejectedInstruction);
+lifecycle.next_action = {
+  id: "viewer.g1.a2", kind: "steer", phase: "prepared", expected_execution_generation: "g1",
+  payload_ref: "data/viewer/rejected-handoff.txt",
+  payload_sha256: createHash("sha256").update(rejectedInstruction).digest("hex"), receipt_ref: null,
+  attempts: 0, attempt_limit: 1, recheck_at: "2000-01-01T00:00:00Z", deadline: "2099-01-01T00:00:00Z",
+};
+lifecycle.next_action_seq = 3;
+writeFileSync(`${home}/data/viewer-rejected-handoff-proposal.json`, JSON.stringify(lifecycle), { mode: 0o600 });
+result = run("fm-task-state.sh", ["reconcile", "viewer", "--expected-revision", String(lifecycle.revision),
+  "--record", `${home}/data/viewer-rejected-handoff-proposal.json`]);
+if (result.status !== 0) throw new Error(`rejected handoff lifecycle preparation failed: ${result.stderr}`);
+writeFileSync(`${home}/state/doomed.meta`, readFileSync(`${home}/state/doomed.meta`, "utf8").replace("kind=ship", "kind=secondmate"));
 const noEffect = { ...quiet,
-  current_state: "No compact handoff effect was created",
-  remaining_gap: "No exact handoff effect is authorized",
-  next_step: "Confirm repeated compact requests do not create progress",
+  current_state: "The authorized handoff target retired before delivery",
+  remaining_gap: "MAIN must reconcile the terminal handoff rejection",
+  next_step: "Report the rejected handoff to MAIN without replay",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(noEffect)]);
@@ -6650,11 +6709,20 @@ record = JSON.parse(result.stdout);
 recordedNextStep = noEffect.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
-  sentToMain.length === beforeMain + 3,
-  "repeated rejected handoff authority report");
-await processLatestAuthority("Repeated compact handoff requests remained unauthorized.");
-if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+try {
+  await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
+    sentToMain.length === beforeMain + 3,
+    "repeated rejected handoff authority report");
+} catch (error) {
+  throw new Error(`${error}; promptCount=${promptCount}; rejected=${JSON.stringify(rejectedObservation)}; spoofed=${JSON.stringify(spoofedObservation)}; report=${JSON.stringify(reportResult)}; sent=${JSON.stringify(sentToMain.slice(beforeMain))}`);
+}
+await processLatestAuthority("Terminal handoff rejection requires MAIN reconciliation.");
+if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-doomed-r1.state`, "utf8").includes("state=rejected") ||
+    existsSync(`${home}/state/doomed.inbox`)) {
+  throw new Error("terminal handoff rejection was replayed or lost its durable rejected state");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1 ||
+    readdirSync(`${home}/state/other.inbox/handled`).filter((name) => name.endsWith(".msg")).length !== 1) {
   throw new Error("no-effect typed handoff created progress or duplicate delivery");
 }
 
@@ -6772,14 +6840,14 @@ EOF
   pass "$out"
 }
 
-test_branch_native_continuation_is_scoped_compact_and_material_only() {
+test_branch_native_continuation_is_scoped_read_only() {
   local repo home out status
   repo="$TMP_ROOT/native-continuation-root"; home="$TMP_ROOT/native-continuation-home"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot }; })()`);
-const { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, bus, fire, settle, makeOffer, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot }; })()`);
+const { pi, bus, fire, settle, makeOffer, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot } = globalThis.__t;
 const { createHash } = await import("node:crypto");
 const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
@@ -6789,9 +6857,9 @@ Object.assign(defaultSessionCtx,{isIdle:()=>true,hasPendingMessages:()=>false,ha
 Object.assign(defaultSessionCtx.sessionManager,{getSessionId:()=>"native-continuation",getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries});
 pi.appendEntry=(customType,data)=>{const entry={type:"custom",id:`entry-${entries.length}`,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString(),customType,data};entries.push(entry);appendFileSync(mainFile,JSON.stringify(entry)+'\n');return entry.id;};
 (await import(`${realRoot}/.pi/extensions/fm-periodic-stow.ts`)).default(pi);
-const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});
+const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});mkdirSync(`${home}/project`,{recursive:true});
 writeFileSync(`${home}/data/${task}/brief.md`,"Retain the unchanged goal and report only material evidence.\n");
-writeFileSync(`${home}/state/${task}.meta`,"spawn_gen=g1\nkind=ship\nexecutor=local-agent\n");
+writeFileSync(`${home}/state/${task}.meta`,`spawn_gen=g1\nkind=ship\nexecutor=local-agent\nproject=${home}/project\n`);
 writeFileSync(`${home}/data/policy-authority.md`,"Standing routine branch authority for this isolated fixture.\n");
 writeFileSync(`${home}/data/historical-report.md`,"Rollout is inactive pending landing, reload and policy enablement.\n");
 writeFileSync(`${home}/data/current-readback.md`,"Rollout is enabled after reload and the exact task grant is active.\n");
@@ -6802,46 +6870,52 @@ let result=run(["enroll",task]);if(result.status!==0)throw Error(result.stderr);
 const policy={schema:"fm-task-continuation-policy.v1",revision:0,issuer:"main",enabled:true,authority_ref:"data/policy-authority.md",authority_sha256:sha(`${home}/data/policy-authority.md`),allowed:["inspect","precheck","steer-same-intent","observe-receipt"],expires_at:"2099-01-01T00:00:00Z"};
 writeFileSync(`${home}/data/policy.json`,JSON.stringify(policy),{mode:0o600});result=run(["continuation-policy","--expected-revision","0","--record",`${home}/data/policy.json`]);if(result.status!==0)throw Error(result.stderr);
 result=run(["refresh",task]);if(result.status!==0)throw Error(result.stderr);
-const mainNative=mainTools.find(tool=>tool.name==="fm_task_continuation");
-if(!mainNative)throw Error("main native continuation tool absent");
-const inspected=await mainNative.execute("seed-inspect",{action:"inspect",task,evidence:[`data/${task}/brief.md`,"data/current-readback.md","data/readback-action.md"]},undefined,undefined,defaultSessionCtx);
-if(inspected.isError)throw Error(`seed inspect refused ${JSON.stringify(inspected)}`);
-const basis=JSON.parse(inspected.content[0].text).basis;
-const assessed=await mainNative.execute("seed-assess",{action:"assess",task,basis,judgment:{disposition:"open",outcome:"Rollout enabled; current branch readback remains pending.",remaining_gap:"Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.",authority_ref:`data/${task}/brief.md`,evidence:[`data/${task}/brief.md`,`data/current-readback.md`],next_action:{kind:"readback",payload_ref:"data/readback-action.md",recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z",attempt_limit:2}}},undefined,undefined,defaultSessionCtx);
-if(assessed.isError)throw Error(`seed assessment refused ${JSON.stringify(assessed)}`);
+  const inspected=run(["inspect",task,"--evidence",`data/${task}/brief.md`,"--evidence","data/current-readback.md","--evidence","data/readback-action.md"]);
+  if(inspected.status!==0)throw Error(`seed inspect refused ${inspected.stderr}`);
+  const basis=JSON.parse(inspected.stdout).basis;
+  const judgment={disposition:"open",outcome:"Rollout enabled; current branch readback remains pending.",remaining_gap:"Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.",authority_ref:`data/${task}/brief.md`,evidence:[`data/${task}/brief.md`,`data/current-readback.md`],next_action:{kind:"readback",payload_ref:"data/readback-action.md",recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z",attempt_limit:2}};
+  const assessed=run(["assess",task,"--basis",basis,"--judgment",JSON.stringify(judgment)]);
+  if(assessed.status!==0)throw Error(`seed assessment refused ${assessed.stderr}`);
 const seedObservation=run(["observe",task]);if(seedObservation.status!==0)throw Error(`seed observation refused ${seedObservation.stderr}`);
-let nativeCalls=0,compactNoChanges=0,material,currentReadback,promptCount=0;
+  let nativeCalls=0,currentReadback,deniedMutation,promptCount=0;
 globalThis.__fmOnBranchPrompt=async({session,text})=>{
  promptCount++;
  const native=session.options.customTools.find(tool=>tool.name==="fm_task_continuation"),report=session.options.customTools.find(tool=>tool.name==="fm_branch_report");
- if(!native||!report)throw Error("branch-native tools absent");const admitted=JSON.parse(text.slice(text.lastIndexOf("\n{")+1));
+   if(!native||!report)throw Error("branch-native tools absent");
+   if(Object.keys(native.parameters.properties).sort().join(",")!=="action,task"||native.parameters.properties.action.const!=="read")throw Error(`branch schema is not read only ${JSON.stringify(native.parameters)}`);
+   if(!text.includes("Canonical task scope"))throw Error(`historical task was not admitted through its wake: ${text}`);
+   const admitted=JSON.parse(run(["lifecycle",task]).stdout);
  if(admitted.assessment?.remaining_gap!=="Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN."||admitted.next_action?.kind!=="readback"||admitted.next_action?.payload_ref!=="data/readback-action.md")throw Error(`current lifecycle context omitted ${JSON.stringify(admitted)}`);
  const selectEvidence=context=>context.next_action?.phase==="prepared"?context.next_action.payload_ref:context.observation?.state==="pending"?"data/historical-report.md":null;
- if(selectEvidence({...admitted,assessment:undefined,next_action:undefined})!=="data/historical-report.md")throw Error("masked counterfactual did not reproduce stale historical selection");
+ const observation=JSON.parse(seedObservation.stdout);
+ if(selectEvidence({...admitted,observation,assessment:undefined,next_action:undefined})!=="data/historical-report.md")throw Error("masked counterfactual did not reproduce stale historical selection");
  if(selectEvidence(admitted)!=="data/readback-action.md")throw Error("current action did not displace historical rollout text");
  if(selectEvidence({observation:{state:"waiting"},assessment:{remaining_gap:"unchanged dependency"},next_action:null})!==null)throw Error("unchanged healthy wait requested a native call");
- currentReadback=await native.execute("current-readback",{action:"inspect",task,evidence:[...new Set([admitted.assessment.authority_ref,...admitted.assessment.evidence.map(item=>item.ref),admitted.next_action.payload_ref])]});nativeCalls++;
+   currentReadback=await native.execute("current-readback",{action:"read",task});nativeCalls++;
  if(currentReadback.isError)throw Error(`current readback refused ${JSON.stringify(currentReadback)}`);const current=JSON.parse(currentReadback.content[0].text);
  if(current.assessment?.remaining_gap!==admitted.assessment.remaining_gap||current.next_action?.id!==admitted.next_action.id)throw Error(`current readback lost canonical action ${JSON.stringify(current)}`);
- const wrong=await native.execute("wrong",{action:"observe",task:"other"});if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
- for(let i=0;i<5;i++){const observed=await native.execute(`same-${i}`,{action:"observe",task});nativeCalls++;const body=JSON.parse(observed.content[0].text);if(observed.isError||body.change!=="none"||body.assessment||body.delegation)throw Error(`noncompact ${JSON.stringify(observed)}`);compactNoChanges++;}
- const patch={delegation_revision:admitted.delegation.revision,precheck:{delegation_revision:admitted.delegation.revision,basis_key:admitted.observation.basis_key,conclusion:"needs-evidence",checks:[{criterion:"brief: verified milestone",result:"missing",evidence:[]}],summary:"No verified milestone yet; retain the unchanged gap without another action."}};
- material=await native.execute("material",{action:"patch",task,expected_revision:admitted.revision,patch_json:JSON.stringify(patch)});nativeCalls++;
- if(material.isError)throw Error(`material refused ${JSON.stringify(material)}`);const changed=JSON.parse(material.content[0].text);if(changed.change!=="material"||changed.precheck?.conclusion!=="needs-evidence")throw Error(`lost delta ${JSON.stringify(material)}`);
+   const wrong=await native.execute("wrong",{action:"read",task:"other"});nativeCalls++;if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
+   deniedMutation=await native.execute("mutation",{action:"patch",task,patch_json:"{}"});nativeCalls++;
+   if(!deniedMutation.isError||!deniedMutation.content[0].text.includes("read only"))throw Error(`branch mutation was not refused ${JSON.stringify(deniedMutation)}`);
  const reported=await report.execute("report",{task,verdict:"routine",summary:"Routine evidence unchanged; retained the existing gap without MAIN bookkeeping."});if(reported.isError)throw Error(JSON.stringify(reported));
 };
 await fire("session_start",{},defaultSessionCtx);pi.appendEntry("fixture-seed",{});const before=sentToMain.length;
-await fire("agent_before_settle",{},defaultSessionCtx);
+const offer=makeOffer("signal: admitted historical continuation",undefined,false,true,1);
+offer.eligibleTasks=[task];offer.taskBySeq={"1":task};
+writeFileSync(`${home}/state/.wake-queue`,`1\t1\tsignal\t${task}.status\tworking: inspect current readback\n`);
+bus.emit("fm-branch-supervision:dispatch",offer);
+if(!offer.accepted)throw Error(`historical admission was declined: ${offer.declineReason}`);
+await offer.settlement;
 try { await settle(()=>outcomeScript(["list","--recent","10"]).includes("Routine evidence unchanged"),"native report"); }
 catch (error) { throw Error(`${error}; seedObservation=${seedObservation.stdout.trim()} outcomes=${outcomeScript(["list","--recent","10"])} promptCount=${promptCount} nativeCalls=${nativeCalls} sessions=${globalThis.__fmSessions?.length}`); }
-if(sentToMain.length!==before)throw Error("routine work opened MAIN");
-if(nativeCalls!==7||compactNoChanges!==5||!material||!currentReadback)throw Error("tool counts changed");
-const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck?.conclusion!=="needs-evidence")throw Error("material delta missing");
-console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,current_readback_tools:1,no_change_native_tools:compactNoChanges,material_native_tools:1,healthy_wait_extra_tools:0,branch_reports:1}));
+if(sentToMain.length!==before+1||!sentToMain.at(-1)?.message?.content?.includes("Routine evidence unchanged"))throw Error(`historical wake outcome was not delivered exactly once: ${JSON.stringify(sentToMain.slice(before))}`);
+  if(nativeCalls!==3||!deniedMutation||!currentReadback)throw Error("tool counts changed");
+  const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck!==null)throw Error("read-only branch mutated historical state");
+  console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,current_readback_tools:1,refused_mutation_tools:1,healthy_wait_extra_tools:0,branch_reports:1}));
 process.exit(0);
 EOF
   status=$?; out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "branch-native continuation scope/delta boundary: $out"
+  expect_code 0 "$status" "branch-native continuation admitted read-only boundary: $out"
   pass "$out"
 }
 
@@ -7342,9 +7416,9 @@ await fire('before_agent_start',{prompt:'Separate request B: explain configurati
 const next=await beforeSettle();
 if(next.continued) throw Error('ordinary question became an independent continuation');
 if(escalationEntries().length!==1) throw Error('compaction or chat duplicated task escalation');
-const tool=mainTools.find(t=>t.name==='fm_task_continuation');
-const listing=JSON.parse((await tool.execute('list',{action:'list'},undefined,undefined,defaultSessionCtx)).content[0].text);
-if(listing.pending_updates.length || 'inputs' in listing) throw Error('chat acquired input bookkeeping');
+const listing=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['progress-list'],{env:process.env,encoding:'utf8'});
+if(listing.status!==0)throw Error(`task discovery failed ${listing.stderr}`);
+if(entries.some(entry=>entry.customType==='fm-continuation-input'))throw Error('chat acquired input bookkeeping');
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
 // Unchanged evidence survives exhausted ordinary attempts. Only the existing
 // heartbeat may deliver a later recovery, and UI safety still takes priority.
@@ -7556,6 +7630,7 @@ EOF
 }
 
 test_compact_progress_drives_branch_same_worker_continuation
+test_branch_native_continuation_is_scoped_read_only
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract

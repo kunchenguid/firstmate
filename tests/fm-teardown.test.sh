@@ -775,6 +775,67 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_compact_progress_requires_main_acceptance_before_teardown() {
+  local case_dir initial open fresh accepted out rc malformed
+  case_dir=$(make_case compact-acceptance)
+  write_meta "$case_dir" local-only ship
+  seed_backlog_in_flight "$case_dir"
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'Complete the compact task before cleanup.\n' > "$case_dir/data/task-x1/brief.md"
+  wt_commit "$case_dir" "landed compact work"
+  add_fork_with_pushed_branch "$case_dir"
+
+  initial=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture read failed'
+  open=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
+    --expected-token "$(printf '%s' "$initial" | jq -r .record_token)" \
+    --progress '{"acceptance":"The landed result is reviewed","current_state":"Implementation landed","remaining_gap":"MAIN has not accepted the result","next_step":"Review the requested behavior"}') \
+    || fail 'compact cleanup fixture update failed'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/open.out" 2> "$case_dir/open.err"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "compact cleanup before MAIN acceptance"
+  assert_grep 'compact task task-x1 is not MAIN-accepted' "$case_dir/open.err" \
+    'compact cleanup refusal did not name missing MAIN acceptance'
+  assert_present "$case_dir/state/task-x1.meta" 'compact cleanup refusal removed task metadata'
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail 'compact cleanup refusal closed the backlog row'
+
+  for malformed in \
+    'Damaged compact state <!-- /firstmate-progress -->' \
+    'Damaged compact state <!-- firstmate-progress:v1 broken -->'; do
+    tasks-axi update task-x1 --file "$case_dir/data/backlog.md" --body "$malformed" >/dev/null \
+      || fail 'malformed compact cleanup fixture update failed'
+    set +e
+    run_teardown "$case_dir" > "$case_dir/malformed.out" 2> "$case_dir/malformed.err"
+    rc=$?
+    set -e
+    expect_code 6 "$rc" "malformed compact marker before cleanup"
+    assert_grep 'malformed Firstmate progress block' "$case_dir/malformed.err" \
+      'malformed compact marker bypassed the existing parser'
+    assert_present "$case_dir/state/task-x1.meta" 'malformed compact marker allowed task cleanup'
+  done
+
+  tasks-axi update task-x1 --file "$case_dir/data/backlog.md" \
+    --body 'Complete the compact task before cleanup.' >/dev/null \
+    || fail 'compact cleanup fixture reset failed'
+  fresh=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture reread failed'
+  accepted=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-task-state.sh" update-progress task-x1 \
+    --expected-token "$(printf '%s' "$fresh" | jq -r .record_token)" \
+    --progress '{"acceptance":"The landed result is reviewed","current_state":"MAIN verified the requested behavior","remaining_gap":"","next_step":""}') \
+    || fail 'compact acceptance update failed'
+  printf '%s' "$accepted" | jq -e '.recorded == true and .remaining_gap == "" and .next_step == ""' >/dev/null \
+    || fail 'compact acceptance fixture did not reach a satisfied state'
+  out=$(run_teardown "$case_dir") || fail "accepted compact teardown failed: $out"
+  assert_absent "$case_dir/state/task-x1.meta" 'accepted compact cleanup retained task metadata'
+  [ "$(backlog_row_state "$case_dir")" = "done" ] || fail 'accepted compact cleanup did not close the task'
+  pass 'lifecycle-free compact teardown requires and preserves MAIN semantic acceptance'
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -3338,6 +3399,7 @@ EOF
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_compact_progress_requires_main_acceptance_before_teardown
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

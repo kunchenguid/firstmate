@@ -4,7 +4,7 @@
 This helper owns only the small embedded progress block.  The tasks-axi
 adapter remains the task-record owner and the shell boundary owns locking and
 publication.  Reads never create a block and replacements emit the complete
-new body on stdout for that owner to publish atomically.
+new body on stdout for that owner's ordinary publication path.
 """
 
 import argparse
@@ -89,8 +89,8 @@ def projection(task: str, goal: str, state: str, held: str, blocked: str,
         "remaining_gap": values["remaining_gap"] if active else "",
         "next_step": values["next_step"] if active else "",
         # Context is an opaque read-time concurrency salt supplied by the
-        # task owner (currently brief bytes, execution generation, and the
-        # backlog hold/block flags). It is
+        # task owner (currently goal, brief bytes, task state, execution
+        # generation, and the backlog hold/block flags). It is
         # neither persisted progress nor an evidence reference.
         "record_token": digest(task.encode() + b"\0" + goal.encode() + b"\0" + body.encode() + b"\0" + context.encode()),
     }
