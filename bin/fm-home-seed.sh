@@ -405,7 +405,7 @@ acquire_treehouse_home() {
   # restarts until teardown or rollback returns it. treehouse prints only the
   # worktree path to stdout (banners go to stderr), so command substitution
   # captures the path.
-  home=$(cd "$FM_ROOT" && HOME="$pool_root" treehouse get --lease --lease-holder "$id") || {
+  home=$(cd "$FM_ROOT" && TREEHOUSE_ROOT="$pool_root" HOME="$pool_root" treehouse get --lease --lease-holder "$id") || {
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }

@@ -282,7 +282,7 @@ test_spawn_tmux_window_construction() {
 
   # Bug 2 fix (b): treehouse-get and the worktree wait loop target the stable id.
   expected_root=$(HOME="$home/user-home" fm_treehouse_pool_root "$home")
-  assert_grep "send-keys -t @spawnwid cd $proj && HOME=$expected_root treehouse get Enter" "$rec" \
+  assert_grep "send-keys -t @spawnwid cd $proj && TREEHOUSE_ROOT=$expected_root HOME=$expected_root treehouse get Enter" "$rec" \
     "treehouse get must carry the per-home root and use the stable window id"
   assert_grep "display-message -p -t @spawnwid #{pane_current_path}" "$rec" \
     "the worktree wait loop must query the stable window id, not the name"

@@ -2,10 +2,10 @@
 # shellcheck shell=bash
 # Shared Treehouse pool-root helpers.
 #
-# Treehouse v2.0.0's installed CLI has no --root flag and ignores
-# TREEHOUSE_ROOT and TREEHOUSE_DIR, but it uses HOME as the default root. Keep
-# the override scoped to each Treehouse command so the worker itself retains the
-# launching home's normal HOME and credentials.
+# Treehouse v2.0.0's installed CLI has no --root flag and ignores TREEHOUSE_ROOT
+# and TREEHOUSE_DIR, but it uses HOME as the default root. Newer versions honor
+# TREEHOUSE_ROOT. Keep both overrides scoped to each Treehouse command so the
+# worker itself retains the launching home's normal HOME and credentials.
 #
 # The per-home root lives OUTSIDE the firstmate home, under the launching user's
 # real HOME, keyed by the home's resolved path: a root inside the home would put
@@ -80,11 +80,11 @@ fm_treehouse_root_for_worktree() { # <home> <worktree> -> <absolute-root>
 }
 
 fm_treehouse_get_command() { # <absolute-root> <project> -> shell command
-  printf 'cd %q && HOME=%q treehouse get' "$2" "$1"
+  printf 'cd %q && TREEHOUSE_ROOT=%q HOME=%q treehouse get' "$2" "$1" "$1"
 }
 
 fm_treehouse_return() { # <home> <working-directory> <worktree>
   local home=$1 cd_dir=$2 worktree=$3 root
   root=$(fm_treehouse_root_for_worktree "$home" "$worktree") || return 1
-  ( CDPATH='' cd -- "$cd_dir" && HOME="$root" treehouse return --force "$worktree" )
+  ( CDPATH='' cd -- "$cd_dir" && TREEHOUSE_ROOT="$root" HOME="$root" treehouse return --force "$worktree" )
 }

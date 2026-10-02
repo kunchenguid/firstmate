@@ -4083,19 +4083,20 @@ test_return_uses_per_home_treehouse_root() {
   land_shippable_commit "$case_dir"
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-printf '%s\\n' "\${HOME:-}" > "$case_dir/treehouse-home.log"
+printf '%s|%s\\n' "\${HOME:-}" "\${TREEHOUSE_ROOT:-}" > "$case_dir/treehouse-home.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
 
   rc=0
   mkdir -p "$case_dir/user-home"
-  HOME="$case_dir/user-home" FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  HOME="$case_dir/user-home" TREEHOUSE_ROOT="$case_dir/shared-treehouse" FM_HOME="$case_dir" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   expect_code 0 "$rc" "per-home-treehouse-root: teardown should succeed"
   expected_root=$(HOME="$case_dir/user-home" fm_treehouse_pool_root "$case_dir")
   assert_present "$case_dir/treehouse-home.log" \
     "per-home-treehouse-root: teardown did not call treehouse return"
-  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root" ] || \
-    fail "per-home-treehouse-root: treehouse return used HOME '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
+  [ "$(cat "$case_dir/treehouse-home.log")" = "$expected_root|$expected_root" ] || \
+    fail "per-home-treehouse-root: treehouse return used roots '$(cat "$case_dir/treehouse-home.log")', expected '$expected_root'"
   pass "fm-teardown.sh scopes treehouse return to the launching home's pool"
 }
 

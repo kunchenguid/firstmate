@@ -118,7 +118,8 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    FM_FAKE_LAUNCH_LOG="$HOME_DIR/launch.log" PATH="$FAKEBIN_DIR:$PATH" \
+    FM_FAKE_LAUNCH_LOG="$HOME_DIR/launch.log" TREEHOUSE_ROOT="$HOME_DIR/shared-treehouse" \
+    PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
@@ -169,7 +170,7 @@ test_spawn_get_uses_per_home_treehouse_root() {
   [ -L "$expected_root/.netrc" ] || fail "spawn did not bridge the launching HOME's netrc credential store"
   assert_grep "machine example.invalid login user password secret" "$expected_root/.netrc" \
     "prepared pool root cannot read the launching HOME's netrc credential store"
-  assert_grep "cd $PROJ_DIR && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
+  assert_grep "cd $PROJ_DIR && TREEHOUSE_ROOT=$expected_root HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
     "treehouse get did not receive the per-home root"
   assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
     "spawn did not restore the launching HOME after Treehouse acquisition"
