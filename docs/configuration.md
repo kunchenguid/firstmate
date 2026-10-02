@@ -1932,6 +1932,9 @@ The adapter automates only the exact deterministic subset: anything needing judg
 This section is the single owner of the runner's operating contract.
 
 - Process-event commands resolve the state root to its physical directory before validating it and deriving paths, so a home reached through a symlinked ancestor behaves like its physical spelling while an unsafe target directory remains refused.
+- A state root that is not a private directory (group- or world-writable, or owned by another user) is refused with its reason (`bad-mode` or `not-owned`), and a registered source cannot be polled until it is fixed.
+  `bin/fm-procevent-when.sh arm` refuses before registering anything, `bin/fm-bootstrap.sh` prints a `PROCEVENT:` diagnostic at session start, and `bin/fm-watch.sh` wakes once per failure episode with `check: process-event reconcile failed: <error>` when `reconcile` fails with an error message, clearing the episode when `reconcile` succeeds again.
+  Only `bad-mode` is fixed by `chmod 750 <state>`; an unconfirmed runner launch is announced separately below and raises no such wake.
 - Registration writes one private record under `state/procevent/`, and a completed result plus its immutable adapter identity are captured under `state/procevent-inbox/` before any announcement or event can reference it.
 - By default, results are published as ordinary `check` wakes carrying the source id and committed result sequence through the existing durable wake queue, so the runner adds no second notification control plane.
 - The self-announcing adapter exception and its fail-safe ordering are defined below.
