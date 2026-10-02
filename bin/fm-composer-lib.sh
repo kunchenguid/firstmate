@@ -55,28 +55,39 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
-#   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
-#                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
+#   bare       - an agent prompt glyph row with no border at all (claude and
+#                muse 1.3 `❯`, codex `›`, muse 0.1.0 `⟩`, cursor `→`). The
+#                agent glyph is itself the container proof; a bare SHELL glyph
+#                (`>` `$` `%` `#`) never is.
 #                A bare composer's WRAP region (typed input continuing on the
 #                rows beneath the glyph row) is bounded by blank rows, by
 #                structural edges, and by the FURNITURE rows a harness draws
-#                directly below its composer - omp's status row and
-#                braille-only animation rows (declared once below, next to
-#                the idle placeholders) - none of which is ever typed input.
+#                directly below its composer - omp's status row,
+#                braille-only animation rows, and entirely muted Muse hint
+#                rows below an empty ❯ glyph. Fleet placeholder matches and
+#                FM_COMPOSER_IDLE_RE overrides do not bound this region.
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
-#                A separated pair that closes over a bare AGENT-GLYPH row is a
-#                different, self-proving thing: real claude 2.x draws exactly
-#                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
-#                pair carries the shape and no identity is needed.
+#   separated  - content rows between two horizontal `─` rules, with no glyph
+#                of the container's own and no side border. The CLOSING rule
+#                is always solid; the OPENING rule may instead carry a title
+#                embedded in its own rule glyphs, which is how muse 1.3 draws
+#                its composer (`── Voice input (⌥ + v to start) ───…`, verified
+#                live on Muse Code 1.3.0-R3401.1). A titled rule only OPENS a
+#                region: it never closes one and never carries the staleness
+#                evidence a solid rule does, so a titled heading drawn below a
+#                composer cannot defer that composer.
+#                pi's region is blank, so it is provable only with a live
+#                agent identity reporting an idle/done pi (herdr `agent get`;
+#                the tmux foreground-process probe) - a blank region between
+#                two transcript rules is otherwise exactly the strict rule's
+#                unidentifiable blank row.
+#                A separated pair that closes over a bare AGENT-GLYPH row
+#                is a different, self-proving thing: real claude 2.x draws
+#                exactly that (`─` rule, `❯`+NBSP, `─` rule), and muse 1.3
+#                draws it under a titled opening rule, so the glyph inside
+#                the pair carries the shape and no identity is needed.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -122,9 +133,9 @@
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
 # target). A `$` followed immediately by a digit is Pi's cost footer, not this
 # prompt (`FM_COMPOSER_PI_STATUS_RE_DEFAULT`).
-# The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# `→` (U+2192, cursor), and `❭` (U+276D, devin) are a genuine empty agent
-# composer either way.
+# The AGENT glyphs `❯` (claude, and muse from 1.3), `›` (codex),
+# `⟩` (U+27E9, muse through 0.1.0), `→` (U+2192, cursor), and
+# `❭` (U+276D, devin) are a genuine empty agent composer either way.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
@@ -250,17 +261,24 @@ fm_composer_normalize_trim_var() {  # <varname>
 #     no fleet harness uses it for ghost text, so it is kept (real text wins:
 #     under-stripping merely defers, which the max-defer alarm surfaces, while
 #     over-stripping would inject over real input).
-# Raising FM_COMPOSER_GHOST_LUMA_MAX is not free: muse draws its `⟩` prompt glyph
-# in truecolor 38;2;90;160;255, luminance ~149.9 (verified, muse 0.1.0-R708.1),
-# the tightest margin over the 128 default in the fleet. Above ~150 that glyph is
-# stripped as ghost text, which is why the bare-glyph fallback below must also
-# recognise every agent glyph from the UNSTRIPPED plain row.
+# Raising FM_COMPOSER_GHOST_LUMA_MAX is not free: muse 0.1.0-R708.1 drew its `⟩`
+# prompt glyph in truecolor 38;2;90;160;255, luminance ~149.9, the tightest
+# margin over the 128 default ever measured in the fleet. Muse 1.3.0-R3401.1
+# draws `❯` in 38;2;251;191;36 (luminance ~191.3) instead, so the margin is
+# wider on the current release, but the 0.1.0 measurement is what the ceiling
+# was chosen against - and 1.3 recolours `❯` back to that exact
+# 38;2;90;160;255 blue while its pane is UNFOCUSED, which is the state
+# firstmate reads a worker in, so the tight margin is the live one. Above ~150
+# that glyph is stripped as ghost text, which is why the bare-glyph fallback
+# below must also recognise every agent glyph from the UNSTRIPPED plain row.
 # The dim/faint and dark-foreground states are tracked together as "de-emphasis";
 # codes are processed left to right within a sequence, so "ESC[0;2m" reads as dim.
 # LC_ALL=C makes awk walk bytes, so multibyte glyphs (e.g. ❯) and de-emphasised
 # runs alike pass through or drop intact without locale-dependent classes.
+# The optional muse-hint mode reuses SGR parsing for the wrap boundary only:
+# dim or exact Muse muted foregrounds, never a widened fleet luma threshold.
 fm_composer_strip_ghost() {
-  LC_ALL=C awk -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
+  LC_ALL=C awk -v mode="${1:-ghost}" -v lumamax="${FM_COMPOSER_GHOST_LUMA_MAX:-128}" '
     function sgr_code(v, b) {
       b = v
       sub(/:.*/, "", b)
@@ -277,20 +295,24 @@ fm_composer_strip_ghost() {
       if (code == "2") return p + 4
       return p + 1
     }
-    # fg38_is_dark: 1 when the SGR 38 foreground starting at param p is a
-    # TRUECOLOR (38;2 / 38:2) whose luminance is below lumamax; 0 otherwise
-    # (a 38;5 palette colour, a bright truecolor, or a malformed run).
+    function muted_foreground(r, g, b, lumamax) {
+      if (mode == "muse-hint")
+        return (r == 138 && g == 144 && b == 152) || (r == 103 && g == 108 && b == 116)
+      return (299*r + 587*g + 114*b) / 1000 < lumamax
+    }
+    # Recognize a truecolor foreground using the selected stripping mode;
+    # palette colours and malformed runs are kept as potentially real text.
     function fg38_is_dark(a, p, k, lumamax,   spec, nf, f, r, g, b) {
       spec = a[p]
       if (index(spec, ":") > 0) {           # colon form: whole colour in a[p]
         nf = split(spec, f, ":")
         if (f[2] != "2" || nf < 5) return 0
         r = f[nf - 2] + 0; g = f[nf - 1] + 0; b = f[nf] + 0
-        return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
+        return muted_foreground(r, g, b, lumamax)
       }
       if (p + 1 > k || a[p + 1] != "2" || p + 4 > k) return 0
       r = a[p + 2] + 0; g = a[p + 3] + 0; b = a[p + 4] + 0
-      return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
+      return muted_foreground(r, g, b, lumamax)
     }
     {
       line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
@@ -467,9 +489,11 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
 # 2026.08.11-e8db854). Devin renders the anchored `Ask Devin to build features,
 # fix bugs, or work on your code` as dim text after its `❭` glyph (verified
-# live, devin 3000.11.1). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
-# matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$'
+# live, devin 3000.11.1).
+# Muse's two recorded hints remain placeholder candidates; the wrap boundary
+# below uses rendering, not catalogue text. FM_COMPOSER_IDLE_RE overrides only
+# idle-placeholder decisions; matching is case-insensitive.
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Type @ to search and insert workspace file paths$|^/loop 10m <prompt> schedules a recurring prompt$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed
@@ -762,6 +786,37 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
   return 1
 }
 
+# _fm_composer_titled_rule_row: a horizontal `─` rule that carries a TITLE
+# embedded in its own rule glyphs - muse 1.3 opens its composer with
+# `── Voice input (⌥ + v to start) ───…` (verified live on Muse Code
+# 1.3.0-R3401.1 at 44, 60, and 100 columns). The proof is deliberately narrow,
+# for the reason _fm_composer_titled_bottom_ok records about grok's titled
+# bottom border: the row must OPEN and CLOSE with the family's own rule glyph,
+# must still carry a full-width run of it, and must carry no other structural
+# glyph, so a box border row or an arbitrary transcript line can never pass.
+# The title itself is not parsed, because muse renders the keybind in it and a
+# keybind is exactly the part a release may respell.
+_fm_composer_titled_rule_row() {  # <trimmed-row>
+  local row=$1 title
+  case "$row" in
+    ──*──) ;;
+    *) return 1 ;;
+  esac
+  case "$row" in
+    *│*|*┃*|*║*|*╭*|*╮*|*╰*|*╯*|*┌*|*┐*|*└*|*┘*|\
+    *┏*|*┓*|*┗*|*┛*|*╔*|*╗*|*╚*|*╝*|*━*|*═*|*▀*|*▄*) return 1 ;;
+  esac
+  # The same eight-column run floor the solid rule above uses, so a titled row
+  # too short to be a composer rule stays ordinary transcript text.
+  case "$row" in
+    *────────*) ;;
+    *) return 1 ;;
+  esac
+  title=${row//─/}
+  fm_composer_normalize_trim_var title
+  [ -n "$title" ]
+}
+
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2
 # has no nameref); they are internal to this owner.
 _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
@@ -858,6 +913,19 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         FM_COMPOSER_SCAN_PI_GLYPH_ROW=$pi_glyph_row
         FM_COMPOSER_SCAN_PI_GLYPH=$pi_glyph
       fi
+      pi_open=$row
+      pi_lines=0
+      pi_glyph_row=-1
+      pi_glyph=''
+    elif _fm_composer_titled_rule_row "$trimmed"; then
+      # A TITLED rule OPENS a region and nothing else: it is never a closing
+      # rule and never updates FM_COMPOSER_SCAN_PI_LAST_SEPARATOR, so a titled
+      # heading drawn BELOW a composer candidate can never make it read stale.
+      # This is what lets muse 1.3's titled opening rule pair with its solid
+      # closing rule around the `❯` row, while adding no new deferral.
+      # It opens a region, so it resets the glyph proof exactly as a solid
+      # opening rule does: a glyph above this rule belongs to the region that
+      # ended here, never to the one starting on the next row.
       pi_open=$row
       pi_lines=0
       pi_glyph_row=-1
@@ -1209,6 +1277,23 @@ _fm_composer_row_is_pi_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "$FM_COMPOSER_PI_STATUS_RE_DEFAULT" sensitive
 }
 
+# _fm_composer_row_is_muse_hint: a nonblank row below an empty ❯ whose
+# visible text is entirely dim or Muse-muted foreground is furniture.
+# Muse 1.3 uses 138;144;152; live 1.4 uses that for its title and 103;108;116
+# for its inline tip. Bright/mixed text and unstyled captures never qualify.
+_fm_composer_row_is_muse_hint() {  # <raw-row> <plain-glyph-row> <styled>
+  local row=$1 prompt=$2 rest
+  [ "$3" = 1 ] || return 1
+  fm_composer_normalize_trim_var prompt
+  [ "$prompt" = '❯' ] || return 1
+  rest=$(printf '%s\n' "$row" | fm_composer_strip_ansi)
+  fm_composer_normalize_trim_var rest
+  [ -n "$rest" ] || return 1
+  rest=$(printf '%s\n' "$row" | fm_composer_strip_ghost muse-hint)
+  fm_composer_normalize_trim_var rest
+  [ -z "$rest" ]
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1242,8 +1327,9 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
 # through <cursor-row> is non-blank and carries no structural edge - the
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
-_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
-  local plain=$1 g=$2 cy=$3 row line trimmed glyph
+_fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row> <screen> <styled>
+  local plain=$1 g=$2 cy=$3 screen=$4 styled=$5 row line trimmed glyph prompt
+  prompt=$(_fm_composer_screen_row "$g" "$plain")
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
@@ -1253,6 +1339,7 @@ _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
     if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
     if _fm_composer_row_is_braille_furniture "$trimmed"; then return 1; fi
+    if _fm_composer_row_is_muse_hint "$(_fm_composer_screen_row "$row" "$screen")" "$prompt" "$styled"; then return 1; fi
     if fm_composer_leading_shell_glyph_var glyph "$trimmed"; then return 1; fi
     row=$((row + 1))
   done
@@ -1429,7 +1516,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 screen=$2 styled=$3 generic=-1 next boundary raw trimmed glyph bare footer=0 prompt
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1491,6 +1578,7 @@ _fm_composer_select_cursorless() {
     return 1
   fi
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    prompt=$(_fm_composer_screen_row "$FM_COMPOSER_SELECTED_FIRST" "$plain")
     next=$((FM_COMPOSER_SELECTED_LAST + 1))
     while :; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
@@ -1500,6 +1588,7 @@ _fm_composer_select_cursorless() {
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
+      _fm_composer_row_is_muse_hint "$(_fm_composer_screen_row "$next" "$screen")" "$prompt" "$styled" && break
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
@@ -1547,7 +1636,7 @@ $caps
 EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
-  _fm_composer_select_cursorless "$plain" || return 1
+  _fm_composer_select_cursorless "$plain" "$screen" "$styled" || return 1
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
@@ -1665,7 +1754,7 @@ EOF
     # not apply and a swallowed Enter on a long message still reads pending
     # and earns its retry.
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -gt "$FM_COMPOSER_SCAN_BARE_ROW" ] \
-       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"; then
+       && _fm_composer_wrap_region_ok "$plain" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy" "$screen" "$styled"; then
       _fm_composer_classify_bare_wrap "$screen" "$styled" "$FM_COMPOSER_SCAN_BARE_ROW" "$cy"
       return 0
     fi
@@ -1687,7 +1776,7 @@ EOF
   # No cursor: the bottom-most shape wins, with the pi-separator staleness
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
-  if ! _fm_composer_select_cursorless "$plain"; then
+  if ! _fm_composer_select_cursorless "$plain" "$screen" "$styled"; then
     printf 'unknown'
     return 0
   fi
