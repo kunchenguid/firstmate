@@ -645,9 +645,10 @@ It uses the fact to decide whether the running remote agent must be replaced to 
 Retire a remote second mate with the normal guarded command:
 
 ```sh
-bin/fm-teardown.sh <id>
+bin/fm-teardown.sh <id> --retire-secondmate <id>
 ```
 
+The `--retire-secondmate` value must name the exact home being retired; a remote route carries the same per-target authority as a local one, and the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns that contract.
 Retirement is executed on the configured host.
 It refuses while any of these holds:
 

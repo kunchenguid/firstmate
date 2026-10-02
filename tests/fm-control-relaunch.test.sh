@@ -1817,6 +1817,56 @@ test_spawn_relaunch_refuses_an_unrecorded_task() {
   pass "fm-spawn --relaunch: an unrecorded task is refused"
 }
 
+# A relaunch adopts the recorded Herdr endpoint without renaming its tab, so
+# the human-readable task label the creating spawn recorded is still exactly
+# the label the tab wears and must survive the relaunch's metadata
+# republication verbatim (the replacement's brief may carry a changed title,
+# so recomputing the label would record text the tab does not show).
+test_spawn_relaunch_preserves_the_recorded_herdr_task_label() {
+  local dir wt out rc
+  dir=$(new_case herdr-label rl50)
+  add_ship_task "$dir" rl50 claude
+  make_herdr_stub "$dir"
+  # The endpoint this case relaunches is AGENT-FREE but still present: its
+  # recorded pane must read back, so seed it exactly as the record names it.
+  # Without this the pane reads structurally gone, and the rebind path (endpoint
+  # proven absent) correctly mints a fresh tab instead of adopting this one.
+  printf '%s' 'pane-rl50' > "$dir/fake/herdr-pane"
+  wt=$(meta_field "$dir" rl50 worktree)
+  cat > "$dir/home/state/rl50.meta" <<EOF
+window=fake-herdr-session:pane-rl50
+endpoint_task_id=rl50
+worktree=$wt
+project=$dir/proj
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-rl50
+model=default
+effort=default
+backend=herdr
+herdr_session=fake-herdr-session
+herdr_workspace_id=ws-rl50
+herdr_tab_id=tab-rl50
+herdr_pane_id=pane-rl50
+herdr_task_label=Paint the fence (rl50)
+EOF
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl50 --relaunch); rc=$?
+  expect_code 0 "$rc" \
+    "a Herdr relaunch against the agent-free recorded endpoint should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl50 herdr_task_label)" = 'Paint the fence (rl50)' ] \
+    || fail "relaunch dropped or rewrote the recorded Herdr task label: '$(meta_field "$dir" rl50 herdr_task_label)'"
+  [ "$(meta_field "$dir" rl50 herdr_tab_id)" = tab-rl50 ] \
+    || fail "relaunch replaced the recorded Herdr tab"
+  if grep -q 'tab rename' "$dir/fake/herdr-log"; then
+    fail "relaunch relabeled the adopted endpoint's tab"
+  fi
+  pass "fm-spawn --relaunch: the recorded herdr_task_label survives republication verbatim"
+}
+
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   local dir out rc
   dir=$(new_case wrongcwd rl18)
@@ -2443,6 +2493,7 @@ test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
+test_spawn_relaunch_preserves_the_recorded_herdr_task_label
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
