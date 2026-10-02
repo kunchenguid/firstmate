@@ -1033,7 +1033,13 @@ Run `bin/fm-sandbox.sh probe` on a host before enabling the flag, and see [`docs
 The wrapper covers the worker launch boundary that spawn and relaunch share; cleanup deliberately runs outside the sandbox with full host privileges, so cleanup is unchanged when the flag is on.
 Sandboxing the agent process does not isolate the pane shell, the terminal daemon, or same-user processes that run outside the worker.
 
-Portable regression coverage lives in [`tests/fm-sandbox.test.sh`](../tests/fm-sandbox.test.sh), [`tests/fm-sandbox-spawn.test.sh`](../tests/fm-sandbox-spawn.test.sh), and the relaunch case in [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh); the live guard is in the `live-harness-optin` family.
+Portable regression coverage lives in [`tests/fm-sandbox.test.sh`](../tests/fm-sandbox.test.sh), [`tests/fm-sandbox-spawn.test.sh`](../tests/fm-sandbox-spawn.test.sh), the secondmate inheritance cases in [`tests/fm-secondmate-harness.test.sh`](../tests/fm-secondmate-harness.test.sh), and the relaunch case in [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh); the live guard is in the `live-harness-optin` family.
+
+### Inheritance
+
+`config/worker-sandbox` and `config/worker-sandbox-settings.json` are inherited into secondmate homes under the primary-authoritative inherited-local-material contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate's own workers run under the same sandbox.
+Because the posture is fail-closed, a secondmate launch that does not leave both files in the child home refuses rather than coming up with the sandbox silently off.
+The refusal covers a failed copy, a skipped inheritance, and any other path that leaves the child without the flag or its settings.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

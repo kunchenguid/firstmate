@@ -3029,9 +3029,23 @@ if [ "$KIND" = secondmate ]; then
     CONFIG_INHERIT_LOCK_HELD=1
     # Inheritance propagation: push the primary-authoritative live-safe local inheritance
     # surface into this secondmate home (fm-config-inherit-lib.sh).
-    FM_CONFIG_INHERIT_LIVE=1 \
-      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" ||
+    if ! FM_CONFIG_INHERIT_LIVE=1 \
+      propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA"; then
       echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
+    fi
+  fi
+  # config/worker-sandbox is a fail-closed safety posture and inheritance is
+  # primary-authoritative, so a secondmate home that did not end up with the
+  # primary's opt-in and its settings would launch its OWN workers unsandboxed -
+  # the escape this opt-in exists to prevent. Verify the postcondition however
+  # inheritance returned, and however it was skipped, and refuse the launch
+  # rather than continue with the sandbox silently off.
+  if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+    if [ ! -e "$PROJ_ABS/config/worker-sandbox" ] ||
+      [ ! -e "$PROJ_ABS/config/worker-sandbox-settings.json" ]; then
+      echo "error: secondmate $ID did not inherit config/worker-sandbox for $PROJ_ABS while this home has it enabled; refusing to launch so its own workers cannot run unsandboxed" >&2
+      exit 1
+    fi
   fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"

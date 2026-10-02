@@ -46,6 +46,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-ff-lib.sh"
 # shellcheck source=/dev/null
@@ -484,8 +486,10 @@ make_seeded_home() {
 # spawn_secondmate <world> <id> <home> [explicit-harness]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE over a
-# blinded ancestry walk pins detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
-# non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
+# blinded ancestry walk pins detect_own. stdout and stderr are discarded (the
+# local-HEAD ff sync harmlessly skips a non-worktree home); the function returns
+# fm-spawn's own exit status so a case can assert a refusal. Inspect
+# <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
@@ -500,10 +504,64 @@ spawn_secondmate() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1 || true
+    "$ROOT/bin/fm-spawn.sh" "${spawn_args[@]}" >/dev/null 2>&1
 }
 
 meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
+
+# config/worker-sandbox must reach a secondmate home: inheritance is
+# primary-authoritative, and a child home that failed to receive the opt-in
+# would launch its own workers unsandboxed. A failed copy must refuse the launch
+# instead of continuing with the sandbox silently off.
+test_spawn_refuses_when_sandbox_inheritance_fails() {
+  local w sm rc
+  w="$TMP_ROOT/spawn-sandbox-fail"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  # Force inheritance to fail: a regular file where the child home's config
+  # directory must be created, so no inherited item can land.
+  printf 'not-a-directory\n' > "$sm/config"
+
+  spawn_secondmate "$w" sm "$sm"
+  rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a secondmate spawn whose config/worker-sandbox inheritance failed must refuse while the primary has the sandbox enabled"
+  [ ! -f "$w/home/state/sm.meta" ] \
+    || fail "a refused sandbox-inheritance spawn must not publish secondmate metadata"
+  [ ! -e "$sm/config/worker-sandbox" ] \
+    || fail "the child home must not hold a sandbox flag after a failed copy"
+  pass "A5 spawn: a failed config/worker-sandbox inheritance refuses the launch, so no descendant worker can start unsandboxed"
+}
+
+# The successful path still launches, and the child home ends up holding both
+# files the primary is authoritative for.
+test_spawn_inherits_sandbox_flag_and_settings() {
+  local w sm fakebin
+  w="$TMP_ROOT/spawn-sandbox-ok"
+  sm="$w/sm"
+  mkdir -p "$w/home/config"
+  : > "$w/home/config/worker-sandbox"
+  printf '%s\n' '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$w/home/config/worker-sandbox-settings.json"
+  make_seeded_home "$sm" sm
+  # An enabled sandbox wraps the secondmate agent's own launch, so the fixture
+  # needs a runtime the wrapped launch can pass its readiness probe with.
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+
+  spawn_secondmate "$w" sm "$sm" \
+    || fail "a secondmate spawn with a working sandbox inheritance must succeed"
+  [ -f "$w/home/state/sm.meta" ] || fail "the successful spawn must publish secondmate metadata"
+  [ -e "$sm/config/worker-sandbox" ] \
+    || fail "the child home must inherit the enabled config/worker-sandbox flag"
+  [ -e "$sm/config/worker-sandbox-settings.json" ] \
+    || fail "the child home must inherit the sandbox settings"
+  pass "A5 spawn: a working inheritance carries config/worker-sandbox and its settings into the secondmate home"
+}
 
 # Split active: crew-harness=claude + secondmate-harness=codex. The secondmate
 # AGENT launches on codex; its own crewmates inherit claude; secondmate-harness
@@ -2725,6 +2783,8 @@ test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib
 test_spawn_split_and_inherit
+test_spawn_refuses_when_sandbox_inheritance_fails
+test_spawn_inherits_sandbox_flag_and_settings
 test_spawn_backward_compat_crew_fallback
 test_spawn_bare_backward_compat
 test_spawn_explicit_harness_wins
