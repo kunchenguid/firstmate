@@ -109,7 +109,8 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      # A child's PPID names this subshell on every Bash; BASHPID needs 4.0.
+      /bin/sh -c 'echo "$PPID"' > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -199,35 +200,96 @@ test_a_named_owner_that_is_gone_ends_the_command() {
   pass "fm_exec_timed ends the command when its named owner is already gone"
 }
 
-# With no named owner the calling script is captured before the watchdog
-# starts, so a script that dies while its subshell is still on the way into
-# fm_exec_timed - the watchdog then starts already reparented - is still
-# detected instead of leaving the command running to its bound.
-test_an_owner_that_dies_during_startup_ends_the_command() {
-  local dir watchdog started
-  dir="$TMP_ROOT/startup-owner"
-  mkdir -p "$dir"
-  # shellcheck disable=SC2016
-  PATH=$PERL_ONLY bash -c '
-    . "$1/bin/fm-timeout-lib.sh"
-    (
-      echo "$BASHPID" > "$2/watchdog"
-      while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
-      fm_exec_timed 60 1 bash -c "exec sleep 300"
-    ) >/dev/null 2>&1 &
-    exit 0
-  ' _ "$ROOT" "$dir"
-  wait_for_file "$dir/watchdog"
-  watchdog=$(cat "$dir/watchdog")
+# Waits for the process recorded in <dir>/watchdog to end, failing after 15s.
+wait_for_watchdog_exit() {  # <dir> <failure-message>
+  local watchdog started
+  wait_for_file "$1/watchdog"
+  watchdog=$(cat "$1/watchdog")
   started=$SECONDS
   while kill -0 "$watchdog" 2>/dev/null; do
     if [ "$((SECONDS - started))" -ge 15 ]; then
       kill -KILL "$watchdog" 2>/dev/null || true
-      fail "a watchdog whose owner died during startup ran on toward its bound"
+      fail "$2"
     fi
     sleep 0.02
   done
+}
+
+# With no named owner the calling script is captured before the watchdog
+# starts, so a script that dies while its subshell is still on the way into
+# fm_exec_timed - the watchdog then starts already reparented - is still
+# detected instead of leaving the command running to its bound.
+#
+# Which owner that is turns on whether the call sits in a subshell, and Bash
+# 3.2 (stock macOS) has no BASHPID to tell: each case also runs with BASHPID
+# unset, which takes the same path on a newer Bash.
+test_an_owner_that_dies_during_startup_ends_the_command() {
+  local dir mode
+  for mode in with-bashpid without-bashpid; do
+    dir="$TMP_ROOT/startup-owner-$mode"
+    mkdir -p "$dir"
+    # shellcheck disable=SC2016
+    PATH=$PERL_ONLY bash -c '
+      [ "$3" = with-bashpid ] || unset BASHPID
+      . "$1/bin/fm-timeout-lib.sh"
+      (
+        /bin/sh -c "echo \"\$PPID\"" > "$2/watchdog"
+        while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
+        fm_exec_timed 60 1 bash -c "exec sleep 300"
+      ) >/dev/null 2>&1 &
+      exit 0
+    ' _ "$ROOT" "$dir" "$mode"
+    wait_for_watchdog_exit "$dir" \
+      "a watchdog whose owner died during startup ran on toward its bound ($mode)"
+  done
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
+# Called outside a subshell the call replaces the script itself, so the owner
+# is the script's parent: a parent that dies while the script is still on its
+# way into fm_exec_timed is detected too, although the watchdog never sees its
+# own parent change.
+test_a_parent_that_dies_before_an_unsubshelled_call_ends_the_command() {
+  local dir mode
+  for mode in with-bashpid without-bashpid; do
+    dir="$TMP_ROOT/startup-parent-$mode"
+    mkdir -p "$dir"
+    # shellcheck disable=SC2016
+    PATH=$PERL_ONLY bash -c '
+      bash -c '\''
+        [ "$3" = with-bashpid ] || unset BASHPID
+        . "$1/bin/fm-timeout-lib.sh"
+        echo "$$" > "$2/watchdog"
+        while kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done
+        fm_exec_timed 60 1 bash -c "exec sleep 300"
+      '\'' _ "$@" >/dev/null 2>&1 &
+      # Stay until the script is up: a shell started after its parent exited
+      # records the reaper as its parent instead.
+      i=0
+      while [ ! -s "$2/watchdog" ] && [ "$i" -lt 500 ]; do
+        i=$((i + 1))
+        sleep 0.02
+      done
+    ' _ "$ROOT" "$dir" "$mode"
+    wait_for_watchdog_exit "$dir" \
+      "a watchdog whose script's parent died before the call ran on toward its bound ($mode)"
+  done
+  pass "fm_exec_timed ends an unsubshelled command when the script's parent is already gone"
+}
+
+# The bound itself must not depend on BASHPID either: a shell without it still
+# runs the command and reports the command's own status.
+test_bounds_a_command_on_a_shell_without_bashpid() {
+  local out rc=0
+  # shellcheck disable=SC2016
+  out=$(PATH=$PERL_ONLY bash -c '
+    unset BASHPID
+    . "$1/bin/fm-timeout-lib.sh"
+    ( fm_exec_timed 5 1 bash -c "echo ran; exit 7" )
+  ' _ "$ROOT" 2>&1) || rc=$?
+  [ "$rc" -eq 7 ] || fail "a shell without BASHPID did not pass the command's status through (rc=$rc: $out)"
+  [ "$out" = ran ] || fail "a shell without BASHPID printed '$out'"
+  pass "fm_exec_timed bounds a command on a shell that has no BASHPID"
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a
@@ -337,6 +399,8 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_a_parent_that_dies_before_an_unsubshelled_call_ends_the_command
+test_bounds_a_command_on_a_shell_without_bashpid
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything

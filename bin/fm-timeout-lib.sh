@@ -221,7 +221,11 @@ fm_exec_timed() {  # <seconds> <grace-seconds> <command...>
     exit 125
   fi
   owner=${FM_EXEC_TIMED_OWNER_PID:-$$}
-  [ "$owner" != "$BASHPID" ] || owner=$PPID
+  # Bash 3.2 has no BASHPID, so exec a child shell whose PPID is this frame
+  # (fm_current_pid's idiom in fm-wake-lib.sh). The shell is named by absolute
+  # path because a caller's PATH need not hold one, and a failed lookup would
+  # leave the frame empty and the owner silently unresolved.
+  [ "$owner" != "${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}" ] || owner=$PPID
   unset FM_EXEC_TIMED_OWNER_PID
   if command -v perl >/dev/null 2>&1; then
     exec perl -MPOSIX=WNOHANG,setpgid -MTime::HiRes=time -e '
