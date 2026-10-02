@@ -331,13 +331,13 @@ function validIdaResultWake(
   }
 }
 
-function hasOpenNeedsDecision(
+function openDecisions(
   lines: readonly string[],
   resolveVerb: string,
   heldVerb: string,
   reservedPrefixes: readonly string[],
-): boolean {
-  const open = new Map<string, "needs-decision" | "blocked">();
+): Map<string, { verb: "needs-decision" | "blocked"; note: string }> {
+  const open = new Map<string, { verb: "needs-decision" | "blocked"; note: string }>();
   for (const line of lines) {
     const verb = statusLineVerb(line);
     if (!["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) continue;
@@ -346,10 +346,20 @@ function hasOpenNeedsDecision(
     const note = statusLineNote(line);
     const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
     if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
-    if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
+    if (verb === "needs-decision" || verb === "blocked") open.set(key, { verb, note });
     else open.delete(key);
   }
-  return [...open.values()].includes("needs-decision");
+  return open;
+}
+
+function hasOpenNeedsDecision(
+  lines: readonly string[],
+  resolveVerb: string,
+  heldVerb: string,
+  reservedPrefixes: readonly string[],
+): boolean {
+  return [...openDecisions(lines, resolveVerb, heldVerb, reservedPrefixes).values()]
+    .some((decision) => decision.verb === "needs-decision");
 }
 
 // Same record grammar as fm_wake_grant_rows_valid: a present claim is a

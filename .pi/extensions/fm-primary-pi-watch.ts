@@ -36,7 +36,6 @@ import {
   dispositionForWakeTrigger,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
-  lifecycleModesForWake,
   scopeForUnreadWakeWithLifecycle,
 } from "./lib/fm-branch-dispatch.ts";
 import {
@@ -727,7 +726,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (!repairFailed) {
-      const modes = await lifecycleModesForWake(fmRoot, fmHome, state);
+      const { modes } = await scopeForUnreadWakeWithLifecycle(fmRoot, fmHome, state, false);
       if (!generationIsLive(owner)) return false;
       const branchDelivery = offerWakeToBranch(message, pending, modes);
       if (branchDelivery) {

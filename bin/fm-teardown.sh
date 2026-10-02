@@ -891,6 +891,14 @@ TEARDOWN_LIFECYCLE_MODE=$(fm_task_lifecycle mode "$ID") || exit 1
 case "$TEARDOWN_LIFECYCLE_MODE" in
   open) echo 'REFUSED: task goal is still open; reconcile completion or explicit archive before cleanup' >&2; exit 1 ;;
   unknown) echo 'REFUSED: task goal state is unknown; no cleanup performed' >&2; exit 1 ;;
+  legacy)
+    # Ordinary lifecycle-free continuation retains semantic acceptance in the
+    # existing task body. Historical legacy tasks without that block keep the
+    # prior landed-work cleanup behavior.
+    # shellcheck source=bin/fm-task-progress-lib.sh
+    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+    fm_task_progress_completion_guard "$ID" || exit $?
+    ;;
 esac
 ENDPOINT_PHASE_DONE=0
 if [ "$ENDPOINT_ONLY" = 1 ] || { { [ "$TEARDOWN_LIFECYCLE_MODE" = accepted ] || [ "$TEARDOWN_LIFECYCLE_MODE" = archived ]; } && [ "$(fm_meta_get "$META" backend)" = herdr ]; }; then

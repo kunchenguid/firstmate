@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--idempotent] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -201,6 +201,9 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 ACTION_ID=
+IDEMPOTENT=0
+COMPACT_PROGRESS_TOKEN=
+COMPACT_PROGRESS_PAYLOAD_SHA=
 if [ "${1:-}" = --action-id ]; then
   [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
   ACTION_ID=$2
@@ -222,11 +225,49 @@ if [ -n "$TARGET_META" ]; then
     # shellcheck source=bin/fm-task-lifecycle-lib.sh
     . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     if [ -z "$ACTION_ID" ]; then
-      fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK" || exit 1
-      if [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
-        fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {
-          echo 'REFUSED: delegated steer requires --action-id' >&2; exit 6;
+      if ! fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK"; then
+        if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ] &&
+          printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -e --arg task "$LEASE_GUARD_TASK" \
+            'type == "object" and (.[$task] | type == "string" and length > 0)' >/dev/null 2>&1; then
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: lifecycle effect requires exact readback or MAIN reconciliation" >&2
+          exit 6
+        fi
+        exit 1
+      fi
+      if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
+        branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
+        printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
+          'type == "array" and (index("*") != null or index($task) != null)' >/dev/null 2>&1 || {
+          echo 'REFUSED: task is outside this exact branch admission' >&2; exit 6;
         }
+        [ -n "$branch_progress_token" ] || {
+          echo 'REFUSED: compact continuation may steer only its token-bound task' >&2; exit 6;
+        }
+        # shellcheck source=bin/fm-task-progress-lib.sh
+        . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+        branch_current_progress=$(fm_task_progress_read "$LEASE_GUARD_TASK") || exit 1
+        [ "$(printf '%s' "$branch_current_progress" | jq -r '.record_token')" = "$branch_progress_token" ] || {
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: task intent, progress, or executor generation changed after branch admission" >&2; exit 6;
+        }
+        printf '%s' "$branch_current_progress" | jq -e \
+          '.task_state == "in_flight" and .task_held == "no" and .task_blocked == "no" and
+           .remaining_gap != "" and .next_step != ""' >/dev/null || {
+          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact task progress no longer permits continuation" >&2; exit 6;
+        }
+        COMPACT_PROGRESS_TOKEN=$branch_progress_token
+        COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
+          'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
+        FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
+      fi
+      if [ "$(fm_lease_actor)" = branch ] &&
+        [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
+        branch_lifecycle=$(fm_task_lifecycle read "$LEASE_GUARD_TASK") || exit 1
+        if printf '%s' "$branch_lifecycle" | jq -e \
+          '.schema == "fm-task-lifecycle.v2" and (.next_action.phase == "prepared" or
+           .next_action.phase == "attempted" or .next_action.phase == "uncertain")' >/dev/null; then
+          echo 'REFUSED: delegated steer with an active lifecycle action requires --action-id' >&2
+          exit 6
+        fi
       fi
     fi
   fi
@@ -264,6 +305,10 @@ while :; do
     esac
     shift 2
     ;;
+  --idempotent)
+    IDEMPOTENT=1
+    shift
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -283,6 +328,11 @@ while :; do
   *) break ;;
   esac
 done
+
+if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$ACTION_ID$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+  echo 'REFUSED: --idempotent is only for an ordinary Branch continuation to its admitted task' >&2
+  exit 6
+fi
 
 if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
   [ -n "$ACTION_ID" ] && [ -n "$EXPECTED_GENERATION" ] && [ -n "$TARGET_META" ] || exit 2
@@ -461,6 +511,10 @@ if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ 
   echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
   exit 6
 fi
+if [ -n "$COMPACT_PROGRESS_TOKEN" ] && [ "${1:-}" = --key ]; then
+  echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation authorizes only its exact MAIN-authored text next_step" >&2
+  exit 6
+fi
 if [ "${1:-}" = "--key" ]; then
   case "$*" in
   *--resolve-key*)
@@ -481,6 +535,13 @@ else
     echo "error: a text steer requires a nonempty message; nothing was sent" >&2
     exit 1
   fi
+  if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+    compact_message_sha=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
+    if [ "$IDEMPOTENT" != 1 ] || [ "$compact_message_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ]; then
+      echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation requires --idempotent with the exact current MAIN-authored next_step" >&2
+      exit 6
+    fi
+  fi
   # Keep the answer text for the closing resolved note.
   RESOLVE_ANSWER_TEXT=$MESSAGE
   # Text addressed to a task selector rides the inbox unless it is a
@@ -497,6 +558,9 @@ else
   fi
   if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
     echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
+  fi
+  if [ "$IDEMPOTENT" = 1 ] && [ "$INBOX_PLANE" != 1 ]; then
+    echo 'REFUSED: --idempotent requires ordinary task inbox text' >&2; exit 6
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -519,8 +583,30 @@ else
         [ "$CURRENT_INBOX_SPAWN_GEN" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } ||
       [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
       fm_lock_release "$INBOX_META_LOCK"
+      if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: task retired or changed executor generation during compact delivery" >&2
+        exit 6
+      fi
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
+    fi
+    if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
+      branch_locked_progress=$(fm_task_progress_read "$INBOX_TASK_ID") || {
+        fm_lock_release "$INBOX_META_LOCK"
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: compact task progress became unreadable during delivery" >&2
+        exit 6
+      }
+      branch_locked_payload_sha=$(printf '%s' "$branch_locked_progress" | python3 -c \
+        'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || {
+        fm_lock_release "$INBOX_META_LOCK"
+        exit 1
+      }
+      if [ "$(printf '%s' "$branch_locked_progress" | jq -r '.record_token')" != "$COMPACT_PROGRESS_TOKEN" ] ||
+        [ "$branch_locked_payload_sha" != "$COMPACT_PROGRESS_PAYLOAD_SHA" ]; then
+        fm_lock_release "$INBOX_META_LOCK"
+        echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$INBOX_TASK_ID: task intent, progress, or executor generation changed after branch admission" >&2
+        exit 6
+      fi
     fi
     if [ -n "$ACTION_ID" ]; then
       BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
@@ -536,6 +622,12 @@ else
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then
         fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
       fi
+    elif [ "$IDEMPOTENT" = 1 ]; then
+      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' \
+        "$CURRENT_INBOX_SPAWN_GEN" "$COMPACT_PROGRESS_TOKEN") || inbox_write_rc=$?
+      case "$INBOX_RECORD" in
+        "$STATE/$INBOX_TASK_ID.inbox/handled/"*) INBOX_ALREADY_HANDLED=1 ;;
+      esac
     else
       INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
     fi
@@ -555,7 +647,9 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    if [ "${INBOX_ALREADY_HANDLED:-0}" != 1 ]; then
+      fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fi
     case "$ring_rc" in
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     3) echo "fm-send: doorbell native submission skipped because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;

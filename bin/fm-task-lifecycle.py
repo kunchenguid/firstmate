@@ -1466,10 +1466,62 @@ class Task:
                     'input authority was rerouted or answered')
         return value, proof
 
+    def intent_body(self, raw, value):
+        body = raw.decode()
+        heading = "## Captain's intent\n"
+        require(body.count(heading) == 1, 'brief needs one canonical Captain intent subsection')
+        start = body.index(heading) + len(heading)
+        end = re.search(r'^#{1,2} ', body[start:], flags=re.M)
+        position = start + end.start() if end else len(body)
+        body = body[:position].rstrip('\n') + '\n\n' + value['text'] + '\n\n' + body[position:]
+        # Newer briefs carry an additional pipeline-only intent subsection.
+        pipeline = '## Captain intent authorized for --intent\n'
+        if pipeline in body:
+            require(body.count(pipeline) == 1, 'ambiguous pipeline intent subsection')
+            body = body.rstrip('\n') + '\n\n' + value['text'] + '\n'
+        result = body.encode()
+        require(len(result) <= MAX_BYTES, 'updated brief too large')
+        return result
+
+    def intent_plan(self, args):
+        value, _proof = self.native_input(args)
+        if self.read(current=False) is not None:
+            return {'task_id': self.id, 'mode': 'lifecycle'}
+        raw = regular(self.directory / 'brief.md')
+        return {'task_id': self.id, 'mode': 'compact', 'before_sha256': digest(raw),
+                'after_sha256': digest(self.intent_body(raw, value))}
+
     def update_brief(self, args):
         value, proof = self.native_input(args)
         record = self.read(current=False)
-        require(record is not None and record['disposition'] == 'open', 'intent update requires an enrolled open goal')
+        if record is None:
+            before = value.get('brief_before_sha256')
+            after = value.get('brief_after_sha256')
+            require(isinstance(before, str) and re.fullmatch(r'[a-f0-9]{64}', before) and
+                    isinstance(after, str) and re.fullmatch(r'[a-f0-9]{64}', after),
+                    'compact intent update requires its persisted brief plan')
+            brief = self.directory / 'brief.md'
+            raw = regular(brief)
+            if digest(raw) == after:
+                return {'task_id': self.id, 'mode': 'compact', 'brief_sha256': after}
+            require(digest(raw) == before, 'brief changed during compact intent append')
+            updated = self.intent_body(raw, value)
+            require(digest(updated) == after, 'compact intent plan changed')
+            fd, name = tempfile.mkstemp(prefix='.brief.', dir=self.directory)
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(updated); stream.flush(); os.fsync(stream.fileno())
+                os.replace(name, brief)
+                directory_fd = os.open(self.directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+            return {'task_id': self.id, 'mode': 'compact', 'brief_sha256': after}
+        require(record['disposition'] == 'open', 'intent update requires an enrolled open goal')
         require((self.generation() or 'unassigned-g1') == record['execution_generation'], 'stale execution generation')
         updates = record.get('intent_updates', {})
         key = digest((proof['session_file'] + '\0' + args.input).encode())
@@ -1491,20 +1543,7 @@ class Task:
             require(not action or action['phase'] in ('confirmed', 'refused'), 'outstanding action requires readback before intent update')
             require(len(updates) < 128, 'intent receipt history full; explicit reconciliation required')
             # The scope is exact append-only user words in the owned subsection.
-            body = raw.decode()
-            heading = "## Captain's intent\n"
-            require(body.count(heading) == 1, 'brief needs one canonical Captain intent subsection')
-            start = body.index(heading) + len(heading)
-            end = re.search(r'^#{1,2} ', body[start:], flags=re.M)
-            position = start + end.start() if end else len(body)
-            body = body[:position].rstrip('\n') + '\n\n' + value['text'] + '\n\n' + body[position:]
-            # Newer briefs carry an additional pipeline-only intent subsection.
-            pipeline = '## Captain intent authorized for --intent\n'
-            if pipeline in body:
-                require(body.count(pipeline) == 1, 'ambiguous pipeline intent subsection')
-                body = body.rstrip('\n') + '\n\n' + value['text'] + '\n'
-            after = body.encode()
-            require(len(after) <= MAX_BYTES, 'updated brief too large')
+            after = self.intent_body(raw, value)
             prior = {'phase': 'prepared', 'proof': proof, 'before': digest(raw), 'after': digest(after),
                      'content': body}
             updates[key] = prior
@@ -2369,7 +2408,7 @@ class Task:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'observe-receipt', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'policy', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-inspect', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
+    parser.add_argument('operation', choices=('read', 'inspect', 'assess', 'intent-plan', 'update-brief', 'refresh', 'owner-receipt', 'init', 'reconcile', 'action', 'observe', 'coordinate', 'branch-patch', 'effect', 'bind-inbox', 'observe-receipt', 'handoff-binding', 'handoff-effect', 'readback', 'mode', 'modes', 'policy', 'due', 'authorize', 'link-cleanup', 'cleanup-read', 'completion-read', 'cleanup-copy-inspect', 'cleanup-copy-bind', 'cleanup-copy-read', 'cleanup-preserve', 'cleanup-binding', 'bind-execution', 'refresh-brief'))
     parser.add_argument('task', nargs='?')
     parser.add_argument('--expected-revision', type=int)
     parser.add_argument('--record')
@@ -2415,6 +2454,8 @@ def main():
             result = task.inspect(args.evidence)
         elif args.operation == 'assess':
             result = task.assess(args)
+        elif args.operation == 'intent-plan':
+            result = task.intent_plan(args)
         elif args.operation == 'update-brief':
             result = task.update_brief(args)
         elif args.operation == 'refresh':

@@ -103,9 +103,11 @@ fm_task_lifecycle_execution_allowed() { # <task>; legacy behavior stays compatib
 # under the lease/meta lock before retrying the acknowledgement.
 fm_task_lifecycle_ack_guard() { # <task>
   [ "${PI_CODING_AGENT:-}" = true ] || return 0
-  local id=$1 data="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" record
+  local id=$1 data="${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}" path record
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   [ -f "$data/$id/brief.md" ] || return 0
+  path="$data/$id/lifecycle.json"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   record=$(fm_task_lifecycle read "$id") || return 1
   [ "$record" != null ] || {
     printf 'REFUSED: retain task %s with fm-task-state.sh enroll before acknowledging its outcome\n' "$id" >&2

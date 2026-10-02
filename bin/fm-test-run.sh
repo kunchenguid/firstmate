@@ -289,7 +289,7 @@ family_for_basename() {
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|fm-task-lifecycle.test.sh|\
+    fm-transition-lib.test.sh|fm-task-lifecycle.test.sh|fm-task-progress.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -698,6 +698,7 @@ tests/fm-supervision-events.test.sh 719
 tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 5952
 tests/fm-task-inbox.test.sh 25369
+tests/fm-task-progress.test.sh 2923
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
 tests/fm-teardown-lifecycle-herdr-e2e.test.sh 98268
@@ -1305,6 +1306,10 @@ families_for_changed_path() {
     bin/fm-task-dispatch.sh|bin/fm-task-state.sh|bin/fm-task-retire.sh)
       printf '%s\n' "__script__:fm-aime-cloud-worker.test.sh"
       printf '%s\n' "__script__:fm-remote-agent.test.sh"
+      [ "$path" != bin/fm-task-state.sh ] || printf '%s\n' "__script__:fm-task-progress.test.sh"
+      ;;
+    bin/fm-task-progress.py|bin/fm-task-progress-lib.sh)
+      printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
     bin/fm-task-lifecycle.py|bin/fm-task-lifecycle-lib.sh)
       printf '%s\n' "__script__:fm-task-handoff.test.sh" "__script__:fm-pi-branch-extension.test.sh"

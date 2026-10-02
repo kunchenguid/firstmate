@@ -54,6 +54,7 @@ install_pi_branch_extension_fixture() {
     "$repo/node_modules/@earendil-works/pi-tui" \
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
+  cp "$ROOT/.pi/extensions/fm-periodic-stow.ts" "$repo/.pi/extensions/fm-periodic-stow.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-task-continuation.ts" "$repo/.pi/extensions/lib/fm-task-continuation.ts"
@@ -862,7 +863,7 @@ if (mainUserMessages.length !== 0) throw new Error("accepted wake leaked to main
 // generator-produced system prompt, no project resources, and the branch bash
 // carries the deterministic actor identity.
 const session = globalThis.__fmSessions[0];
-if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
+if (JSON.stringify(session.options.tools) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"])) {
   throw new Error(`unexpected tool order: ${JSON.stringify(session.options.tools)}`);
 }
 const loader = globalThis.__fmLoaders[0];
@@ -3064,7 +3065,7 @@ const globalSettings = {
 writeFileSync(`${process.env.FM_TEST_AGENT_DIR}/settings.json`, JSON.stringify(globalSettings));
 // The same observed startup state must restore the guarded bash independent
 // of release strings, while a package retaining it needs no adaptation.
-if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
+if (mode !== "stable") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"];
 
 registryModels.push(
   { provider: "anthropic", id: "main-model", api: "anthropic-messages" },
@@ -3108,7 +3109,7 @@ const lifecycle = globalThis.__fmLifecycle ?? [];
 if (lifecycle.indexOf("compat-session-start") < 0 || lifecycle.indexOf("compat-session-start") > lifecycle.indexOf("prompt")) {
   throw new Error(`the branch prompted before compatibility initialization: ${JSON.stringify(lifecycle)}`);
 }
-if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_branch_report"])) {
+if (JSON.stringify(session.getActiveToolNames()) !== JSON.stringify(["read", "bash", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"])) {
   throw new Error(`compatibility startup escaped the branch tool allowlist: ${JSON.stringify(session.getActiveToolNames())}`);
 }
 if (JSON.stringify(globalThis.__fmPackageLookups) !== JSON.stringify([
@@ -3187,7 +3188,7 @@ EOF
 
 test_codex_compat_package_failures_return_the_wake_to_main() {
   local mode repo home out status
-  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup unexpected-tools unrestorable-bash; do
+  for mode in settings absent malformed identity no-entry multiple-entries outside-entry resolve wrong-source wrong-scope wrong-origin wrong-path load startup missing-handoff unexpected-tools unrestorable-bash; do
     repo="$TMP_ROOT/codex-failure-$mode-root"
     home="$TMP_ROOT/codex-failure-$mode-home"
     mkdir -p "$home/state" "$home/config"
@@ -3219,9 +3220,10 @@ if (mode.startsWith("wrong-")) {
     { metadata: { source: "npm:pi-openai-codex-compat", scope: "user", origin: "package",
       [mode.slice(6)]: "untrusted" } };
 }
-if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report", "exec_command"];
+if (mode === "missing-handoff") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
+if (mode === "unexpected-tools") globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report", "exec_command"];
 if (mode === "unrestorable-bash") {
-  globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_branch_report"];
+  globalThis.__fmCompatActiveTools = ["read", "fm_task_continuation", "fm_task_handoff", "fm_branch_report"];
   globalThis.__fmRefuseToolRestore = true;
 }
 if (mode === "resolve") globalThis.__fmCompatResolveError = "synthetic resolver failure";
@@ -4671,11 +4673,12 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
-  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { syncBuiltinESMExports } from "node:module";
-import fs, { readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const originalReadFileSync = fs.readFileSync;
 let countedStatusPath = "";
@@ -4686,7 +4689,7 @@ fs.readFileSync = function(path, ...args) {
 };
 syncBuiltinESMExports();
 
-const { activateEligibleRowsOwner, scopeForUnreadWake, dispositionForWakeTrigger, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
+const { activateEligibleRowsOwner, scopeForUnreadWake, scopeForUnreadWakeWithLifecycle, dispositionForWakeTrigger, writeEligibleRowsSnapshot, releaseEligibleRowsSnapshot, BRANCH_ELIGIBLE_ROWS_FILE } =
   await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
 const project = `${process.env.FM_HOME}/projects/approved`;
@@ -4744,6 +4747,41 @@ writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\ttask-a.status\tneeds-decisi
 const needsDecisionOnly = scopeForUnreadWake(state, false);
 if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 || needsDecisionOnly.corrupted) {
   throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
+}
+
+mkdirSync(`${process.env.FM_HOME}/data`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/.tasks.toml`, 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
+writeFileSync(`${process.env.FM_HOME}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
+let command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-tasks-axi.sh`,
+  ["add", "task-a", "Keep the accepted behavior unchanged", "--kind", "ship", "--body", "Original scope.", "--start"],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME } });
+if (command.status !== 0) throw new Error(`task fixture failed: ${command.stderr}`);
+mkdirSync(`${process.env.FM_HOME}/data/task-a`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/data/task-a/brief.md`, "Keep the accepted behavior unchanged.\n");
+command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["progress", "task-a"],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME } });
+if (command.status !== 0) throw new Error(`progress fixture read failed: ${command.stderr}`);
+const progress = JSON.parse(command.stdout);
+command = spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`, ["update-progress", "task-a",
+  "--expected-token", progress.record_token, "--progress", JSON.stringify({ acceptance: "The existing contract passes",
+    current_state: "Validation requested a review decision", remaining_gap: "The finding is unresolved",
+    next_step: "Classify the finding against the accepted intent" })],
+  { encoding: "utf8", env: { ...process.env, FM_HOME: process.env.FM_HOME, FM_SUPERVISION_ACTOR: "main" } });
+if (command.status !== 0) throw new Error(`progress fixture update failed: ${command.stderr}`);
+
+writeFileSync(`${state}/task-a.status`, "needs-decision [key=product-scope]: choose a broader product contract\n");
+const genuineDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
+if (genuineDecision.scope.eligible || genuineDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
+  throw new Error(`compact fields moved a genuine decision away from MAIN: ${JSON.stringify(genuineDecision)}`);
+}
+
+const findingPath = `${process.env.FM_HOME}/data/task-a/nm-run-review-findings.txt`;
+writeFileSync(findingPath, "NM-1: restore the already accepted behavior\n");
+writeFileSync(`${state}/task-a.status`, `needs-decision [key=nm-run-review]: ask-user findings=NM-1 file=${findingPath}\n`);
+const noMistakesDecision = await scopeForUnreadWakeWithLifecycle(process.env.FM_ROOT_OVERRIDE, process.env.FM_HOME, state, false);
+if (noMistakesDecision.scope.eligible || noMistakesDecision.scope.eligibleSeqs.length !== 0 ||
+    noMistakesDecision.scope.needsDecisionKeys.join(",") !== "task-a.status") {
+  throw new Error(`an exact no-mistakes decision snapshot moved away from MAIN: ${JSON.stringify(noMistakesDecision)}`);
 }
 
 // A captain-held task's bounded stale recheck is itself a decision wake. It is
@@ -4914,7 +4952,6 @@ unlinkSync(`${state}/.main-eligible-rows`);
 // A MAIN claim is row-local: old claimed rows cannot poison an unrelated
 // new task's grant. The same task/endpoint trigger remains conservatively MAIN.
 const { strict: assert } = await import("node:assert");
-const { spawnSync } = await import("node:child_process");
 writeFileSync(`${state}/task-b.meta`, `project=${project}\nwindow=fm-b\n`);
 const mixedClaims = "1\t1\tsignal\ttask-a.status\told\n1\t2\tsignal\ttask-b.status\tnew\n";
 writeFileSync(`${state}/.wake-queue`, mixedClaims);
@@ -6002,14 +6039,815 @@ EOF
   pass "expired delegation refuses a bound branch report before storage"
 }
 
-test_branch_native_continuation_is_scoped_compact_and_material_only() {
+test_compact_progress_drives_branch_same_worker_continuation() {
+  local repo home fakebin out status
+  repo="$TMP_ROOT/compact-branch-root"
+  home="$TMP_ROOT/compact-branch-home"
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  install_pi_branch_extension_fixture "$repo"
+  PATH="$fakebin:$PATH" PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/state/procevent-claims" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot }; })()`);
+const { pi, fire, settle, sentToMain, mainTools, defaultSessionCtx, home, realRoot } = globalThis.__t;
+const { createHash } = await import("node:crypto");
+const { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } = await import("node:fs");
+const { spawnSync } = await import("node:child_process");
+
+mkdirSync(`${home}/state`, { recursive: true });
+mkdirSync(`${home}/data`, { recursive: true });
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${home}/.tasks.toml`, 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n');
+writeFileSync(`${home}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
+mkdirSync(`${home}/fakebin`, { recursive: true });
+writeFileSync(`${home}/fakebin/herdr`, `#!/bin/sh
+case "$1 $2" in
+  "status --json") printf '%s\\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' ;;
+  "agent --help") printf 'Commands:\\n  prompt  Submit a prompt to an agent\\n' ;;
+  "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\\n' "$3" ;;
+  "pane process-info") printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":101,"foreground_processes":[{"pid":102,"name":"pi","argv0":"pi"}]}}}\\n' "$4" ;;
+  "agent get") status=idle; [ "$3" = "w1:p2" ] && [ -f '${home}/state/other-working' ] && status=working
+    printf '{"result":{"agent":{"agent":"pi","pane_id":"%s","agent_status":"%s"}}}\\n' "$3" "$status" ;;
+  "agent prompt") printf '{"result":{"type":"agent_prompted","pane_id":"%s"}}\\n' "$3" ;;
+  "pane read") printf 'ready\\n' ;;
+  *) printf '{}\\n' ;;
+esac
+`);
+chmodSync(`${home}/fakebin/herdr`, 0o755);
+const projectDir = `${home}/project`;
+mkdirSync(projectDir, { recursive: true });
+writeFileSync(`${projectDir}/fixture.txt`, "fixture\n");
+for (const args of [
+  ["init", "-q", "-b", "fixture-branch", projectDir],
+  ["-C", projectDir, "add", "fixture.txt"],
+  ["-C", projectDir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "fixture"],
+]) {
+  const git = spawnSync("git", args, { encoding: "utf8" });
+  if (git.status !== 0) throw new Error(`project fixture failed: ${git.stderr}`);
+}
+const candidateBranch = spawnSync("git", ["-C", projectDir, "branch", "--show-current"], { encoding: "utf8" }).stdout.trim();
+const candidateHead = spawnSync("git", ["-C", projectDir, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout.trim();
+const otherProjectDir = `${home}/other-project`;
+mkdirSync(otherProjectDir, { recursive: true });
+writeFileSync(`${otherProjectDir}/fixture.txt`, "other fixture\n");
+for (const args of [
+  ["init", "-q", "-b", "other-branch", otherProjectDir],
+  ["-C", otherProjectDir, "add", "fixture.txt"],
+  ["-C", otherProjectDir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-q", "-m", "fixture"],
+]) {
+  const git = spawnSync("git", args, { encoding: "utf8" });
+  if (git.status !== 0) throw new Error(`other project fixture failed: ${git.stderr}`);
+}
+writeFileSync(`${home}/fakebin/no-mistakes`, `#!/bin/sh
+case "$1 $2" in
+  "axi status") [ -f '${home}/nm-status' ] || exit 1; cat '${home}/nm-status' ;;
+  "daemon status") exit 0 ;;
+  *) exit 0 ;;
+esac
+`);
+chmodSync(`${home}/fakebin/no-mistakes`, 0o755);
+process.env.PATH = `${home}/fakebin:${process.env.PATH}`;
+const run = (script, args, actor = "main", extra = {}) => spawnSync(`${realRoot}/bin/${script}`, args, {
+  encoding: "utf8",
+  env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state`,
+    FM_DATA_OVERRIDE: `${home}/data`, FM_SUPERVISION_ACTOR: actor, ...extra },
+});
+let result = run("fm-tasks-axi.sh", ["add", "viewer", "Make the viewer responsive", "--kind", "ship",
+  "--body", "Keep the existing task identity.", "--start"]);
+if (result.status !== 0) throw new Error(result.stderr);
+result = run("fm-tasks-axi.sh", ["add", "other", "Advance the existing dependent work", "--kind", "ship",
+  "--body", "Keep the existing dependent task identity.", "--start"]);
+if (result.status !== 0) throw new Error(result.stderr);
+writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${projectDir}\nworktree=${projectDir}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+mkdirSync(`${home}/data/viewer`, { recursive: true });
+writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive.\n");
+writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${otherProjectDir}\nworktree=${otherProjectDir}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+writeFileSync(`${home}/state/archive-target.meta`, `window=fixture:w1:p3\nendpoint_task_id=archive-target\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t3\nherdr_pane_id=w1:p3\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+let progress = run("fm-task-state.sh", ["progress", "viewer"]);
+if (progress.status !== 0) throw new Error(progress.stderr);
+let record = JSON.parse(progress.stdout);
+const fields = {
+  acceptance: "The same worker completes no-mistakes and MAIN verifies the requested behavior",
+  current_state: "Implementation checkpoint 4826e2b4 is committed",
+  remaining_gap: "The same worker has not started ordinary no-mistakes",
+  next_step: "Tell the existing viewer worker to start no-mistakes on checkpoint 4826e2b4",
+};
+let recordedNextStep = fields.next_step;
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(fields)]);
+if (result.status !== 0) throw new Error(result.stderr);
+record = JSON.parse(result.stdout);
+
+const entries = [];
+const mainFile = `${home}/main.jsonl`;
+writeFileSync(mainFile, JSON.stringify({ type: "session", version: 3, id: "compact-branch" }) + "\n");
+Object.assign(defaultSessionCtx, { isIdle: () => true, hasPendingMessages: () => false,
+  hasUI: false, ui: { getEditorText: () => "" } });
+Object.assign(defaultSessionCtx.sessionManager, { getSessionFile: () => mainFile,
+  getSessionId: () => "compact-branch", getLeafId: () => entries.at(-1)?.id,
+  getBranch: () => entries, getEntries: () => entries });
+pi.appendEntry = (customType, data) => {
+  const entry = { type: "custom", id: `main-${entries.length}`, parentId: entries.at(-1)?.id ?? null,
+    timestamp: new Date().toISOString(), customType, data };
+  entries.push(entry);
+  appendFileSync(mainFile, JSON.stringify(entry) + "\n");
+  return entry.id;
+};
+(await import(`${realRoot}/.pi/extensions/fm-periodic-stow.ts`)).default(pi);
+
+const routed = [];
+globalThis.__fmExecuteBranchBash = async (context) => {
+  routed.push({ command: context.command, actor: context.env.FM_SUPERVISION_ACTOR });
+  const executed = spawnSync("bash", ["-c", context.command], {
+    cwd: context.cwd, env: { ...context.env, PATH: `${home}/fakebin:${context.env.PATH}` }, encoding: "utf8",
+  });
+  if (executed.status !== 0) {
+    return { content: [{ type: "text", text: executed.stderr }], details: undefined, isError: true };
+  }
+  if (promptCount === 1) {
+    writeFileSync(`${home}/state/viewer.status`, "done: obsolete pre-validation worker status\n");
+    writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: running\n  head: ${candidateHead}\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,running,1s,"active now",123,1\n`);
+  } else if (promptCount === 2) {
+    writeFileSync(`${home}/state/viewer.status`, "done: obsolete intermediate worker status\n");
+    writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: running\n  head: ${candidateHead}\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,running,1s,"active now",123,2\n`);
+  }
+  return { content: [{ type: "text", text: executed.stdout || "instruction durably queued" }], details: undefined };
+};
+let promptCount = 0;
+let readResult;
+let deniedUpdate;
+let reportResult;
+let scopedRefusal;
+let staleRead;
+let staleHandoff;
+let rejectedObservation;
+let spoofedObservation;
+globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
+  promptCount += 1;
+  const expectedStep = recordedNextStep;
+  if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
+      text.includes("authority_ref") || text.includes('"evidence"')) {
+    throw new Error(`compact admission was incomplete or rich: ${text}`);
+  }
+  if (promptCount === 2 && !text.includes("run failed")) {
+    throw new Error(`Branch did not receive the changed executor result: ${text}`);
+  }
+  if (promptCount === 11 && !text.includes("checks green")) {
+    throw new Error(`Branch did not receive the goal-ready executor result: ${text}`);
+  }
+  const continuation = session.options.customTools.find((tool) => tool.name === "fm_task_continuation");
+  const handoff = session.options.customTools.find((tool) => tool.name === "fm_task_handoff");
+  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+  const bash = session.options.customTools.find((tool) => tool.name === "bash");
+  readResult = await continuation.execute("read", { action: "read", task: "viewer" });
+  if (readResult.isError || JSON.parse(readResult.content[0].text).next_step !== expectedStep) {
+    throw new Error(`bound compact read failed: ${JSON.stringify(readResult)}`);
+  }
+  const schema = continuation.parameters;
+  if (Object.keys(schema.properties).sort().join(",") !== "action,task" || schema.properties.action.const !== "read") {
+    throw new Error(`branch continuation schema is not admitted-task read only: ${JSON.stringify(schema)}`);
+  }
+  deniedUpdate = await continuation.execute("update", { action: "update", task: "viewer" });
+  if (!deniedUpdate.isError || !deniedUpdate.content[0].text.includes("read only")) {
+    throw new Error(`branch gained progress-write authority: ${JSON.stringify(deniedUpdate)}`);
+  }
+  if (promptCount === 1) {
+    scopedRefusal = await bash.execute("cross-scope", { command: `${realRoot}/bin/fm-send.sh other 'Unrelated steer.'` });
+    if (!scopedRefusal.isError || !scopedRefusal.content[0].text.includes("outside this exact branch admission")) {
+      throw new Error(`compact admission escaped its canonical task: ${JSON.stringify(scopedRefusal)}`);
+    }
+  }
+  const command = promptCount === 3
+    ? `${realRoot}/bin/fm-pr-check.sh viewer https://github.com/acme/viewer/pull/7`
+    : promptCount === 4
+      ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
+      : promptCount === 7
+        ? `${realRoot}/bin/fm-send.sh viewer --idempotent 'Run a different unauthorized checkpoint.'`
+      : promptCount >= 5 ? "" :
+        `${realRoot}/bin/fm-send.sh viewer --idempotent '${expectedStep}'`;
+  if (command) {
+    const sent = await bash.execute("continue", { command });
+    if (promptCount <= 2) {
+      if (sent.isError) throw new Error(`exact compact next_step was not routed: ${JSON.stringify(sent)}`);
+    } else if (promptCount === 7) {
+      if (!sent.isError || !sent.content[0].text.includes("FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:viewer")) {
+        throw new Error(`arbitrary compact same-worker text was not refused visibly: ${JSON.stringify(sent)}`);
+      }
+    } else if (promptCount === 5) {
+      if (!sent.isError) throw new Error("post-handoff failure fixture unexpectedly succeeded");
+    } else if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
+  } else {
+    const inspected = await bash.execute("inspect", { command: `${realRoot}/bin/fm-task-state.sh progress viewer` });
+    if (inspected.isError || JSON.parse(inspected.content[0].text).record_token !== JSON.parse(readResult.content[0].text).record_token) {
+      throw new Error(`read-only Bash inspection failed: ${JSON.stringify(inspected)}`);
+    }
+    const failed = await bash.execute("unchanged-failure", { command: "/bin/false" });
+    if (!failed.isError) throw new Error("unchanged failure fixture unexpectedly succeeded");
+    if (promptCount === 5) {
+      const params = { task: "viewer", target: "other", id: "viewer-to-other-r1",
+        instruction: "Continue the already-approved dependent step.", action_id: "viewer.g1.a1" };
+      const delivered = await handoff.execute("compact-handoff", params);
+      if (delivered.isError || JSON.parse(delivered.content[0].text).state !== "delivered" ||
+          !existsSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`)) {
+        throw new Error(`prepared compact handoff was not delivered: ${JSON.stringify(delivered)}`);
+      }
+    } else if (promptCount === 6) {
+      const unrelated = run("fm-send.sh", ["other", "Unrelated sender message."]);
+      if (unrelated.status !== 0) throw new Error(`unrelated target message failed: ${unrelated.stderr}`);
+    } else if (promptCount === 8) {
+      const refused = await handoff.execute("overflow-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
+        instruction: "Continue the second approved dependent step." });
+      if (!refused.isError || !refused.content[0].text.includes("does not authorize an exact cross-task handoff")) {
+        throw new Error(`oversized history bypassed compact handoff authority: ${JSON.stringify(refused)}`);
+      }
+    } else if (promptCount === 9) {
+      const rejected = await handoff.execute("rejected-handoff", { task: "viewer", target: "doomed", id: "viewer-to-doomed-r1",
+        instruction: "Continue the authorized dependency before it retires.", action_id: "viewer.g1.a2" });
+      rejectedObservation = rejected;
+      const rejectedResult = JSON.parse(rejected.content[0].text);
+      if (!rejected.isError || rejectedResult.status !== 7 || rejectedResult.state !== "rejected" ||
+          rejectedResult.change !== "uncertain") {
+        throw new Error(`terminal handoff rejection did not remain MAIN-owned: ${JSON.stringify(rejected)}`);
+      }
+      const spoofed = await handoff.execute("spoofed-source", { task: "other", target: "viewer", id: "spoofed-r1",
+        instruction: "Spoof the admitted source." });
+      spoofedObservation = spoofed;
+      if (!spoofed.isError || !spoofed.content[0].text.includes("outside this exact branch admission")) {
+        throw new Error(`typed handoff accepted a spoofed source: ${JSON.stringify(spoofed)}`);
+      }
+    } else {
+      appendFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task advanced\n");
+      appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
+    }
+  }
+  if (promptCount === 10) {
+    const queued = run("fm-tasks-axi.sh", ["reopen", "viewer"]);
+    if (queued.status !== 0) throw new Error(`concurrent task queue failed: ${queued.stderr}`);
+    staleRead = await continuation.execute("stale-read", { action: "read", task: "viewer" });
+    staleHandoff = await handoff.execute("stale-handoff", { task: "viewer", target: "other", id: "viewer-queued-r1",
+      instruction: "A queued task must not deliver this instruction." });
+  }
+  reportResult = await report.execute("report", { task: "viewer", verdict: promptCount === 11 ? "captain" : "routine",
+    silent: promptCount !== 11,
+    summary: promptCount === 11 ? "The requested acceptance evidence is complete and ready for MAIN's semantic review." : promptCount === 10 ? "A concurrently queued task invalidated every compact authority boundary." : promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
+      ? "The future decision recheck was armed while captain approval remains pending."
+      : promptCount === 5 ? "The prepared cross-task handoff reached the authorized worker."
+      : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
+      : promptCount === 7 ? "Arbitrary same-task text requires MAIN effect authority."
+      : promptCount === 8 ? "Oversized history did not authorize a compact cross-task handoff."
+      : promptCount === 9 ? "Terminal handoff rejection requires MAIN reconciliation."
+      : "The exact MAIN-authored next step reached the same worker idempotently." });
+  if (promptCount === 10) {
+    if (!reportResult.isError || !reportResult.content[0].text.includes("invalidated this branch result")) {
+      throw new Error(`held task retained compact report authority: ${JSON.stringify(reportResult)}`);
+    }
+  } else if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
+};
+
+const processLatestAuthority = async (summary) => {
+  const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const row = rows.at(-1);
+  if (row?.verdict !== "captain" || row?.summary !== summary) {
+    throw new Error(`effect authority did not use captain outcome semantics: ${JSON.stringify(row)}`);
+  }
+  const request = sentToMain.at(-1);
+  if (request?.message?.customType !== "fm-branch-process" || request?.options?.triggerTurn !== true ||
+      request?.options?.deliverAs !== "followUp" || !request.message.content.includes(`[seq ${row.seq}] task=viewer`)) {
+    throw new Error(`effect authority did not start MAIN processing: ${JSON.stringify(request)}`);
+  }
+  const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
+  const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+  const exact = await outcomes.execute("authority-read", { sequences: String(row.seq) });
+  if (exact.isError || !exact.content[0].text.includes(summary)) {
+    throw new Error(`MAIN could not read exact authority outcome: ${JSON.stringify(exact)}`);
+  }
+  const acknowledged = await processed.execute("authority-ack", { through: row.seq });
+  if (acknowledged.isError || !acknowledged.content[0].text.includes(`processed through seq ${row.seq}`)) {
+    throw new Error(`MAIN could not acknowledge authority outcome: ${JSON.stringify(acknowledged)}`);
+  }
+};
+
+await fire("session_start", {}, defaultSessionCtx);
+pi.appendEntry("fixture-seed", {});
+const beforeMain = sentToMain.length;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try { await settle(() => promptCount === 1 && reportResult, "compact branch continuation"); }
+catch (error) {
+  const outcomes = (() => { try { return readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8"); } catch { return ""; } })();
+  const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
+  throw new Error(`${error}; prompts=${promptCount} routed=${JSON.stringify(routed)} outcomes=${outcomes} trace=${trace}`);
+}
+const viewerRoutes = routed.filter((item) => item.command.includes("fm-send.sh viewer"));
+if (viewerRoutes.length !== 1 || viewerRoutes[0].actor !== "branch") {
+  throw new Error(`compact same-worker authority check did not run as Branch: ${JSON.stringify(routed)}`);
+}
+const inbox = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")) : [];
+if (inbox.length !== 1) {
+  throw new Error(`exact compact same-worker continuation did not converge on one inbox receipt: ${JSON.stringify(inbox)}`);
+}
+if (sentToMain.length !== beforeMain) throw new Error(`routine start interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+if (!entries.some((entry) => entry.customType === "fm-continuation-branch-delivery")) {
+  throw new Error("MAIN session lacks the compact branch delivery receipt");
+}
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
+  entry.data.change === "material")) throw new Error("same-worker inbox advancement was not retained as routine progress");
+if (readFileSync(`${home}/data/backlog.md`, "utf8").match(/firstmate-progress:v1/g)?.length !== 1) {
+  throw new Error("continuation created a second active progress record");
+}
+if (readFileSync(`${home}/data/backlog.md`, "utf8").includes("no-mistakes started by")) {
+  throw new Error("branch overwrote MAIN-owned progress");
+}
+
+// A session restart preserves the original-row checkpoint and its settled
+// idempotent receipt, so no duplicate attempt or MAIN notification is produced.
+await fire("session_shutdown", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
+pi.appendEntry("fixture-restart", {});
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 1600));
+if (promptCount !== 1 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 1) throw new Error("healthy execution replayed the continuation");
+if (sentToMain.length !== beforeMain) throw new Error("healthy unchanged execution notified MAIN");
+
+// A new executor result changes the bounded admission key even though MAIN has
+// not rewritten the compact task row. Branch reuses the same exact inbox receipt.
+const intermediate = { ...fields };
+writeFileSync(`${home}/state/viewer.status`, "done: intermediate no-mistakes review result\n");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
+reportResult = undefined;
+const intermediateState = run("fm-task-state.sh", ["--durable-only", "viewer"]);
+if (intermediateState.status !== 0 || !intermediateState.stdout.includes("state: failed") ||
+    !intermediateState.stdout.includes("source: run-step")) {
+  throw new Error(`intermediate executor result was not exposed by its state owner: ${intermediateState.stderr || intermediateState.stdout}`);
+}
+pi.events.emit("firstmate:heartbeat-tick", {});
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try {
+  await settle(() => promptCount === 2 &&
+    routed.filter((item) => item.command.includes("fm-send.sh viewer")).length === 2 &&
+    reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+    sentToMain.length === beforeMain,
+    "intermediate same-worker continuation");
+} catch (error) {
+  const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
+  throw new Error(`${error}; executor=${intermediateState.stdout.trim()} entries=${JSON.stringify(entries)} trace=${trace}`);
+}
+await settle(() => {
+  try { return (readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8").match(/"reason":"reported-continuation"/g) ?? []).length === 2; }
+  catch { return false; }
+}, "intermediate Branch settlement");
+await new Promise((resolve) => setTimeout(resolve, 100));
+const messages = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")) : [];
+if (messages.length !== 1) throw new Error(`intermediate exact retry duplicated its inbox receipt: ${JSON.stringify(messages)}`);
+if (sentToMain.length !== beforeMain) throw new Error("intermediate routine continuation interrupted MAIN");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const intermediateToken = record.record_token;
+const prCheck = { ...intermediate,
+  current_state: "The implementation and focused validation are ready for PR monitoring",
+  remaining_gap: "The PR check has not been armed",
+  next_step: "Arm the PR check for https://github.com/acme/viewer/pull/7",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(prCheck)]);
+if (result.status !== 0) throw new Error(`MAIN PR-check progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+if (record.record_token === intermediateToken) throw new Error("material MAIN progress update retained its old record token");
+const listedAfterPrUpdate = run("fm-task-state.sh", ["progress-list"]);
+if (listedAfterPrUpdate.status !== 0 || !JSON.parse(listedAfterPrUpdate.stdout).tasks.includes("viewer")) {
+  throw new Error(`updated in-flight task disappeared from compact monitoring: ${listedAfterPrUpdate.stderr || listedAfterPrUpdate.stdout}`);
+}
+recordedNextStep = prCheck.next_step;
+const statusBeforePrCheck = readFileSync(`${home}/state/viewer.status`, "utf8");
+const inboxBeforePrCheck = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort() : [];
+reportResult = undefined;
+pi.events.emit("firstmate:heartbeat-tick", {});
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try {
+  await settle(() => promptCount === 3 &&
+    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length === 1 &&
+    reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+    sentToMain.length === beforeMain,
+    "PR-check-only continuation");
+} catch (error) {
+  const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
+  const currentProgress = run("fm-task-state.sh", ["progress", "viewer"]);
+  throw new Error(`${error}; progress=${currentProgress.stdout.trim()} prompts=${promptCount} report=${JSON.stringify(reportResult)} entries=${JSON.stringify(entries)} trace=${trace}`);
+}
+if (readFileSync(`${home}/state/viewer.status`, "utf8") !== statusBeforePrCheck ||
+    JSON.stringify(existsSync(`${home}/state/viewer.inbox`)
+      ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort() : []) !== JSON.stringify(inboxBeforePrCheck)) {
+  throw new Error("PR-check fixture unexpectedly changed status or inbox state");
+}
+if (!readFileSync(`${home}/state/viewer.meta`, "utf8").includes("pr=https://github.com/acme/viewer/pull/7") ||
+    !readFileSync(`${home}/state/viewer.pr-poll`, "utf8").includes("https://github.com/acme/viewer/pull/7") ||
+    !readFileSync(`${home}/state/viewer.pr-poll-registration`, "utf8").trim() ||
+    !readFileSync(`${home}/state/viewer.check.sh`, "utf8").trim()) {
+  throw new Error("PR-check owner did not publish its resumable task state");
+}
+if (sentToMain.length !== beforeMain) throw new Error(`routine PR-check interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
+  entry.data.change === "material")) throw new Error("routine PR-check did not settle quietly in Branch");
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const futureRecheck = { ...prCheck,
+  current_state: "The implementation is ready and captain approval is explicitly pending",
+  remaining_gap: "Captain approval remains pending and the future decision recheck is not armed",
+  next_step: "Arm the future decision recheck for the existing task",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(futureRecheck)]);
+if (result.status !== 0) throw new Error(`MAIN future-recheck progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = futureRecheck.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 4 &&
+  routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length === 1 &&
+  reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+  sentToMain.length === beforeMain,
+  "future-recheck continuation");
+for (const path of [
+  `${home}/state/when/when-viewer.spec`,
+  `${home}/state/when/when-viewer.trust`,
+  `${home}/state/procevent/when-viewer.source`,
+]) {
+  if (!readFileSync(path, "utf8").trim()) throw new Error(`future-recheck owner did not publish ${path}`);
+}
+if (sentToMain.length !== beforeMain) throw new Error(`routine future recheck interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+const waitingApproval = run("fm-task-state.sh", ["progress", "viewer"]);
+const waitingApprovalRecord = JSON.parse(waitingApproval.stdout);
+if (waitingApproval.status !== 0 || waitingApprovalRecord.task_state !== "in_flight" ||
+    waitingApprovalRecord.current_state !== futureRecheck.current_state || waitingApprovalRecord.next_step !== futureRecheck.next_step) {
+  throw new Error(`future captain-approval wait did not remain open: ${waitingApproval.stderr || waitingApproval.stdout}`);
+}
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (promptCount !== 4 || sentToMain.length !== beforeMain ||
+    routed.some((item) => /fm-(?:control|pr-merge|merge-local)\.sh/.test(item.command))) {
+  throw new Error("future captain-approval wait repeated coordination or performed unauthorized lifecycle work");
+}
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const handoff = { ...futureRecheck,
+  current_state: "The task is ready to continue through its approved dependency",
+  remaining_gap: "The approved dependent worker instruction has not been delivered",
+  next_step: "Send the approved handoff to the existing other worker",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(handoff)]);
+if (result.status !== 0) throw new Error(`MAIN handoff progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = handoff.next_step;
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
+mkdirSync(`${home}/data/other`, { recursive: true });
+writeFileSync(`${home}/data/other/brief.md`, "Continue the already-approved dependent step.\n");
+mkdirSync(`${home}/data/doomed`, { recursive: true });
+writeFileSync(`${home}/data/doomed/brief.md`, "Continue the authorized dependency before it retires.\n");
+writeFileSync(`${home}/state/doomed.meta`, `window=fixture:w1:p4
+endpoint_task_id=doomed
+project=${home}/project
+backend=herdr
+herdr_session=fixture
+herdr_workspace_id=w1
+herdr_tab_id=w1:t4
+herdr_pane_id=w1:p4
+harness=pi
+kind=ship
+spawn_gen=g1
+`);
+for (const task of ["viewer", "other", "doomed"]) {
+  result = run("fm-task-state.sh", ["enroll", task]);
+  if (result.status !== 0) throw new Error(`lifecycle enrollment failed for ${task}: ${result.stderr}`);
+}
+const handoffInstruction = "Continue the already-approved dependent step.";
+writeFileSync(`${home}/data/viewer/handoff.txt`, handoffInstruction);
+let lifecycle = JSON.parse(readFileSync(`${home}/data/viewer/lifecycle.json`, "utf8"));
+const targetLifecycle = JSON.parse(readFileSync(`${home}/data/other/lifecycle.json`, "utf8"));
+const doomedLifecycle = JSON.parse(readFileSync(`${home}/data/doomed/lifecycle.json`, "utf8"));
+const authoritySha = createHash("sha256").update(readFileSync(`${home}/data/viewer/brief.md`)).digest("hex");
+lifecycle.schema = "fm-task-lifecycle.v2";
+lifecycle.delegation = {
+  revision: 1, issuer: "main", authority_ref: "data/viewer/brief.md", authority_sha256: authoritySha,
+  allowed: ["inspect", "precheck", "steer-same-intent", "observe-receipt", "handoff"],
+  edges: [
+    { target: "other", goal_revision: targetLifecycle.goal_revision,
+      execution_generation: targetLifecycle.execution_generation, authority_ref: "data/viewer/brief.md",
+      authority_sha256: authoritySha, scope: "Existing approved dependent step" },
+    { target: "doomed", goal_revision: doomedLifecycle.goal_revision,
+      execution_generation: doomedLifecycle.execution_generation, authority_ref: "data/viewer/brief.md",
+      authority_sha256: authoritySha, scope: "Authorized dependency before retirement" },
+  ],
+  expires_at: "2099-01-01T00:00:00Z", revoked: false,
+};
+lifecycle.next_action = {
+  id: "viewer.g1.a1", kind: "steer", phase: "prepared", expected_execution_generation: "g1",
+  payload_ref: "data/viewer/handoff.txt",
+  payload_sha256: createHash("sha256").update(handoffInstruction).digest("hex"), receipt_ref: null,
+  attempts: 0, attempt_limit: 2, recheck_at: "2000-01-01T00:00:00Z", deadline: "2099-01-01T00:00:00Z",
+};
+lifecycle.next_action_seq = 2;
+writeFileSync(`${home}/data/viewer-handoff-proposal.json`, JSON.stringify(lifecycle), { mode: 0o600 });
+result = run("fm-task-state.sh", ["reconcile", "viewer", "--expected-revision", String(lifecycle.revision),
+  "--record", `${home}/data/viewer-handoff-proposal.json`]);
+if (result.status !== 0) throw new Error(`prepared handoff lifecycle failed: ${result.stderr}`);
+reportResult = undefined;
+pi.events.emit("firstmate:heartbeat-tick", {});
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 5 && reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+  sentToMain.length === beforeMain,
+  "typed handoff continuation");
+if (!existsSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`) ||
+    !existsSync(`${home}/state/other.inbox`) ||
+    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
+  throw new Error("prepared compact handoff did not create one durable target receipt");
+}
+if (sentToMain.length !== beforeMain) throw new Error(`authorized routine handoff interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const unrelatedInbox = { ...handoff,
+  current_state: "The prepared compact handoff was delivered and the target may receive unrelated work",
+  remaining_gap: "The delivered target work has not completed",
+  next_step: "Confirm unrelated target inbox activity cannot create handoff authority",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(unrelatedInbox)]);
+if (result.status !== 0) throw new Error(`MAIN unrelated-inbox progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = unrelatedInbox.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 6 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
+  "unrelated target inbox isolation");
+if (sentToMain.length !== beforeMain) throw new Error("unrelated target inbox activity interrupted MAIN");
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
+  throw new Error("unrelated target inbox activity prevented quiet settlement");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+  throw new Error("unrelated target inbox fixture did not create exactly one independent message");
+}
+
+writeFileSync(`${home}/state/viewer.child.meta`, "spawn_gen=child-g1\nkind=ship\n");
+writeFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task started\n");
+mkdirSync(`${home}/data/viewer/artifacts`, { recursive: true });
+writeFileSync(`${home}/data/viewer/artifacts/build.log`, "initial artifact bytes\n");
+mkdirSync(`${home}/state/task-handoffs/records`, { recursive: true });
+for (let index = 0; index < 257; index += 1) {
+  const id = `historical-${String(index).padStart(3, "0")}`;
+  writeFileSync(`${home}/state/task-handoffs/records/${id}.msg`,
+    `schema=fm-task-handoff.v1\nid=${id}\nfrom=archive-source\ntarget=archive-target\n--\nhistorical handoff\n`);
+}
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const overflowQuiet = { ...unrelatedInbox,
+  current_state: "The task is waiting with oversized unrelated handoff history",
+  remaining_gap: "No task-local resumable state has changed",
+  next_step: "Confirm oversized unrelated handoff history did not change this task",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(overflowQuiet)]);
+if (result.status !== 0) throw new Error(`MAIN overflow quiet progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = overflowQuiet.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+for (let attempt = 0; attempt < 1000 && !(promptCount === 7 && reportResult); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!(promptCount === 7 && reportResult)) {
+  const outcomes = existsSync(`${home}/state/branch-outcomes.jsonl`)
+    ? readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8") : "";
+  throw new Error(`timed out waiting for same-task authority refusal report: prompts=${promptCount} report=${JSON.stringify(reportResult)} outcomes=${outcomes} routed=${JSON.stringify(routed)}`);
+}
+if (reportResult.isError || !reportResult.content?.[0]?.text?.includes("delivered [captain]") ||
+    sentToMain.length !== beforeMain + 1) {
+  throw new Error(`same-task authority refusal did not reach MAIN: ${JSON.stringify({ reportResult, sentToMain })}`);
+}
+await processLatestAuthority("Arbitrary same-task text requires MAIN effect authority.");
+if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("Arbitrary same-task text requires MAIN")) {
+  throw new Error("same-task authority refusal settled silently instead of reaching MAIN");
+}
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const quiet = { ...overflowQuiet,
+  current_state: "The second compact handoff request lacks exact authority despite oversized history",
+  remaining_gap: "The dependent instruction remains MAIN-owned",
+  next_step: "Confirm oversized history cannot create handoff authority",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(quiet)]);
+if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = quiet.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 8 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
+  sentToMain.length === beforeMain + 2,
+  "oversized handoff authority report");
+if (existsSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`) ||
+    sentToMain.at(-1)?.message?.customType !== "fm-branch-process") {
+  throw new Error(`compact oversized handoff authority was not reported: ${JSON.stringify(sentToMain)}`);
+}
+await processLatestAuthority("Oversized history did not authorize a compact cross-task handoff.");
+if (!readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").includes("Oversized history did not authorize")) {
+  throw new Error("missing handoff authority settled silently instead of reaching MAIN");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+  throw new Error("compact handoff refusal changed unrelated target inbox state");
+}
+
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const deliveredReceipt = readdirSync(`${home}/state/other.inbox`).find((name) => name.endsWith(".msg"));
+const deliveredPath = `${home}/state/other.inbox/${deliveredReceipt}`;
+mkdirSync(`${home}/state/other.inbox/handled`, { recursive: true });
+const handledDeliveredPath = `${home}/state/other.inbox/handled/${deliveredReceipt}`;
+renameSync(deliveredPath, handledDeliveredPath);
+writeFileSync(`${home}/state/other-working`, "working\n");
+writeFileSync(`${home}/state/other.status`, "working: acknowledged the exact prepared handoff\n");
+const otherState = run("fm-task-state.sh", ["other"]);
+result = run("fm-task-state.sh", ["action", "viewer", "--action-id", "viewer.g1.a1", "--phase", "confirmed",
+  "--receipt-ref", handledDeliveredPath,
+  "--receipt-sha256", createHash("sha256").update(readFileSync(handledDeliveredPath)).digest("hex")]);
+if (result.status !== 0) throw new Error(`first handoff confirmation failed: ${result.stderr}; target=${otherState.stdout}; target-error=${otherState.stderr}`);
+lifecycle = JSON.parse(readFileSync(`${home}/data/viewer/lifecycle.json`, "utf8"));
+const rejectedInstruction = "Continue the authorized dependency before it retires.";
+writeFileSync(`${home}/data/viewer/rejected-handoff.txt`, rejectedInstruction);
+lifecycle.next_action = {
+  id: "viewer.g1.a2", kind: "steer", phase: "prepared", expected_execution_generation: "g1",
+  payload_ref: "data/viewer/rejected-handoff.txt",
+  payload_sha256: createHash("sha256").update(rejectedInstruction).digest("hex"), receipt_ref: null,
+  attempts: 0, attempt_limit: 1, recheck_at: "2000-01-01T00:00:00Z", deadline: "2099-01-01T00:00:00Z",
+};
+lifecycle.next_action_seq = 3;
+writeFileSync(`${home}/data/viewer-rejected-handoff-proposal.json`, JSON.stringify(lifecycle), { mode: 0o600 });
+result = run("fm-task-state.sh", ["reconcile", "viewer", "--expected-revision", String(lifecycle.revision),
+  "--record", `${home}/data/viewer-rejected-handoff-proposal.json`]);
+if (result.status !== 0) throw new Error(`rejected handoff lifecycle preparation failed: ${result.stderr}`);
+writeFileSync(`${home}/state/doomed.meta`, readFileSync(`${home}/state/doomed.meta`, "utf8").replace("kind=ship", "kind=secondmate"));
+const noEffect = { ...quiet,
+  current_state: "The authorized handoff target retired before delivery",
+  remaining_gap: "MAIN must reconcile the terminal handoff rejection",
+  next_step: "Report the rejected handoff to MAIN without replay",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(noEffect)]);
+if (result.status !== 0) throw new Error(`MAIN no-effect progress update failed: ${result.stderr}`);
+record = JSON.parse(result.stdout);
+recordedNextStep = noEffect.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try {
+  await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("delivered [captain]") &&
+    sentToMain.length === beforeMain + 3,
+    "repeated rejected handoff authority report");
+} catch (error) {
+  throw new Error(`${error}; promptCount=${promptCount}; rejected=${JSON.stringify(rejectedObservation)}; spoofed=${JSON.stringify(spoofedObservation)}; report=${JSON.stringify(reportResult)}; sent=${JSON.stringify(sentToMain.slice(beforeMain))}`);
+}
+await processLatestAuthority("Terminal handoff rejection requires MAIN reconciliation.");
+if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-doomed-r1.state`, "utf8").includes("state=rejected") ||
+    existsSync(`${home}/state/doomed.inbox`)) {
+  throw new Error("terminal handoff rejection was replayed or lost its durable rejected state");
+}
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1 ||
+    readdirSync(`${home}/state/other.inbox/handled`).filter((name) => name.endsWith(".msg")).length !== 1) {
+  throw new Error("no-effect typed handoff created progress or duplicate delivery");
+}
+
+// tasks-axi preserves the in-flight state while adding a captain hold. The
+// hold bit must still invalidate the compact record and prevent a new Branch
+// admission until MAIN releases it.
+result = run("fm-tasks-axi.sh", ["hold", "viewer", "--reason", "captain decision pending", "--kind", "captain"]);
+if (result.status !== 0) throw new Error(`compact hold failed: ${result.stderr}`);
+const heldProgress = run("fm-task-state.sh", ["progress", "viewer"]);
+const heldRecord = JSON.parse(heldProgress.stdout);
+if (heldProgress.status !== 0 || heldRecord.task_state !== "in_flight" || heldRecord.task_held !== "yes" ||
+    heldRecord.recorded || heldRecord.remaining_gap || heldRecord.next_step) {
+  throw new Error(`held task retained compact progress authority: ${heldProgress.stderr || heldProgress.stdout}`);
+}
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (promptCount !== 9 || sentToMain.length !== beforeMain + 3) {
+  throw new Error("held in-flight task received a compact Branch admission");
+}
+result = run("fm-tasks-axi.sh", ["unhold", "viewer"]);
+if (result.status !== 0) throw new Error(`compact hold release failed: ${result.stderr}`);
+
+// A concurrent move back to Queued after admission invalidates every compact authority
+// boundary before any read, handoff, or report can be consumed.
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const holdCheck = { ...noEffect,
+  current_state: "The compact admission is about to race a task queue transition",
+  remaining_gap: "The stale admission must lose all authority after the queue transition",
+  next_step: "Verify the queued task refuses the admitted compact operations",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(holdCheck)]);
+if (result.status !== 0) throw new Error(`MAIN queue-boundary progress update failed: ${result.stderr}`);
+recordedNextStep = holdCheck.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+try { await settle(() => promptCount === 10 && reportResult?.isError, "queued task invalidates compact authority"); }
+catch (error) {
+  throw new Error(`${error}; prompts=${promptCount} report=${JSON.stringify(reportResult)} main=${JSON.stringify(sentToMain.slice(beforeMain))}`);
+}
+if (existsSync(`${home}/state/task-handoffs/records/viewer-queued-r1.msg`)) {
+  throw new Error("queued task created a handoff from stale compact authority");
+}
+if (!staleRead?.isError || !staleRead.content[0].text.includes("disposition changed") ||
+    !staleHandoff?.isError || !staleHandoff.content[0].text.includes("disposition changed")) {
+  throw new Error(`queued task retained compact read or handoff authority: ${JSON.stringify({ staleRead, staleHandoff })}`);
+}
+await settle(() => sentToMain.length === beforeMain + 4, "queued admission recovery outcome");
+const recoveryRows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+const recoverySummary = recoveryRows.at(-1)?.summary ?? "";
+if (!recoverySummary.includes("continuation settled without a durable outcome")) {
+  throw new Error(`queued admission did not fail closed through MAIN: ${JSON.stringify(recoveryRows.at(-1))}`);
+}
+await processLatestAuthority(recoverySummary);
+result = run("fm-tasks-axi.sh", ["start", "viewer"]);
+if (result.status !== 0) throw new Error(`queued task restart failed: ${result.stderr}`);
+
+// A new executor result gets a fresh bounded Branch admission without a MAIN
+// progress rewrite. Goal-ready evidence alone crosses into MAIN, which then
+// performs final semantic acceptance and removes the task from monitoring.
+writeFileSync(`${home}/data/viewer/report.md`, "The requested acceptance checks passed.\n");
+writeFileSync(`${home}/state/viewer.status`, "done: goal-ready evidence is available\n");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: completed\n  head: ${candidateHead}\n  outcome: checks-passed\n  steps[1]{step,status,findings,duration_ms}:\n    ci,completed,0,1\n`);
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const goalReady = { ...noEffect,
+  current_state: "The requested acceptance checks passed",
+  remaining_gap: "MAIN has not performed final semantic acceptance",
+  next_step: "MAIN reviews the completed artifact against the requested outcome",
+};
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(goalReady)]);
+if (result.status !== 0) throw new Error(`MAIN goal-ready progress update failed: ${result.stderr}`);
+recordedNextStep = goalReady.next_step;
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+for (let attempt = 0; attempt < 1000 && !(promptCount === 11 && reportResult); attempt += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!(promptCount === 11 && reportResult && !reportResult.isError && sentToMain.length === beforeMain + 5)) {
+  throw new Error(`timed out waiting for goal-ready continuation outcome: prompts=${promptCount} main=${sentToMain.length - beforeMain} report=${JSON.stringify(reportResult)}`);
+}
+const goalReadyOutcome = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n")
+  .map((line) => JSON.parse(line)).find((entry) => entry.task === "viewer" &&
+    entry.verdict === "captain" && entry.summary.includes("acceptance evidence is complete"));
+if (sentToMain.at(-1)?.message?.customType !== "fm-branch-process" ||
+    !sentToMain.at(-1)?.message?.content?.includes("task=viewer") ||
+    !goalReadyOutcome?.summary?.includes("acceptance evidence is complete")) {
+  throw new Error(`goal-ready evidence did not reach MAIN: outcomes=${readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")} main=${JSON.stringify(sentToMain)}`);
+}
+await processLatestAuthority("The requested acceptance evidence is complete and ready for MAIN's semantic review.");
+progress = run("fm-task-state.sh", ["progress", "viewer"]);
+record = JSON.parse(progress.stdout);
+const accepted = { ...noEffect, current_state: "All requested checks passed and MAIN reviewed the artifact",
+  remaining_gap: "", next_step: "" };
+result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
+  "--progress", JSON.stringify(accepted)]);
+if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (promptCount !== 11 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 3 ||
+    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
+    routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
+    sentToMain.length !== beforeMain + 5) {
+  throw new Error("accepted goal remained active or interrupted MAIN");
+}
+
+console.log("compact continuation routed exact sends and prepared handoffs while reporting missing authority");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "compact progress branch continuation: $out"
+  pass "$out"
+}
+
+test_branch_native_continuation_is_scoped_read_only() {
   local repo home out status
   repo="$TMP_ROOT/native-continuation-root"; home="$TMP_ROOT/native-continuation-home"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot }; })()`);
-const { pi, fire, settle, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot } = globalThis.__t;
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, bus, fire, settle, makeOffer, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot }; })()`);
+const { pi, bus, fire, settle, makeOffer, outcomeScript, sentToMain, defaultSessionCtx, mainTools, home, realRoot } = globalThis.__t;
 const { createHash } = await import("node:crypto");
 const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
@@ -6019,9 +6857,9 @@ Object.assign(defaultSessionCtx,{isIdle:()=>true,hasPendingMessages:()=>false,ha
 Object.assign(defaultSessionCtx.sessionManager,{getSessionId:()=>"native-continuation",getLeafId:()=>entries.at(-1)?.id,getBranch:()=>entries,getEntries:()=>entries});
 pi.appendEntry=(customType,data)=>{const entry={type:"custom",id:`entry-${entries.length}`,parentId:entries.at(-1)?.id??null,timestamp:new Date().toISOString(),customType,data};entries.push(entry);appendFileSync(mainFile,JSON.stringify(entry)+'\n');return entry.id;};
 (await import(`${realRoot}/.pi/extensions/fm-periodic-stow.ts`)).default(pi);
-const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});
+const task="routine";mkdirSync(`${home}/data/${task}`,{recursive:true});mkdirSync(`${home}/project`,{recursive:true});
 writeFileSync(`${home}/data/${task}/brief.md`,"Retain the unchanged goal and report only material evidence.\n");
-writeFileSync(`${home}/state/${task}.meta`,"spawn_gen=g1\nkind=ship\nexecutor=local-agent\n");
+writeFileSync(`${home}/state/${task}.meta`,`spawn_gen=g1\nkind=ship\nexecutor=local-agent\nproject=${home}/project\n`);
 writeFileSync(`${home}/data/policy-authority.md`,"Standing routine branch authority for this isolated fixture.\n");
 writeFileSync(`${home}/data/historical-report.md`,"Rollout is inactive pending landing, reload and policy enablement.\n");
 writeFileSync(`${home}/data/current-readback.md`,"Rollout is enabled after reload and the exact task grant is active.\n");
@@ -6032,46 +6870,52 @@ let result=run(["enroll",task]);if(result.status!==0)throw Error(result.stderr);
 const policy={schema:"fm-task-continuation-policy.v1",revision:0,issuer:"main",enabled:true,authority_ref:"data/policy-authority.md",authority_sha256:sha(`${home}/data/policy-authority.md`),allowed:["inspect","precheck","steer-same-intent","observe-receipt"],expires_at:"2099-01-01T00:00:00Z"};
 writeFileSync(`${home}/data/policy.json`,JSON.stringify(policy),{mode:0o600});result=run(["continuation-policy","--expected-revision","0","--record",`${home}/data/policy.json`]);if(result.status!==0)throw Error(result.stderr);
 result=run(["refresh",task]);if(result.status!==0)throw Error(result.stderr);
-const mainNative=mainTools.find(tool=>tool.name==="fm_task_continuation");
-if(!mainNative)throw Error("main native continuation tool absent");
-const inspected=await mainNative.execute("seed-inspect",{action:"inspect",task,evidence:[`data/${task}/brief.md`,"data/current-readback.md","data/readback-action.md"]},undefined,undefined,defaultSessionCtx);
-if(inspected.isError)throw Error(`seed inspect refused ${JSON.stringify(inspected)}`);
-const basis=JSON.parse(inspected.content[0].text).basis;
-const assessed=await mainNative.execute("seed-assess",{action:"assess",task,basis,judgment:{disposition:"open",outcome:"Rollout enabled; current branch readback remains pending.",remaining_gap:"Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.",authority_ref:`data/${task}/brief.md`,evidence:[`data/${task}/brief.md`,`data/current-readback.md`],next_action:{kind:"readback",payload_ref:"data/readback-action.md",recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z",attempt_limit:2}}},undefined,undefined,defaultSessionCtx);
-if(assessed.isError)throw Error(`seed assessment refused ${JSON.stringify(assessed)}`);
+  const inspected=run(["inspect",task,"--evidence",`data/${task}/brief.md`,"--evidence","data/current-readback.md","--evidence","data/readback-action.md"]);
+  if(inspected.status!==0)throw Error(`seed inspect refused ${inspected.stderr}`);
+  const basis=JSON.parse(inspected.stdout).basis;
+  const judgment={disposition:"open",outcome:"Rollout enabled; current branch readback remains pending.",remaining_gap:"Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN.",authority_ref:`data/${task}/brief.md`,evidence:[`data/${task}/brief.md`,`data/current-readback.md`],next_action:{kind:"readback",payload_ref:"data/readback-action.md",recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z",attempt_limit:2}};
+  const assessed=run(["assess",task,"--basis",basis,"--judgment",JSON.stringify(judgment)]);
+  if(assessed.status!==0)throw Error(`seed assessment refused ${assessed.stderr}`);
 const seedObservation=run(["observe",task]);if(seedObservation.status!==0)throw Error(`seed observation refused ${seedObservation.stderr}`);
-let nativeCalls=0,compactNoChanges=0,material,currentReadback,promptCount=0;
+  let nativeCalls=0,currentReadback,deniedMutation,promptCount=0;
 globalThis.__fmOnBranchPrompt=async({session,text})=>{
  promptCount++;
  const native=session.options.customTools.find(tool=>tool.name==="fm_task_continuation"),report=session.options.customTools.find(tool=>tool.name==="fm_branch_report");
- if(!native||!report)throw Error("branch-native tools absent");const admitted=JSON.parse(text.slice(text.lastIndexOf("\n{")+1));
+   if(!native||!report)throw Error("branch-native tools absent");
+   if(Object.keys(native.parameters.properties).sort().join(",")!=="action,task"||native.parameters.properties.action.const!=="read")throw Error(`branch schema is not read only ${JSON.stringify(native.parameters)}`);
+   if(!text.includes("Canonical task scope"))throw Error(`historical task was not admitted through its wake: ${text}`);
+   const admitted=JSON.parse(run(["lifecycle",task]).stdout);
  if(admitted.assessment?.remaining_gap!=="Inspect the prepared current-session readback, then preserve final semantic acceptance for MAIN."||admitted.next_action?.kind!=="readback"||admitted.next_action?.payload_ref!=="data/readback-action.md")throw Error(`current lifecycle context omitted ${JSON.stringify(admitted)}`);
  const selectEvidence=context=>context.next_action?.phase==="prepared"?context.next_action.payload_ref:context.observation?.state==="pending"?"data/historical-report.md":null;
- if(selectEvidence({...admitted,assessment:undefined,next_action:undefined})!=="data/historical-report.md")throw Error("masked counterfactual did not reproduce stale historical selection");
+ const observation=JSON.parse(seedObservation.stdout);
+ if(selectEvidence({...admitted,observation,assessment:undefined,next_action:undefined})!=="data/historical-report.md")throw Error("masked counterfactual did not reproduce stale historical selection");
  if(selectEvidence(admitted)!=="data/readback-action.md")throw Error("current action did not displace historical rollout text");
  if(selectEvidence({observation:{state:"waiting"},assessment:{remaining_gap:"unchanged dependency"},next_action:null})!==null)throw Error("unchanged healthy wait requested a native call");
- currentReadback=await native.execute("current-readback",{action:"inspect",task,evidence:[...new Set([admitted.assessment.authority_ref,...admitted.assessment.evidence.map(item=>item.ref),admitted.next_action.payload_ref])]});nativeCalls++;
+   currentReadback=await native.execute("current-readback",{action:"read",task});nativeCalls++;
  if(currentReadback.isError)throw Error(`current readback refused ${JSON.stringify(currentReadback)}`);const current=JSON.parse(currentReadback.content[0].text);
  if(current.assessment?.remaining_gap!==admitted.assessment.remaining_gap||current.next_action?.id!==admitted.next_action.id)throw Error(`current readback lost canonical action ${JSON.stringify(current)}`);
- const wrong=await native.execute("wrong",{action:"observe",task:"other"});if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
- for(let i=0;i<5;i++){const observed=await native.execute(`same-${i}`,{action:"observe",task});nativeCalls++;const body=JSON.parse(observed.content[0].text);if(observed.isError||body.change!=="none"||body.assessment||body.delegation)throw Error(`noncompact ${JSON.stringify(observed)}`);compactNoChanges++;}
- const patch={delegation_revision:admitted.delegation.revision,precheck:{delegation_revision:admitted.delegation.revision,basis_key:admitted.observation.basis_key,conclusion:"needs-evidence",checks:[{criterion:"brief: verified milestone",result:"missing",evidence:[]}],summary:"No verified milestone yet; retain the unchanged gap without another action."}};
- material=await native.execute("material",{action:"patch",task,expected_revision:admitted.revision,patch_json:JSON.stringify(patch)});nativeCalls++;
- if(material.isError)throw Error(`material refused ${JSON.stringify(material)}`);const changed=JSON.parse(material.content[0].text);if(changed.change!=="material"||changed.precheck?.conclusion!=="needs-evidence")throw Error(`lost delta ${JSON.stringify(material)}`);
+   const wrong=await native.execute("wrong",{action:"read",task:"other"});nativeCalls++;if(!wrong.isError||!wrong.content[0].text.includes("outside this exact branch admission"))throw Error("scope escaped");
+   deniedMutation=await native.execute("mutation",{action:"patch",task,patch_json:"{}"});nativeCalls++;
+   if(!deniedMutation.isError||!deniedMutation.content[0].text.includes("read only"))throw Error(`branch mutation was not refused ${JSON.stringify(deniedMutation)}`);
  const reported=await report.execute("report",{task,verdict:"routine",summary:"Routine evidence unchanged; retained the existing gap without MAIN bookkeeping."});if(reported.isError)throw Error(JSON.stringify(reported));
 };
 await fire("session_start",{},defaultSessionCtx);pi.appendEntry("fixture-seed",{});const before=sentToMain.length;
-await fire("agent_before_settle",{},defaultSessionCtx);
+const offer=makeOffer("signal: admitted historical continuation",undefined,false,true,1);
+offer.eligibleTasks=[task];offer.taskBySeq={"1":task};
+writeFileSync(`${home}/state/.wake-queue`,`1\t1\tsignal\t${task}.status\tworking: inspect current readback\n`);
+bus.emit("fm-branch-supervision:dispatch",offer);
+if(!offer.accepted)throw Error(`historical admission was declined: ${offer.declineReason}`);
+await offer.settlement;
 try { await settle(()=>outcomeScript(["list","--recent","10"]).includes("Routine evidence unchanged"),"native report"); }
 catch (error) { throw Error(`${error}; seedObservation=${seedObservation.stdout.trim()} outcomes=${outcomeScript(["list","--recent","10"])} promptCount=${promptCount} nativeCalls=${nativeCalls} sessions=${globalThis.__fmSessions?.length}`); }
-if(sentToMain.length!==before)throw Error("routine work opened MAIN");
-if(nativeCalls!==7||compactNoChanges!==5||!material||!currentReadback)throw Error("tool counts changed");
-const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck?.conclusion!=="needs-evidence")throw Error("material delta missing");
-console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,current_readback_tools:1,no_change_native_tools:compactNoChanges,material_native_tools:1,healthy_wait_extra_tools:0,branch_reports:1}));
+if(sentToMain.length!==before+1||!sentToMain.at(-1)?.message?.content?.includes("Routine evidence unchanged"))throw Error(`historical wake outcome was not delivered exactly once: ${JSON.stringify(sentToMain.slice(before))}`);
+  if(nativeCalls!==3||!deniedMutation||!currentReadback)throw Error("tool counts changed");
+  const record=JSON.parse(readFileSync(`${home}/data/${task}/lifecycle.json`));if(record.delegation.policy_revision!==1||record.precheck!==null)throw Error("read-only branch mutated historical state");
+  console.log(JSON.stringify({main_model_turns:0,main_tools:0,branch_native_tools:nativeCalls,current_readback_tools:1,refused_mutation_tools:1,healthy_wait_extra_tools:0,branch_reports:1}));
 process.exit(0);
 EOF
   status=$?; out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "branch-native continuation scope/delta boundary: $out"
+  expect_code 0 "$status" "branch-native continuation admitted read-only boundary: $out"
   pass "$out"
 }
 
@@ -6246,7 +7090,7 @@ JS
   pass "$out"
 }
 
-test_native_semantic_lifecycle_with_installed_session_manager() {
+test_native_compact_continuation_with_installed_session_manager() {
   local repo home sdk
   sdk="${FM_PI_PACKAGE_DIR:-$(npm root -g)/@earendil-works/pi-coding-agent}"
   if [ ! -f "$sdk/dist/index.js" ]; then
@@ -6258,11 +7102,14 @@ test_native_semantic_lifecycle_with_installed_session_manager() {
   install_pi_branch_extension_fixture "$repo"
   cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   printf '#!/bin/sh\nprintf "watcher: healthy pid=1 (beacon 0s)\\n"\n' > "$repo/bin/fm-watch-arm.sh"
+  # shellcheck disable=SC2016 # The fixture wrapper expands these values when it runs.
+  printf '#!/bin/sh\nexec "$REAL_ROOT/bin/fm-task-state.sh" "$@"\n' > "$repo/bin/fm-task-state.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
+  chmod +x "$repo/bin/fm-task-state.sh"
   FM_HOME="$home" FM_NATIVE_SDK="$sdk" REAL_ROOT="$ROOT" \
     FM_ROOT_OVERRIDE="$repo" FM_NATIVE_WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
     PLUGIN="$repo/.pi/extensions/lib/fm-task-continuation.ts" \
-    node "$ROOT/tests/lifecycle-native.mjs" || fail "installed SDK semantic workflow failed"
+    node "$ROOT/tests/lifecycle-native.mjs" || fail "installed SDK compact continuation workflow failed"
 }
 
 test_continuation_defers_reserved_admission_at_ui_boundary() {
@@ -6569,9 +7416,9 @@ await fire('before_agent_start',{prompt:'Separate request B: explain configurati
 const next=await beforeSettle();
 if(next.continued) throw Error('ordinary question became an independent continuation');
 if(escalationEntries().length!==1) throw Error('compaction or chat duplicated task escalation');
-const tool=mainTools.find(t=>t.name==='fm_task_continuation');
-const listing=JSON.parse((await tool.execute('list',{action:'list'},undefined,undefined,defaultSessionCtx)).content[0].text);
-if(listing.pending_updates.length || 'inputs' in listing) throw Error('chat acquired input bookkeeping');
+const listing=spawnSync(`${process.env.FM_ROOT_OVERRIDE}/bin/fm-task-state.sh`,['progress-list'],{env:process.env,encoding:'utf8'});
+if(listing.status!==0)throw Error(`task discovery failed ${listing.stderr}`);
+if(entries.some(entry=>entry.customType==='fm-continuation-input'))throw Error('chat acquired input bookkeeping');
 if(JSON.parse(readFileSync(path)).disposition!=='open') throw Error('retry budget exhaustion closed goal');
 // Unchanged evidence survives exhausted ordinary attempts. Only the existing
 // heartbeat may deliver a later recovery, and UI safety still takes priority.
@@ -6782,6 +7629,8 @@ EOF
   pass "$out"
 }
 
+test_compact_progress_drives_branch_same_worker_continuation
+test_branch_native_continuation_is_scoped_read_only
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
@@ -6834,10 +7683,4 @@ test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates
 test_mark_read_failure_keeps_routine_redelivery_and_captain_deduplication
 test_expired_delegation_refuses_bound_branch_report
-test_branch_native_continuation_is_scoped_compact_and_material_only
-
-test_native_semantic_lifecycle_with_installed_session_manager
-test_continuation_defers_reserved_admission_at_ui_boundary
-test_continuation_retries_definite_send_failure_and_isolates_stale_tasks
-test_continuation_defers_pending_short_receipt_at_public_boundary
-test_continuation_survives_ack_compaction_and_unrelated_input
+test_native_compact_continuation_with_installed_session_manager

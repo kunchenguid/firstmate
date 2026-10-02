@@ -1,88 +1,62 @@
-# Durable task acceptance and continuation
+# Goal-directed task continuation
 
-A worker can finish a run while its requested result is still incomplete.
-Firstmate retains the requested outcome, evidence, remaining gap and next authorized step with that task, so switching topics or restarting a session does not erase the earlier request.
-A supervisor judges acceptance against the brief; neither a process exit nor a provider success makes that judgment automatically.
+A worker can finish a run while the requested outcome remains incomplete.
+The original backlog task therefore carries the minimum restart context: its title is the goal, and a compact body block records the acceptance method, current state, remaining gap and next step.
+MAIN compares material results with that contract and continues the next authorized action until the acceptance method is satisfied.
+A process exit, worker return, report, pull request, empty inbox or provider success is never acceptance by itself.
 
-For example, a completed investigation may share its directory with another task.
-After acceptance, Firstmate can remove the investigation's positively identified pane, verify whether its dedicated workspace disappeared, and retain the shared directory and final report.
-An ambiguous old endpoint remains a named cleanup obligation; it does not restart the investigation.
+## Active record and owners
 
-## Owners and prerequisites
+[`fm-task-progress.py`](../bin/fm-task-progress.py) owns the bounded `firstmate-progress:v1` block embedded in the existing task body.
+Its read token also binds the task's current hold and dependency-block flags; a held or blocked row is never eligible for compact continuation, even when its backlog state remains In flight.
+[`fm-task-progress-lib.sh`](../bin/fm-task-progress-lib.sh) reads and updates that block through the configured tasks-axi owner.
+[`fm-task-state.sh`](../bin/fm-task-state.sh) exposes `progress`, `update-progress` and `progress-list` as the public interface.
+No task directory, lifecycle JSON, evidence list, scheduler or mirrored progress store is created for ordinary continuation.
 
-The brief owns the natural-language contract.
-[`fm-task-state.sh`](../bin/fm-task-state.sh) exposes its assessment operations; [`fm-task-lifecycle.py`](../bin/fm-task-lifecycle.py) owns the bounded JSON schema, evidence checks and revision transitions, and [`fm-task-lifecycle-lib.sh`](../bin/fm-task-lifecycle-lib.sh) composes the existing task lease and metadata lock.
-The record requires Python 3.9 or newer and uses only its standard library.
-The task's existing private data directory retains the assessment after execution metadata is removed.
-It is not a second backlog, execution engine, permission grant or scheduler.
+The task title remains the canonical goal and is returned with every progress read.
+The compact block contains only `acceptance`, `current_state`, `remaining_gap` and `next_step`, plus an opaque context version in its marker.
+The caller must return the opaque `record_token` from `progress` when calling `update-progress`; a title/body correction already visible at update-time refuses the stale update, while a task-state change, authenticated brief update, executor-generation replacement, hold or block also makes the recorded fields inactive until MAIN publishes corrected progress.
+Executor identity comes from the existing local `spawn_gen`, native remote-agent generation, or legacy AIME execution generation owner, and an unreadable or unsupported active identity fails closed.
+The token is an optimistic stale-read guard, not an evidence reference, semantic assessment fingerprint or atomic compare-and-swap guarantee.
+The supported task owner cannot combine token comparison with publication, so an ordinary writer that changes the task body after the check but before `update --body-file` may be overwritten; this narrow publication race is an accepted limitation.
+An identical update performs no task-record write.
+MAIN is the only progress writer, and it writes only after a material change.
+The branch may read one token-bound compact admission while the original task remains exactly `in_flight` and route work already authorized through an existing owner, but it cannot update these fields or make final semantic acceptance.
 
-The existing wake queue, actor claims, task inbox, control transaction, provider record and cleanup receipt retain their respective effects and acknowledgements.
-[`fm-inactive-reconcile.sh`](../bin/fm-inactive-reconcile.sh) discovers current tasks through metadata, cleanup receipts and the configured backlog within its existing scan deadline and cursor.
-It never traverses historical task directories to find work.
-The Pi adapter batches record reads off the UI thread with a bounded subprocess and returns uncertain tasks to main.
-For explicit intent updates, the lifecycle owner incrementally indexes the native session, scans bounded appended deltas, and rereads only the selected current-branch records.
-An incomplete cold catch-up retains its safe checkpoint for the same operation to retry, while a concurrent session change refuses without publishing a partial snapshot; the script header owns the numeric bounds.
+The existing wake queue, actor claims, task inbox, handoff record, execution metadata, provider record, operation receipt, merge guard and cleanup receipt remain authoritative for their own effects.
+An attempted or uncertain effect must still be read back through its existing owner before retry.
+Continuation progress neither grants authority nor replaces any of those records.
 
-## Intake and evidence reconciliation
+## Intake, reminders and acceptance
 
-Finalize the brief and create the ordinary backlog item, then initialize its lifecycle assessment before deferring an accepted request without an executor.
-Local, iDA and AIME dispatch initialize records for new executions as well.
-Use the task-state header's inspect/assess interface to bind evidence and submit the semantic judgment; the owner derives revisions and fingerprints.
-An unassigned task is valid.
-For a local launch, the launch owner binds its execution generation only after launch delivery and the backlog commit both succeed; metadata left by an attempted but unconfirmed launch remains unknown for reconciliation.
-When ordinary dispatch has no prepared lifecycle action, observation can still prove execution from the bound brief, matching generation, confirmed launch publication and authoritative run-step or harness activity.
-A synthetic launch busy marker cannot supply that proof, and observation never creates an action or accepts the goal.
+At intake, create the ordinary backlog task with a clear outcome-oriented title.
+Before the task can leave MAIN's current context, record a concrete acceptance method, current state, and either both a remaining gap and next step or neither.
+Both gap fields empty means MAIN has judged the requested outcome satisfied; the existing delivery, captain-hold, merge and cleanup owners still gate retirement.
 
-Save the semantic assessment and any prepared action before acknowledging its wake.
-An open-goal wake with a known lifecycle revision refuses acknowledgement until that revision advances, except when the existing branch outcome owner has durably recorded a routine result after the wake for that exact unchanged lifecycle revision, assessment evidence key and execution generation.
-That narrow receipt retires presentation only: it does not rewrite the lifecycle, close the goal, reset continuation pacing or satisfy an unresolved action.
-For terminal work, the scan binds the current retained resource and release facts; acknowledging that exact observation does not require a new semantic assessment.
-A historical inactive-goal wake recorded with unknown lifecycle state refuses acknowledgement while the current lifecycle remains unreadable; after repair makes the exact current lifecycle readable, acknowledgement retires only that historical presentation and leaves the current goal, pending effect and newer current wake unchanged.
-A lease refusal therefore cannot consume the task's only recovery trigger.
-A confirmed action still leaves an unaccepted goal open.
-A future bounded wait defers the next review; expiry asks for reconciliation and does not itself restart a healthy worker or cancel a query.
+The Pi adapter discovers in-flight task identities through `progress-list`, reads their compact projections, and stays quiet for healthy unchanged execution or a deliberate wait.
+When a material result leaves an authorized gap without a healthy executor, it first offers one token-bound continuation to the supervision branch.
+The branch may inspect current artifacts and route the already-authorized next step through the existing owner; a no-mistakes start or ordinary gate continuation goes back to the same worker, which alone runs or responds to the pipeline.
+A declined or failed branch offer falls back to MAIN.
+It never derives task identity from a backend endpoint label.
+A healthy unchanged wait and verified routine advancement are retained quietly in the branch session.
+A changed executor observation admits another bounded Branch turn without a MAIN progress rewrite.
+Only goal-ready evidence, a genuine blocker, or an authority decision is delivered through MAIN's durable sequence-bound processing and acknowledgement path; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
+These transcript entries are delivery receipts only and never become another progress source.
+Topic switches, session reload and compaction therefore recover from the original task row, while ordinary commands and unchanged observations add no progress writes.
 
-Ordinary conversation remains in the native transcript and requires no separate answer or route record.
-New actual work uses ordinary task intake; follow-ups, corrections, approvals and stops are reconciled against an explicitly selected existing task.
-The native intent-update path takes the original current-session message as authority, and preserves its exact words in that task's brief under the existing lock.
-It retains only the task-bound prepared append transaction, so interruption is recovered by retrying the same route; a successful append never proves an effect or task acceptance.
-Ambiguous task identity requires clarification before routing.
-A prepared, unattempted observation can be explicitly superseded with new authority and exact old-payload readback through the assessment owner; attempted or uncertain effects retain their existing readback requirement.
+MAIN's native `fm_task_continuation` tool exposes only `read` and `update`.
+`read` followed by a material `update` replaces the former evidence-heavy `inspect` then `assess` routine.
+No progress action accepts evidence paths, authority references, lifecycle JSON or caller-reconstructed judgments.
+The separate `fm_task_intent_update` tool retains the interruption-safe, native-session-authenticated path for appending a selected original user correction.
+Discovery remains with `fm-task-state.sh progress-list`, which the heartbeat adapter calls automatically; read-only rich history remains with `fm-task-state.sh lifecycle`.
+Neither is duplicated into the daily progress schema.
+Branch receives its own actual `fm_task_continuation` registration with only `read` for the exact admitted task.
 
-The next action binds exact payload bytes, authority evidence, execution generation and a monotonic action identity.
-Use that identity with the existing automatic send, spawn, relaunch or iDA followup owner.
-An interrupted send reuses its original inbox record, including after worker acknowledgement.
-A published launch reuses its metadata identity; an attempted launch without a verified publication refuses another allocation until its control or launch evidence is reconciled.
-A confirmed replacement retains both the original expected generation and the resulting execution generation.
-The record is not evidence that the new worker achieved its goal.
-
-A prepared action can be attempted only within its deadline and bounded attempt budget.
-The current effect owners make one attempt and reuse its receipt; the two-attempt schema ceiling does not authorize a second ambiguous effect.
-An uncertain effect must be read back before it can be replaced.
-A refused effect cannot reset its budget by preparing the same kind and payload under another action id in the same goal revision.
-Choose a materially different authorized diagnostic or record the exact missing decision, authority or external change.
-No monitoring default authorizes additional model spend, query spend, merging, file disposal or security changes.
-
-## Routine branch ownership
-
-The [routine continuation configuration](configuration.md#routine-continuation-policy-configtask-continuation-policyjson) owns the home policy's operator-facing schema, activation and rollback contract.
-The lifecycle owner materializes that explicit MAIN authority as task-local grants for routine Pi supervision.
-It is not another task record, queue or clock: the ordinary continuation scan still discovers enrolled tasks, and refresh only materializes a policy-origin v2 grant onto an assigned open task.
-Explicit task grants and handoff edges are not replaced by policy.
-
-Every delegated operation rechecks the exact task, goal revision, brief hash, execution generation, delegation revision and supervision generation.
-Every policy-origin operation additionally rechecks the current policy digest.
-Disabling, expiring or replacing policy therefore fences stale effects immediately.
-A new policy revision can renew its own prior task grant only when no prepared, attempted or uncertain action would cross the authority boundary.
-Missing or unreadable policy and ambiguous execution identity fail closed.
-A parked or paused executor remains inspectable but refuses delegated effects and is never automatically resumed.
-
-MAIN still owns intent edits, semantic assessment and acceptance, dispatch, policy mutation, archive/stop, permission and security decisions, merge and cleanup.
-The [Pi supervision branch](pi-supervision-branch.md#delegated-task-continuation) owns admission contents, native tool exposure, no-change handling and compact result projections.
-
-A prepared unattempted steer may bind an instruction handled before preparation only through `observe-receipt`.
-The referenced file must be the same task's exact handled inbox message, use the inbox schema, match the payload bytes and execution generation, and have provider-aware working, done or failed activity evidence.
-The owner confirms that receipt with zero attempts; it does not fabricate an effect, accept the goal or discard a later remaining gap.
+Neither the monitor nor the branch replaces an action owner.
+The branch may call that owner's existing interface for an already-authorized routine next step, while MAIN handles genuine scope/product/architecture, destructive, security, merge and cleanup decisions, reviews actual artifacts, writes material progress changes, and alone accepts the goal.
+Ask-user findings remain MAIN-owned.
+Project-required routine confirmations follow the same in-scope rule; all other decisions return to MAIN.
+An empty inbox or unchanged wait is quiet, but a recorded actionable gap does not disappear until MAIN advances it, records a genuine blocker, or satisfies acceptance.
 
 ## Stops, older records and delivery
 
@@ -99,6 +73,7 @@ For a historical cleanup observation recorded before retained-copy preservation 
 Present preservation fields, every other fact in the cleanup observation and each separately assessed evidence item remain bound, so this compatibility does not admit changed evidence.
 Business completion is independent of physical cleanup: after validated closure, the task leaves the active backlog even when its endpoint or copy must remain, and its cleanup receipt keeps that residual obligation discoverable.
 The retained-resource completion path in [`fm-task-retire.sh`](../bin/fm-task-retire.sh) closes an accepted delivered ship or completed scout through the existing backlog-close marker and cleanup receipt; explicit archive retains uncertain effects separately.
+A lifecycle-free task whose body contains compact progress must have the exact current MAIN-authored empty gap and next step before the legacy cleanup path can run.
 When a ship retains multiple merge receipts from its current execution generation, completion requires exactly one receipt matching the task metadata's current PR URL and head; absent, duplicate or conflicting identity refuses without pruning history.
 With a single current-generation receipt, delivery metadata may be absent, but any supplied URL or head must agree and duplicate identity fields still refuse.
 The selected receipt supplies the backlog completion reference, independently of receipt ordering, while all merge history remains intact.
@@ -112,9 +87,9 @@ A terminal lifecycle dependency is observed through its task, intent, dispositio
 Unchanged scans remain quiet; relevant release facts or the first reached time bound produce one readback observation.
 A temporary parked or externally waiting task stays open.
 
-Absent lifecycle records retain legacy behavior until explicitly reconciled.
-For migration, inspect the exact current task generation, original brief and authoritative acceptance or stop receipt through the existing owners, including the configured tasks-axi current/history lookup.
-Publish an assessment only when that evidence covers this generation.
+Existing rich lifecycle records remain readable for historical effect and cleanup reconciliation, but they are not migrated into compact progress or scanned as active work.
+When such a record must be reconciled, inspect the exact current task generation, original brief and authoritative acceptance or stop receipt through the existing owners, including the configured tasks-axi current/history lookup.
+Publish a historical assessment only when that evidence covers this generation.
 Historical Done text, a status keyword, a newer timestamp, a matching task name or an old merge-ready event cannot close a newer request.
 A reopened request needs a new goal revision and a distinct authority reference.
 Corrupt records, changed briefs and generation conflicts remain unknown and preserve their original bytes.
@@ -134,7 +109,7 @@ A fresh dispatch cannot reuse a task identity that already owns a previous remot
 AIME's existing lifecycle remains compatible; iDA followup support grants no new AIME continuation capability.
 
 [`fm-teardown.sh`](../bin/fm-teardown.sh) owns independent endpoint cleanup and [`fm-teardown-endpoint-lib.sh`](../bin/fm-teardown-endpoint-lib.sh) owns its receipt stages and retained reasons.
-An enrolled open goal retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
+An open task retains its endpoint, directory, slot and task records; cleanup begins only after semantic acceptance or a separately authorized archive, and discard authority does not bypass that boundary.
 For an accepted or archived goal, cleanup validates the exact task's home-local metadata and recorded Herdr session/pane, refuses an endpoint claimed by another task, and confirms that exact pane is absent after closing it.
 An explicit expected generation must still match; missing, conflicting or uncertain endpoint routing refuses before effects.
 The worker may still be running or its tab may be focused: completed-task window retirement does not depend on composer state, presentation journals, continuation receipts, historical process identities or a ShortTask actor-binding gate.
@@ -159,9 +134,11 @@ A result summary alone cannot retire a cleanup obligation; incomplete, conflicti
 
 ## Verification
 
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) covers original-row reuse, explicit goal and acceptance projection, MAIN-only token-checked updates, task-state and authenticated-intent invalidation, visible concurrent-correction refusal, local and remote execution-generation invalidation, unchanged-write suppression, terminal safety and absence of a second progress store.
 [`tests/fm-task-lifecycle.test.sh`](../tests/fm-task-lifecycle.test.sh) covers revision conflicts, pending effects, explicit stop, generation mismatch, routine-policy grant fencing and renewal, exact handled-receipt recovery, lost wake recovery, unchanged-wake outcome coverage, unreadable unknown-record refusal, guarded acknowledgement after repair, current-wake preservation, relevant-change-only terminal observations and exact outcome replay.
 [`tests/fm-task-handoff.test.sh`](../tests/fm-task-handoff.test.sh) covers durable rejection when an exact pending handoff's bound source becomes terminal.
-[`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh) covers ordinary-chat exclusion, authenticated task intent updates, interrupted append recovery, bounded incremental indexing for warm and cold native sessions, and the scoped compact native continuation surface.
+[`tests/lifecycle-native.mjs`](../tests/lifecycle-native.mjs), run by [`tests/fm-pi-branch-extension.test.sh`](../tests/fm-pi-branch-extension.test.sh), covers topic-switch restart, intermediate-result continuation, canonical task identity reminders, compact call and response measurements, quiet unchanged work and read-only historical lifecycle access through the installed Pi SDK.
+The same branch suite also exercises the harmless Herdr-shaped path from an incomplete checkpoint through real `fm-send.sh` inbox receipts, stale-intent, stopped-task and cross-task refusal, sequence-acknowledged authority escalation, intermediate continuation, and final MAIN-only acceptance.
 [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh), including its [`retirement-business.py`](../tests/retirement-business.py) fixture, covers business closure with resources retained, current-delivery selection among multiple receipts, identity and generation refusal, interruption recovery, and exact Done-history convergence.
 The existing send, control, remote-agent and backlog suites exercise their respective effect owners.
 [`tests/fm-teardown-endpoint-safety.test.sh`](../tests/fm-teardown-endpoint-safety.test.sh) covers the open-goal barrier, completed exact-pane cleanup without historical admission gates, foreign or shared endpoint refusal, and dirty, unlanded or uncertain-owner copy retention.

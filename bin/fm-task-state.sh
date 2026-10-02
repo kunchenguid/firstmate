@@ -5,7 +5,10 @@
 # Usage:
 #   fm-task-state.sh <task-id>
 #   fm-task-state.sh --durable-only <task-id>
-#   fm-task-state.sh lifecycle|observe|enroll <task-id>
+#   fm-task-state.sh progress <task-id>
+#   fm-task-state.sh update-progress <task-id> --expected-token TOKEN --progress '<json>'
+#   fm-task-state.sh progress-list
+#   fm-task-state.sh lifecycle|observe|enroll <task-id>   # historical/safety records
 #   fm-task-state.sh inspect <task-id> [--evidence <path>]...
 #   fm-task-state.sh assess <task-id> --basis <inspect-token> --judgment '<semantic-json>'
 #   fm-task-state.sh refresh <task-id>
@@ -41,9 +44,44 @@ if [ "${1:-}" = --durable-only ]; then
   DURABLE_ONLY=1
   shift
 fi
-# The task-local goal owner is opt-in through enrollment, independent of the
-# provider/process state below. No historical task is enrolled by a state read.
+# Compact progress reads the existing task row without enrollment.
+# The historical rich lifecycle owner remains opt-in and independent of the
+# provider/process state below; no historical task is enrolled by a state read.
 case "${1:-}" in
+  progress-list)
+    [ "$#" -eq 1 ] || exit 2
+    # shellcheck source=bin/fm-task-progress-lib.sh
+    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+    fm_task_progress_list
+    exit $?
+    ;;
+  progress)
+    [ "$#" -eq 2 ] || exit 2
+    # shellcheck source=bin/fm-task-progress-lib.sh
+    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+    fm_task_progress_read "$2"
+    exit $?
+    ;;
+  update-progress)
+    shift
+    progress_id=${1:-}; [ -n "$progress_id" ] || exit 2
+    shift
+    task_progress_expected=''
+    task_progress_json=''
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --expected-token) task_progress_expected=${2:-}; shift 2 ;;
+        --progress) task_progress_json=${2:-}; shift 2 ;;
+        *) exit 2 ;;
+      esac
+    done
+    [ -n "$task_progress_expected" ] && [ -n "$task_progress_json" ] || exit 2
+    # shellcheck source=bin/fm-task-progress-lib.sh
+    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+    # shellcheck disable=SC2031 # The sourced implementation uses a subshell by design.
+    fm_task_progress_update "$progress_id" "$task_progress_expected" "$task_progress_json"
+    exit $?
+    ;;
   continuation-policy)
     shift
     if [ "$#" -gt 0 ]; then
@@ -58,7 +96,7 @@ case "${1:-}" in
       python3 "$SCRIPT_DIR/fm-task-lifecycle.py" policy "$@"
     exit $?
     ;;
-  lifecycle|inspect|assess|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|observe-receipt|readback|modes)
+  lifecycle|inspect|assess|intent-plan|update-brief|refresh|observe|enroll|init|reconcile|action|coordinate|branch-patch|observe-receipt|readback|modes)
     operation=$1; shift
     id=${1:-}; [ -n "$id" ] || exit 2
     shift
