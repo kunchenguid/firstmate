@@ -1533,8 +1533,12 @@ test_root_memory_limit_reports_a_named_death() {
 }
 
 test_memory_failure_retries_without_external_sources() {
-  local tmp fakebin fixture out rc log rss_kib require_bounds=0
-  fm_lint_bounds_supported && require_bounds=1
+  local tmp fakebin fixture out rc log rss_kib require_bounds=0 mode
+  local -a modes=(0)
+  if fm_lint_bounds_supported; then
+    require_bounds=1
+    modes=(1 0)
+  fi
   tmp=$(fm_test_tmproot fm-lint-memory-fallback)
   fakebin=$(fm_fakebin "$tmp")
   fixture="$tmp/teardown.sh"
@@ -1565,23 +1569,34 @@ exit 0
 SH
   chmod +x "$fakebin/shellcheck"
 
-  rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS="$require_bounds" \
-    FM_TEST_FALLBACK_LOG="$log" "$LINT" --telemetry "$tmp/pass.tsv" "$fixture" 2>&1) || rc=$?
-  [ "$rc" -eq 0 ] || fail "a clean no-source fallback did not pass"$'\n'"$out"
-  assert_grep $'source_directives\t1' "$tmp/pass.tsv" "telemetry lost the root's source directive"
-  assert_grep $'source_followed_directives\t0' "$tmp/pass.tsv" \
-    "telemetry counted a source directive that the passing fallback did not follow"
-  [ "$(cat "$log")" = "$(printf 'yes\tnone\nno\tSC1091,SC2034,SC2153,SC2329')" ] \
-    || fail "the memory failure did not retry without external sources and exclude only cross-file codes"$'\n'"$(cat "$log")"
-  assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=251)" \
-    "the fallback was not identified in the output"
-  assert_contains "$out" "fallback passed with cross-file codes excluded (SC1091,SC2034,SC2153,SC2329)" \
-    "the narrower fallback result was not disclosed"
-  awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ && $9 == 0 && $10 == "memory-fallback" { found=1 } END { exit !found }' \
-    "$tmp/pass.roots.tsv" || fail "the clean fallback was not recorded distinctly"
-  rss_kib=$(awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ { print $11 }' "$tmp/pass.roots.tsv")
-  case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+  for mode in "${modes[@]}"; do
+    : > "$log"
+    rc=0
+    out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS="$mode" \
+      FM_TEST_FALLBACK_LOG="$log" "$LINT" --telemetry "$tmp/pass.$mode.tsv" "$fixture" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] || fail "a clean no-source fallback did not pass (bounded=$mode)"$'\n'"$out"
+    assert_grep $'source_directives\t1' "$tmp/pass.$mode.tsv" "telemetry lost the root's source directive"
+    assert_grep $'source_followed_directives\t0' "$tmp/pass.$mode.tsv" \
+      "telemetry counted a source directive that the passing fallback did not follow"
+    [ "$(cat "$log")" = "$(printf 'yes\tnone\nno\tSC1091,SC2034,SC2153,SC2329')" ] \
+      || fail "the memory failure did not retry without external sources and exclude only cross-file codes"$'\n'"$(cat "$log")"
+    assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=251)" \
+      "the fallback was not identified in the output"
+    assert_contains "$out" "fallback passed with cross-file codes excluded (SC1091,SC2034,SC2153,SC2329)" \
+      "the narrower fallback result was not disclosed"
+    awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ && $9 == 0 && $10 == "memory-fallback" { found=1 } END { exit !found }' \
+      "$tmp/pass.$mode.roots.tsv" || fail "the clean fallback was not recorded distinctly"
+    rss_kib=$(awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ { print $11 }' "$tmp/pass.$mode.roots.tsv")
+    if [ "$mode" -eq 1 ]; then
+      assert_grep $'meta\tbounds_enforced\t1' "$tmp/pass.$mode.roots.tsv" \
+        "the bounded fallback did not enforce bounds"
+      case "$rss_kib" in ''|*[!0-9]*) fail "the fallback attempts lost per-root RSS reporting: $rss_kib" ;; esac
+    else
+      assert_grep $'meta\tbounds_enforced\t0' "$tmp/pass.$mode.roots.tsv" \
+        "the unbounded fallback unexpectedly enforced bounds"
+      [ "$rss_kib" = unavailable ] || fail "the unbounded fallback unexpectedly reported RSS: $rss_kib"
+    fi
+  done
 
   if ! pinned_ready; then
     pass "SKIP (ShellCheck $REQUIRED not resolved): real fallback finding check"
