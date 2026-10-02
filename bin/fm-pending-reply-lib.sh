@@ -1211,14 +1211,8 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 
 # True when this home opted into a later reminder for an unresolved escalation.
 # Absent means escalate once, which is the behaviour without the flag.
-fm_pending_reply_resurface_enabled() {  # <state-dir>
-  local state=$1 config
-  if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
-    config=$FM_CONFIG_OVERRIDE
-  else
-    config="$(dirname "$state")/config"
-  fi
-  [ -e "$config/pending-reply-resurface" ]
+fm_pending_reply_resurface_enabled() {
+  [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/pending-reply-resurface" ]
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
@@ -1362,7 +1356,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" phase escalated || return 1
   # This session already receives the status wake. A later session reminds
   # only when the home opted in.
-  if fm_pending_reply_resurface_enabled "$state"; then
+  if fm_pending_reply_resurface_enabled; then
     fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
     fm_pending_reply_set "$rec" surfaced_session \
       "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
@@ -1688,11 +1682,11 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
-  if fm_pending_reply_resurface_enabled "$state"; then
+  if fm_pending_reply_resurface_enabled; then
     for rec in ${live[@]+"${live[@]}"}; do
       [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
       [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] || continue
-      "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
+      FM_HOME="${FM_HOME:-}" "$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" "$state" || true
       break
     done
   fi

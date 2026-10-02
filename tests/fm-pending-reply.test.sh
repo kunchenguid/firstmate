@@ -99,6 +99,7 @@ setup_parent() {  # <name> -> home
 opt_in_resurface() {  # <home>
   mkdir -p "$1/config"
   : > "$1/config/pending-reply-resurface"
+  export FM_HOME="$1"
 }
 
 # Seed a local secondmate home bound to <parent> with identity <id>.
@@ -2068,6 +2069,7 @@ test_escalated_record_is_reminded_once_per_later_session() {
   json=$(fm_pending_reply_escalated_decisions_json "$state")
   [ "$json" = '[]' ] || fail "bearings input still listed a resolved escalation: $json"
   unset FM_PENDING_REPLY_SESSION
+  unset FM_HOME
   pass "an escalated pending reply is reminded once per later session until it resolves"
 }
 
@@ -2133,6 +2135,7 @@ test_operator_closed_escalation_is_not_reminded() {
     (any(.[]; .key == $closed) | not) and any(.[]; .key == $kept)
   ' >/dev/null || fail "bearings input listed a recorded dismissal: $json"
   unset FM_PENDING_REPLY_SESSION
+  unset FM_HOME
   pass "an operator-closed escalation is neither reminded nor listed, an open one still is"
 }
 
@@ -2171,6 +2174,7 @@ test_other_closes_do_not_dismiss_escalation() {
     any(.[]; .key == $legacy) and any(.[]; .key == $keyed)
   ' >/dev/null || fail "bearings input dropped an escalation nobody dismissed: $json"
   unset FM_PENDING_REPLY_SESSION
+  unset FM_HOME
   pass "only the operator's keyed close dismisses an escalation"
 }
 
@@ -2200,6 +2204,7 @@ test_same_session_operator_close_is_recorded() {
   ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "tick failed"
   [ ! -e "$stub/started" ] || fail "the tick kept starting the reminder for a closed escalation"
   unset FM_PENDING_REPLY_SESSION
+  unset FM_HOME
   pass "a same-session operator close is recorded and stops the reminder"
 }
 
@@ -2233,6 +2238,7 @@ test_queued_reminder_does_not_mark_unnamed_record() {
   [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s2 ] \
     || fail "the reminded escalation was not marked for this session"
   unset FM_PENDING_REPLY_SESSION
+  unset FM_HOME
   pass "a queued reminder does not mark an escalation it does not name"
 }
 
@@ -2258,6 +2264,7 @@ test_reminder_leaves_state_alone_without_escalations() {
     [ "$(cat "$rec")" = "$before" ] || { echo "a dismissed record was rewritten" >&2; exit 1; }
   ) || fail "remind without live escalations failed"
   [ ! -s "$state/.wake-queue" ] || fail "a reminder was enqueued with nothing to remind"
+  unset FM_HOME
   pass "the reminder leaves records and queue alone when nothing needs reminding"
 }
 
@@ -2289,6 +2296,7 @@ test_tick_starts_reminder_only_for_escalated_records() {
   ( _FM_PENDING_REPLY_LIB_DIR=$stub; fm_pending_reply_tick "$state" ) || fail "escalated tick failed"
   [ "$(cat "$stub/started" 2>/dev/null)" = "$state" ] \
     || fail "a tick with an escalated record did not start the reminder once"
+  unset FM_HOME
   pass "the tick starts the reminder only when a record is escalated"
 }
 
@@ -2319,6 +2327,7 @@ test_new_session_in_same_harness_process_is_reminded() {
   [ "${same_wakes:-0}" = 0 ] || fail "the escalating session was reminded again"
   [ "${new_wakes:-0}" = 1 ] || fail "a new session in the same harness process was not reminded"
   [ "${repeat_wakes:-0}" = 1 ] || fail "the new session was reminded ${repeat_wakes:-0} times"
+  unset FM_HOME
   pass "a new session in the same harness process is reminded once"
 }
 
@@ -2399,6 +2408,7 @@ test_dismissal_scan_is_saved_under_record_lock() {
     *" open") ;;
     *) fail "the dismissal scan was not saved once the lock was free" ;;
   esac
+  unset FM_HOME
   pass "the dismissal scan is saved only under the record lock"
 }
 
@@ -2407,6 +2417,7 @@ test_resurface_stays_off_without_the_flag() {
   local home state corr rec
   home=$(setup_parent resurface-off)
   state="$home/state"
+  export FM_HOME="$home"
   export FM_PENDING_REPLY_NOW=1000
   export FM_PENDING_REPLY_SEND_HOOK='true'
   export FM_PENDING_REPLY_SESSION=s1
@@ -2423,8 +2434,41 @@ test_resurface_stays_off_without_the_flag() {
     && fail "remind ran without the flag"
   [ "$("$ROOT/bin/fm-pending-reply-remind.sh" --decisions "$state")" = '[]' ] \
     || fail "bearings input listed an escalation the home did not opt into"
-  unset FM_PENDING_REPLY_SESSION
+  unset FM_PENDING_REPLY_SESSION FM_HOME
   pass "an escalated pending reply is not re-surfaced unless the home opts in"
+}
+
+# The flag is read from FM_CONFIG_OVERRIDE, else FM_HOME/config, never from
+# beside the state directory.
+test_resurface_flag_follows_the_config_dir() {
+  local home elsewhere state corr
+  home=$(setup_parent resurface-config)
+  elsewhere="$TMP_ROOT/resurface-config-elsewhere-$RANDOM"
+  mkdir -p "$elsewhere/config"
+  state="$elsewhere/state"
+  mkdir -p "$state"
+  opt_in_resurface "$home"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(escalate_new "$home" "$state" "state outside the home")
+  export FM_PENDING_REPLY_SESSION=s2
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "remind failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "a home that opted in was not reminded when its state lives elsewhere"
+  : > "$state/.wake-queue"
+  export FM_CONFIG_OVERRIDE="$elsewhere/config"
+  export FM_PENDING_REPLY_SESSION=s3
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "overridden remind failed"
+  [ ! -s "$state/.wake-queue" ] || fail "the reminder ignored FM_CONFIG_OVERRIDE without the flag"
+  [ "$("$ROOT/bin/fm-pending-reply-remind.sh" --decisions "$state")" = '[]' ] \
+    || fail "bearings input ignored FM_CONFIG_OVERRIDE without the flag"
+  : > "$elsewhere/config/pending-reply-resurface"
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "flagged override remind failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "the flag in FM_CONFIG_OVERRIDE did not turn the reminder on"
+  unset FM_PENDING_REPLY_SESSION FM_CONFIG_OVERRIDE FM_HOME
+  pass "the resurface flag is read from FM_CONFIG_OVERRIDE or FM_HOME/config"
 }
 
 # A status log that cannot be read is not remembered as still open.
@@ -2475,6 +2519,7 @@ test_same_session_operator_close_is_recorded
 test_unchanged_status_log_is_not_reread_for_dismissal
 test_dismissal_scan_is_saved_under_record_lock
 test_resurface_stays_off_without_the_flag
+test_resurface_flag_follows_the_config_dir
 test_failed_dismissal_read_is_not_cached_as_open
 test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations

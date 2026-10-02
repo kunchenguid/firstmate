@@ -56,7 +56,7 @@ fm_pending_reply_remind_escalated() {  # <state-dir>
   local state=$1 token dir rec corr task summary payload key queued scan appended=0 rc=0
   local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  fm_pending_reply_resurface_enabled "$state" || return 0
+  fm_pending_reply_resurface_enabled || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -117,7 +117,7 @@ if [ "${1:-}" = --token ]; then
 fi
 if [ "${1:-}" = --decisions ]; then
   [ -n "${2:-}" ] || exit 2
-  if fm_pending_reply_resurface_enabled "$2"; then
+  if fm_pending_reply_resurface_enabled; then
     fm_pending_reply_escalated_decisions_json "$2"
   else
     printf '[]'
