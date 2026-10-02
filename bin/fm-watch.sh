@@ -10,7 +10,10 @@
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
-# although its initial no-verb status signal still surfaces in normal mode.
+# although its initial no-verb status signal still surfaces in normal mode. When
+# that signal presented an open captain decision, an unchanged declared-wait
+# recheck stays silent while the task status/open decision set is unchanged and
+# the endpoint is positively live.
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
@@ -490,8 +493,9 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
+# .wedge-escalations-, .paused-*, .decision-presented-*, .writing-*,
+# .waiting-*), and live homes hold those markers on disk under the current format,
+# so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
 # poll of one window derives it once.
@@ -1159,16 +1163,38 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # window; wake() itself exits the cycle, exactly as it does inline. An optional
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
 # declared `until` time that has just passed re-surface at once), while the
-# throttle keeps the cadence between repeats.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
+# throttle keeps the cadence between repeats. The optional <decision-task> records
+# the status and open-decision snapshot only after a successful wake append, and
+# suppresses a due declared-wait repeat only when that exact snapshot was already
+# presented.
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [decision-task]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
+  local decision_task=${7-} decision_identity='' decision_marker=''
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
     [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
   fi
+  if [ -n "$decision_task" ]; then
+    decision_identity=$(status_decision_presentation_identity "$STATE/$decision_task.status" || true)
+    if [ -n "$decision_identity" ]; then
+      decision_marker="$STATE/.decision-presented-$(window_key "$win")"
+      case "$scope" in
+        *:due) ;;
+        *)
+          if [ "$(cat "$decision_marker" 2>/dev/null || true)" = "$decision_identity" ] \
+            && decision_presentation_endpoint_live "$STATE/$decision_task.status"; then
+            if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+            triage_log "absorbed unchanged declared-wait recheck for an already-presented open decision: $win"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+  fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+  if [ -n "$decision_identity" ]; then printf '%s' "$decision_identity" > "$decision_marker" || true; fi
   wake "$reason"
 }
 
@@ -1628,7 +1654,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$task"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1703,7 +1729,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.decision-presented-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -1817,6 +1844,68 @@ task_captain_call_open() {  # <task>
   CAPTAIN_CALL_IDENTITY=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" \
     open "$task" --identity 2>/dev/null) || return 1
   return 0
+}
+
+decision_presentation_endpoint_live() {  # <status-file>
+  local statusf=$1 task meta kind win backend state
+  task=${statusf##*/}; task=${task%.status}
+  meta="$STATE/$task.meta"
+  [ -r "$meta" ] && [ ! -L "$meta" ] || return 1
+  kind=$(sed -n 's/^kind=//p' "$meta" | head -1)
+  if [ "$kind" = secondmate ]; then
+    fm_secondmate_liveness_probe "$meta" "$task" poll
+    [ "$FM_SM_LIVE_STATUS" = alive ]
+    return
+  fi
+  win=$(sed -n 's/^window=//p' "$meta" | head -1)
+  [ -n "$win" ] || return 1
+  backend=$(sed -n 's/^backend=//p' "$meta" | head -1)
+  [ -n "$backend" ] || backend=tmux
+  state=$(fm_backend_agent_state "$backend" "$win" 2>/dev/null) || return 1
+  [ "$state" = alive ]
+}
+
+# Snapshot the reported status signature, latest status line, and open decision
+# set only when an unanswered captain decision exists. Keep the initial signal
+# path free of endpoint liveness probes; the due recheck separately requires a
+# positive live-endpoint verdict before it can be absorbed.
+# The full signature re-arms a recheck after any status append, while the fold
+# makes decision identity explicit rather than trusting only the latest status
+# line.
+status_decision_presentation_identity() {  # <status-file> [<expected-signature>]
+  local statusf=$1 expected=${2-} before latest open after key verb summary has_decision=0
+  before=$(fm_wake_signal_sig "$statusf") || return 1
+  [ -z "$expected" ] || [ "$before" = "$expected" ] || return 1
+  open=$(status_open_decisions "$statusf") || return 1
+  while IFS=$(printf '\t') read -r key verb summary; do
+    case "$verb" in
+      needs-decision) has_decision=1 ;;
+      blocked) _fm_is_pending_reply_escalation "$key" "$summary" && has_decision=1 ;;
+    esac
+  done <<EOF
+$open
+EOF
+  [ "$has_decision" -eq 1 ] || return 1
+  latest=$(last_status_line "$statusf")
+  after=$(fm_wake_signal_sig "$statusf") || return 1
+  [ "$before" = "$after" ] || return 1
+  printf 'status=%s\nlatest=%s\nopen=%s' "$before" "$latest" "$open"
+}
+
+# A status signal is already presented by the main-owned decision row. Save its
+# matching status/open-set snapshot after queueing that row, so a later declared
+# wait cannot use its first recheck to repeat the same decision.
+record_decision_status_presentation() {  # <status-file> <expected-signature>
+  local statusf=$1 expected=$2 task meta win key identity marker
+  task=${statusf##*/}; task=${task%.status}
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  win=$(sed -n 's/^window=//p' "$meta" | head -1)
+  [ -n "$win" ] || return 1
+  key=$(window_key "$win")
+  identity=$(status_decision_presentation_identity "$statusf" "$expected") || return 1
+  marker="$STATE/.decision-presented-$key"
+  printf '%s' "$identity" > "$marker"
 }
 
 # The identity a re-surface throttle is bound to: the task's whole status-log
@@ -2962,6 +3051,14 @@ EOF
         mark_surfaced "$f" "$surface_end" "$surface_ident"
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in
+          *" $f "*) record_decision_status_presentation "$f" "$sig" || true ;;
+        esac
+      done <<EOF
+$pending
 EOF
       wake "$reason"
     else
