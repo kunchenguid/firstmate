@@ -38,13 +38,14 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 # liveness questions are decided by the process table alone (FM_TEST_KILL_RC=1
 # makes every pid dead). The suite itself may run inside a Claude session whose
 # CLAUDE_CODE_SESSION_ID and CLAUDE_PID would leak into the expression, so both
-# are scrubbed and only FM_TEST_SESSION_ID and FM_TEST_CLAUDE_PID reach it.
+# are scrubbed and only fixture identities reach it.
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
-  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+  [ -z "${FM_TEST_CODEX_THREAD_ID:-}" ] || session_env+=("CODEX_THREAD_ID=$FM_TEST_CODEX_THREAD_ID")
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CODEX_THREAD_ID ${session_env[@]+"${session_env[@]}"} \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -91,6 +92,9 @@ SH
     FM_TEST_CLAUDE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
       || fail "$shape: the session holding the lock did not recognize itself as the owner"
   done
+  printf 'codex:stale-thread\n' > "$dir/state/.lock-session"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "a stale Codex sidecar masked direct ownership of a Claude anchor"
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
@@ -425,6 +429,141 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
     || fail "no anchor pid was resolved for the healthy chain with a trusted id"
   [ "$got" = 710 ] || fail "the healthy chain with a trusted id anchored '$got', expected 710 rather than the front-end"
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
+}
+
+test_managed_codex_daemon_is_not_a_thread_identity() {
+  local dir fakebin state got
+  dir="$TMP_ROOT/codex-shared-daemon"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  900:comm=) printf '%s\n' codex ;;
+  900:args=) printf '%s\n' 'codex app-server --managed-daemon' ;;
+  900:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '900\n' > "$state/.lock"
+  printf 'codex:thread-one\n' > "$state/.lock-session"
+  got=$(FM_TEST_CODEX_THREAD_ID=thread-one lib_eval "$fakebin" 'fm_session_lock_trusted_session_id') \
+    || fail "the Codex thread identity was not trusted under its daemon"
+  [ "$got" = codex:thread-one ] || fail "the Codex sidecar identity was '$got'"
+  FM_TEST_CODEX_THREAD_ID=thread-one owned "$fakebin" "$state" \
+    || fail "the owning Codex thread did not recognize its lock"
+  if FM_TEST_CODEX_THREAD_ID=thread-two owned "$fakebin" "$state"; then
+    fail "another Codex thread claimed the shared daemon's lock"
+  fi
+  if owned "$fakebin" "$state"; then
+    fail "a Codex shell without a thread id claimed the shared daemon's lock"
+  fi
+  rm -f "$state/.lock-session"
+  if FM_TEST_CODEX_THREAD_ID=thread-one owned "$fakebin" "$state"; then
+    fail "a shared daemon lock without a sidecar was claimed by ancestry"
+  fi
+  FM_TEST_CODEX_THREAD_ID=thread-two foreign_owner "$fakebin" "$state" >/dev/null \
+    || fail "the other Codex thread did not see a live foreign owner"
+  pass "session-lock: shared Codex daemon ancestry cannot impersonate another thread"
+}
+
+test_guarded_codex_takeover_requires_quiet_exact_owner() {
+  local dir fakebin state owner watcher out
+  dir="$TMP_ROOT/codex-takeover"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  sleep 120 &
+  owner=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_OWNER_PID" ]; then
+  case "$field" in
+    comm=) printf '%s\n' codex ;;
+    args=) printf '%s\n' 'codex app-server --managed-daemon' ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=) printf '%s\n' bash ;;
+    args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+    ppid=) printf '%s\n' "$FM_TEST_OWNER_PID" ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$owner" > "$state/.lock"
+  printf 'codex:thread-old\n' > "$state/.lock-session"
+  codex_lock() {
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+      FM_HOME="$dir" FM_TEST_OWNER_PID="$owner" CODEX_THREAD_ID=thread-new \
+      PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh" "$@"
+  }
+  out=$(codex_lock status)
+  assert_contains "$out" "take-over --expect-pid $owner --expect-session codex:thread-old" \
+    "status did not show a guarded command with its exact current owner"
+  if codex_lock >/dev/null 2>&1; then
+    fail "an ordinary Codex lock acquisition stole the shared daemon's lock"
+  fi
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old >/dev/null 2>&1; then
+    fail "take-over accepted a recent owner lock"
+  fi
+  perl -e 'utime(time-600,time-600,$ARGV[0]) or die $!' "$state/.lock"
+  sleep 120 &
+  watcher=$!
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$watcher" > "$state/.watch.lock/pid"
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old >/dev/null 2>&1; then
+    fail "take-over accepted a live watcher"
+  fi
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  rm -f "$state/.watch.lock/pid"
+  rmdir "$state/.watch.lock"
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:wrong >/dev/null 2>&1; then
+    fail "take-over accepted a stale expected session"
+  fi
+  out=$(codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old) \
+    || fail "guarded take-over refused an idle exact owner: $out"
+  assert_contains "$out" 'lock taken over' "take-over did not report its verified handoff"
+  [ "$(cat "$state/.lock-session")" = codex:thread-new ] \
+    || fail "take-over did not publish the new thread identity"
+  codex_lock >/dev/null || fail "the new Codex thread did not retain its lock"
+  rm -f "$state/.lock-session"
+  perl -e 'utime(time-600,time-600,$ARGV[0]) or die $!' "$state/.lock"
+  if codex_lock >/dev/null 2>&1; then
+    fail "a managed Codex daemon with no sidecar was claimed by ancestry"
+  fi
+  out=$(codex_lock status)
+  assert_contains "$out" "take-over --expect-pid $owner --expect-session none" \
+    "status did not offer guarded recovery for a missing sidecar"
+  codex_lock take-over --expect-pid "$owner" --expect-session none >/dev/null \
+    || fail "guarded take-over could not repair a missing sidecar"
+  [ "$(cat "$state/.lock-session")" = codex:thread-new ] \
+    || fail "missing-sidecar recovery did not publish a trusted thread"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  pass "session-lock: a quiet exact shared daemon permits guarded takeover, including missing-sidecar repair; recent and watched owners refuse"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -1106,6 +1245,8 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+test_managed_codex_daemon_is_not_a_thread_identity
+test_guarded_codex_takeover_requires_quiet_exact_owner
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

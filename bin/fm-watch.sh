@@ -1135,6 +1135,26 @@ secondmate_liveness_tick() {
   [ "$failed" -eq 0 ]
 }
 
+# The remote reply mirror has its own progress evidence: the remote log size
+# and the committed local cursor. The adapter owns the episode marker and wake
+# publication; this watcher only gives its new actionable result a live cycle.
+remote_reply_lag_tick() {
+  local meta id kind host result
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    kind=$(fm_meta_get "$meta" kind)
+    [ "$kind" = secondmate ] || continue
+    host=$(fm_meta_get "$meta" remote_host)
+    [ -n "$host" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" lag-check "$id") || continue
+    case "$result" in check:*) wake "$result" ;; esac
+  done
+}
+
 # Consecutive wedge-escalation count for a window past FM_WEDGE_DEMAND_INSPECT_COUNT
 # (default 3): a pane that keeps re-wedging on the SAME stale hash - each
 # escalation gets absorbed again as "still validating" one poll later, since the
@@ -2714,6 +2734,10 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
+
+  # A live source can still stop advancing its cursor. Its remote adapter
+  # compares remote bytes with that cursor and owns the once-per-episode wake.
+  remote_reply_lag_tick
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.

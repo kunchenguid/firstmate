@@ -10,18 +10,19 @@
 #   fm-procevent-remote-reply.sh self-announcing
 #   fm-procevent-remote-reply.sh source-id <secondmate-id>
 #   fm-procevent-remote-reply.sh relisten
+#   fm-procevent-remote-reply.sh lag-check <secondmate-id>
 #   fm-procevent-remote-reply.sh retire <secondmate-id>
 #
 # `arm` registers one blocking, non-destructive delta source for the remote
 # home's state/parent-replies.status log. The process-event runner owns blocking,
-# capture, publication, and one machine-wide source owner. Each captured delta is
-# terminal for that exact registration; `handle` validates and idempotently
-# ingests it, acknowledges the captured generation, then registers the next
-# cursor-anchored source. `relisten` tells that runner to poll again in the same
-# process, still holding the claim, after an empty window and after that re-arm.
+# capture, publication, and one machine-wide source owner. Each captured delta
+# is applied through `handle`, which validates and idempotently ingests it,
+# acknowledges the captured generation, then registers the next cursor-anchored
+# source. A delta is not terminal for the runner: `relisten` polls again in the
+# same process, still holding the claim, after an empty window and after re-arm.
 # A window the remote job worker preempted is reported to the runner as an empty
 # window, so it relistens too (see JOB_PREEMPTED below).
-# A continuity break is escalated and not re-armed, so the registration is dropped
+# Only a continuity break is terminal: it is escalated and not re-armed, so the registration is dropped
 # and the runner stops. The runner does not refresh the owner lease.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
@@ -95,6 +96,8 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -268,18 +271,110 @@ WINDOW_CLOSED_EMPTY=75
 JOB_PREEMPTED=76
 
 cmd_source() {
-  local id=${1:-} started rc=0
+  local id=${1:-} started rc=0 attempt marker key reason
   validate_id "$id"
-  read_cursor "$id"
-  started=$(fm_pending_reply_now)
-  "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-    "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
-  if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
-    fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
-  elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
-    rc=$WINDOW_CLOSED_EMPTY
+  mkdir -p "$CURSOR_DIR" || return 1
+  [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] || return 1
+  marker="$CURSOR_DIR/$id.source-failed"
+  [ ! -e "$marker" ] || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
+  # The runner retains its claim during brief transport/read failures. Three
+  # consecutive failures open one durable failure episode; its next relisten
+  # keeps repairing even when the parent watcher is temporarily absent.
+  for attempt in 1 2 3; do
+    read_cursor "$id"
+    started=$(fm_pending_reply_now)
+    rc=0
+    "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
+      "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+    case "$rc" in
+      0|"$WINDOW_CLOSED_EMPTY"|"$JOB_PREEMPTED")
+        rm -f -- "$marker"
+        if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
+          fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true
+        elif [ "$rc" -eq "$JOB_PREEMPTED" ]; then
+          rc=$WINDOW_CLOSED_EMPTY
+        fi
+        return "$rc"
+        ;;
+    esac
+    [ "$attempt" -eq 3 ] || sleep "$attempt"
+  done
+  key="remote-reply-source-failed-$id"
+  reason="check: remote reply listener $id failed three consecutive reads (last exit $rc); inspect the remote route and re-ensure remote-reply-$id"
+  if [ ! -e "$marker" ]; then
+    if fm_wake_append check "$key" "$reason"; then
+      (umask 077; printf '%s\n' "$rc" > "$marker") || true
+    fi
   fi
-  return "$rc"
+  sleep 5
+  return "$WINDOW_CLOSED_EMPTY"
+}
+
+# The process-event claim can disappear after a failed remote read while its
+# registration remains. A watcher normally re-ensures it, but a live watcher
+# alone does not prove the cursor is advancing. Probe the remote append-only
+# log's size on a bounded cadence and announce one episode when it stays ahead
+# of the committed cursor. A moving cursor resets the episode; a failed probe
+# proves no lag and leaves the existing observation untouched.
+cmd_lag_check() {  # <secondmate-id>
+  local id=${1:-} threshold=${FM_REMOTE_REPLY_LAG_SECONDS:-120}
+  local cadence=${FM_REMOTE_REPLY_LAG_PROBE_SECONDS:-} now size marker probe
+  local prior_offset prior_since prior_alerted since key reason tmp
+  validate_id "$id"
+  remote_route_exists "$id"
+  if [ -z "$cadence" ]; then
+    case "$WAIT_SECONDS" in ''|*[!0-9]*) die "remote reply wait window must be whole seconds" ;; esac
+    [ "$WAIT_SECONDS" -le 300 ] || die "remote reply wait window exceeds its safety bound"
+    cadence=$((10#$WAIT_SECONDS + 35))
+  fi
+  case "$threshold:$cadence" in *[!0-9:]*|:*|*:) die "lag thresholds must be whole seconds" ;; esac
+  [ "$threshold" -ge 1 ] && [ "$threshold" -le 3600 ] || die "lag threshold must be 1-3600 seconds"
+  [ "$cadence" -ge 1 ] && [ "$cadence" -le 360 ] || die "lag probe cadence must be 1-360 seconds"
+  mkdir -p "$CURSOR_DIR" || return 1
+  [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] || return 1
+  marker="$CURSOR_DIR/$id.lag"
+  probe="$CURSOR_DIR/$id.lag-probe"
+  [ ! -L "$marker" ] && [ ! -L "$probe" ] || return 1
+  [ "$(fm_path_age "$probe")" -ge "$cadence" ] || return 0
+  touch "$probe" || return 1
+  read_cursor "$id"
+  size=$(fm_run_timed 15 "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh size "$REMOTE_LOG" 2>/dev/null) || return 0
+  case "$size" in ''|*[!0-9]*) return 0 ;; esac
+  [ "${#size}" -le 18 ] || return 0
+  if [ "$size" -le "$CURSOR_OFFSET" ]; then
+    [ ! -L "$marker" ] || return 1
+    rm -f -- "$marker"
+    return 0
+  fi
+  now=$(date +%s)
+  prior_offset=
+  prior_since=
+  prior_alerted=0
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+    read -r prior_offset prior_since prior_alerted < "$marker" || true
+  fi
+  case "$prior_since" in ''|*[!0-9]*) prior_since= ;; esac
+  if [ "$prior_offset" != "$CURSOR_OFFSET" ] || [ -z "$prior_since" ] || [ "$prior_since" -gt "$now" ]; then
+    prior_since=$now
+    prior_alerted=0
+  fi
+  since=$prior_since
+  if [ "$prior_alerted" = 1 ]; then return 0; fi
+  if [ $((now - since)) -lt "$threshold" ]; then
+    tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
+    printf '%s %s 0\n' "$CURSOR_OFFSET" "$since" > "$tmp" && mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+    return 0
+  fi
+  key="remote-reply-lag-$id-$since"
+  reason="check: remote reply channel stalled: mate=$id remote_bytes=$size cursor=$CURSOR_OFFSET for $((now - since))s; inspect the process-event listener and watcher, then re-ensure remote-reply-$id"
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
+  if ! fm_wake_append check "$key" "$reason"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  printf '%s %s 1\n' "$CURSOR_OFFSET" "$since" > "$tmp" && mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$reason"
 }
 
 safe_doc_path() {
@@ -744,6 +839,7 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
+  rm -f -- "$CURSOR_DIR/$id.lag" "$CURSOR_DIR/$id.lag-probe" "$CURSOR_DIR/$id.source-failed"
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 
@@ -780,10 +876,11 @@ case "${1:-}" in
   autohandle) shift; [ "$#" -eq 3 ] || usage; cmd_autohandle "$@" ;;
   ingest) shift; [ "$#" -eq 2 ] || usage; cmd_ingest "$@" ;;
   classify) shift; [ "$#" -eq 1 ] || usage; classify_result "$1" ;;
-  terminal) shift; [ "$#" -eq 1 ] || usage; [ -s "$1" ] ;;
+  terminal) shift; [ "$#" -eq 1 ] || usage; [ "$(classify_result "$1")" = continuity-broken ] ;;
   self-announcing) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
   source-id) shift; [ "$#" -eq 1 ] || usage; source_id "$1" ;;
   relisten) shift; [ "$#" -eq 0 ] || usage; exit 0 ;;
+  lag-check) shift; [ "$#" -eq 1 ] || usage; cmd_lag_check "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
   retire-quiesce-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_quiesce_locked "$@" ;;
   retire-finalize-locked) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; require_parent_lifecycle_lock "$1"; cmd_retire_finalize_locked "$@" ;;

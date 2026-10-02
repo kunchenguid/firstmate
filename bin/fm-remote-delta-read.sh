@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-remote-delta-read.sh <relative-log> <offset> <prefix-sha256> [wait-seconds]
+#   fm-remote-delta-read.sh size <relative-log>
 #
 # The reader validates continuity by hashing the exact prefix represented by the
 # caller's cursor. It then blocks until at least one complete appended line is
@@ -142,6 +143,31 @@ emit_break() { # <reason> <size> <actual-prefix>
   printf 'payload_bytes=0\n'
   printf 'reason=%s\n\n' "$1"
 }
+
+if [ "${1:-}" = size ]; then
+  [ "$#" -eq 2 ] || usage
+  LOG=$(resolve_log "$2")
+  if [ ! -e "$LOG" ]; then
+    printf '0\n'
+    exit 0
+  fi
+  LOG_PARENT=$(dirname "$LOG")
+  LOG_BASE=$(basename "$LOG")
+  (
+    CDPATH='' cd -- "$LOG_PARENT" 2>/dev/null || exit 1
+    [ "$(pwd -P)" = "$LOG_PARENT" ] || exit 1
+    perl -MFcntl=:DEFAULT -e '
+      use strict;
+      use warnings;
+      my $path = shift;
+      sysopen(my $in, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @stat = stat $in or exit 1;
+      -f _ or exit 1;
+      print "$stat[7]\n";
+    ' "$LOG_BASE"
+  ) || die "log size could not be read safely: $2"
+  exit 0
+fi
 
 [ "$#" -ge 3 ] && [ "$#" -le 4 ] || usage
 REL=$1

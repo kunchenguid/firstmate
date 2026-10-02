@@ -53,6 +53,7 @@ if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
+[ ! -e "${FM_REMOTE_REPLY_FAIL_FLAG:-/nonexistent}" ] || exit 255
 host=$1
 entry=$2
 shift 2
@@ -173,6 +174,9 @@ if [ -z "$RESULT" ]; then
   fail "the remote reply delta was not durably captured"
 fi
 assert_grep 'done [corr=0123456789abcdef]' "$RESULT" "captured delta lost the correlated status line"
+if remote_env "$ADAPTER" terminal "$RESULT"; then
+  fail "an ordinary delta was classified terminal and tried to retire its re-armed listener"
+fi
 # One remote note, one announcement: the adapter declares self-announcing, so a
 # fully autohandled capture publishes NO check wake - the mirrored status bytes
 # are the single announcement, observed here through the same signature-vs-seen
@@ -823,18 +827,42 @@ fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
-# A failed transport is not an empty wait: do not launch a second read under
-# the same owner, even when the launch floor is short.
+# A failed transport used to leave a registered source with no owner until a
+# watcher cycle restarted it. Keep the same runner while reads fail, publish
+# one durable failure after three attempts, then recover without reconcile.
 : > "$TMP_ROOT/failed-polls"
-FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+touch "$TMP_ROOT/fail-remote-read"
+FM_REMOTE_REPLY_FAIL_FLAG="$TMP_ROOT/fail-remote-read" \
+  FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
   remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
 failed_reader=$!
-wait "$failed_reader" || fail "failed reader did not leave the runner"
-sleep 2
-[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 1 ] \
-  || fail "failed reader relaunched within the launch floor"
-pass "a failed remote read exits instead of relistening"
+for _ in $(seq 1 100); do
+  [ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -ge 3 ] && break
+  sleep 0.1
+done
+[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -ge 3 ] \
+  || fail "the listener did not retry three failed reads"
+[ "$(reply_owner)" = live ] || fail "a failed read orphaned the registered source"
+for _ in $(seq 1 100); do
+  grep -q 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue" 2>/dev/null && break
+  sleep 0.1
+done
+assert_grep 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue" \
+  "three failed reads did not publish a durable failure"
+printf 'working: recovered after transport failure\n' >> "$REMOTE/state/parent-replies.status"
+rm -f "$TMP_ROOT/fail-remote-read"
+for _ in $(seq 1 100); do
+  grep -q 'recovered after transport failure' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'recovered after transport failure' "$PARENT/state/ios.status" \
+  "the retained listener did not ingest after transport recovery"
+[ "$(grep -c 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue")" -eq 1 ] \
+  || fail "one failed-read episode published duplicate wakes"
+stop_reply_listener || fail "the recovered listener did not stop"
+wait "$failed_reader" || true
+pass "a failed remote read retries under one owner, wakes once, and recovers without a watcher"
 
 # Make local ingestion persistently fail after the delta has been captured.
 # Its durable generation must remain the only copy until reconciliation.
@@ -1001,6 +1029,8 @@ RESULT_TWELVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -p
 [ -n "$RESULT_TWELVE" ] || fail "continuity break produced no durable result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_TWELVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
+remote_env "$ADAPTER" terminal "$RESULT_TWELVE" \
+  || fail "a continuity break did not classify as terminal"
 set +e
 remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-nine.out" 2>&1
 handle_rc=$?
@@ -1033,6 +1063,77 @@ remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
+assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
+  "adapter retirement left a failed-read episode a later route could inherit"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
+
+# A watcher compares the remote log size with the committed cursor. One lag
+# episode wakes only after the bound, then cursor progress clears its marker.
+remote_env "$ADAPTER" arm ios >/dev/null
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-first.out"
+[ ! -s "$TMP_ROOT/lag-first.out" ] || fail "lag woke before its bound"
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-second.out"
+assert_grep 'remote reply channel stalled: mate=ios' "$TMP_ROOT/lag-second.out" \
+  "an aged remote log ahead of its cursor did not wake"
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-third.out"
+[ ! -s "$TMP_ROOT/lag-third.out" ] || fail "one lag episode woke repeatedly"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/lag-catchup.out" 2>&1 &
+for _ in $(seq 1 100); do
+  grep -q 'source was replaced' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'source was replaced' "$PARENT/state/ios.status" \
+  "lagged reply was not ingested after the listener restarted"
+stop_reply_listener || fail "lag catchup listener did not stop"
+for _ in $(seq 1 100); do
+  [ "$(reply_owner)" = none ] && break
+  sleep 0.1
+done
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-caught-up.out"
+[ ! -s "$TMP_ROOT/lag-caught-up.out" ] || fail "a caught-up channel still woke"
+assert_absent "$PARENT/state/remote-replies/ios.lag" "catchup did not clear the lag episode"
+pass "an aged remote reply lag wakes once and catchup resets its episode"
+
+# The live failure mode is a detached reconcile launch that never proves a
+# claim, followed by an attached start that can read and apply the same reply.
+# Keep both paths in this relay fixture instead of treating a launch-failed
+# wake as proof that the remote route itself is broken.
+REAL_PERL=$(command -v perl)
+export FM_TEST_REAL_PERL="$REAL_PERL"
+cat > "$FAKEBIN/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = detach ]; then exit 125; fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+chmod +x "$FAKEBIN/perl"
+detached_rc=0
+FM_TEST_REAL_PERL="$REAL_PERL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" reconcile > "$TMP_ROOT/detached-fail.out" 2>&1 \
+  || detached_rc=$?
+[ "$detached_rc" -ne 0 ] || fail "an unconfirmed detached launch was reported as healthy"
+assert_grep 'failed=1' "$TMP_ROOT/detached-fail.out" \
+  "the detached path did not report its unconfirmed launch"
+[ "$(reply_owner)" = none ] || fail "a failed detached launch invented an owner"
+assert_grep 'remote-reply-ios is registered but its launch did not prove' "$PARENT/state/.wake-queue" \
+  "the detached failure had no durable actionable wake"
+rm -f "$FAKEBIN/perl"
+unset FM_TEST_REAL_PERL
+printf 'working: attached launch after detached failure\n' >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/attached-recovery.out" 2>&1 &
+for _ in $(seq 1 100); do
+  grep -q 'attached launch after detached failure' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'attached launch after detached failure' "$PARENT/state/ios.status" \
+  "an attached launch did not ingest after detached confirmation failed"
+stop_reply_listener || fail "attached recovery listener did not stop"
+pass "a failed detached launch surfaces durably and an attached launch ingests the backlog"
 
 echo "ALL TESTS PASSED"
