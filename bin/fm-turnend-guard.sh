@@ -122,9 +122,13 @@ done
 # shellcheck source=bin/fm-hook-host-lib.sh
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
-# Read the whole turn-end hook payload once; never block on unreadable/absent
-# stdin.
-PAYLOAD=$(cat 2>/dev/null || true)
+# Read the whole payload, including multiline JSON and an unterminated last
+# line, with a two-second input budget. A hook caller can leave its pipe open
+# after writing: waiting for EOF with cat would spend the harness's entire Stop
+# timeout before checking supervision. Bash read preserves bytes received on
+# timeout or EOF; jq below still rejects incomplete or malformed JSON.
+PAYLOAD=
+IFS= read -r -d '' -t 2 PAYLOAD 2>/dev/null || true
 [ -n "$PAYLOAD" ] || exit 0
 
 # jq is the repo's established JSON dependency (bin/fm-x-poll.sh uses the same

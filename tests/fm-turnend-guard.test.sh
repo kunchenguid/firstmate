@@ -938,6 +938,80 @@ test_tracked_claude_entries_inert_under_grok() {
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
+# Exercise the executable while this shell keeps the FIFO writer open. Closing
+# the writer only after the assertion distinguishes payload handling from EOF.
+# Poll by iteration with CI headroom; the old cat-based path cannot finish at
+# all while fd 9 remains open, regardless of machine speed.
+run_stop_with_open_stdin() {
+  local dir=$1 command=$2 payload=$3 expected=$4 pid attempt completed status out
+  mkfifo "$dir/input"
+  exec 9<> "$dir/input"
+  (
+    cd "$dir" || exit 1
+    PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" bash -c "$command" \
+      < "$dir/input" 9>&- > "$dir/output" 2>&1
+    printf '%s\n' "$?" > "$dir/status"
+  ) 9>&- &
+  pid=$!
+  printf '%s' "$payload" >&9
+  completed=0
+  for ((attempt=0; attempt<100; attempt++)); do
+    if [ -f "$dir/status" ]; then
+      completed=1
+      break
+    fi
+    sleep 0.1
+  done
+  exec 9>&-
+  # Release EOF even on the regression path before reaping the hook.
+  wait "$pid" 2>/dev/null || true
+  [ "$completed" -eq 1 ] || fail "Stop waited for stdin EOF instead of evaluating the received payload"
+  status=$(cat "$dir/status")
+  out=$(cat "$dir/output")
+  expect_code "$expected" "$status" "open stdin must preserve the Stop verdict"
+  if [ "$expected" -eq 2 ]; then
+    assert_contains "$out" 'TURN WOULD END BLIND' "open stdin must still block missing supervision"
+  else
+    [ -z "$out" ] || fail "allowed Stop with open stdin produced output: $out"
+  fi
+}
+
+test_hook_evaluates_payload_without_stdin_eof() {
+  local dir
+  dir=$(make_primary_dir "$TMP_ROOT/hook-open-stdin")
+  : > "$dir/state/task1.meta"
+  run_stop_with_open_stdin "$dir" 'exec bash bin/fm-turnend-guard.sh' \
+    '{"stop_hook_active":false}' 2
+  pass "fm-turnend-guard: received JSON still blocks missing supervision without stdin EOF"
+}
+
+test_codex_stop_preserves_verdicts_without_stdin_eof() {
+  local command scenario dir payload expected identity
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/.codex/hooks.json")
+  for scenario in missing healthy retry empty incomplete; do
+    dir=$(make_primary_dir "$TMP_ROOT/codex-open-stdin-$scenario")
+    mark_codex_hook_root "$dir"
+    : > "$dir/state/task1.meta"
+    # Multiline JSON with escaped content and no terminal newline must survive
+    # the bounded read just as EOF-terminated hook payloads do.
+    payload=$'{\n  "stop_hook_active": false,\n  "session_id": "escaped\\\"value"\n}'
+    expected=0
+    case "$scenario" in
+      missing) expected=2 ;;
+      healthy)
+        identity=$(watcher_identity "$dir" "$$") || fail "could not identify live watcher holder"
+        record_watcher_lock "$dir" "$$" "$identity"
+        touch "$dir/state/.last-watcher-beat"
+        ;;
+      retry) payload='{"stop_hook_active":true}' ;;
+      empty) payload='' ;;
+      incomplete) payload='{"stop_hook_active":' ;;
+    esac
+    run_stop_with_open_stdin "$dir" "$command" "$payload" "$expected"
+  done
+  pass ".codex/hooks.json: open stdin preserves missing/healthy watcher, retry, empty and invalid payload verdicts"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -2241,6 +2315,8 @@ test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
+test_hook_evaluates_payload_without_stdin_eof
+test_codex_stop_preserves_verdicts_without_stdin_eof
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
