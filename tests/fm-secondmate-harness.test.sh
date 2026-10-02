@@ -513,7 +513,7 @@ meta_harness() { grep '^harness=' "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # would launch its own workers unsandboxed. A failed copy must refuse the launch
 # instead of continuing with the sandbox silently off.
 test_spawn_refuses_when_sandbox_inheritance_fails() {
-  local w sm rc
+  local w sm rc fakebin stderr
   w="$TMP_ROOT/spawn-sandbox-fail"
   sm="$w/sm"
   mkdir -p "$w/home/config"
@@ -521,11 +521,23 @@ test_spawn_refuses_when_sandbox_inheritance_fails() {
   printf '%s\n' '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
     > "$w/home/config/worker-sandbox-settings.json"
   make_seeded_home "$sm" sm
-  # Force inheritance to fail: a regular file where the child home's config
-  # directory must be created, so no inherited item can land.
-  printf 'not-a-directory\n' > "$sm/config"
+  fakebin=$(make_noop_tmux "$w/tmux-sm")
+  fm_test_fake_srt "$fakebin"
+  mkdir -p "$sm/config"
+  chmod 0555 "$sm/config"
+  if [ -w "$sm/config" ]; then
+    chmod 0755 "$sm/config"
+    printf 'ok - failed sandbox inheritance permission test # SKIP directory permissions are bypassed by this user\n'
+    return
+  fi
   spawn_secondmate "$w" sm "$sm"
   rc=$?
+  chmod 0755 "$sm/config"
+  stderr=$(cat "$w/sm.spawn.err")
+  assert_contains "$stderr" "inheritance failed" \
+    "the unwritable config directory must cause propagation failure"
+  assert_contains "$stderr" "sandbox configuration does not match the primary (config/worker-sandbox, config/worker-sandbox-settings.json)" \
+    "failed propagation must reach the sandbox postcondition guard"
   [ "$rc" -ne 0 ] \
     || fail "a secondmate spawn whose config/worker-sandbox inheritance failed must refuse while the primary has the sandbox enabled"
   [ ! -f "$w/home/state/sm.meta" ] \

@@ -3043,7 +3043,7 @@ if [ "$KIND" = secondmate ]; then
   if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
     if ! cmp -s "$CONFIG/worker-sandbox" "$PROJ_ABS/config/worker-sandbox" ||
       ! cmp -s "$CONFIG/worker-sandbox-settings.json" "$PROJ_ABS/config/worker-sandbox-settings.json"; then
-      echo "error: secondmate $ID sandbox configuration does not match the primary for $PROJ_ABS; refusing to launch with missing or stale inherited settings" >&2
+      echo "error: secondmate $ID sandbox configuration does not match the primary (config/worker-sandbox, config/worker-sandbox-settings.json) for $PROJ_ABS; refusing to launch with missing or stale inherited settings" >&2
       exit 1
     fi
   fi
