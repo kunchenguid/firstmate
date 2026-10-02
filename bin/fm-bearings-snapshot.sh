@@ -43,10 +43,11 @@
 # floored age), and are counted in omitted[].
 # --all-decisions reveals every captain hold available within the bounded snapshot
 # and drops its gate, so a hold is never in both Captain's Call and Charted Next.
-# decisions_open also leads with every unresolved, undismissed escalated
-# pending reply (verb blocked, key pending-reply-<corr>, owner "(main)"); it is
-# not a captain hold, takes no bucket, is listed with or without
-# --all-decisions, and does not count against FM_BEARINGS_DECISIONS.
+# With config/pending-reply-resurface present, decisions_open also leads with
+# every unresolved, undismissed escalated pending reply (verb blocked, key
+# pending-reply-<corr>, owner "(main)"); it is not a captain hold, takes no
+# bucket, is listed with or without --all-decisions, and does not count
+# against FM_BEARINGS_DECISIONS.
 # Aging is a projection safety net only; the durable
 # deferral remains re-holding with --until.
 #
