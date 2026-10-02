@@ -98,6 +98,36 @@ if [ "$PROVIDER" = gerrit ]; then
   fi
 fi
 
+# Refuse to arm a Forgejo watch with no tea on PATH, for the same reason as
+# the GitLab case above. tea also addresses a repo by slug only, resolving the
+# host from a named "tea login" rather than from the URL the way gh and glab
+# do, so a poll can only ever succeed when exactly one registered login
+# matches this host; refuse now rather than watch something that can never
+# resolve. This duplicates bin/fm-pr-poll.sh's own login match deliberately:
+# that script is a static, standalone watcher body with no sourced
+# dependency, so it re-derives the same match at every poll instead of
+# trusting a name recorded here.
+if [ "$PROVIDER" = forgejo ]; then
+  if ! command -v tea >/dev/null 2>&1; then
+    echo "error: watching a Forgejo pull request requires tea on PATH" >&2
+    exit 1
+  fi
+  tea login list --output json 2>/dev/null | awk -F'"' -v h="$HOST" '
+      /"name":/ { name = $4 }
+      /"url":/ {
+        u = $4
+        sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
+        sub(/\/.*$/, "", u)
+        sub(/:[0-9]+$/, "", u)
+        if (u == h) { print name; n++ }
+      }
+      END { exit (n == 1) ? 0 : 1 }
+    ' >/dev/null || {
+    echo "error: watching a Forgejo pull request at $HOST requires exactly one 'tea login' registered for that host (see 'tea login list')" >&2
+    exit 1
+  }
+fi
+
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -112,18 +142,20 @@ fi
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
-# revision names one patch set, every amend or rebase is a new patch set, and
-# bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
-# recorded revision would silently become the reviewed content. Both consumers
-# already treat it as optional:
+# output, which would need a JSON processor firstmate does not require, and
+# tea's single-PR view ignores field selection entirely, so neither a GitLab
+# nor a Forgejo task records a pr_head here, and neither does a Gerrit task: a
+# Gerrit revision names one patch set, every amend or rebase is a new patch set,
+# and bin/fm-review-diff.sh has no Gerrit path to resolve a current head with,
+# so a recorded revision would silently become the reviewed content. Both
+# consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# bin/fm-pr-merge.sh reads a GitLab or Forgejo head live at merge time for the
+# same reason, and treats a recorded value that disagrees as stale rather than
+# authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
