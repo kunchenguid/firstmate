@@ -1506,6 +1506,12 @@ fm_treehouse_home_root() {  # <home>
   if [ -d "$base" ]; then
     base=$(CDPATH='' cd -- "$base" 2>/dev/null && pwd -P) || return 1
   else
+    case "/$base/" in
+      */./*|*/../*)
+        printf 'error: TREEHOUSE_ROOT %s has a . or .. segment and does not exist yet; set TREEHOUSE_ROOT to a path without dot segments\n' "$base" >&2
+        return 1
+        ;;
+    esac
     suffix=
     parent=$base
     while [ "$parent" != / ] && [ ! -d "$parent" ]; do
