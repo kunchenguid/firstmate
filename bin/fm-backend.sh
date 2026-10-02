@@ -388,55 +388,25 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
   esac
 }
 
-# Fence the two rollout readers before input reaches a worker. A failed send
-# leaves unknown until fresh lifecycle evidence; it never restores old idle.
-fm_backend_fence_transcript_input() {  # <backend> <target> [check-target|fence-text] [text]
-  local candidate state=${FM_STATE_OVERRIDE:-$FM_HOME/state} managed=0
-  [ -d "$state" ] || return 0
-  for candidate in "$state/"*.busy-session; do
-    [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || { managed=1; break; }
-  done
-  if [ "$managed" = 0 ]; then
-    for candidate in "$state/"*.meta; do
-      [ -f "$candidate" ] || continue
-      case "$(fm_meta_get "$candidate" harness)" in
-        codex|traex)
-          [ -z "$(fm_meta_get "$candidate" busy_gen)" ] || { managed=1; break; }
-          ;;
-      esac
-    done
-  fi
-  [ "$managed" = 1 ] || return 0
-  if [ "${3:-}" = fence-text ]; then
-    printf '%s' "$4" | python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" fence-text "$state" "$1" "$2"
-  else
-    python3 "$FM_BACKEND_LIB_DIR/fm-busy-transcript.py" "${3:-fence-target}" "$state" "$1" "$2"
-  fi
-}
-
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
-  case "${2-}" in
-    Enter|enter|C-m|c-m|ctrl+m|Ctrl+M) fm_backend_fence_transcript_input "$backend" "$1" || return 1 ;;
-    *) fm_backend_fence_transcript_input "$backend" "$1" check-target || return 1 ;;
-  esac
   case "$backend" in
     herdr) fm_backend_herdr_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
 }
 
-# fm_backend_send_text_submit: type text once, then submit and verify,
-# retrying only the submission (never retyping). Echoes the backend's
-# proof-carrying verdict; callers require exact empty for confirmed delivery.
+# fm_backend_send_text_submit: submit text through the backend's native prompt
+# API without consulting vendor transcripts. Echoes submitted|unknown|send-failed.
+# `submitted` is transport acceptance only, never proof that the worker read or
+# completed the instruction. `unknown` forbids blind replay.
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
   local backend=$1
   shift
   fm_backend_source "$backend" || return 1
-  fm_backend_fence_transcript_input "$backend" "$1" fence-text "$2" || return 1
   case "$backend" in
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
@@ -465,10 +435,9 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 
 # fm_backend_busy_state: semantic busy/idle/unknown from Herdr's native agent
 # state. Historical and unknown backends report unknown. Callers own the
-# fallback policy: fm-watch.sh uses unknown as the cue for harness-scoped
-# pane-tail detection, while
-# fm-crew-state.sh also corroborates native idle verdicts with the recorded
-# harness's signature before treating a no-run crew as not busy.
+# fallback policy. Codex and TraeX ordinary task state additionally requires
+# this native status to be paired with fm_backend_agent_state's exact process
+# result; Pi keeps its generation-bound lifecycle source.
 fm_backend_busy_state() {  # <backend> <target>
   local backend=$1
   shift
@@ -480,11 +449,10 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
-# empty|pending|pending-unproven|unknown for callers that need a pre-submit
-# input guard, a submit acknowledgement, or a launch-readiness check. It is
-# exposed so a caller other than the send path (the away-mode daemon's
-# supervisor-pane pending-input guard in bin/fm-supervise-daemon.sh, and
-# retained launch and delivery checks) can ask the same question
+# empty|pending|pending-unproven|unknown for callers that need a supervisor
+# input guard or a launch-readiness check. It is exposed for the away-mode
+# daemon's supervisor-pane pending-input guard and retained lifecycle checks;
+# ordinary message submission does not call it. Callers can ask the same question
 # without duplicating per-backend composer reading. Every adapter's named
 # classifier is a THIN wrapper - capture plus a capability descriptor fed to
 # the one shared shape owner (bin/fm-composer-lib.sh,

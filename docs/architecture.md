@@ -139,10 +139,9 @@ In away mode, seen-status dedupe does not clear possible-wedge aging for nonterm
 Away-mode housekeeping has no worktree-write deferral of its own, so while `state/.afk` exists a quiet crew that is writing its own worktree still escalates as a possible wedge at that bound.
 The daemon escalates captain-relevant events, plus a bounded recheck for a declared external wait that is still declared, as one batched, single-line digest using the canonical `away-supervisor` kind from `bin/fm-operational-input.sh` so firstmate can distinguish it structurally from real messages; captain-held transfers remain silent until return while the posture record exists.
 Its supervisor injection path supports Herdr panes only, with `FM_SUPERVISOR_BACKEND` restricted to `herdr` and `FM_SUPERVISOR_TARGET` resolved independently from task-spawn selection.
-Pane existence, busy checks, composer checks, capture, and verified submit route through `bin/fm-backend.sh`: Herdr uses native agent-state submit confirmation on idle baselines, a composer empty fallback when native stays idle, and a pre-Enter rendered-footer transition when that baseline is unavailable.
-The retries-exhausted queued-Enter decision is owned by `fm_composer_queued_enter_verdict` in `bin/fm-composer-lib.sh`; Herdr provides only its backend-specific busy signal.
+Pane existence, busy checks, composer checks, capture, and text submission route through `bin/fm-backend.sh`. Herdr ordinary text submission uses one native `agent prompt` call and does not read a vendor transcript, pane content, composer state, or agent execution state as a submission prerequisite or receipt. Native API success means only `submitted`; a timeout-like result is uncertain and must not be replayed blindly.
 Composer classification has one shared owner, `bin/fm-composer-lib.sh`: Herdr contributes only a screen capture plus declarative styled, cursor, identity, and row capabilities, while the shared classifier owns every shape and the `empty`/`pending`/`pending-unproven`/`unknown` verdict.
-The daemon injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
+The away daemon independently uses that classifier as a supervisor-pane safety guard before native submission: it injects only into an affirmatively `empty` composer, so every other or future verdict defers; positive container proof is required, and a blank unidentified row or bare dead-shell prompt cannot receive an escalation.
 The current operator boundary is in [Composer and injection safety](herdr-backend.md#composer-and-injection-safety).
 Unsupported supervisor backends refuse at daemon startup.
 Stalled escalation delivery writes `state/.subsuper-inject-wedged` and attempts a configured backend-independent active alert after `FM_MAX_DEFER_SECS` instead of silently deferring forever.
@@ -150,7 +149,7 @@ On an unmarked return, `bin/fm-afk-return.sh` owns ordered shutdown, the record 
 `fm-send.sh` delivers every remote text steer and ordinary local text steer as a durable steering-inbox record plus a best-effort constant doorbell line (`bin/fm-task-inbox-lib.sh`).
 The doorbell line is a shell no-op and is never typed into an endpoint classified as dead or missing; that record surfaces once for recovery instead of walking the re-ring ladder (`bin/fm-task-inbox-lib.sh` header).
 `bin/fm-task-handoff.sh` closes the source-task to target-task gap before that inbox boundary: it records the exact body and recipient under a stable identity before lease arbitration, retains a concrete retryable refusal while the sibling supervision actor owns the target, and idempotently promotes the handoff into one ordinary target inbox record only while the [bound source remains open](task-lifecycle.md#stops-older-records-and-delivery).
-Its local-only typed plane - harness-native invocations and explicit backend targets - selects a pre-Enter popup-settle for slash commands and for codex `$...` skill invocations using metadata-routed target `harness=` values, then adds its own `FM_SEND_SETTLE` pause after successful typed sends so immediate peeks catch the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
+Its local text plane - harness-native invocations and explicit backend targets - uses the same native prompt submission and adds its own `FM_SEND_SETTLE` pause after API acceptance so immediate peeks can observe the receiving turn starting; the sub-supervisor uses only the shared submit core and does not pay that post-submit pause.
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `bin/fm-control.sh` is the control plane: an allowlisted `interrupt`, `exit`, and transactional `relaunch` addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
@@ -159,22 +158,20 @@ Text for a worker to read and commands that drive a worker's process are separat
 ## Busy state is semantic, per adapter
 
 `bin/fm-busy-lib.sh` is the single owner of what "this worker is busy" means.
-`bin/fm-busy-event.sh` owns the shared generation sidecar, pushed lifecycle records, and the public entrypoint for restoring a provenance-verified original generation, while `bin/fm-busy-transcript.py` owns the task-bound pull source and live-process provenance checks used by managed Codex and TraeX workers.
+`bin/fm-busy-event.sh` owns the shared generation sidecar, pushed lifecycle records, and the public entrypoint for restoring a provenance-verified original generation, while `bin/fm-busy-transcript.py` retains task-bound transcript provenance only for the recovery paths that independently require it.
 `bin/fm-busy-recover.sh` owns the lifecycle-locked reconciliation behind that recovery entrypoint; the entrypoint header owns the exact procedure and refusal boundaries, and the harness recovery reference routes agents to it.
 Every classification returns a verdict of busy, idle, unknown, or dead together with the source that produced it, so a consumer or a diagnostic can never confuse semantic state with a fallback.
 
 Pi reports its turn lifecycle through the Firstmate-owned extension's `agent_start` and `agent_settled`, confirmed by `ctx.isIdle()`.
 Model providers used through Pi inherit that lifecycle.
-Managed Codex and TraeX workers on Herdr use their bound structured transcript after structural process liveness is established; CLI and binding-writer version metadata is descriptive and never an admission gate, while missing, malformed, or unbound structural evidence remains unknown.
-Legacy TraeX tasks without transcript wiring retain Herdr's native busy-only fallback, while legacy Codex tasks remain `codex-unverified`.
+Managed Codex and TraeX workers on Herdr use Herdr's native status plus the exact registered worker process. Native `working` reports busy; `idle`, `done`, `blocked`, and `waiting` report idle; an unrecognized status with a positively live worker also reports idle; a confirmed exited worker reports dead; and inconclusive process evidence stays unknown. This intentionally loses transcript-derived turn precision: a live UI in an unrecognized state is treated as idle, but ordinary state cost no longer depends on vendor transcript bytes. An attributed no-mistakes run remains authoritative ahead of this fallback, and native idle alone never establishes task completion.
 
-Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
+Missing, malformed, stale, untrusted, or unverified Pi semantic state is unknown, never idle. For Codex and TraeX only, the explicit native-unknown plus exact-live-process rule above yields idle; unproven liveness remains unknown.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
 
-Each pushed record or transcript binding is bound to an incarnation token minted when the task's wiring is armed, so evidence from a superseded incarnation is rejected rather than applied, and stale retained evidence classifies unknown.
-All are harness-scoped rather than a global pattern union, and none is a recorded worker state source.
+Each pushed Pi record is bound to an incarnation token minted when the task's wiring is armed, so evidence from a superseded incarnation is rejected rather than applied. Retained transcript bindings remain scoped recovery evidence and are not an ordinary Codex or TraeX state source.
 
 ## Task executors
 
@@ -218,8 +215,7 @@ It owns task endpoint creation, bounded capture, text/key sends, current-path re
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns selection and the retired-backend refusal contract.
 Herdr owns terminals and Treehouse owns worktrees; retained historical records never become operational Herdr identities by default.
 `fm-watch.sh` decides each window's busy state through the semantic contract above rather than by polling the backend for rendered text.
-Herdr's native `agent.get` verdict still participates, but only as evidence of activity: a native `busy` is accepted when the task has no semantic source of its own, while a native `idle` is not, because `agent.get` reports generation state and reads idle while a worker blocks on its own long-running foreground tool call.
-For a transcript-bound worker, Herdr instead supplies structural process liveness before the transcript is read; native unknown does not mask valid task-bound evidence, and native state never closes its turn.
+Herdr's native `agent.get` verdict supplies ordinary Codex and TraeX state after exact process liveness is established: working is busy; idle/done/blocked/waiting is idle; and an unrecognized state with a live worker is deliberately idle. Exited is dead and inconclusive liveness is unknown. Pi instead retains its generation-bound lifecycle record. No native idle verdict establishes task completion, and an attributed no-mistakes run outranks this fallback.
 The durable polling loop remains the fallback when native push is unavailable.
 For capable Herdr sessions, the same watcher replaces its terminal sleep with a bounded native event wait that immediately surfaces `blocked`; [Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback) owns the current mechanism and capability gates, while [runtime backend verification](verification/runtime-backends.md#native-blocked-event) owns the active evidence.
 Herdr is the only supported terminal: Treehouse remains its worktree provider, [`herdr-backend.md`](herdr-backend.md) owns current setup, CI coverage, and safety limits, and [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) owns active empirical evidence.

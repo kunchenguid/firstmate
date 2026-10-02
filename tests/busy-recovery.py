@@ -106,6 +106,7 @@ try:
                    'elif args[:2]==["pane","process-info"]:\n print(dump({"result":{"type":"pane_process_info","process_info":data["process_info"]}}))\n'
                    'elif args[:2]==["agent","get"]:\n print(json.dumps({"result":{"agent":{"agent":data["pane"]["agent"],"agent_status":"idle","pane_id":data["pane"]["pane_id"],"cwd":data["pane"]["foreground_cwd"],"foreground_cwd":data["pane"]["foreground_cwd"]}}}))\n'
                    'elif args[:2]==["pane","read"]:\n print("╭────╮\\n│    │\\n╰────╯")\n'
+                   'elif args[:2]==["agent","prompt"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n"); print(json.dumps({"result":{"type":"agent_prompted"}}))\n'
                    'elif args[:2]==["pane","send-text"]:\n send_log.write_text(send_log.read_text() + args[3] + "\\n" if send_log.exists() else args[3] + "\\n")\n'
                    'elif args[:2]==["pane","send-keys"]:\n pass\n'
                    'elif args and args[0]=="status":\n print(json.dumps({"server":{"running":True}}))\n'
@@ -174,9 +175,8 @@ try:
     apply()
     assert (state / 'worker.inbox/.ring-state').read_bytes() == ring_after_watcher
     assert not (state / 'worker.inbox/.rearm').exists()
-    call('python3', reader, 'fence-target', state, 'herdr', 'fm-lab-fixture:w1:p2')
     print('ok - escalated inbox recovery returns delivery to the watcher and repeated recovery stays idempotent')
-    print('ok - read-only legacy preflight, original-generation restore and ordinary input fence')
+    print('ok - read-only legacy preflight and original-generation restore')
     print('ok - a real same-name daemon does not replace exact root launch-argument provenance')
     reset()
     live_holder = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
@@ -201,8 +201,8 @@ try:
     finally:
         duplicate.terminate(); duplicate.wait()
     reset(); (state / 'worker.meta').write_text(meta.replace('fm-lab-fixture:w1:p2', 'fm-lab-fixture:w1:p3'))
-    call('python3', reader, 'fence-target', state, 'herdr', 'fm-lab-fixture:w1:p3', ok=False)
-    print('ok - duplicate launch identities and contradictory endpoint metadata refuse input')
+    check(ok=False)
+    print('ok - duplicate launch identities and contradictory endpoint metadata refuse recovery')
     # Replacement terminal, wrong live PID, stale gen, missing evidence.
     reset(); changed = copy.deepcopy(pane); changed['terminal_id'] = 'term_reused'; set_transport(changed)
     apply(ok=False); assert not (state / 'worker.busy-gen').exists()
@@ -229,8 +229,6 @@ try:
     reset(); (state / 'worker.meta').write_text(meta.replace(gen, 'g-other')); check(ok=False)
     reset(); (state / 'worker.busy-session').unlink(); check(ok=False)
     reset(); (state / 'worker.meta').write_text(meta.replace('spawn_gen=s-original', 'spawn_gen=new-spawn')); apply(ok=False)
-    reset(); data = json.loads(binding); data['unaccounted_input'] = True
-    (state / 'worker.busy-session').write_text(json.dumps(data)); check(ok=False)
     reset(); changed = copy.deepcopy(pane); changed['foreground_cwd'] = str(base); set_transport(changed); check(ok=False)
     print('ok - missing, conflicting, stale and reused endpoint evidence refuses without restoring a generation')
     # Interrupted verification under the busy lock must release it and allow
@@ -283,8 +281,9 @@ try:
     assert long_proof['process']['pid'] == process.pid
     print('ok - legitimate long transcript recovery retains original terminal and native PID provenance')
     log.write_text(''.join(json.dumps(dict(row, ordinal=i)) + '\n' for i, row in enumerate(records)))
-    # A later replacement may preserve all disk evidence. Input still rechecks
-    # the actual process and terminal immediately before ordinary transport.
+    # A later replacement may preserve all disk evidence. The retired
+    # transcript-fence commands remain unavailable; ordinary transport no
+    # longer calls this reader at all.
     process.terminate(); process.wait()
     replacement = subprocess.Popen(argv, cwd=cwd, env=worker_env)
     try:
@@ -296,7 +295,7 @@ try:
         call('python3', reader, 'fence-target', state, 'herdr', 'fm-lab-fixture:w1:p2', ok=False)
     finally:
         replacement.terminate(); replacement.wait()
-    print('ok - even copied launch argv cannot make a replacement accept recovered text or keys; missing sidecar refuses')
+    print('ok - retired transcript-fence commands remain unavailable after recovery provenance changes')
 finally:
     daemon.terminate(); daemon.wait()
     if process.poll() is None:

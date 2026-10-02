@@ -1428,6 +1428,103 @@ test_no_run_herdr_unknown_uses_backend_capture() {
   pass "herdr's native busy verdict reads working with no record present"
 }
 
+# Codex and TraeX ordinary state is deliberately bounded to Herdr's native
+# status and exact worker-process liveness. Vendor transcript bindings may
+# still exist for recovery, but this public reader must not execute them.
+test_codex_traex_native_state_avoids_transcript_reader() {
+  command -v jq >/dev/null 2>&1 || { pass "Codex/TraeX native-state test skipped without jq"; return; }
+  local h d id out marker transcript status
+  for h in codex traex; do
+    reset_fakes
+    id="native-$h"
+    d=$(new_case "$id")
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    write_crew_meta "$d/state/$id.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+      "backend=herdr" "harness=$h" "busy_gen=legacy-generation"
+    transcript="$d/vendor-transcript.jsonl"
+    truncate -s $((64 * 1024 * 1024)) "$transcript"
+    printf '{"path":"%s"}\n' "$transcript" > "$d/state/$id.busy-session"
+    printf 'legacy-generation\n' > "$d/state/$id.busy-gen"
+    marker="$d/transcript-reader-executed"
+    cat > "$d/fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'executed\n' > "$FORBIDDEN_READER_MARKER"
+exit 97
+SH
+    chmod +x "$d/fakebin/python3"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_HERDR_PROCESS=agent
+
+    FM_FAKE_HERDR_AGENT_STATUS=working
+    out=$(FORBIDDEN_READER_MARKER="$marker" run_crew_state "$d" "$id")
+    assert_contains "$out" "state: working" "$h native working -> working"
+    assert_contains "$out" "herdr-native" "$h native working names Herdr"
+
+    for status in idle blocked waiting; do
+      FM_FAKE_HERDR_AGENT_STATUS=$status
+      rm -f "$d/state/$id.status"
+      out=$(FORBIDDEN_READER_MARKER="$marker" run_crew_state "$d" "$id")
+      assert_contains "$out" "state: unknown" "$h native $status alone is not semantic completion"
+      assert_not_contains "$out" "state: done" "$h native $status must not complete the task"
+    done
+
+    FM_FAKE_HERDR_AGENT_STATUS=unknown
+    printf 'needs-decision: native unknown with live process reached idle fallback\n' > "$d/state/$id.status"
+    out=$(FORBIDDEN_READER_MARKER="$marker" run_crew_state "$d" "$id")
+    assert_contains "$out" "state: parked" "$h live native-unknown is treated as idle"
+    assert_contains "$out" "source: status-log" "$h live native-unknown reaches the ordinary idle fallback"
+    [ ! -e "$marker" ] || fail "$h public state path executed the forbidden transcript reader"
+  done
+  pass "Codex and TraeX public state uses Herdr status/process only and never reads a 64 MiB transcript"
+}
+
+test_codex_traex_process_exit_and_unproven_liveness() {
+  command -v jq >/dev/null 2>&1 || { pass "Codex/TraeX process-state test skipped without jq"; return; }
+  local h d id out
+  for h in codex traex; do
+    reset_fakes
+    id="process-$h"
+    d=$(new_case "$id")
+    make_repo_on_branch "$d/wt" "fm/$id"
+    make_fakebin "$d" >/dev/null
+    write_crew_meta "$d/state/$id.meta" "window=default:w1:p2" "worktree=$d/wt" "kind=ship" \
+      "backend=herdr" "harness=$h"
+    FM_FAKE_AXI_STATUS=""
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_HERDR_AGENT_STATUS=unknown
+
+    FM_FAKE_HERDR_PROCESS=shell
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: unknown" "$h exited process has no live task state"
+    assert_contains "$out" "backend target gone" "$h exited process is classified dead"
+
+    FM_FAKE_HERDR_PROCESS=unreadable
+    out=$(run_crew_state "$d" "$id")
+    assert_contains "$out" "state: unknown" "$h unproven liveness stays unknown"
+    assert_contains "$out" "herdr-process-unverified" "$h unproven liveness names its source"
+    assert_not_contains "$out" "source: status-log" "$h unproven liveness cannot use an idle fallback"
+  done
+  pass "Codex and TraeX exited workers read dead while unproven liveness stays unknown"
+}
+
+test_codex_active_validation_outranks_native_idle() {
+  command -v jq >/dev/null 2>&1 || { pass "Codex validation-attribution test skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case codex-validation-authority)
+  make_repo_on_branch "$d/wt" fm/codex-validation-authority
+  make_fakebin "$d" >/dev/null
+  write_crew_meta "$d/state/codex-validation-authority.meta" "window=default:w1:p2" "worktree=$d/wt" \
+    "kind=ship" "backend=herdr" "harness=codex"
+  FM_FAKE_AXI_STATUS="$(run_running fm/codex-validation-authority)"
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  local out; out=$(run_crew_state "$d" codex-validation-authority)
+  assert_contains "$out" "state: working" "active validation remains working over native idle"
+  assert_contains "$out" "source: run-step" "active validation remains authoritative"
+  pass "active no-mistakes attribution stays authoritative over ordinary native state"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -2361,6 +2458,9 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_herdr_unknown_uses_backend_capture
+test_codex_traex_native_state_avoids_transcript_reader
+test_codex_traex_process_exit_and_unproven_liveness
+test_codex_active_validation_outranks_native_idle
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

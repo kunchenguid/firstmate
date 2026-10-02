@@ -203,9 +203,9 @@ pane_readable() {  # <target>
   esac
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
-# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
-# adapter answers from its own lifecycle record. Herdr native busy is positive
-# activity evidence when no record exists; native idle never closes a turn.
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown|dead> <source>". Codex and
+# TraeX answer from Herdr's native status plus exact worker-process liveness;
+# Pi retains its generation-bound lifecycle record.
 crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE"
 }
@@ -777,6 +777,7 @@ BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
 case "${BUSY_VERDICT%% *}" in
   busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
   idle) ;;
+  dead) emit unknown none "backend target gone: $BACKEND_TARGET (agent gone, pane shell remains)" ;;
   *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
 esac
 

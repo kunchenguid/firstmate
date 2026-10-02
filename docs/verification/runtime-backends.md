@@ -167,13 +167,38 @@ ok - codex (codex-cli 0.159.1): the doorbell reached a real worker, which acted 
 ok - codex (codex-cli 0.159.1): coalesced input submitted once without re-ring or recovery Enter
 ```
 
-The doorbell pre-check skips only proven pending text; an ambiguous composer does not indefinitely suppress a recoverable constant notification.
-Portable ladder and enqueue regressions remain in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh`.
-`tests/fm-backend-herdr.test.sh` exercises the native insertion transport, independent real-process identity signals, default-session socket reconciliation, schema-backed and schema-less capability gates, literal newlines, foreign targets and ambiguous write responses without another text send or Enter.
-The live guard proves the reproduced input-coalescing mechanism, not the initiating trigger of an earlier production recurrence.
-Pi and TraeX retain literal insertion; this correction adds no paste framing to their paths.
-The same guard also passed on Pi 0.87.1 in that Linux Herdr lab; its idle composer remained unclassified, so the existing advisory path proceeded and the real worker acted and acknowledged after the guard's one allowed mid-wait re-ring.
-TraeX was inspected as an unaffected non-Codex integration but was not submitted a live prompt in this verification.
+That dated result describes the retired terminal insertion path. Ordinary
+doorbells now use one native `herdr agent prompt` call after exact home, task,
+backend, session, pane, authority and reservation resolution. They do not read
+the pane composer, agent execution state or vendor transcript before or after
+submission. A zero API result means `submitted`, not read, handled or complete;
+the durable inbox record reaches `handled/` only when the worker moves it.
+A timeout-like API result remains uncertain and is surfaced without automatic
+replay, while a definite API refusal remains a transport failure.
+
+Portable routing, exact-text, multiline, forbidden-transcript-read, API failure
+and uncertainty regressions live in `tests/fm-send-inbox.test.sh`,
+`tests/fm-task-inbox.test.sh`, and `tests/fm-backend-herdr.test.sh`. The older
+coalescing experiment remains useful historical evidence for why terminal
+typing was fragile; it is not the current transport contract and does not
+establish the cause of the earlier production recurrence.
+
+On 2026-10-02 the current native-prompt path passed the guarded named-session
+lab with Codex 0.159.1 and TraeX 0.207.1 internal edition on Herdr 0.8.0. Each
+installed harness received one real `fm-send` doorbell, performed the harmless
+task, and moved the durable inbox record to `handled/`; no transcript receipt or
+recovery Enter participated in submission. This proves native submission and
+worker acknowledgement separately, not exactly-once delivery or semantic task
+completion. The guard reports an explicit skip for an unavailable requested
+harness and fails if it verifies none.
+
+```sh
+HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
+  FM_HERDR_LAB_TASK=remove-transcript-send-gates-20261002 \
+  FM_SEND_INBOX_LIVE_E2E=1 \
+  FM_SEND_INBOX_LIVE_HARNESSES='codex traex' \
+  bin/fm-test-run.sh tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
 
 ## Herdr
 
@@ -198,13 +223,13 @@ herdr 0.7.5
 ["pane.output_matched","pane.agent_status_changed","pane.scroll_changed"]
 ```
 
-### In-turn transcript input consumption
+### Historical transcript input observation (not a send prerequisite)
 
 Verified on 2026-09-29 with Herdr 0.8.0, Codex 0.158.0 and TraeX 0.207.1 on Linux.
 The named-lab guard below uses installed default TUIs and a local simulated provider inside private namespaces.
-It submits two durable doorbells during one actual root turn, verifies both typed UserMessage events belong to that turn, checks one tool execution reads and acknowledges both records, and observes busy followed by idle through the public classifier.
+It submitted two durable doorbells during one actual root turn, observed both typed UserMessage events in that turn, checked one tool execution read and acknowledged both records, and observed busy followed by idle through the public classifier.
 The provider advances only after actual tool-result requests, so speculative requests cannot substitute for execution.
-The prior start-count fence reproduced busy followed by unknown for both adapters on this sequence.
+The then-current start-count fence reproduced busy followed by unknown for both adapters on this sequence.
 Private task evidence preserves independent before/after transcript hashes and the bounded event inventory.
 
 ```sh
@@ -224,31 +249,44 @@ ok - traex multiple in-turn steering receipts settle without invented starts
 The same guard covers fresh launch, exact original-process recovery, single-message steering, interruption, tool and simulated API failures, process exit and endpoint death.
 It does not establish authenticated provider availability.
 Portable coverage demonstrates that nonempty future `cli_version` values do not change transcript admission; the stable compatibility contract is owned by [Busy state is semantic, per adapter](../architecture.md#busy-state-is-semantic-per-adapter).
-The accounting, structural transcript admission, bounded refusal categories and conservative legacy-input limits belong to [`fm-busy-transcript.py`](../../bin/fm-busy-transcript.py).
-Portable coverage in `tests/fm-busy-state.test.sh` additionally separates partial and complete reads, unmatched and duplicate inputs, append-only compaction, unsupported replacement/rotation, malformed records and wrong identity.
+Current `fm-busy-transcript.py` reads transcripts only for retained lifecycle
+and recovery provenance operations. It no longer supplies ordinary Codex/TraeX
+state, admits message submission,
+establishes a submission fence, matches typed receipts, or accounts pending
+transport input. Consequently these historical observations provide no current
+identity, consumption, deduplication or receipt guarantee for an ordinary send.
 
-### Long transcript steering and recovery
+### Historical long-transcript steering evidence
 
 Verified on 2026-10-02 with the portable suite and a named isolated Herdr lab.
-A valid append-only transcript above 32 MiB remains bound, accepts an ordinary inbox doorbell, and becomes idle only after the exact typed `UserMessage` and handled inbox record are both present.
+A valid append-only transcript above 32 MiB remained bound, accepted an ordinary inbox doorbell, and became idle only after the exact typed `UserMessage` and handled inbox record were both present under the former contract.
 The same fixture reads successfully under a 64 MiB address-space ceiling, while an individual JSONL record above 32 MiB refuses as `record-too-large`.
-The recovery fixture accepts the long transcript only with its retained original terminal and native PID provenance; the existing missing, conflicting, replacement-process, prefix-rewrite, truncation, ordering, duplicate and unconsumed-input refusals remain covered in the same suite.
+Recovery still requires its retained original terminal and native PID provenance
+where that lifecycle operation needs it. Ordinary message submission is now
+independent: missing, unreadable, oversized, malformed or replaced transcript
+content cannot block an otherwise authorized native prompt, and transcript
+bytes are not opened anywhere in that send call chain.
+Ordinary Codex/TraeX state is independent too: the public classifier combines
+Herdr native status with exact worker-process liveness, including the deliberate
+native-unknown plus live-process => idle rule. Portable forbidden-reader coverage
+places a 64 MiB transcript binding beside both harnesses and proves neither
+public state call executes it. Active no-mistakes run attribution still wins.
 
 ```sh
 bin/fm-test-run.sh tests/fm-busy-state.test.sh
 ```
 
 ```text
-ok - codex ordinary inbox receipt settles above 32 MiB
+ok - Codex and TraeX ordinary state never execute the transcript reader, even with a 64 MiB binding
 ok - codex long transcript read stays within a 64 MiB address-space ceiling
-ok - traex ordinary inbox receipt settles above 32 MiB
+ok - Codex and TraeX use native status with exact process liveness, including live-unknown as idle
 ok - traex long transcript read stays within a 64 MiB address-space ceiling
 ok - legitimate long transcript recovery retains original terminal and native PID provenance
 all fm-busy-state tests passed
 ```
 
 The live guard used Codex 0.159.1, TraeX 0.207.1 internal edition and Herdr 0.8.0.
-Both installed TUIs passed task-bound startup, original-generation recovery, actual durable inbox acknowledgement, exact in-turn receipt accounting, interruption and endpoint-death checks.
+Both installed TUIs passed the then-current task-bound startup, original-generation recovery, durable inbox acknowledgement, in-turn transcript observation, interruption and endpoint-death checks.
 The guard's separate final TraeX normal-launch probe did not pass: `fm-spawn` reported that the launch identity did not belong to the isolated task copy.
 No same-base counterfactual was run, so this remains an unattributed limitation rather than evidence of either a baseline condition or a candidate regression, and it is not counted as a long-transcript pass.
 
@@ -263,7 +301,7 @@ HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
 
 The fresh-directory trust path was verified on 2026-09-24 with traecli 0.207.1 internal edition and Herdr 0.8.0.
 That combination renders `enter continue | esc quit` and reports native `unknown` at the exact chooser, so the guard binds the TraeX identity, pane, and isolated cwd to that complete rendering before sending Enter.
-The same live run observed native `working`, verified the worker's benign instruction output, kept the post-turn native `unknown` unclassified, cleaned up the pane, and preserved the default-session tripwire.
+The same historical live run observed native `working`, verified the worker's benign instruction output, kept the post-turn native `unknown` unclassified under the former state contract, cleaned up the pane, and preserved the default-session tripwire. The current contract treats that state as idle when the exact worker process remains live.
 
 ```sh
 HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
@@ -347,10 +385,11 @@ The CLI matrix was checked directly:
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
-| Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
+| Native prompt | `herdr agent prompt <pane> <text> --session <name>` | Submits exact text, including literal newlines; success is API acceptance only. |
+| Literal terminal insertion (lifecycle-only evidence) | `herdr pane send-text <pane> <text> --session <name>` | Leaves text unsubmitted until Enter and is not used by ordinary message submission. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
-| Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
+| Native state | `herdr agent get <pane>` | Working and done transitions are lifecycle evidence only. They neither admit nor confirm ordinary prompt submission. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
@@ -1261,7 +1300,7 @@ Its native App Server peer and watcher-close process are deterministic fixtures;
 [Semantic busy state](supervision.md#semantic-busy-state) owns the default-TUI lifecycle guard, versions, output, source coverage, and limits.
 That run observed TraeX reporting native `agent_status=unknown` while its `traex` foreground process remained alive.
 The busy reader uses the existing structural process probe in that case; exact `traex` and `traecli` names are recognized, with real-process decoy coverage in `tests/fm-agent-process-live-e2e.test.sh`.
-Structural liveness permits the task-bound transcript read but does not itself infer busy or idle.
+The former contract used structural liveness only to admit a task-bound transcript read. The current ordinary contract does not read that transcript: exact live process plus native unknown is deliberately idle, an exited process is dead, and unproven liveness stays unknown.
 
 ## Independent task workspace cleanup
 

@@ -411,8 +411,12 @@ _handoff_deliver_locked() {  # <id>
   }
   fm_task_inbox_ring "$backend" "$endpoint" "$inbox_record" "fm-$target" || ring_rc=$?
   case "$ring_rc" in
-    1) echo "fm-task-handoff: doorbell skipped because the composer holds pending text; delivered at $inbox_record and the watcher will re-ring" >&2 ;;
     2) echo "fm-task-handoff: doorbell did not reach $endpoint; delivered at $inbox_record and the watcher will re-ring" >&2 ;;
+    4)
+      fm_task_inbox_record_escalated "$STATE" "$target" "$inbox_record" || true
+      fm_wake_append stale "$endpoint" "stale: $endpoint (handoff doorbell submission outcome is uncertain for $inbox_record; do not replay blindly; inspect the worker)" || true
+      echo "fm-task-handoff: doorbell submission is uncertain; delivered at $inbox_record and will not be replayed blindly" >&2
+      ;;
   esac
   printf 'task handoff %s delivered at %s\n' "$id" "$inbox_record"
 }

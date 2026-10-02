@@ -216,15 +216,11 @@ test_stale_gen_record_unknown() {
 # --- missing and malformed semantic data --------------------------------------
 
 test_missing_record_unknown_not_idle() {
-  local state out h
+  local state out
   state=$(new_state_dir missing)
-  for h in pi traex; do
-    out=$(fm_busy_classify herdr w1 "$h" t1 "$state")
-    [ "$out" = "unknown missing" ] || fail "$h with no record must be 'unknown missing', got '$out'"
-  done
-  out=$(fm_busy_classify herdr w1 codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "codex with no verified source must be 'unknown codex-unverified', got '$out'"
-  pass "a converted adapter with no record classifies unknown, never idle"
+  out=$(fm_busy_classify herdr w1 pi t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "Pi with no record must be 'unknown missing', got '$out'"
+  pass "Pi with no generation-bound record classifies unknown, never idle"
 }
 
 test_malformed_record_unknown() {
@@ -269,9 +265,14 @@ test_source_mismatch_cross_adapter() {
   "$EV" apply "$state" t1 busy --gen "$gen" --source pi-ext --event agent-start
   out=$(fm_busy_classify herdr w1 pi t1 "$state")
   [ "$out" = "busy pi-ext" ] || fail "Pi record was not trusted: $out"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf 'alive'; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'idle'; }
   out=$(fm_busy_classify herdr w1 traex t1 "$state")
-  [ "$out" = "unknown traex-transcript" ] || fail "Pi record trusted by TraeX: $out"
-  pass "semantic records are trusted only by their adapter"
+  [ "$out" = "idle herdr-native" ] || fail "Pi record trusted by TraeX: $out"
+  unset -f fm_backend_agent_state fm_backend_busy_state
+  pass "Pi semantic records do not override TraeX's native Herdr state"
 }
 
 test_converted_adapters_ignore_footer_text() {
@@ -281,25 +282,87 @@ test_converted_adapters_ignore_footer_text() {
    ■■■■⬝⬝⬝⬝  esc interrupt
 Working...
 Ctrl+c:cancel'
-  for h in pi traex; do
+  out=$(fm_busy_classify herdr w1 pi t1 "$state" "$tail")
+  [ "$out" = "unknown missing" ] || fail "Pi must never classify from footer text, got '$out'"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf 'unreadable'; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'busy'; }
+  for h in codex traex; do
     out=$(fm_busy_classify herdr w1 "$h" t1 "$state" "$tail")
-    [ "$out" = "unknown missing" ] || fail "$h must never classify from footer text, got '$out'"
+    [ "$out" = "unknown herdr-process-unverified" ] || fail "$h must never classify from footer text, got '$out'"
   done
-  out=$(fm_busy_classify herdr w1 codex t1 "$state" "$tail")
-  [ "$out" = "unknown codex-unverified" ] || fail "codex must never classify from footer text, got '$out'"
+  unset -f fm_backend_agent_state fm_backend_busy_state
   pass "converted adapters never classify busy from rendered footer text"
 }
 
-test_codex_unverified_gate() {
+test_codex_record_does_not_override_native() {
   local state gen out
   state=$(new_state_dir codex-gate)
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf 'alive'; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'idle'; }
   out=$(fm_busy_classify herdr w1 codex t1 "$state")
-  [ "$out" = "unknown codex-transcript" ] || fail "unverified codex must classify unknown, got '$out'"
+  [ "$out" = "idle herdr-native" ] || fail "Codex record overrode native idle, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
-  pass "codex classifies unknown until a semantic source passes its verification gate"
+  unset -f fm_backend_agent_state fm_backend_busy_state
+  pass "Codex ordinary state ignores its old lifecycle record and uses Herdr"
+}
+
+test_codex_traex_native_state_and_process_contract() {
+  local state out h
+  state=$(new_state_dir native-process-contract)
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf '%s' "$FAKE_PROCESS_STATE"; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf '%s' "$FAKE_NATIVE_STATE"; }
+  for h in codex traex; do
+    FAKE_PROCESS_STATE=alive FAKE_NATIVE_STATE=busy
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "busy herdr-native" ] || fail "$h native working: $out"
+    FAKE_NATIVE_STATE=idle
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "idle herdr-native" ] || fail "$h native idle/blocked: $out"
+    FAKE_NATIVE_STATE=unknown
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "idle herdr-native-live" ] || fail "$h live unknown: $out"
+    FAKE_PROCESS_STATE=dead
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "dead endpoint-gone" ] || fail "$h exited worker: $out"
+    FAKE_PROCESS_STATE=unreadable
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "unknown herdr-process-unverified" ] || fail "$h unproven process: $out"
+  done
+  unset -f fm_backend_agent_state fm_backend_busy_state
+  unset FAKE_PROCESS_STATE FAKE_NATIVE_STATE
+  pass "Codex and TraeX use native status with exact process liveness, including live-unknown as idle"
+}
+
+test_codex_traex_state_never_executes_transcript_reader() {
+  local state out h marker transcript
+  state=$(new_state_dir forbidden-reader)
+  marker="$state/reader-opened"
+  transcript="$state/vendor-transcript.jsonl"
+  truncate -s $((64 * 1024 * 1024)) "$transcript"
+  printf '{"path":"%s"}\n' "$transcript" > "$state/t1.busy-session"
+  printf 'legacy-generation\n' > "$state/t1.busy-gen"
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_agent_state() { printf 'alive'; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify
+  fm_backend_busy_state() { printf 'unknown'; }
+  # shellcheck disable=SC2329 # forbidden-read tripwire for the removed path
+  python3() { printf 'opened\n' > "$marker"; return 97; }
+  for h in codex traex; do
+    out=$(fm_busy_classify herdr s:w:p "$h" t1 "$state")
+    [ "$out" = "idle herdr-native-live" ] || fail "$h forbidden-reader fixture returned $out"
+  done
+  [ ! -e "$marker" ] || fail "ordinary native state executed the forbidden transcript reader"
+  unset -f fm_backend_agent_state fm_backend_busy_state python3
+  pass "Codex and TraeX ordinary state never execute the transcript reader, even with a 64 MiB binding"
 }
 
 test_dead_endpoint_overrides() {
@@ -419,7 +482,9 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
-test_codex_unverified_gate
+test_codex_record_does_not_override_native
+test_codex_traex_native_state_and_process_contract
+test_codex_traex_state_never_executes_transcript_reader
 test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
@@ -471,14 +536,6 @@ for harness, version in [('codex', '0.156.1'), ('traex', '0.207.1')]:
         actual = run('python3', reader, 'read', state, 'worker', harness, 'herdr', 'lab:w1:p1')
         assert actual == verdict+' '+harness+'-transcript', (harness,label,actual)
         print('ok - '+harness+' '+label)
-    def text_fence(text):
-        script = '''source "$1/bin/fm-backend.sh"
-fm_backend_source() { :; }
-fm_backend_herdr_send_text_submit() { printf empty; }
-fm_backend_send_text_submit herdr lab:w1:p1 "$2" 1 .01 .01
-'''
-        return subprocess.run(['bash', '-c', script, '_', str(root), text],
-            env=dict(os.environ, FM_HOME=str(home)), capture_output=True, text=True)
     def user(text, turn='turn-1', thread='session-1'):
         return {'type': 'event_msg', 'payload': {'type': 'item_completed',
             'thread_id': thread, 'turn_id': turn,
@@ -493,12 +550,10 @@ fm_backend_send_text_submit herdr lab:w1:p1 "$2" 1 .01 .01
     reset(); append(complete)
     (state/'worker.meta').write_text(commented_meta)
     expect('idle', 'repeated completion history and indented comments are ignored')
-    assert text_fence('after completion audit').returncode == 0
-    expect('unknown', 'comments do not consume pending text')
     append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
     append(user('after completion audit', 'turn-2'))
     append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
-    expect('idle', 'normal text receipt settles with completion history retained')
+    expect('idle', 'later lifecycle settles with completion history retained')
     for invalid, label in [
         (commented_meta + f'busy_gen={gen}\n', 'duplicate effective generation'),
         (commented_meta + 'harness=other\n', 'conflicting effective harness'),
@@ -508,144 +563,15 @@ fm_backend_send_text_submit herdr lab:w1:p1 "$2" 1 .01 .01
         reset(); append(complete)
         (state/'worker.meta').write_text(invalid)
         expect('unknown', label + ' still refuses beside comments')
-        assert text_fence('must not be sent').returncode != 0, label
     reset(); append(complete)
     (state/'worker.meta').write_text(commented_meta)
     wrong = copy.deepcopy(records); wrong[0]['payload']['originator'] = 'other-tui'
     write(wrong + [complete])
     expect('unknown', 'comments cannot authorize invalid transcript provenance')
-    assert text_fence('must not be sent').returncode != 0
-    reset(); append(complete)
-    (state/'worker.meta').write_text(commented_meta)
-    run('python3', reader, 'fence-target', state, 'herdr', 'lab:w1:p1')
-    run('python3', reader, 'fence-target', state, 'herdr', 'lab:w1:p1')
-    expect('unknown', 'legacy input watermark survives completion history')
-    assert text_fence('new text after old fences').returncode == 0
-    accounted = json.loads((state/'worker.busy-session').read_text())
-    assert accounted['required_starts'] == 3 and len(accounted['pending_inputs']) == 1
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append(user('new text after old fences', 'turn-2'))
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
-    expect('unknown', 'consuming new text cannot clear the older root-start watermark')
-    accounted = json.loads((state/'worker.busy-session').read_text())
-    assert accounted['required_starts'] == 3 and accounted['pending_inputs'] == []
-    reset(); expect('busy', 'bind before in-turn steering')
-    assert text_fence('steer one').returncode == 0
-    assert text_fence('steer two').returncode == 0
-    append(user('steer one')); append(user('steer two'))
-    expect('busy', 'multiple consumed inputs keep the same working root turn')
-    append(complete); expect('idle', 'in-turn receipts settle without artificial root starts')
-    reset(); expect('busy', 'bind before unconsumed input')
-    assert text_fence('wanted').returncode == 0
-    append(user('unrelated')); expect('busy', 'working turn is not input-consumption proof')
-    append(complete); expect('unknown', 'unrelated user message cannot settle pending input')
-    reset(); append(complete); expect('idle', 'bind before root-turn text input')
-    assert text_fence('new root').returncode == 0
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append(user('new root', 'turn-2')); expect('busy', 'matching root-turn input receipt')
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2','error':{'message':'simulated failure'}}})
-    expect('idle', 'consumed input can settle with API failure')
-    reset(); expect('busy', 'bind before identical inputs')
-    assert text_fence('same').returncode == 0
-    assert text_fence('same').returncode == 0
-    append(user('same')); expect('busy', 'one receipt cannot consume two identical sends')
-    append(complete); expect('unknown', 'second identical input remains unconsumed')
-    reset(); expect('busy', 'bind before partial read retry')
-    assert text_fence('late receipt').returncode == 0
-    row = json.dumps(dict(user('late receipt'), ordinal=3)) + '\n'
-    with log.open('a') as f: f.write(row[:20])
-    expect('unknown', 'partial consumption record remains uncertain')
-    with log.open('a') as f: f.write(row[20:])
-    expect('busy', 'complete matching record resolves transient read')
-    append(complete); expect('idle', 'retry preserves exact consumption attribution')
-    reset(); expect('busy', 'bind before failed pre-input read')
-    row = json.dumps({'type':'response_item','ordinal':3,'payload':{}}) + '\n'
-    with log.open('a') as f: f.write(row[:20])
-    refused = text_fence('never sent')
-    assert refused.returncode != 0 and 'partial-record' in refused.stderr, refused
-    with log.open('a') as f: f.write(row[20:])
-    append(complete); expect('idle', 'refused transport creates no phantom input')
-    assert text_fence('retry input').returncode == 0
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append(user('retry input', 'turn-2'))
-    append({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'turn-2','reason':'interrupted'}})
-    expect('idle', 'retried exact input and real cancellation settle')
-    reset(); expect('busy', 'bind before wrong-thread receipt')
-    assert text_fence('steer').returncode == 0
-    append(user('steer', thread='other')); expect('unknown', 'wrong-thread consumption refused')
-    reset(); expect('busy', 'bind before wrong-turn receipt')
-    assert text_fence('steer').returncode == 0
-    append(user('steer', turn='other')); expect('unknown', 'wrong-turn consumption refused')
-    reset(); append(complete); expect('idle', 'bind before legacy uncertainty')
-    legacy = json.loads((state/'worker.busy-session').read_text()); legacy['unaccounted_input'] = True
-    (state/'worker.busy-session').write_text(json.dumps(legacy))
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append(user('arbitrary', 'turn-2'))
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
-    expect('unknown', 'legacy unaccounted input never healed by readable unrelated records')
-    reset(); expect('busy', 'bind before compaction')
-    assert text_fence('after compaction').returncode == 0
-    append({'type':'compacted','payload':{'message':'summary'}})
-    append(user('after compaction')); append(complete)
-    expect('idle', 'append-only compaction preserves receipts and lifecycle')
-    reset(); expect('busy', 'bind before duplicate ordinal')
-    assert text_fence('duplicate').returncode == 0
-    append(user('duplicate'))
-    with log.open('a') as f: f.write(json.dumps(dict(user('duplicate'), ordinal=3))+'\n')
-    expect('unknown', 'replayed record ordinal cannot become another consumption')
-    reset(); append(complete); expect('idle', 'bind before malformed neighbor')
-    (state/'neighbor.busy-session').write_text('invalid')
-    (state/'neighbor.meta').write_text('backend=herdr\nwindow=lab:other:p2\nharness=codex\nharness=traex\n')
-    assert text_fence('neighbor unaffected').returncode == 0
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append(user('neighbor unaffected', 'turn-2'))
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
-    expect('idle', 'unrelated damaged task cannot affect exact-target input receipts')
-    reset(); expect('busy', 'bind before malformed input accounting')
-    damaged = json.loads((state/'worker.busy-session').read_text())
-    damaged['pending_inputs'] = [{'after': 2, 'digest': 'not a hash'}]
-    (state/'worker.busy-session').write_text(json.dumps(damaged))
-    expect('unknown', 'malformed receipt accounting is never normalized')
-    assert json.loads((state/'worker.busy-session').read_text())['last_refusal'] == {'stage':'read','reason':'malformed-record'}
-    reset(); expect('busy', 'bind before diagnostic redaction')
-    with log.open('a') as f: f.write('do-not-log-this-secret\n')
-    refused = text_fence('do-not-log-input')
-    assert refused.returncode != 0 and 'malformed-record' in refused.stderr, refused
-    assert 'do-not-log' not in refused.stderr
-    assert json.loads((state/'worker.busy-session').read_text())['last_refusal'] == {'stage':'fence','reason':'malformed-record'}
-    if os.geteuid() != 0:
-        reset(); append(complete); expect('idle', 'bind before unreadable transient')
-        log.chmod(0)
-        try:
-            refused = text_fence('not delivered')
-            assert refused.returncode != 0 and 'transient-read' in refused.stderr, refused
-        finally:
-            log.chmod(0o600)
-        expect('idle', 'restored readability after refused send does not invent consumption')
-    reset(); expect('busy', 'bind before replayed typed user item')
-    assert text_fence('same').returncode == 0
-    assert text_fence('same').returncode == 0
-    replay = user('same'); append(replay); append(replay); append(complete)
-    expect('unknown', 'duplicate vendor user identity cannot account for two inputs')
     reset(); expect('busy','active turn')
     append({'type':'response_item','payload':{'type':'function_call_output','call_id':'tool-1','output':'exit code 7'}})
     expect('busy','tool failure does not end the turn')
     append(complete); expect('idle','normal completion')
-    # Exercise the public backend dispatcher, including the ordering of fencing
-    # before a mocked transport failure. No implementation text is inspected.
-    script = '''source "$1/bin/fm-backend.sh"
-fm_backend_source() { :; }
-fm_backend_herdr_send_text_submit() { return 9; }
-fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
-'''
-    result = subprocess.run(['bash','-c',script,'_',str(root)], env=dict(os.environ,FM_HOME=str(home)))
-    assert result.returncode == 9
-    expect('unknown','submit-before-log and transport failure cannot reuse old idle')
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    expect('busy','next matching turn clears submission fence')
-    append(user('next', 'turn-2'))
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2','error':{'message':'simulated 401'}}})
-    expect('idle','API failure terminal settles turn')
     reset(); append({'type':'event_msg','payload':{'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}})
     expect('idle','user interrupt settles matching turn')
     reset(); append(complete); expect('idle','bind exact session')
@@ -694,16 +620,6 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     reset(); (state/'worker.busy-session').unlink();expect('unknown','missing binding')
     reset(); (state/'worker.busy-gen').unlink();expect('unknown','missing generation sidecar')
     reset(); append(dict(complete,payload={'type':'task_complete','turn_id':'old-turn'}));expect('unknown','mismatched terminal turn')
-    reset(); append(complete);run('python3',reader,'fence-target',state,'herdr','lab:w1:p1')
-    run('python3',reader,'fence-target',state,'herdr','lab:w1:p1')
-    append({'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-2','root_turn_id':'turn-2'}})
-    append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-2'}})
-    expect('unknown','two pending submissions need two observed starts')
-    reset();append(complete);expect('idle','bind before unreadable submission');log.unlink()
-    denied=subprocess.run(['python3',str(reader),'fence-target',str(state),'herdr','lab:w1:p1'],capture_output=True,text=True)
-    assert denied.returncode != 0
-    write(records+[complete])
-    expect('unknown','lost watermark cannot later resurrect old idle')
     reset(); append(complete); expect('idle', 'bind before long append-only history')
     next_ordinal = 4
     padding = 'x' * 65536
@@ -714,32 +630,6 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
             next_ordinal += 1
     assert log.stat().st_size > 32 * 1024 * 1024
     expect('idle', 'append-only transcript above 32 MiB retains its binding')
-    inbox = state/'worker.inbox'; inbox.mkdir()
-    record = inbox/'001.msg'
-    record.write_text('schema=fm-task-inbox.v1\n--\nharmless long-log instruction\n')
-    ring = '''set -eu
-source "$1/bin/fm-backend.sh"
-source "$1/bin/fm-task-inbox-lib.sh"
-fm_backend_source() { :; }
-fm_backend_agent_state() { printf alive; }
-fm_backend_composer_state() { printf empty; }
-fm_backend_herdr_send_text_submit() { printf empty; }
-fm_task_inbox_ring herdr lab:w1:p1 "$2" fm-worker
-fm_task_inbox_doorbell_line "$2"
-'''
-    doorbell = run('bash','-c',ring,'_',root,record)
-    with log.open('a') as stream:
-        rows = [
-            {'type':'event_msg','payload':{'type':'task_started','turn_id':'turn-long','root_turn_id':'turn-long'}},
-            {'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-long',
-                'item':{'type':'UserMessage','id':'long-user','content':[{'type':'text','text':doorbell}]}}},
-            {'type':'event_msg','payload':{'type':'task_complete','turn_id':'turn-long'}},
-        ]
-        for row in rows:
-            stream.write(json.dumps(dict(row,ordinal=next_ordinal))+'\n')
-            next_ordinal += 1
-    (inbox/'handled').mkdir(); record.rename(inbox/'handled/001.msg')
-    expect('idle', 'ordinary inbox receipt settles above 32 MiB')
     if sys.platform == 'linux' and hasattr(resource, 'RLIMIT_AS'):
         def bounded_address_space():
             resource.setrlimit(resource.RLIMIT_AS, (64 * 1024 * 1024, 64 * 1024 * 1024))
@@ -760,13 +650,14 @@ fm_task_inbox_doorbell_line "$2"
         code='''source "$1/bin/fm-busy-lib.sh"
 probe_pid=$5
 fm_backend_agent_state() { if kill -0 "$probe_pid" 2>/dev/null; then printf alive; else printf dead; fi; }
+fm_backend_busy_state() { printf busy; }
 fm_busy_classify herdr lab:w1:p1 "$2" worker "$3"
 '''
         return run('bash','-c',code,'_',root,harness,state,'unused',process.pid)
-    assert classify() == 'busy '+harness+'-transcript'
+    assert classify() == 'busy herdr-native'
     process.terminate();process.wait()
     assert classify() == 'dead endpoint-gone'
-    print('ok - '+harness+' process exit overrides an open transcript turn')
+    print('ok - '+harness+' process exit overrides native working state')
 PYTEST
 }
 

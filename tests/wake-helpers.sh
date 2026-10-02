@@ -77,6 +77,14 @@ case "$1 ${2:-}" in
       bash|zsh|sh) echo '{"error":{"code":"agent_not_found"}}' ;;
       *) echo '{"result":{"agent":{"agent":"pi","agent_status":"unknown"}}}' ;;
     esac ;;
+  'agent prompt')
+    [ "${FM_FAKE_PROMPT_TIMEOUT:-0}" != 1 ] || {
+      printf 'timeout waiting for response\n' >&2
+      exit 1
+    }
+    [ "${FM_FAKE_SEND_FAIL:-0}" != 1 ] || exit 1
+    printf '%s\n' "${4:-}" >> "$sent"
+    printf '{"result":{"type":"agent_prompted"}}\n' ;;
   'pane process-info')
     jq -n --arg p "$4" --arg command "${FM_FAKE_HERDR_CURRENT_COMMAND:-pi}" '{result:{type:"pane_process_info",process_info:{pane_id:$p,shell_pid:101,foreground_processes:[{pid:102,name:$command,argv0:$command}]}}}' ;;
   'pane read')

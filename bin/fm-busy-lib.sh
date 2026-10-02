@@ -26,26 +26,23 @@
 # In-place restoration of an evidenced original generation is owned by
 # fm-busy-event.sh recover; re-arming never proves an old worker's identity.
 #
-# Pi writes generation-bound pi-ext lifecycle events. Codex and TraeX use
-# generation-bound transcript pull readers; no rendered footer proves idle.
-# Firstmate launch and recovery writers use fm-spawn and fm-recovery.
-# Missing, malformed, mismatched or unsupported evidence stays unknown.
-#
-# Codex and TraeX managed workers use the task-bound pull reader in
-# fm-busy-transcript.py, which owns binding, structural identity and submission
-# fences. Descriptive CLI versions never gate admission. They arm an unknown
-# record for generation ownership only; the reader
-# never trusts that seed as evidence of activity. tmux/Herdr process liveness
-# must be verified before reading; other backends remain unknown. Missing
-# bindings on legacy Codex tasks remain codex-unverified; legacy TraeX retains
-# the generic native busy-only fallback. New bindings outrank native state.
+# Pi writes generation-bound pi-ext lifecycle events. Codex and TraeX ordinary
+# state comes from Herdr's native status plus its exact process classifier; no
+# rendered footer or vendor transcript participates. A recognized native
+# working/idle/blocked state keeps its meaning once the worker process is live.
+# An unrecognized status with that same positive liveness proof is idle; a
+# confirmed exited worker is dead; inconclusive process evidence stays unknown.
+# This deliberately trades transcript-derived turn precision for bounded native
+# reads: an unrecognized live UI is considered idle. Firstmate launch and
+# recovery writers and the transcript reader remain available to their separate
+# lifecycle/recovery owners, but their records do not outrank native ordinary
+# state. Other backends remain unknown.
 # The reserved Codex hook probe below remains closed because hooks miss API failure.
 # docs/verification/supervision.md owns the current and historical evidence.
 #
 # Sourcing: set -u and set -e safe; no subshell-unfriendly globals.
 
 FM_BUSY_LIB_VERSION=v1
-FM_BUSY_TRANSCRIPT_READER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-busy-transcript.py"
 
 # fm_busy_codex_hooks_verified: the sanctioned intermediate - Codex's stable
 # hooks engine (UserPromptSubmit to open a turn, Stop and SessionEnd to close
@@ -176,51 +173,45 @@ fm_busy_record_read() {  # <state-dir> <id>
 }
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
-# busy|idle|unknown|dead plus the producing source (see header). The transcript
-# readers require structural process liveness before trusting their logs.
+# busy|idle|unknown|dead plus the producing source (see header). Codex and
+# TraeX require structural process liveness before trusting Herdr's native
+# status.
 # A legacy optional capture argument is ignored; rendered output
 # never substitutes for the retained adapters' semantic lifecycle evidence.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5
-  local out rc r_state r_source native
+  local out rc r_state r_source native process_state
   case "$harness" in
     pi|codex|traex) ;;
     *) printf 'unknown unsupported-harness'; return 0 ;;
   esac
   case "$harness" in
     codex*|traex)
-      if [ -f "$state/$id.busy-session" ] || [ -f "$state/$id.busy-gen" ] ||
-        grep -q '^busy_gen=' "$state/$id.meta" 2>/dev/null; then
-        # A stopped agent cannot leave an open rollout classified busy. Only
-        # recovery-grade backend evidence may override the semantic reader.
-        native=unverified
-        if command -v fm_backend_agent_state >/dev/null 2>&1; then
-          native=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
-          # TraeX can have native agent_status=unknown while its process is
-          # alive. Reuse the backend's structural process probe, without
-          # letting that native semantic status mask a valid transcript.
-          if [ "$backend" = herdr ] && [ "$native" = unreadable ] &&
-            fm_backend_herdr_parse_target "$target"; then
-            case "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null)" in
-              agent) native=alive ;;
-              shell) native=dead ;;
-            esac
-          fi
-        fi
-        case "$native" in
-          dead|missing) printf 'dead endpoint-gone' ;;
-          alive)
-            python3 "$FM_BUSY_TRANSCRIPT_READER" read "$state" "$id" "$harness" "$backend" "$target" 2>/dev/null ||
-              printf 'unknown %s-transcript' "$harness"
-            ;;
-          *) printf 'unknown %s-transcript' "$harness" ;;
-        esac
+      if [ "$backend" != herdr ] ||
+        ! command -v fm_backend_agent_state >/dev/null 2>&1 ||
+        ! command -v fm_backend_busy_state >/dev/null 2>&1; then
+        printf 'unknown herdr-native-unavailable'
         return 0
       fi
-      if [ "$harness" != traex ]; then
-        printf 'unknown codex-unverified'
-        return 0
-      fi
+      process_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
+      case "$process_state" in
+        dead|missing)
+          printf 'dead endpoint-gone'
+          return 0
+          ;;
+        alive) ;;
+        *)
+          printf 'unknown herdr-process-unverified'
+          return 0
+          ;;
+      esac
+      native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
+      case "$native" in
+        busy) printf 'busy herdr-native' ;;
+        idle) printf 'idle herdr-native' ;;
+        *) printf 'idle herdr-native-live' ;;
+      esac
+      return 0
       ;;
 
   esac
@@ -242,10 +233,9 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
       return 0
       ;;
   esac
-  # No record at all. A native herdr busy verdict is semantic enough to trust
-  # for BUSY (streaming means a turn is running); native idle is narrower
-  # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # No record at all. Pi retains its generation-bound push source. A native
+  # Herdr busy verdict is positive activity evidence for that fallback, while
+  # native idle is narrower than Pi's turn lifecycle and stays unknown here.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then

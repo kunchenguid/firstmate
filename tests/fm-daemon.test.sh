@@ -1458,8 +1458,8 @@ test_escalate_batches_into_one_digest() {
     || fail "batch digest did not join events with literal ' | '"
   [ -s "$state/.subsuper-escalations" ] && fail "escalation buffer not cleared after flush"
   [ -e "$state/.subsuper-escalations.since" ] && fail "first-append sidecar not cleared after flush"
-  n=$(grep -c '\[ENTER\]' "$sent")
-  [ "$n" -eq 1 ] || fail "expected one injected digest, got $n send-keys submits"
+  n=$(grep -c 'FIRSTMATE_OP: v1 away-supervisor: ' "$sent")
+  [ "$n" -eq 1 ] || fail "expected one native-prompt digest, got $n submissions"
   pass "multiple escalations flush as a single batched digest"
 }
 
@@ -2068,57 +2068,40 @@ test_pane_input_pending_bordered_with_text_is_pending() {
   pass "pane_input_pending: text inside a bordered composer is still pending"
 }
 
-test_submit_ack_confirms_on_bordered_empty_composer() {
-  # RC2: the submit acknowledgement must recognize a bordered-EMPTY composer as
-  # "submitted." The old ACK reused the broken check, so on pi it could never
-  # confirm and always reported a false "Enter swallowed."
+test_native_prompt_success_reports_submitted_once() {
   local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-bordered)
+  dir=$(make_bordered_case native-prompt-success)
   fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
   verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
     fm_backend_herdr_send_text_submit "fixture:win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = empty ] || fail "submit-ACK did not confirm on a bordered-empty composer: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest typed more than once (retype)"
-  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "expected exactly one submitted Enter"
-  pass "submit-ACK confirms a submit when the composer returns to a bordered-empty box"
+  [ "$verdict" = submitted ] || fail "native prompt acceptance did not report submitted: $verdict"
+  [ "$(grep -Fxc 'the digest' "$sent")" -eq 1 ] || fail "native prompt did not submit exactly once"
+  pass "native prompt success reports one submitted payload"
 }
 
-test_submit_ack_reports_pending_on_persistent_swallow() {
-  # A genuinely swallowed Enter (text stays in the box across all retries) is
-  # reported as "pending" — the daemon keeps the buffer, fm-send exits non-zero —
-  # and the digest is typed ONCE (Enter-only retries, never a retype).
-  local dir fakebin sent verdict
-  dir=$(make_bordered_case ack-swallow)
-  fakebin="$dir/fakebin"; sent="$dir/sent.log"; : > "$sent"
-  touch "$dir/.swallow"
-  verdict=$(PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 \
-    fm_backend_herdr_send_text_submit "fixture:win" "the digest" 3 0.05 0.05)
-  [ "$verdict" = pending ] || fail "persistent swallow not reported as pending: $verdict"
-  [ "$(grep -cv '\[ENTER\]' "$sent")" -eq 1 ] || fail "digest retyped on swallow (expected type-once)"
-  pass "submit-ACK reports pending on a persistently swallowed Enter (type-once)"
-}
-
-test_max_defer_empty_swallow_types_once_and_alarms() {
+test_uncertain_native_prompt_is_recorded_and_never_replayed() {
   local dir state fakebin sent
-  dir=$(make_bordered_case maxdefer-stuck)
+  dir=$(make_bordered_case native-prompt-uncertain)
   state="$dir/state"; fakebin="$dir/fakebin"
   sent="$dir/sent.log"; : > "$sent"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
-  touch "$dir/.swallow"
   escalate_add "$state" "needs-decision: pick A"
   echo $(( $(date +%s) - 600 )) > "$state/.subsuper-escalations.since"
   afk_enter "$state"
   PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_INJECT_CONFIRM_SLEEP=0.05 \
     FM_ESCALATE_BATCH_SECS=99999 FM_MAX_DEFER_SECS=60 housekeeping "$state"
-  [ "$(grep -c 'Supervisor escalate' "$sent" 2>/dev/null || true)" -eq 1 ] \
-    || fail "max-defer typed the digest more than once"
+  [ ! -s "$sent" ] || fail "uncertain prompt fixture unexpectedly recorded an accepted payload"
   [ -s "$state/.subsuper-inject-wedged" ] \
-    || fail "stuck max-defer inject did not raise a wedge alarm marker"
-  [ -s "$state/.subsuper-escalations" ] \
-    || fail "buffer lost after a failed max-defer inject (must be preserved)"
-  pass "max-defer on an empty stuck pane types once, alarms, and preserves the buffer"
+    || fail "uncertain prompt did not leave durable uncertainty evidence"
+  grep -F 'not replayed' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "uncertainty marker did not explain the at-most-once decision"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "uncertain payload remained eligible for a blind later replay"
+  PATH="$fakebin:$PATH" FM_FAKE_COMPOSER="$dir/composer" FM_FAKE_SENT="$sent" \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_ESCALATE_BATCH_SECS=0 housekeeping "$state"
+  [ ! -s "$sent" ] || fail "later housekeeping replayed an uncertain prompt"
+  pass "uncertain native prompt is recorded durably and retired without blind replay"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -2541,37 +2524,32 @@ test_inject_wedge_alarm_throttles_when_marker_cannot_be_written() {
   pass "in-process wedge throttle prevents alert spam when the marker cannot persist"
 }
 
-test_fm_send_reports_delivered_unconfirmed_submit() {
-  # When typed-plane text was typed and Enter sent but the submit read-back
-  # remains pending, fm-send must return its documented delivered-unconfirmed status and prevent
-  # a duplicate resend reflex. A synchronously confirmed submit remains zero.
+test_fm_send_reports_uncertain_native_prompt() {
+  # A timeout-like native prompt result may have been accepted. fm-send returns
+  # its documented uncertain status and explicitly prevents a replay reflex.
   local dir fakebin err rc
-  dir=$(make_bordered_case send-swallow)
+  dir=$(make_bordered_case send-native-timeout)
   fakebin="$dir/fakebin"; err="$dir/send.err"
   # Clean submit -> exit 0.
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_SEND_SLEEP=0.05 "$ROOT/bin/fm-send.sh" sess:w1:win 'route this work' >/dev/null 2>"$err" \
     || fail "fm-send exited non-zero on a clean submit: $(cat "$err")"
-  # Persistent composer text after Enter -> delivered-unconfirmed exit 3 with
-  # a non-error warning that explicitly tells the operator not to resend.
-  printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
-  touch "$dir/.swallow"
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
+    FM_FAKE_PROMPT_TIMEOUT=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:w1:win 'fix findings 1 and 3, skip 2' >/dev/null 2>"$err"; then
     rc=0
   else
     rc=$?
   fi
-  [ "$rc" -eq 3 ] || fail "fm-send returned $rc instead of delivered-unconfirmed exit 3: $(cat "$err")"
-  grep -F 'submission is unconfirmed' "$err" >/dev/null \
-    || fail "fm-send did not explain the pending confirmation: $(cat "$err")"
+  [ "$rc" -eq 3 ] || fail "fm-send returned $rc instead of uncertain exit 3: $(cat "$err")"
+  grep -F 'text submission' "$err" | grep -F 'is uncertain' >/dev/null \
+    || fail "fm-send did not explain the uncertain native result: $(cat "$err")"
   grep -F 'do not retype or blindly resend' "$err" >/dev/null \
     || fail "fm-send did not prevent a duplicate resend: $(cat "$err")"
   if grep -F 'error:' "$err" >/dev/null; then
     fail "fm-send mislabeled delivered-unconfirmed as an error: $(cat "$err")"
   fi
-  pass "fm-send returns 3 with a non-error no-resend warning when confirmation stays pending"
+  pass "fm-send returns 3 with a non-error no-resend warning on native prompt timeout"
 }
 
 test_fm_send_exits_nonzero_on_initial_send_failure() {
@@ -2766,12 +2744,12 @@ test_inject_msg_herdr_submits_through_backend_dispatch() {
     fm_backend_send_text_submit() {
       [ "$1" = herdr ] && [ "$2" = "default:w1:p2" ] || fail "unexpected send_text_submit args: $1 $2"
       case "$3" in *"hello"*) : ;; *) fail "digest text missing from send_text_submit: $3" ;; esac
-      printf 'empty'
+      printf 'submitted'
     }
     FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" inject_msg "hello" "$state" \
-      || fail "inject_msg should succeed when send_text_submit confirms empty"
+      || fail "inject_msg should succeed when the native API accepts submission"
   ) || fail "herdr successful-submit inject_msg subshell failed"
-  pass "inject_msg: dispatches busy-guard/composer-guard/submit through the herdr backend and succeeds on a confirmed empty composer"
+  pass "inject_msg: dispatches guards and native submission through the herdr backend"
 }
 
 # Safety-critical (task fm-composer-shellglyph-safety): the away-mode injector
@@ -2896,9 +2874,8 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
-test_submit_ack_confirms_on_bordered_empty_composer
-test_submit_ack_reports_pending_on_persistent_swallow
-test_max_defer_empty_swallow_types_once_and_alarms
+test_native_prompt_success_reports_submitted_once
+test_uncertain_native_prompt_is_recorded_and_never_replayed
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
@@ -2924,9 +2901,8 @@ test_wedge_alarm_hung_override_times_out_and_falls_through
 test_wedge_alarm_shutdown_stops_active_notifier_group
 test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend
 test_inject_wedge_alarm_throttles_when_marker_cannot_be_written
-test_fm_send_reports_delivered_unconfirmed_submit
+test_fm_send_reports_uncertain_native_prompt
 test_fm_send_exits_nonzero_on_initial_send_failure
-test_fm_send_exits_nonzero_on_unproven_submit
 test_discover_supervisor_backend_precedence
 test_discover_supervisor_target_herdr
 test_pane_is_busy_herdr_native_busy_state

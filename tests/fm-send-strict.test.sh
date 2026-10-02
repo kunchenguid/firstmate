@@ -24,6 +24,8 @@ make_stubs() {  # <dir> -> echoes fakebin dir
 set -u
 [ -z "${FM_HERDR_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_HERDR_LOG"
 case "$1 ${2:-}" in
+  'agent prompt')
+    printf 'agent-prompt target=%s:%s arg=%s\n' "${HERDR_SESSION:-}" "$3" "${4:-}" >> "${FM_ENDPOINT_LOG:-/dev/null}" ;;
   'pane send-text'|'pane send-keys')
     literal=0; [ "$2" != send-text ] || literal=1
     payload=${4:-}
@@ -58,9 +60,9 @@ test_exact_lane_id_send_still_works() {
     "$SEND" mpf-lane-m8 "lost dispatch" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "exact task id send should succeed when metadata exists"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:w1:p-mpf-lane-m8 literal=1 arg=: Firstmate instruction waiting" \
+  assert_contains "$got" "agent-prompt target=sess:w1:p-mpf-lane-m8 arg=: Firstmate instruction waiting" \
     "exact id should ring the doorbell at the meta target"
-  assert_contains "$got" "target=sess:w1:p-mpf-lane-m8 literal=0 arg=Enter" "exact id should submit the doorbell with Enter"
+  assert_not_contains "$got" "literal=0 arg=Enter" "native prompt must not submit a separate Enter"
   grep -qF 'lost dispatch' "$home/state/mpf-lane-m8.inbox/001.msg" \
     || fail "exact id should record the steer in the task inbox"
   pass "fm-send strict: exact task/lane ids resolve through home metadata"
@@ -151,12 +153,12 @@ test_healthy_fm_id_send_still_works() {
     "$SEND" fm-lane-ok "hello captain" >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "healthy fm-id send should succeed"
   got=$(cat "$log")
-  assert_contains "$got" "target=sess:w1:p-lane-ok literal=1 arg=: Firstmate instruction waiting" \
+  assert_contains "$got" "agent-prompt target=sess:w1:p-lane-ok arg=: Firstmate instruction waiting" \
     "healthy send should ring the doorbell at the meta target"
-  assert_contains "$got" "target=sess:w1:p-lane-ok literal=0 arg=Enter" "healthy send should submit the doorbell with Enter"
+  assert_not_contains "$got" "literal=0 arg=Enter" "native prompt must not submit a separate Enter"
   grep -qF 'hello captain' "$home/state/lane-ok.inbox/001.msg" \
     || fail "healthy send should record the steer in the task inbox"
-  assert_contains "$(cat "$err")" "requested message WILL still be sent" "fm-send guard banner should keep send-specific continuation wording"
+  assert_contains "$(cat "$err")" "delivery is reported by the send operation below" "fm-send guard banner should keep send-specific continuation wording"
   pass "fm-send strict: healthy fm-<id> sends record the steer and ring once"
 }
 

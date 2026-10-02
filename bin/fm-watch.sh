@@ -429,6 +429,13 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
+      if [ "$ring_rc" -eq 4 ]; then
+        reason="stale: $w (doorbell submission outcome is uncertain for $rec; do not replay blindly; inspect the worker)"
+        fm_wake_append stale "$w" "$reason" || exit 1
+        fm_task_inbox_record_escalated "$STATE" "$task" "$rec" || exit 1
+        wake "$reason"
+        return 0
+      fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true

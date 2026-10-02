@@ -29,7 +29,6 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 # cannot change placement behavior for tests that do not set it themselves.
 mkdir -p "$TMP_ROOT/ambient-home"
 export FM_HOME="$TMP_ROOT/ambient-home"
-export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
@@ -64,10 +63,8 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
-if [ -f "$RESP/$n.exit" ]; then
-  exit "$(cat "$RESP/$n.exit")"
-fi
 [ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+[ -f "$RESP/$n.exit" ] && exit "$(cat "$RESP/$n.exit")"
 exit 0
 SH
   chmod +x "$fb/herdr"
@@ -4041,322 +4038,6 @@ test_composer_state_codex_non_faint_same_text_is_pending() {
   pass "fm_backend_herdr_composer_state: non-faint codex prompt text still reads pending"
 }
 
-# --- wait_for_working: the native agent-state poll-and-classify primitive ---
-# Direct unit coverage for fm_backend_herdr_wait_for_working, the helper
-# fm_backend_herdr_send_text_submit now uses instead of composer scraping
-# (docs/herdr-backend.md "Native agent-state submit confirmation").
-
-test_wait_for_working_returns_busy_on_first_poll() {
-  local dir log resp fb out calls
-  dir="$TMP_ROOT/wait-busy-first"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_working default w1:p2 1 5' "$ROOT" )
-  [ "$out" = busy ] || fail "wait_for_working should report busy once 'working' is observed, got '$out'"
-  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
-  [ "$calls" -eq 1 ] || fail "wait_for_working should short-circuit on the FIRST busy poll instead of consuming the whole budget, made $calls call(s)"
-  pass "fm_backend_herdr_wait_for_working: reports 'busy' immediately on the first poll, without spending the rest of the budget"
-}
-
-test_wait_for_working_catches_a_slow_transition_mid_window() {
-  local dir log resp fb out calls
-  dir="$TMP_ROOT/wait-busy-slow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Two idle samples, then working on the third - a transition that would be
-  # MISSED by a single check-at-the-end design (the old composer approach's
-  # shape) but is caught here because the budget is sampled repeatedly.
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/3.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_working default w1:p2 0.03 3' "$ROOT" )
-  [ "$out" = busy ] || fail "wait_for_working should catch a transition that lands on a later sample within the SAME window, got '$out'"
-  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
-  [ "$calls" -eq 3 ] || fail "expected exactly 3 agent-get polls (idle, idle, working), got $calls"
-  pass "fm_backend_herdr_wait_for_working: a slow transition landing on a later sample within one window is still caught (robust against the 'slow transition' failure direction)"
-}
-
-test_wait_for_working_samples_budget_endpoint_without_final_sleep() {
-  local dir log resp fb out sleep_log sleeps
-  dir="$TMP_ROOT/wait-budget-endpoint"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" \
-    bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_wait_for_working default w1:p2 0.5 6' "$ROOT" )
-  [ "$out" = idle ] || fail "wait_for_working should report idle when every endpoint-spread poll is readable-idle, got '$out'"
-  sleeps=$(grep -c '^sleep:0.1000$' "$sleep_log")
-  [ "$sleeps" -eq 5 ] || fail "six polls across a 0.5s budget should sleep five times at 0.1000s, got $sleeps matching sleeps; log: $(cat "$sleep_log")"
-  pass "fm_backend_herdr_wait_for_working: spreads six samples across the full budget endpoint without a final trailing sleep"
-}
-
-test_send_text_submit_applies_herdr_minimum_confirm_budget() {
-  local dir log resp fb out sleep_log sleeps
-  dir="$TMP_ROOT/submit-min-budget"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; sleep_log="$dir/sleeps"; : > "$log"; : > "$sleep_log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/8.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/9.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_SLEEP_LOG="$sleep_log" FM_BACKEND_HERDR_SUBMIT_POLLS=6 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6 \
-    bash -c '. "$0/bin/backends/herdr.sh"; sleep() { printf "sleep:%s\n" "$1" >> "$FM_SLEEP_LOG"; }; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.4 0' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should catch a slow-but-valid transition inside the herdr minimum budget, got '$out'"
-  sleeps=$(grep -c '^sleep:0.1200$' "$sleep_log")
-  [ "$sleeps" -eq 5 ] || fail "a 0.4s caller budget should be expanded to five 0.1200s sleeps across the 0.6s herdr floor, got $sleeps; log: $(cat "$sleep_log")"
-  [ "$(grep -c '^sleep:0.0800$' "$sleep_log")" -eq 0 ] || fail "send_text_submit used the caller's too-short 0.4s budget instead of the herdr floor: $(cat "$sleep_log")"
-  pass "fm_backend_herdr_send_text_submit: applies the herdr minimum confirmation budget before polling agent-state"
-}
-
-test_wait_for_working_returns_idle_when_never_busy_but_readable() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/wait-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/1.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_working default w1:p2 0.02 2' "$ROOT" )
-  [ "$out" = idle ] || fail "wait_for_working should report idle when the target was legibly read but never busy, got '$out'"
-  pass "fm_backend_herdr_wait_for_working: reports 'idle' (readable, genuinely not yet working) when 'busy' never appears"
-}
-
-test_wait_for_working_returns_unknown_when_never_readable() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/wait-unknown"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
-  printf '1\n' > "$resp/2.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_working default w1:p2 0.02 2' "$ROOT" )
-  [ "$out" = unknown ] || fail "wait_for_working should report unknown when every poll fails to read the target, got '$out'"
-  pass "fm_backend_herdr_wait_for_working: reports 'unknown' (a hard read failure, not a timing race) only when EVERY poll in the window fails"
-}
-
-test_wait_for_working_treats_blocked_as_submit_active() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/wait-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/1.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_for_working default w1:p2 0.01 1' "$ROOT" )
-  [ "$out" = busy ] || fail "wait_for_working should treat a post-Enter blocked state as submit-active, got '$out'"
-  pass "fm_backend_herdr_wait_for_working: treats blocked as submit-active for confirmation without changing watcher busy-state semantics"
-}
-
-# --- send_text_submit: native agent-state (agent get) verify-and-retry ------
-# Rewritten for the 2026-07-07 incident (docs/herdr-backend.md): confirmation
-# no longer reads composer content in the normal idle-baseline path, so a
-# harness whose IDLE composer shows dynamic tip text (real codex) can no
-# longer misread as "pending" and block/mis-confirm a send.
-# FM_BACKEND_HERDR_SUBMIT_POLLS=1 pins most tests
-# below to exactly one agent-get sample per Enter attempt for simple,
-# deterministic call-count assertions; the multi-sample behavior itself is
-# covered above by the wait_for_working tests and by
-# test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter.
-
-test_send_text_submit_detects_landed_send() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-ok"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: send-text (literal, no output)
-  # 2: agent get - pre-Enter baseline is idle
-  # 3: send-keys enter
-  # 4: agent get - agent_status working (a real turn started: submitted)
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should report empty (submitted) once agent_status reports working, got '$out'"
-  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''hello captain' "send_text_submit did not type the literal text first"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "send_text_submit should not need a second Enter for a plain message with no popup, sent $enter_count Enter(s)"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never read the composer/pane content for confirmation anymore"
-  pass "fm_backend_herdr_send_text_submit: reports 'empty' once agent_status reports working after one Enter, without ever reading the composer"
-}
-
-test_send_text_submit_detects_swallowed_enter() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/submit-swallow"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Every post-Enter agent-get read still reports idle, and the composer still
-  # holds the typed text: a genuine swallow, not a queued Enter.
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/7.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/8.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/9.out"
-  printf '  ready\n' > "$resp/10.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "send_text_submit should report pending once retries are exhausted with agent_status never going busy and the composer still holding the text, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'pending' when agent_status stays idle and the composer still holds unsent text after retried Enters (swallowed)"
-}
-
-# Regression coverage for the 2026-07-03 incident using the NEW mechanism: a
-# slash command's first Enter can close a completion popup and fill an
-# argument-hint placeholder WITHOUT submitting. In the idle-baseline path,
-# filling a placeholder never starts a turn, so agent_status simply stays idle
-# for Enter #1, and the retry loop sends a genuine second Enter exactly as it
-# would for any other swallowed Enter.
-test_send_text_submit_popup_autocomplete_requires_second_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-popup-autocomplete"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: send-text "/compact"
-  # 2: agent get - pre-Enter baseline is idle
-  # 3: send-keys enter (#1) - closes the popup, fills the placeholder; no turn starts
-  # 4: agent get -> idle (not submitted yet)
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  # 5: composer still holds the placeholder fill; native idle falls through
-  #    to the shared composer verdict, which retries rather than confirming.
-  printf '  \xe2\x9d\xaf /compact\n' > "$resp/5.out"
-  # 6: send-keys enter (#2) - actually submits
-  # 7: agent get -> working (submitted)
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/compact" 3 0.01 1.2' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should eventually report empty once the SECOND Enter actually starts a turn, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 2 ] || fail "send_text_submit must send a SECOND Enter after the popup-placeholder fill's agent_status still reads idle, got $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: a slash-command popup's placeholder fill on Enter #1 never flips agent_status to working, so it does not short-circuit as submitted; Enter #2 is retried and lands it"
-}
-
-test_send_text_submit_confirms_blocked_after_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-blocked"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/3.out"
-  printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "needs approval" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should treat a blocked state after Enter as a confirmed delivered prompt, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "blocked after Enter must not provoke a retry into the prompt, sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: a post-Enter blocked state confirms delivery without retrying into the prompt"
-}
-
-test_send_text_submit_preexisting_working_pending_is_queued_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-preexisting-working-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Native working + proven pending after the retry budget is the OpenCode
-  # busy-queued Enter: the harness accepted Enter and will submit when the
-  # current turn ends. Footer transition is not the confirmation path here
-  # because the pre-Enter native status is already working.
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '  ready\n' > "$resp/3.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "a working native baseline plus proven pending after retries is a queued Enter, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "queued-Enter confirmation should use the configured retry count, sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: native working + proven pending after retries reports empty (queued Enter)"
-}
-
-test_send_text_submit_preexisting_working_does_not_confirm_failed_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-preexisting-working-enter-failed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-  printf '  ready\n' > "$resp/3.out"
-  printf '1\n' > "$resp/4.exit"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
-  [ "$out" = send-failed ] || fail "a failed Enter must not be reported as queued delivery merely because native status is working, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "send_text_submit should attempt the configured number of Enters, made $enter_count attempt(s)"
-  pass "fm_backend_herdr_send_text_submit: a failed Enter cannot borrow preexisting working state as queued-delivery proof"
-}
-
-test_send_text_submit_idle_baseline_does_not_confirm_failed_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-idle-enter-failed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '1\n' > "$resp/3.exit"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
-  [ "$out" = send-failed ] || fail "a failed Enter must not borrow a later native transition as delivery proof, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "send_text_submit should attempt the configured number of Enters, made $enter_count attempt(s)"
-  [ "$(grep -c $'\x1f''agent'$'\x1f''get' "$log")" -eq 1 ] || fail "a failed Enter must not run native delivery confirmation"
-  pass "fm_backend_herdr_send_text_submit: a failed Enter cannot borrow a later native transition as delivery proof"
-}
-
-test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-idle-native-empty-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Live Claude on Herdr 0.8.0 keeps agent_status idle through a landed turn.
-  # After Enter, native wait_for_working stays idle and the composer clears:
-  # that empty verdict is positive delivery, not a swallow.
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf\n' > "$resp/5.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "an idle native status plus a cleared composer must confirm delivery, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "a cleared composer should confirm without extra Enters, sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: idle native agent-state plus empty composer reports empty (landed Claude turn)"
-}
-
-test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/submit-idle-native-rendered-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # Idle native baseline (Claude never leaves idle) with proven pending text
-  # and a generating footer after retries is a queued follow-up Enter.
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '  \xe2\x9d\xaf hello captain\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
-  printf 'thinking... esc to interrupt\n' > "$resp/7.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 1 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "idle native + proven pending + rendered busy after retries is a queued Enter, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: idle native baseline uses a rendered busy footer to confirm a queued Enter"
-}
-
-# --- the never-idle-native-state harness (real cursor on herdr) --------------
-# Measured live on cursor-agent 2026.08.11-e8db854 under herdr: `agent get`
-# reports a cursor pane `blocked` in EVERY state - idle, mid-turn, and after -
-# so the idle-baseline native path is structurally unreachable and every typed
-# send lands in the composer branch. Cursor's mid-turn composer row renders its own
-# `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
-# content verdict is `pending` on a composer holding no user text, and every
-# typed steer reported delivery unconfirmed on a message that had actually landed.
-# The bytes below are the real captures from that pane.
-
-# The idle capture: no busy token anywhere, which is the pre-Enter baseline.
-test_send_text_submit_confirms_despite_codex_idle_tip_composer() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/submit-codex-idle-tip"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "reply with just OK" 3 0.01 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should confirm via agent_status alone even for a harness whose idle composer shows dynamic tip text, got '$out'"
-  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never call 'pane read' - a codex-style dynamic idle-tip composer can never mislead a confirmation path that does not read it"
-  pass "fm_backend_herdr_send_text_submit: confirms submission via native agent-state alone, immune to a codex-style dynamic idle-tip composer that would have misread as 'pending' under the old composer-based confirmation"
-}
-
 # Companion regression for the pre-injection empty-box guard itself
 # (bin/fm-supervise-daemon.sh's pane_input_pending): a real Codex idle
 # composer can show faint ghost suggestions after the bare `›` prompt.
@@ -4388,109 +4069,6 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w1:p2' "$ROOT" )
   [ "$out" = pending ] || fail "the pre-injection empty-box guard must still refuse real unsubmitted composer text after this change, got '$out'"
   pass "fm_backend_composer_state (herdr): the pre-injection empty-box guard still refuses a genuinely non-empty composer, unaffected by the submit-confirmation change"
-}
-
-# A slow transition landing partway through a single Enter attempt's own
-# budget must not provoke a needless extra Enter - end-to-end through
-# send_text_submit itself (test_wait_for_working_catches_a_slow_transition_mid_window
-# above covers the primitive directly; this proves the caller wires it
-# correctly).
-test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-slow-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1: send-text  2: baseline idle  3: send-keys enter  4,5: agent get -> idle  6: agent get -> working
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
-  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/6.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=3 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.03 0.01' "$ROOT" )
-  [ "$out" = empty ] || fail "send_text_submit should confirm once a later sample within the SAME Enter attempt observes working, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "a slow (but within-budget) transition must not provoke a needless extra Enter, sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: a slow transition landing on a later sample within one Enter's budget is confirmed WITHOUT sending a needless extra Enter"
-}
-
-test_send_text_submit_send_failed() {
-  local dir log resp fb out
-  dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = send-failed ] || fail "send_text_submit should report send-failed when the literal send itself fails, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: reports 'send-failed' when the literal send-text call itself errors"
-}
-
-test_send_text_submit_unknown_on_capture_failure() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '1\n' > "$resp/4.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "send_text_submit should report unknown when the post-Enter agent-get read fails, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "send_text_submit must never retry past an unreadable target (that is a hard I/O failure, not a timing race), sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: reports 'unknown' when the post-Enter agent-get read fails (never retries past an unreadable target)"
-}
-
-test_send_text_submit_unknown_on_composer_capture_failure() {
-  local dir log resp fb out enter_count
-  dir="$TMP_ROOT/submit-composer-read-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
-  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
-  printf '1\n' > "$resp/5.exit"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "x" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = unknown ] || fail "send_text_submit should report unknown when native status stays idle but the composer cannot be read, got '$out'"
-  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-  [ "$enter_count" -eq 1 ] || fail "send_text_submit must not retry Enter after composer verification becomes unreadable, sent $enter_count Enter(s)"
-  pass "fm_backend_herdr_send_text_submit: an unreadable composer stops Enter retries after native status stays idle"
-}
-
-# Retained safety cases from the retired terminal submit suite. These drive
-# the real Herdr submit API with malformed, uncertain and wrapped captures.
-test_send_text_submit_uncertain_capture_never_becomes_delivery() {
-  local scenario dir log resp fb out expected enter_count
-  for scenario in unbounded failed-baseline ambiguous wrapped placeholder; do
-    dir="$TMP_ROOT/submit-migrated-$scenario"; mkdir -p "$dir/responses"
-    log="$dir/log"; resp="$dir/responses"; : > "$log"
-    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
-    printf 'ready\n' > "$resp/3.out"
-    expected=unknown
-    case "$scenario" in
-      unbounded|failed-baseline)
-        printf '│ > unbounded\nthinking... esc to interrupt\n' > "$resp/5.out"
-        [ "$scenario" != failed-baseline ] || printf '1\n' > "$resp/3.exit" ;;
-      ambiguous)
-        printf '╭────────────╮\n│ > fix  │\n╰────────────╯\n' > "$resp/5.out"
-        cp "$resp/5.out" "$resp/7.out"
-        printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/8.out"
-        expected=pending-unproven ;;
-      wrapped)
-        printf '╭──────────────╮\n│ >            │\n│ second line  │\n╰──────────────╯\n' > "$resp/5.out"
-        printf '╭────╮\n│    │\n╰────╯\n' > "$resp/7.out"
-        expected=empty ;;
-      placeholder)
-        printf '  ❯ /compact [instructions]\n' > "$resp/5.out"
-        printf '  ❯\n' > "$resp/7.out"
-        expected=empty ;;
-    esac
-    fb=$(make_herdr_fakebin "$dir")
-    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 fix 2 0.01 0.01' "$ROOT")
-    [ "$out" = "$expected" ] || fail "$scenario must preserve its proof boundary: expected $expected, got $out"
-    enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
-    case "$scenario" in
-      unbounded|failed-baseline) [ "$enter_count" = 1 ] || fail 'unknown capture retried Enter' ;;
-      *) [ "$enter_count" = 2 ] || fail "$scenario failed to exercise the retry" ;;
-    esac
-  done
-  pass 'Herdr submit keeps unknown/unproven captures unconfirmed and retries wrapped/placeholder text'
 }
 
 # --- fm-backend.sh dispatch wiring -------------------------------------------
@@ -5083,6 +4661,39 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# Native prompt submission is one API call with exact target and text. It does
+# not inspect agent state, composer output, or send terminal keys.
+test_send_text_submit_uses_native_prompt_once() {
+  local dir log resp fb out expected
+  dir="$TMP_ROOT/native-prompt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 "$1" 9 9 9' "$ROOT" $'first line\nsecond line')
+  [ "$out" = submitted ] || fail "native prompt success should report submitted, got '$out'"
+  expected=$'HERDR_SESSION=lab\x1fagent\x1fprompt\x1fw1:p2\x1ffirst line\nsecond line\x1f--session\x1flab'
+  [ "$(cat "$log")" = "$expected" ] || fail "native prompt target or multiline text changed:"$'\n'"$(cat "$log")"
+  pass "fm_backend_herdr_send_text_submit: one native prompt preserves session, pane, and multiline text"
+}
+
+test_send_text_submit_reports_failure_and_timeout_uncertainty() {
+  local kind dir log resp fb out
+  for kind in failure timeout timeout-exit; do
+    dir="$TMP_ROOT/native-prompt-$kind"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$kind" in
+      timeout) printf '1\n' > "$resp/1.exit"; printf 'request timeout after possible acceptance\n' > "$resp/1.out" ;;
+      timeout-exit) printf '124\n' > "$resp/1.exit"; : > "$resp/1.out" ;;
+      *) printf '1\n' > "$resp/1.exit"; printf 'backend rejected prompt\n' > "$resp/1.out" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 message 3 .1 .1' "$ROOT" 2>/dev/null)
+    if [ "$kind" = timeout ] || [ "$kind" = timeout-exit ]; then [ "$out" = unknown ] || fail "timeout must remain uncertain, got '$out'";
+    else [ "$out" = send-failed ] || fail "backend rejection must remain visible, got '$out'"; fi
+    [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "$kind path repeated native submission"
+  done
+  pass "fm_backend_herdr_send_text_submit: backend failure is visible and timeout is uncertain without replay"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -5240,30 +4851,10 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
-test_wait_for_working_returns_busy_on_first_poll
-test_wait_for_working_catches_a_slow_transition_mid_window
-test_wait_for_working_samples_budget_endpoint_without_final_sleep
-test_send_text_submit_applies_herdr_minimum_confirm_budget
-test_wait_for_working_returns_idle_when_never_busy_but_readable
-test_wait_for_working_returns_unknown_when_never_readable
-test_wait_for_working_treats_blocked_as_submit_active
-test_send_text_submit_detects_landed_send
-test_send_text_submit_detects_swallowed_enter
-test_send_text_submit_popup_autocomplete_requires_second_enter
-test_send_text_submit_confirms_blocked_after_enter
-test_send_text_submit_preexisting_working_pending_is_queued_enter
-test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
-test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
-test_send_text_submit_idle_native_empty_composer_confirms_delivery
-test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
-test_send_text_submit_confirms_despite_codex_idle_tip_composer
+test_send_text_submit_uses_native_prompt_once
+test_send_text_submit_reports_failure_and_timeout_uncertainty
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
-test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
-test_send_text_submit_send_failed
-test_send_text_submit_unknown_on_capture_failure
-test_send_text_submit_unknown_on_composer_capture_failure
-test_send_text_submit_uncertain_capture_never_becomes_delivery
 test_dispatch_routes_herdr_backend
 test_dispatch_busy_state_unknown_for_tmux
 test_dispatch_composer_state_routes_by_backend
@@ -5316,165 +4907,3 @@ PYSCHEMA
 }
 
 test_workspace_move_schema_semantics
-
-# Native Codex input transport, exercised against real process identity.
-python3 - "$ROOT" "$TMP_ROOT" <<'PY'
-import json, os, pathlib, shutil, socket, subprocess, sys, tempfile, threading, time
-root, temporary = map(pathlib.Path, sys.argv[1:])
-shim = temporary / 'shim'; shim.mkdir()
-cli = shim / 'herdr'
-cli.write_text('''#!/usr/bin/env python3
-import json,os,sys
-args=sys.argv[1:]
-assert args[-2:]==['--session',os.environ['TEST_SESSION']]
-with open(os.environ['PROBE_LOG'],'a') as f:f.write(json.dumps(args)+'\\n')
-fixture=json.load(open(os.environ['PROBE_FIXTURE']))
-command=args[:-2]
-if command==['status','--json']:
-    value=fixture['status']
-elif command==['session','list','--json']:
-    value=fixture['sessions']
-elif command[:2]==['pane','process-info']:
-    value=fixture['process']
-elif command==['api','schema','--json']:
-    if not fixture['schema_available']:sys.exit(2)
-    value=fixture['schema']
-elif command[:2]==['agent','get']:
-    sent=any(row[:2]==['pane','send-keys'] for row in map(json.loads,open(os.environ['PROBE_LOG'])))
-    value={'result':{'agent':{'agent_status':'working' if sent else 'idle'}}}
-else:
-    value={}
-print(json.dumps(value))
-'''); cli.chmod(0o700)
-fixture_path = temporary / 'fixture.json'; log = temporary / 'cli.jsonl'
-short = tempfile.TemporaryDirectory(prefix='fm-input-', dir='/tmp')
-socket_dir = pathlib.Path(short.name) / 'socket-dir'; socket_dir.mkdir()
-socket_alias = pathlib.Path(short.name) / 'socket-alias'; socket_alias.symlink_to(socket_dir, target_is_directory=True)
-request_path = socket_dir / 'native.sock'
-alias_path = socket_alias / 'native.sock'
-params={'required':['pane_id'],'properties':{'pane_id':{'type':'string'},'text':{'type':'string'},'keys':{'type':'array','items':{'type':'string'}}}}
-schema={'schemas':{'request':{'oneOf':[{'properties':{'method':{'const':'pane.send_input'},'params':{'$ref':'#/schemas/request/$defs/PaneSendInputParams'}}}], '$defs':{'PaneSendInputParams':params}}}}
-versioned = temporary / 'codex' / '2.1.220'; versioned.parent.mkdir()
-shutil.copyfile(shutil.which('sleep'), versioned); versioned.chmod(0o700)
-process=subprocess.Popen([str(versioned),'120'])
-renamed = None
-try:
-    kernel=subprocess.check_output(['ps','-p',str(process.pid),'-o','comm='],text=True).strip()
-    argv0=subprocess.check_output(['ps','-p',str(process.pid),'-o','args='],text=True).split()[0]
-    assert pathlib.Path(kernel).name=='2.1.220' and 'codex' in argv0.split('/'), (kernel,argv0)
-    foreground={'pid':process.pid,'name':kernel,'argv':[argv0,'120']}
-    fixture={
-        'status':{'server':{'session':'input-test','running':True,'socket':str(request_path)}},
-        'sessions':{'sessions':[{'name':'input-test','running':True,'socket_path':str(request_path)}]},
-        'process':{'result':{'type':'pane_process_info','process_info':{'pane_id':'w1:p2','foreground_processes':[foreground]}}},
-        'schema':schema,
-        'schema_available':True,
-    }
-    env=dict(os.environ,PATH=str(shim)+':'+os.environ['PATH'],PROBE_FIXTURE=str(fixture_path),PROBE_LOG=str(log))
-    def run(expected, text='literal\nsecond line $() `quoted`', response=None, backend=False,
-            session='input-test', schema_available=True, capability_response=None, connections=1):
-        fixture['schema_available']=schema_available
-        fixture_path.write_text(json.dumps(fixture))
-        log.write_text('')
-        calls=[]
-        with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as server:
-            server.bind(str(request_path));server.listen()
-            def serve():
-                for _ in range(connections):
-                    conn,_=server.accept()
-                    with conn:
-                        data=b''
-                        while b'\n' not in data:data+=conn.recv(65536)
-                        body=json.loads(data.split(b'\n',1)[0]);calls.append(body)
-                        if body['id']=='fm-codex-input-capability':
-                            reply=capability_response or {'id':body['id'],'error':{'code':'pane_not_found','message':'pane not found'}}
-                        else:
-                            reply=response or {'id':'fm-codex-input','result':{'type':'ok'}}
-                        conn.sendall((json.dumps(reply)+'\n').encode())
-            thread=threading.Thread(target=serve);thread.start()
-            command=['python3',str(root/'bin/backends/herdr-codex-input.py'),session,'w1:p2']
-            if backend:
-                command=['bash','-c','. "$1/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit "$2:w1:p2" "$3" 1 0.01 0','_',str(root),session,text]
-            result=subprocess.run(command,input=text,text=True,capture_output=True,env=dict(env,TEST_SESSION=session))
-            thread.join(timeout=5)
-            assert not thread.is_alive(), 'native socket fixture did not finish'
-        request_path.unlink()
-        expected_rc=0 if backend else expected
-        assert result.returncode==expected_rc,(result.returncode,result.stderr,expected_rc)
-        expected_output='empty' if backend and expected==0 else 'send-failed' if backend else ''
-        if backend:assert result.stdout==expected_output,(result.stdout,result.stderr)
-        invocations=list(map(json.loads,log.read_text().splitlines()))
-        assert all(args[-2:]==['--session',session] for args in invocations),invocations
-        return calls,invocations
-    calls,_=run(0)
-    assert calls==[{'id':'fm-codex-input','method':'pane.send_input','params':{'pane_id':'w1:p2','text':'literal\nsecond line $() `quoted`','keys':[]}}],calls
-    print('ok - real argv0 identity survives a version-named kernel process; one literal native insertion has no submission key')
-    compiler=shutil.which('cc')
-    if compiler:
-        binary=pathlib.Path(short.name)/'codex'
-        subprocess.run([compiler,'-x','c','-o',str(binary),'-'],input='#include <string.h>\n#include <unistd.h>\nint main(int argc, char **argv) { (void)argc; strcpy(argv[0], "decoy"); for (;;) pause(); }\n',text=True,check=True)
-        renamed=subprocess.Popen([str(binary)])
-        for _ in range(40):
-            args=subprocess.check_output(['ps','-p',str(renamed.pid),'-o','args='],text=True).split()[0]
-            if args=='decoy':break
-            time.sleep(.05)
-        kernel2=subprocess.check_output(['ps','-p',str(renamed.pid),'-o','comm='],text=True).strip()
-        assert pathlib.Path(kernel2).name=='codex' and args=='decoy',(kernel2,args)
-        foreground.update(pid=renamed.pid,name=kernel2,argv=[args])
-        assert len(run(0)[0])==1
-        print('ok - real kernel identity survives an independently renamed argv0')
-    else:
-        print('# C compiler absent: kernel-only divergence not verified')
-    foreground.update(name='pi',argv=['pi'])
-    assert run(10,connections=0)[0]==[]
-    print('ok - a non-Codex foreground cannot receive framed native input')
-    foreground.update(name='codex',argv=['codex','app-server'])
-    assert run(10,connections=0)[0]==[]
-    print('ok - an app-server does not establish a Codex composer')
-    foreground.update(name='codex',argv=['codex'])
-    params['required']=['keys','text','pane_id']
-    assert len(run(0)[0])==1
-    params['required'].append('unknown_permission')
-    assert run(1,connections=0)[0]==[]
-    params['required']=['pane_id']
-    print('ok - native capability accepts supplied required fields but refuses unknown requirements')
-    fixture['process']['result']['process_info']['pane_id']='w9:p9'
-    assert run(1,connections=0)[0]==[]
-    fixture['process']['result']['process_info']['pane_id']='w1:p2'
-    fixture['status']['server']['session']='foreign'
-    assert run(1,connections=0)[0]==[]
-    fixture['status']['server']['session']='input-test'
-    print('ok - foreign pane and session identities stop without insertion')
-    fixture['schema']={}
-    assert run(1,connections=0)[0]==[]
-    fixture['schema']=schema
-    assert run(1,text='literal\x1b[201~injection',connections=0)[0]==[]
-    print('ok - missing native capability and embedded paste delimiters fail closed')
-    calls,_=run(1,response={'id':'foreign','result':{'type':'ok'}})
-    assert len(calls)==1
-    calls,invocations=run(1,response={'id':'foreign','result':{'type':'ok'}},backend=True)
-    assert len(calls)==1
-    assert not any(args[:2] in (['pane','send-text'],['pane','send-keys']) for args in invocations)
-    print('ok - ambiguous post-write response is a failure, with no retry')
-    fixture['status']={'client':{'session':None},'server':{'session':None,'running':True,'socket':str(alias_path)}}
-    fixture['sessions']={'sessions':[{'name':'default','running':True,'socket_path':str(request_path)}]}
-    calls,invocations=run(0,backend=True,session='default')
-    assert len(calls)==1 and calls[0]['params']['keys']==[],calls
-    assert sum(args[:2]==['pane','send-keys'] and args[2:4]==['w1:p2','enter'] for args in invocations)==1,invocations
-    print('ok - null default-session identity uses its independently listed canonical socket and one external Enter')
-    fixture['status']={'server':{'session':'input-test','running':True,'socket':str(request_path)}}
-    fixture['sessions']={'sessions':[{'name':'input-test','running':True,'socket_path':str(request_path)}]}
-    calls,invocations=run(0,backend=True,schema_available=False,connections=2)
-    assert calls[0]=={'id':'fm-codex-input-capability','method':'pane.send_input','params':{'pane_id':'','text':'','keys':[]}},calls
-    assert calls[1]['id']=='fm-codex-input' and calls[1]['params']['keys']==[],calls
-    assert sum(args[:2]==['pane','send-keys'] and args[2:4]==['w1:p2','enter'] for args in invocations)==1,invocations
-    print('ok - schema-less native capability proof precedes one text-only insertion and one external Enter')
-    unsupported={'id':'fm-codex-input-capability','error':{'code':'invalid_request','message':'unknown method'}}
-    calls,invocations=run(1,schema_available=False,capability_response=unsupported)
-    assert len(calls)==1 and not any(args[:2]==['pane','send-keys'] for args in invocations),(calls,invocations)
-    print('ok - schema-less servers without pane.send_input remain rejected before any target write')
-finally:
-    process.terminate();process.wait()
-    if renamed is not None:renamed.terminate();renamed.wait()
-    short.cleanup()
-PY

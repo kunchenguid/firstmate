@@ -675,10 +675,11 @@ escalate_add() {  # <state> <distilled-item>
 }
 
 # Flush the escalation buffer as ONE batched, single-line digest to the
-# supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
-# inject failure (buffer preserved for retry / catch-up).
+# supervisor pane. Returns 0 on accepted inject (or empty buffer), 1 when the
+# buffer remains eligible for a later attempt, and 2 after an uncertain native
+# submission is recorded and retired from replay.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg rc marker
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -687,7 +688,28 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    : > "$buf"
+    rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    # The native prompt may already have been accepted even though its client
+    # response timed out. Preserve that uncertainty durably, but retire this
+    # exact buffered payload so a later housekeeping cycle cannot submit it a
+    # second time.
+    marker="$state/.subsuper-inject-wedged"
+    {
+      printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown as of %s; not replayed\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+      printf 'Submitted-at-most-once buffered items:\n'
+      cat "$buf" 2>/dev/null
+    } > "$marker" 2>/dev/null || true
+    : > "$buf"
+    rm -f "${buf}.since"
+    return 2
+  fi
   return 1
 }
 
@@ -1173,19 +1195,16 @@ window_for_task() {  # <task-key> [state]
 
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
-# Returns 0 on successful inject (or empty buffer), non-zero if the pane is
-# gone, the supervisor is busy, afk is inactive, or the verified submit cannot
-# be confirmed after bounded retries. On non-zero the caller preserves
-# the buffer so the escalation survives for the next cycle or the catch-up flush.
+# Returns 0 when the backend accepts the submission, 2 when the transport
+# outcome is uncertain, and 1 for a definite refusal or a pre-submit deferral.
+# The caller preserves the buffer only for return 1. Return 2 retires the exact
+# payload after recording the uncertainty so it cannot be blindly replayed.
 #
 # Submit model:
-#   - TYPE ONCE, then submit with Enter. Never retype the digest: a swallowed
-#     Enter leaves our text in the composer, and retyping would concatenate two
-#     sentinel-prefixed digests into one corrupted turn.
-#   - SUBMIT ACK = the backend submit primitive reports `empty` after Enter.
-#     Herdr's normal idle-baseline path requires an observed turn start.
-#     Pending means Enter was swallowed; unknown is treated as undelivered by
-#     this strict daemon path.
+#   - Submit once through the backend's native prompt API; never type into the
+#     terminal or retry an uncertain result.
+#   - `submitted` means only that the API accepted the prompt. The supervisor's
+#     later behavior is not inferred from transport success.
 #   - COMPOSER GUARD before typing: if the cursor line already has real content
 #     after dim/faint ghost text and borders are ignored (a human's half-typed
 #     line, or a previous injection's unsent text), defer entirely - injecting
@@ -1227,18 +1246,20 @@ inject_msg() {  # <message> [state]
     log "inject deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
     return 1
   fi
-  # (4) Type the digest ONCE, then submit with Enter (retry Enter only, never
-  # retype) via the shared submit primitive. Success = the backend confirms
-  # submit. An unconfirmed/unknown pane does NOT count as delivered, so the
-  # buffer is preserved (strict) rather than cleared.
-  # fm_backend_send_text_submit owns Herdr's typed-once delivery confirmation.
+  # (4) Submit the digest once through the native backend API. Acceptance does
+  # not prove that the supervisor read it. Unknown transport is returned
+  # distinctly so the caller can record it and retire the payload from replay.
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
+  if [ "$verdict" = submitted ]; then
+    return 0
   fi
-  log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
+  if [ "$verdict" = unknown ]; then
+    log "inject uncertain: native prompt may have been accepted; this payload must not be replayed"
+    return 2
+  fi
+  log "inject failed: native prompt was refused (verdict=$verdict)"
   return 1
 }
 
