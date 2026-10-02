@@ -182,7 +182,7 @@ the operational prefix lets firstmate distinguish it from a real captain message
   Styled captures let that owner remove dim/faint and dark-TRUECOLOR ghost or placeholder text while shape detection uses the ANSI-stripped screen, so a dark border is not lost with ghost content.
   A ghost-only or idle bordered composer with proven empty input therefore reads empty without allowing an unbordered shell prompt to do the same.
   `FM_COMPOSER_IDLE_RE` overrides the shared idle-placeholder regex, but a match alone never bypasses the classifier's shape-specific position and ANSI de-emphasis safety gates.
-  `FM_BUSY_REGEX` overrides the rendered delivery guards.
+  `FM_BUSY_REGEX` overrides the rendered supervisor busy guard.
   A blank or otherwise unidentified input row carries no positive container proof and defers injection, so a modal dialog or a mid-redraw pane is never an injection target.
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one

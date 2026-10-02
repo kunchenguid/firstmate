@@ -160,7 +160,8 @@ def load(state, task, recovery=False):
     data = json.loads((state / (task + ".busy-session")).read_text(), object_pairs_hook=unique_fields)
     meta = metadata(state, task)
     # The writer label is diagnostic. Admission is bound to the task, launch,
-    # process and transcript evidence below, including pending input accounting.
+    # process and transcript evidence below; retired pending-input fields are
+    # deliberately irrelevant to this retained evidence reader.
     require(isinstance(data, dict), "malformed-record")
     gen_path = state / (task + ".busy-gen")
     require(not gen_path.is_symlink())

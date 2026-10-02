@@ -97,7 +97,7 @@ The full credentialed Pi primary guard passed on the candidate in a bounded base
 The unchanged baseline both passed once and failed an Ahoy ASCII near-miss case once; earlier candidate near-miss failures therefore have no demonstrated causal link to this pruning.
 [`supervision.md`](supervision.md#post-start-instruction-refresh) owns the compact-refresh guard and its current baseline/candidate limitation.
 The TraeX guard independently verified initial execution and durable steering through file receipts on both versions, but both failed to prove an empty composer after Escape and Ctrl+U (`state=unknown`).
-Native unknown remains unknown; the full interrupt sequence has no current passing claim.
+Under that historical classifier, native unknown remained unknown; the full interrupt sequence has no current passing claim.
 Baseline failures document retained limitations; they do not by themselves waive acceptance or establish a complete root cause.
 Historical observations below remain dated evidence, not restored backend support or current installation instructions.
 
@@ -951,7 +951,9 @@ evidence: herdr=herdr 0.9.0 pi=0.82.0 target=fm-lab-fm-afk-pi-return-37189-7133:
 Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `confirm` recorded the posture with no daemon pid, flag, or terminal; a pending real Pi draft was left untouched with nothing submitted into the captain pane; the unmarked return request was recognized as the return, rendered the brief health first, and opened the catch-up gate on the live blocker; resolving the blocker cleared the gate, and a clean re-entry and return left exactly one archived record per away window.
 The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.sh` and the same live entry point: Bearings continues through a pending return catch-up, projects its posture as an action-free warning outside Captain's Call, and drops that warning after the gate clears, while an active away window still refuses.
 The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
-The daemon's submission ordering, exact digest content, independent live-composer overwrite guard, and max-defer behavior keep real-Herdr coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon. Its synthetic destination intercepts the capability-selected native command at the public CLI boundary; real native prompt submission and acknowledgement are covered separately by the named Codex/TraeX lab above. The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
+The daemon's submission ordering, exact digest content, independent live-composer overwrite guard, and max-defer behavior keep real-Herdr coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon.
+Its synthetic destination intercepts the capability-selected native command at the public CLI boundary; real native prompt submission and acknowledgement are covered separately by the named Codex/TraeX lab above.
+The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
 ## Pi supervision branch
 

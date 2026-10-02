@@ -250,7 +250,8 @@ fm_composer_strip_ghost() {
 }
 
 
-# Delivery acknowledgements only; current worker state belongs to fm-busy-lib.
+# Rendered supervisor busy guard only; current worker state belongs to
+# fm-busy-lib, and native prompt submission does not consult these patterns.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc to interrupt|Working\.\.\.'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
 FM_DELIVERY_PI_BUSY_REGEX_DEFAULT='Working\.\.\.'

@@ -94,7 +94,7 @@
 #          FM_HOUSEKEEPING_TICK     seconds between housekeeping passes while
 #                                   the watcher is mid-cycle (default 15)
 #          FM_BUSY_REGEX            optional rendered busy-signature override
-#                                   for delivery guards
+#                                   for the supervisor pre-submit guard
 #          FM_COMPOSER_IDLE_RE      optional shared classifier override; see
 #                                   docs/configuration.md for its safety gates
 #          FM_MAX_DEFER_SECS        max seconds a buffered escalation may sit
