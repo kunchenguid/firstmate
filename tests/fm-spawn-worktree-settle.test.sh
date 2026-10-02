@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop and allocator lifetime bound in bin/fm-spawn.sh.
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -220,6 +220,163 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
+
+# Execute the actual allocation line delivered to the pane, under an outer
+# fixture watchdog. Before the fix, unbounded treehouse get hits that watchdog;
+# after the fix, the inner production bound returns and reaps its child tree.
+make_allocator_fakebin() {
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*)
+    if [ -f "$FM_ALLOC_CWD" ]; then cat "$FM_ALLOC_CWD"; else printf '%s\n' "$FM_ALLOC_PROJECT"; fi
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        'treehouse get'|fm_allocated=*)
+          . "$FM_ALLOC_TIMEOUT_LIB"
+          cd "$FM_ALLOC_PROJECT" || exit 1
+          rc=0
+          fm_run_timed 10 bash -c "$arg; pwd -P > \"\$FM_ALLOC_CWD\"; printf 'completed\\n' > \"\$FM_ALLOC_COMPLETED\"" || rc=$?
+          printf '%s\n' "$rc" > "$FM_ALLOC_RESULT"
+          ;;
+      esac
+    done
+    ;;
+esac
+exit 0
+SH
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$$" > "$FM_ALLOC_PID"
+if [ "$FM_ALLOC_CASE" = success ]; then
+  [ "$*" = "get --lease --lease-holder allocator-success" ] || exit 1
+  printf '%s\n' "$FM_ALLOC_WORKTREE"
+  exit 0
+fi
+# A fetch descendant ignores TERM, testing escalation independently of the
+# allocator's response to TERM. A real Git HTTP helper stays in this group.
+bash -c 'trap "" TERM; echo $$ > "$1"; while :; do sleep 1; done' _ "$FM_ALLOC_CHILD" &
+case "$FM_ALLOC_CASE" in
+  stall) wait ;;
+  trickle) while :; do printf '.' >&2; sleep 0.1; done ;;
+  prompt)
+    printf 'Credentials: ' >&2
+    read -r answer || true
+    printf 'prompt-read\n' > "$FM_ALLOC_PROMPT"
+    wait
+    ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/treehouse"
+}
+
+allocator_pid_running() {
+  local state
+  kill -0 "$1" 2>/dev/null || return 1
+  state=$(ps -o stat= -p "$1" 2>/dev/null || true)
+  case "$state" in ''|*Z*) return 1 ;; esac
+}
+
+test_allocator_bound() {
+  local behavior=$1 rec id out status parent child unrelated i result
+  id="allocator-$behavior"
+  rec=$(make_primary_case "$id" "$id" 100000)
+  read_settle_record "$rec"
+  make_allocator_fakebin
+  printf 'unlanded work\n' > "$WT_DIR/keep-me.txt"
+  sleep 300 &
+  unrelated=$!
+  out=$(FM_SPAWN_ALLOCATOR_TIMEOUT=2 FM_SPAWN_ISOLATION_TIMEOUT=6 \
+    FM_ALLOC_PROJECT="$PROJ_DIR" FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_CASE="$behavior" \
+    FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh" \
+    FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result" FM_ALLOC_PID="$HOME_DIR/allocator.pid" \
+    FM_ALLOC_CHILD="$HOME_DIR/child.pid" FM_ALLOC_PROMPT="$HOME_DIR/prompt" \
+    run_settle_spawn "$id")
+  status=$?
+  # Clean the unrelated fixture before asserting, including on pre-fix failure.
+  result=0
+  kill -0 "$unrelated" 2>/dev/null || result=1
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  [ "$result" -eq 0 ] || fail "allocator timeout killed an unrelated process"
+  [ "$status" -ne 0 ] || fail "stalled allocator unexpectedly launched a worker"
+  [ -f "$HOME_DIR/result" ] || fail "the pane never executed its allocator command"
+  [ "$(cat "$HOME_DIR/result")" -ne 124 ] \
+    || fail "allocator outlived the isolation budget and hit the outer fixture watchdog"
+  [ -f "$HOME_DIR/completed" ] || fail "allocator command never returned before the fixture watchdog"
+  assert_contains "$out" "within 6s" "spawn did not retain its isolation deadline"
+  parent=$(cat "$HOME_DIR/allocator.pid")
+  child=$(cat "$HOME_DIR/child.pid")
+  for i in $(seq 1 50); do
+    if ! allocator_pid_running "$parent" && ! allocator_pid_running "$child"; then break; fi
+    sleep 0.1
+  done
+  ! allocator_pid_running "$parent" || fail "allocator survived its deadline"
+  ! allocator_pid_running "$child" || fail "allocator-owned fetch child survived its deadline"
+  [ "$behavior" != prompt ] || [ -f "$HOME_DIR/prompt" ] \
+    || fail "credential prompt did not receive detached stdin"
+  assert_grep 'unlanded work' "$WT_DIR/keep-me.txt" "timeout discarded unlanded work"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused allocation published task metadata"
+  pass "$behavior allocation is bounded and only its process group is stopped"
+}
+
+test_allocator_success_with_unset_defaults() {
+  local rec id out status
+  id=allocator-success
+  rec=$(make_primary_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  make_allocator_fakebin
+  out=$(FM_ALLOC_PROJECT="$PROJ_DIR" FM_ALLOC_WORKTREE="$WT_DIR" \
+    FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_CASE=success \
+    FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh" \
+    FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result" \
+    FM_ALLOC_PID="$HOME_DIR/allocator.pid" run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "bounded allocator should hand off a successful lease"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "spawn did not adopt the allocated lease"
+  [ -f "$HOME_DIR/completed" ] || fail "successful allocation did not return before worker launch"
+  pass "unset timeout defaults allocate a durable lease and hand off the worker cwd"
+}
+
+test_timeout_ordering_refuses_before_allocation() {
+  local rec id out status spec alloc isolation
+  for spec in '5 6' '6 6' '7 6' '0 6' '02 6' 'x 6' '2 0'; do
+    read -r alloc isolation <<EOF
+$spec
+EOF
+    id="allocator-invalid-$alloc-$isolation"
+    rec=$(make_primary_case "$id" "$id" 0)
+    read_settle_record "$rec"
+    make_allocator_fakebin
+    out=$(FM_SPAWN_ALLOCATOR_TIMEOUT="$alloc" FM_SPAWN_ISOLATION_TIMEOUT="$isolation" \
+      run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn accepted invalid allocator/isolation ordering: $spec"
+    case "$spec" in
+      '5 6'|'6 6'|'7 6') assert_contains "$out" 'must be below' "invalid ordering was not explained" ;;
+      *) assert_contains "$out" 'spawn timeouts must be positive integers' "invalid bounds were not explained" ;;
+    esac
+    [ ! -e "$COUNTFILE" ] || fail "invalid timeout configuration reached pane polling"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "invalid timeout configuration published metadata"
+  done
+  pass "invalid bounds and allocator/grace ordering refuse before allocation"
+}
+
+# Existing successful spawn cases also cover defaults under set -u.
+unset FM_SPAWN_ALLOCATOR_TIMEOUT FM_SPAWN_ISOLATION_TIMEOUT
+test_allocator_success_with_unset_defaults
+test_timeout_ordering_refuses_before_allocation
+test_allocator_bound stall
+test_allocator_bound trickle
+test_allocator_bound prompt
 
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read

@@ -242,6 +242,11 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   Allocation uses a non-interactive Treehouse lease under fm_run_timed, with
+#   FM_SPAWN_ALLOCATOR_TIMEOUT (default 45s) plus its 1s kill grace strictly
+#   below FM_SPAWN_ISOLATION_TIMEOUT (default 60s). Both must be positive
+#   unpadded integers. A timed-out allocation retains any ambiguous slot; only
+#   ownership-aware teardown may return it, never the timeout path.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -3018,6 +3023,20 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  FM_SPAWN_ALLOCATOR_TIMEOUT=${FM_SPAWN_ALLOCATOR_TIMEOUT:-45}
+  FM_SPAWN_ISOLATION_TIMEOUT=${FM_SPAWN_ISOLATION_TIMEOUT:-60}
+  for timeout_value in "$FM_SPAWN_ALLOCATOR_TIMEOUT" "$FM_SPAWN_ISOLATION_TIMEOUT"; do
+    case "$timeout_value" in
+      ''|0*|*[!0-9]*|??????????*)
+        echo "error: spawn timeouts must be positive integers below 1000000000" >&2
+        exit 1
+        ;;
+    esac
+  done
+  if [ "$((FM_SPAWN_ALLOCATOR_TIMEOUT + 1))" -ge "$FM_SPAWN_ISOLATION_TIMEOUT" ]; then
+    echo "error: FM_SPAWN_ALLOCATOR_TIMEOUT plus 1s kill grace must be below FM_SPAWN_ISOLATION_TIMEOUT" >&2
+    exit 1
+  fi
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -4249,9 +4268,14 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Bound only acquisition, not the shell the worker will later inhabit. A
+  # durable lease keeps a completed allocation protected after the bounded
+  # process exits; an interrupted allocation is never returned speculatively.
+  # stdin is detached so credential prompts cannot consume later pane input.
+  allocator_command=". $(shell_quote "$SCRIPT_DIR/fm-timeout-lib.sh"); fm_run_timed $FM_SPAWN_ALLOCATOR_TIMEOUT treehouse get --lease --lease-holder $(shell_quote "$ID") < /dev/null"
+  spawn_send_text_line "$WT_TARGET" "fm_allocated=\$(bash -c $(shell_quote "$allocator_command")) && cd -- \"\$fm_allocated\""
 
-  # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
+  # Wait for the allocation handoff: the pane's cwd moves to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
   # automatic-rename slips through), display-message -t <bad-name> falls back to the
   # active client's window, which would misread firstmate's OWN pane path as the
@@ -4286,7 +4310,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$FM_SPAWN_ISOLATION_TIMEOUT"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4304,19 +4328,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within ${FM_SPAWN_ISOLATION_TIMEOUT}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
 
-  # Claim the pool slot for this task. The interactive `treehouse get` sent to
-  # the pane above records only a process lease (Treehouse's durable
-  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
-  # homes, is not this path), so Treehouse cannot say which task a slot belongs
-  # to once that task's worker exits - and that is exactly when the slot is
-  # handed on and this task's worktree= line goes stale. The claim is what lets
-  # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
+  # Claim the pool slot for this task as well as the allocator's durable lease.
+  # This home/task claim lets teardown reconcile a slot that has since been
+  # reassigned without relying on a stale worktree= line in task metadata.
+  # bin/fm-teardown.sh leaves a slot that has since been reassigned untouched, so
   # a slot that cannot be claimed is refused here, at the cheapest point, rather
   # than launching a worker whose slot teardown could later release out from
   # under its successor.
