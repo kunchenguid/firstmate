@@ -323,6 +323,19 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Worker launch command (config/worker-launch-command):
+#   Opt-in and per harness. Each non-comment line is `<harness> <command>`; a
+#   ship or scout launch (and relaunch) on a listed harness puts that command
+#   plus one space at the start of the launch prompt, so the harness runs it
+#   first with the brief carrier as its arguments. Supported: claude, grok, pi,
+#   pi-signed (a /command) and codex (a $command); every other verified harness
+#   refuses, because its launch prompt is not verified to run a leading command.
+#   Absent file, an unlisted harness, a secondmate, and a raw launch command
+#   leave the launch byte for byte unchanged. Blank lines and # comments are
+#   ignored; any other malformed line, a duplicate harness, or an unreadable
+#   file refuses before any endpoint, worktree, or record exists. Read on every
+#   spawn and relaunch; never inherited into secondmate homes. See
+#   docs/configuration.md for the per-harness behavior this relies on.
 # Worker account pin (config/claude-account, config/pi-account):
 #   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
@@ -366,6 +379,9 @@
 #                  omp's cwd-only auto-discovery cannot load it a second time)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __LAUNCHCOMMAND__ quoted config/worker-launch-command entry for this
+#                  harness plus its trailing space, directly before the brief
+#                  carrier; empty when none applies
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
 #     __WORKTREE__  absolute path to the task worktree
@@ -576,6 +592,55 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+# config/worker-launch-command (header above): parsed once per spawn or
+# relaunch, before any mutation, so a malformed entry refuses rather than
+# launching a worker whose first prompt silently lacks the chosen command.
+if ! WORKER_LAUNCH_COMMAND_PRESENT=$(fm_config_source_present "$CONFIG/worker-launch-command"); then
+  exit 1
+fi
+WORKER_LAUNCH_COMMANDS=
+if [ "$WORKER_LAUNCH_COMMAND_PRESENT" = 1 ]; then
+  if [ ! -f "$CONFIG/worker-launch-command" ]; then
+    echo "error: config/worker-launch-command must be a readable regular file" >&2
+    exit 1
+  fi
+  # Read the whole file with a checked command so a read failure refuses
+  # instead of ending the parse early like end of file would.
+  if ! wlc_content=$(cat "$CONFIG/worker-launch-command"); then
+    echo "error: config/worker-launch-command could not be read" >&2
+    exit 1
+  fi
+  wlc_line_no=0
+  while IFS= read -r wlc_line || [ -n "$wlc_line" ]; do
+    wlc_line_no=$((wlc_line_no + 1))
+    read -r wlc_harness wlc_command wlc_extra <<<"$wlc_line"
+    case "$wlc_harness" in '' | '#'*) continue ;; esac
+    wlc_error=
+    case "$wlc_harness" in
+    claude | grok | pi | pi-signed) wlc_sigil=/ ;;
+    codex) wlc_sigil=$ ;;
+    opencode | omp | cursor | muse | gemini | rovo | agy | devin | kimi)
+      wlc_error="harness '$wlc_harness' is not supported: its launch prompt is not verified to run a leading command"
+      ;;
+    *) wlc_error="unknown harness '$wlc_harness'" ;;
+    esac
+    if [ -z "$wlc_error" ]; then
+      if [ -z "$wlc_command" ] || [ -n "$wlc_extra" ]; then
+        wlc_error="expected '<harness> <command>' with exactly one command token"
+      elif ! printf '%s' "$wlc_command" | LC_ALL=C grep -Eq '^[/$][A-Za-z0-9][A-Za-z0-9:._-]*$' \
+        || [ "${wlc_command:0:1}" != "$wlc_sigil" ]; then
+        wlc_error="command '$wlc_command' for $wlc_harness must be one token starting with '$wlc_sigil' followed by letters, digits, ':', '.', '_' or '-'"
+      elif printf '%s\n' "$WORKER_LAUNCH_COMMANDS" | grep -q "^$wlc_harness "; then
+        wlc_error="duplicate entry for $wlc_harness"
+      fi
+    fi
+    if [ -n "$wlc_error" ]; then
+      echo "error: config/worker-launch-command line $wlc_line_no: $wlc_error; supported harnesses: claude, grok, pi, pi-signed (a /command) and codex (a \$command)" >&2
+      exit 1
+    fi
+    WORKER_LAUNCH_COMMANDS="$WORKER_LAUNCH_COMMANDS$wlc_harness $wlc_command"$'\n'
+  done <<<"$wlc_content"
+fi
 # config/lavish-axi-host is the primary-owned per-machine address for the
 # shared Lavish server. Read it once per launch and refuse malformed values so
 # every worker reaches the same server instead of starting a second one.
@@ -2017,7 +2082,7 @@ launch_template() {
     # record-backed doorbell: the full envelope is published into the receiving
     # home's state/operational-inbox before launch and only a printable doorbell
     # naming it is passed. A record that cannot be published stops the spawn.
-    printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
+    printf '%s' '__MODELFLAG____EFFORTFLAG____LAUNCHCOMMAND____BRIEFDOORBELL__'
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
   # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
@@ -2045,7 +2110,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __LAUNCHCOMMAND__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2054,7 +2119,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __LAUNCHCOMMAND__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   # omp (Oh My Pi), a Pi fork. Same one-positional-brief, --model, --thinking,
@@ -2108,7 +2173,7 @@ launch_template() {
   # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
-  grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG____LAUNCHCOMMAND__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
   # --yolo does NOT cover and which would otherwise block every spawn, since
   # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -5083,6 +5148,12 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+sq_launch_command=
+if [ "$KIND" != secondmate ]; then
+  worker_launch_command=$(printf '%s' "$WORKER_LAUNCH_COMMANDS" | awk -v h="$HARNESS" '$1 == h { print $2 }')
+  [ -z "$worker_launch_command" ] || sq_launch_command=$(shell_quote "$worker_launch_command ")
+fi
+LAUNCH=${LAUNCH//__LAUNCHCOMMAND__/"$sq_launch_command"}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;

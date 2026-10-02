@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, environment, or launch command | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [worker launch command](#worker-launch-command-configworker-launch-command) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -912,6 +912,51 @@ An absent or blank file changes nothing, while a present path that is not a read
 The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
 
 `bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
+
+## Worker launch command (config/worker-launch-command)
+
+The optional local, gitignored `config/worker-launch-command` starts every ship and scout launch prompt with a harness command, such as a skill that only runs when invoked explicitly.
+The command becomes the first thing the worker runs, and the brief follows it as the command's arguments.
+A command typed into the worker after launch would instead queue behind the worker's first turn.
+
+Each non-comment line is `<harness> <command>`, and the command differs by harness:
+
+```text
+# Start every worker in poteto-mode.
+claude /poteto-mode
+codex $poteto-mode
+grok /poteto-mode
+pi /skill:poteto-mode
+pi-signed /skill:poteto-mode
+```
+
+| Harness | Command form | Unknown command |
+| --- | --- | --- |
+| `claude` | `/name` slash command or skill | Claude Code reports `Unknown command` and drops the prompt, so the worker waits without its brief |
+| `codex` | `$name` skill mention | The worker still follows the brief |
+| `grok` | `/name` command or skill | The worker still follows the brief |
+| `pi`, `pi-signed` | `/skill:name` skill or `/name` prompt template | The worker still follows the brief |
+
+Every other harness refuses an entry, because its launch prompt is not verified to run a leading command.
+Kimi and Rovo receive their brief pointer after launch rather than in the launch prompt, and the remaining harnesses have not been proven to interpret a leading command.
+
+Only name a Claude command that resolves in every project this home launches Claude workers into, at project, user, or plugin scope.
+
+### Scope and refusals
+
+A ship or scout launch, including a relaunch, on a listed harness carries the command.
+An absent file, a harness with no entry, a secondmate launch, and a raw launch command leave the launch exactly as it was.
+Blank or whitespace-only lines and lines whose first non-blank character is `#` are ignored.
+A line naming an unknown or unsupported harness, a command that is not one token with the harness's leading character, a second entry for one harness, or an unreadable file refuses every spawn from that home before any endpoint, worktree, or task record exists.
+
+Calm presentation recognizes a launch prompt as Firstmate input only when the prompt starts with it, so a worker's first prompt shows unhidden once a command leads it.
+
+### When changes apply and inheritance
+
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change reaches the next launch without a restart.
+The file is local to each home and not inherited into secondmate homes, because the command must exist in the projects that home launches workers into.
+
+Regression coverage lives in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh), and [`tests/fm-worker-launch-command-live-e2e.test.sh`](../tests/fm-worker-launch-command-live-e2e.test.sh) proves the installed harnesses; the dated results are in [runtime backend verification](verification/runtime-backends.md#worker-launch-command).
 
 ## Worker launch environment (config/launch-env-allowlist)
 

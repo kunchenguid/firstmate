@@ -615,6 +615,49 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
 
+## Worker launch command
+
+`config/worker-launch-command` ([configuration](../configuration.md#worker-launch-command-configworker-launch-command)) relies on each harness interpreting a command that opens its launch prompt and then reading the rest of the prompt as that command's arguments.
+`tests/fm-worker-launch-command-live-e2e.test.sh` renders a real `bin/fm-spawn.sh` ship launch for each installed supported harness, runs it unchanged in an isolated tmux server, and requires two markers in the task worktree.
+A model-invocation-disabled probe skill named by the command touches the first marker, and the brief touches the second only when the first already exists, so both markers prove the command ran first and the brief still followed it.
+
+Verified 2026-09-28 on Linux with Claude Code 2.1.283, codex-cli 0.157.0, grok 1.0.41, and pi 0.87.1; pi-signed was not installed.
+
+```sh
+FM_WORKER_LAUNCH_COMMAND_LIVE=1 bash tests/fm-worker-launch-command-live-e2e.test.sh
+```
+
+```
+ok - claude 2.1.283 (Claude Code) runs the leading /fmlc-probe and then follows the brief
+ok - codex codex-cli 0.157.0 runs the leading $fmlc-probe and then follows the brief
+ok - grok grok 1.0.41 (4220f3b224a6) [stable] runs the leading /fmlc-probe and then follows the brief
+ok - pi 0.87.1 runs the leading /skill:fmlc-probe and then follows the brief
+# pi-signed is not installed; not checked
+```
+
+A command that names nothing installed was probed the same day by launching each harness directly with a leading unknown command followed by a two-line brief asking for `FMPROBE-BRIEF-SEEN pineapple`:
+
+```sh
+env -u CLAUDECODE claude --dangerously-skip-permissions "/fm-nosuch $(cat brief.txt)"
+codex --dangerously-bypass-approvals-and-sandbox --disable hooks "\$fm-nosuch $(cat brief.txt)"
+grok --always-approve "/fm-nosuch $(cat brief.txt)"
+pi "/skill:fm-nosuch $(cat brief.txt)"
+```
+
+Codex (`$fm-nosuch`), Grok (`/fm-nosuch`), and Pi (`/skill:fm-nosuch`) each answered `FMPROBE-BRIEF-SEEN pineapple`.
+Claude Code rejected the command and never submitted the brief, leaving the worker at an empty prompt:
+
+```
+● Unknown command: /fm-nosuch
+● Args from unknown skill: FMPROBE-BRIEF: reply with the line FMPROBE-BRIEF-SEEN and the word after this colon: pineapple
+  second line of the brief
+────────────────────────────────────────────────────────────
+❯
+```
+
+OpenCode, Cursor, Oh My Pi, Muse, Gemini, Rovo, AGY, Devin, and Kimi were not installed, so no leading command was proven for them and `bin/fm-spawn.sh` refuses an entry naming them.
+The guard submits a few low-effort prompts per harness, so it is opt-in; rerun it after any Claude, Codex, Grok, or Pi upgrade.
+
 ## Worker account pin sign-in check
 
 `bin/fm-worker-account-lib.sh` decides whether a pinned account is signed in from vendor output: the exit status of `claude auth status`, the JSON of `pi auth check`, and the provider column of `pi --list-models`.

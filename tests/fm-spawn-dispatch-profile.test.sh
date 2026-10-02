@@ -1181,13 +1181,16 @@ test_lavish_absent_config_preserves_destination_ambient() {
 printf '%s\n' "${LAVISH_AXI_HOST-unset}" > "$FM_LAVISH_SEEN"
 SH
   chmod +x "$FAKEBIN_DIR/claude"
-  out=$(FM_FAKE_PANE_LOG="$pane_log" \
-    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  FM_TEST_PANE_LOG="$pane_log"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
+  unset FM_TEST_PANE_LOG
   expect_code 0 "$status" "an absent Lavish host configuration should allow the worker spawn"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "LAVISH_AXI_HOST" \
     "an absent configuration changed the host in the worker launch"
+  assert_grep "cd -- '$WT_DIR'" "$pane_log" \
+    "the destination pane log recorded none of the pre-launch pane commands"
   assert_not_contains "$(cat "$pane_log")" "LAVISH_AXI_HOST" \
     "an absent configuration changed the host in the destination pane"
   FM_LAVISH_SEEN="$seen" LAVISH_AXI_HOST=destination.example PATH="$FAKEBIN_DIR:$PATH" \
@@ -1885,6 +1888,182 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# config/worker-launch-command (bin/fm-spawn.sh header): a listed harness's
+# command leads the launch prompt of a ship or scout, with the unchanged brief
+# carrier following it as the command's arguments. Each assertion executes the
+# emitted launch with an argv-capture harness, so it checks what the worker
+# would actually receive.
+write_worker_launch_commands() {  # <home>
+  printf '%s\n' '# start every worker in poteto-mode' '' $'  \t' '  # indented note' \
+    'claude /poteto-mode' "codex \$poteto-mode" 'grok /poteto-mode' \
+    'pi /skill:poteto-mode' 'pi-signed /skill:poteto-mode' \
+    > "$1/config/worker-launch-command"
+}
+
+capture_launch_prompt() {  # <launch> <fakebin> <harness> <out>
+  cat > "$2/$3" <<'SH'
+#!/usr/bin/env bash
+printf '%s' "${!#}" > "$FM_LAUNCH_PROMPT"
+SH
+  chmod +x "$2/$3"
+  FM_LAUNCH_PROMPT="$4" PATH="$2:$PATH" bash -c "$1" || fail "could not execute the $3 launch"
+}
+
+assert_launch_brief_carrier() {  # <harness> <file> <message>
+  local kind
+  if [ "$1" = claude ]; then
+    kind=$("$ROOT/bin/fm-operational-input.sh" doorbell-kind < "$2")
+  else
+    kind=$("$ROOT/bin/fm-operational-input.sh" kind < "$2")
+  fi
+  [ "$kind" = launch-brief ] || fail "$3: $(head -c 200 "$2")"
+}
+
+test_worker_launch_command_leads_each_supported_harness_prompt() {
+  local harness kind cmd rec id out status prompt
+  for harness in claude codex grok pi pi-signed; do
+    case "$harness" in
+      codex) cmd="\$poteto-mode" ;;
+      pi | pi-signed) cmd=/skill:poteto-mode ;;
+      *) cmd=/poteto-mode ;;
+    esac
+    for kind in ship scout; do
+      id="launchcmd-$harness-$kind-z24"
+      rec=$(make_spawn_case "launchcmd-$harness-$kind" "$harness" "$id")
+      read_case_record "$rec"
+      write_worker_launch_commands "$HOME_DIR"
+      if [ "$kind" = scout ]; then
+        out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+      else
+        out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+      fi
+      status=$?
+      expect_code 0 "$status" "$harness $kind spawn with a launch command should succeed"$'\n'"$out"
+      prompt="$CASE_DIR/prompt"
+      capture_launch_prompt "$(cat "$LAUNCH_LOG")" "$FAKEBIN_DIR" "$harness" "$prompt"
+      [ "$(head -c "$((${#cmd} + 1))" "$prompt")" = "$cmd " ] \
+        || fail "$harness $kind launch prompt does not start with '$cmd ': $(head -c 200 "$prompt")"
+      tail -c "+$((${#cmd} + 2))" "$prompt" > "$CASE_DIR/carrier"
+      assert_launch_brief_carrier "$harness" "$CASE_DIR/carrier" \
+        "$harness $kind launch command is not followed by the unchanged launch-brief carrier"
+    done
+  done
+  pass "config/worker-launch-command leads the ship and scout launch prompt of every supported harness"
+}
+
+test_worker_launch_command_leaves_unlisted_harness_unchanged() {
+  local harness rec id out status launch expected prompt
+  for harness in claude codex grok pi; do
+    id="launchcmd-unlisted-$harness-z25"
+    rec=$(make_spawn_case "launchcmd-unlisted-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    if [ "$harness" = claude ]; then
+      printf '%s\n' "codex \$poteto-mode" > "$HOME_DIR/config/worker-launch-command"
+    else
+      printf '%s\n' 'claude /poteto-mode' > "$HOME_DIR/config/worker-launch-command"
+    fi
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn with no entry of its own should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    if [ "$harness" = claude ]; then
+      expected=$(claude_expected_launch "$launch" "$HOME_DIR" "$id" --dangerously-skip-permissions)
+      [ "$launch" = "$expected" ] || fail "an unlisted claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+    fi
+    prompt="$CASE_DIR/prompt"
+    capture_launch_prompt "$launch" "$FAKEBIN_DIR" "$harness" "$prompt"
+    assert_launch_brief_carrier "$harness" "$prompt" "an unlisted $harness launch prompt is not the bare launch-brief carrier"
+  done
+  pass "config/worker-launch-command leaves a harness without an entry launching exactly as before"
+}
+
+test_worker_launch_command_absent_leaves_launch_unchanged() {
+  local harness rec id out status launch prompt
+  for harness in codex grok pi; do
+    id="launchcmd-absent-$harness-z26"
+    rec=$(make_spawn_case "launchcmd-absent-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn without a launch command should succeed"$'\n'"$out"
+    launch=$(cat "$LAUNCH_LOG")
+    prompt="$CASE_DIR/prompt"
+    capture_launch_prompt "$launch" "$FAKEBIN_DIR" "$harness" "$prompt"
+    assert_launch_brief_carrier "$harness" "$prompt" "an absent launch command changed the $harness launch prompt"
+  done
+  pass "an absent config/worker-launch-command leaves every launch prompt as the bare launch-brief carrier"
+}
+
+test_worker_launch_command_skips_secondmate_launch() {
+  local rec id sm out status prompt
+  id=launchcmd-secondmate-z27
+  rec=$(make_spawn_case launchcmd-secondmate claude "$id")
+  read_case_record "$rec"
+  write_worker_launch_commands "$HOME_DIR"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn with a launch command should succeed"$'\n'"$out"
+  prompt="$CASE_DIR/prompt"
+  capture_launch_prompt "$(cat "$LAUNCH_LOG")" "$FAKEBIN_DIR" claude "$prompt"
+  assert_launch_brief_carrier claude "$prompt" "a secondmate launch prompt gained the worker launch command"
+  pass "config/worker-launch-command never changes a secondmate launch"
+}
+
+test_worker_launch_command_malformed_refuses_before_endpoint_or_metadata() {
+  local n line expected rec id out status
+  n=0
+  while IFS='|' read -r line expected; do
+    n=$((n + 1))
+    id="launchcmd-bad-$n-z28"
+    rec=$(make_spawn_case "launchcmd-bad-$n" claude "$id")
+    read_case_record "$rec"
+    printf '%b\n' "$line" > "$HOME_DIR/config/worker-launch-command"
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "malformed worker-launch-command '$line' must refuse the spawn"
+    assert_contains "$out" "config/worker-launch-command line" "refusal for '$line' must name the file and line"
+    assert_contains "$out" "$expected" "refusal for '$line' must explain the problem"
+    [ ! -s "$LAUNCH_LOG" ] || fail "malformed worker-launch-command '$line' launched: $(cat "$LAUNCH_LOG")"
+    assert_absent "$HOME_DIR/state/$id.meta" "malformed worker-launch-command '$line' wrote metadata"
+  done <<'EOF'
+kimi /poteto-mode|harness 'kimi' is not supported
+opencode /poteto-mode|harness 'opencode' is not supported
+claud /poteto-mode|unknown harness 'claud'
+claude poteto-mode|must be one token starting with '/'
+codex /poteto-mode|must be one token starting with '$'
+claude /poteto-mode extra|exactly one command token
+claude|exactly one command token
+claude /poteto-mode\nclaude /other|duplicate entry for claude
+EOF
+  pass "a malformed config/worker-launch-command refuses before any endpoint or metadata"
+}
+
+test_worker_launch_command_unreadable_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  # A mode-000 file is detected but cannot be read, so the read itself fails.
+  # Root reads it anyway, which would make the refusal vacuous.
+  if [ "$(id -u)" = 0 ]; then
+    pass "an unreadable config/worker-launch-command refuses before any endpoint or metadata (skipped as root)"
+    return 0
+  fi
+  id="launchcmd-unreadable-z29"
+  rec=$(make_spawn_case "launchcmd-unreadable" claude "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'claude /poteto-mode' > "$HOME_DIR/config/worker-launch-command"
+  chmod 000 "$HOME_DIR/config/worker-launch-command"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  chmod 600 "$HOME_DIR/config/worker-launch-command"
+  expect_code 1 "$status" "an unreadable worker-launch-command must refuse the spawn"
+  assert_contains "$out" "config/worker-launch-command could not be read" "the refusal must name the read failure"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unreadable worker-launch-command launched: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "an unreadable worker-launch-command wrote metadata"
+  pass "an unreadable config/worker-launch-command refuses before any endpoint or metadata"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_claude_launch_brief_publishes_record_doorbell
@@ -1939,6 +2118,12 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_worker_launch_covers_task_channel_dirs
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
+test_worker_launch_command_leads_each_supported_harness_prompt
+test_worker_launch_command_leaves_unlisted_harness_unchanged
+test_worker_launch_command_absent_leaves_launch_unchanged
+test_worker_launch_command_skips_secondmate_launch
+test_worker_launch_command_malformed_refuses_before_endpoint_or_metadata
+test_worker_launch_command_unreadable_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
