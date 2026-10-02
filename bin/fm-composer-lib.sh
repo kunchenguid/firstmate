@@ -54,7 +54,8 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
-#                tolerated, including Grok 1.0.5's three-column title overhang.
+#                tolerated, including Grok 1.0.5's three-column title overhang
+#                and the one-column `·` in Grok 1.0.41's title.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -1047,6 +1048,14 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  # Grok 1.0.41 separates the permission mode in its title with U+00B7, one
+  # column wide. Count it only in a Grok title so no other bottom gains a
+  # non-ASCII glyph.
+  title=${inner//"$dash"/}
+  fm_composer_normalize_trim_var title
+  case "$title" in
+    'Grok '*) spaces=${spaces//·/ } ;;
+  esac
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -1062,8 +1071,6 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   local overhang
   overhang=$(printf '%*s' "$FM_COMPOSER_GROK_TITLE_OVERHANG" '')
   [ "$spaces" = "$expected$overhang" ] || return 1
-  title=${inner//"$dash"/}
-  fm_composer_normalize_trim_var title
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;

@@ -731,6 +731,33 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_grok_middot_title_under_optin_banner() {
+  # Grok 1.0.41 idle on herdr, captured live: the 'Help improve Grok' opt-in
+  # banner above the box, and a width-aligned bottom title that separates the
+  # permission mode with U+00B7. The middle dot is one column, but it is not
+  # ASCII, so the titled-bottom check read the whole box as ambiguous and a
+  # relaunch refused on an unknown composer.
+  local banner footer idle typed skewed foreign
+  banner=$'  Help improve Grok              [Opt out] [Opt in]\n  Off by default. Opt-in to allow SpaceXAI to\n  retain coding data, e.g., prompts, traces, &\n  metrics, for training and debugging purposes.\n  Read Terms and Privacy Policy.\n\n'
+  footer=$'\n\n                        Grok Build  1.0.41 [stable]'
+  idle="$banner"$'  ╭───────────────────────────────────────────────╮\n  │ ❯                                             │\n  ╰──────── Grok 4.7 Fast (low) · always-approve ─╯'"$footer"
+  assert_screen "grok 1.0.41 idle under the opt-in banner on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "grok 1.0.41 idle under the opt-in banner on tmux" empty "$CAPS_TMUX" "$idle" 7
+  assert_screen "grok 1.0.41 idle under the opt-in banner on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "grok 1.0.41 idle under the opt-in banner on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  typed="$banner"$'  ╭───────────────────────────────────────────────╮\n  │ ❯ deploy the fix                              │\n  ╰──────── Grok 4.7 Fast (low) · always-approve ─╯'"$footer"
+  assert_screen "grok 1.0.41 typed draft on herdr" pending "$CAPS_STYLED" "$typed"
+  assert_screen "grok 1.0.41 typed draft on tmux" pending "$CAPS_TMUX" "$typed" 7
+  # The dot counts as one column only; a bottom that is still off by a column
+  # does not prove the box.
+  skewed="$banner"$'  ╭───────────────────────────────────────────────╮\n  │ ❯                                             │\n  ╰─────── Grok 4.7 Fast (low) · always-approve ─╯'"$footer"
+  assert_screen "grok middot title one column short" unknown "$CAPS_STYLED" "$skewed"
+  # Only a Grok title may carry the dot; any other title stays unproved.
+  foreign="$banner"$'  ╭───────────────────────────────────────────────╮\n  │ ❯                                             │\n  ╰──────── Kimi 4.7 Fast (low) · always-approve ─╯'"$footer"
+  assert_screen "non-grok middot title" unknown "$CAPS_STYLED" "$foreign"
+  pass "matrix: grok 1.0.41's middot title under the opt-in banner is empty while drafts and unproved bottoms stay safe"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -982,6 +1009,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_middot_title_under_optin_banner
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence

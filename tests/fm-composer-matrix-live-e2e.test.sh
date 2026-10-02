@@ -162,7 +162,12 @@ check_harness_idle_cursorless() {  # <name> <version> <target>
 # --- 1. Every installed verified harness must reach a proven-empty composer --
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    case "$h" in
+      # Workers run grok with --always-approve (fm-spawn), which adds
+      # '· always-approve' to the composer's titled bottom border.
+      grok) check_harness_idle_empty "$h" grok --always-approve ;;
+      *) check_harness_idle_empty "$h" "$h" ;;
+    esac
   else
     note "harness absent, not verified here: $h"
   fi
