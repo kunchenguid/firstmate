@@ -814,6 +814,7 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   [ "$pid" -gt 1 ] || return 1
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
+  fm_remote_job_start_unverifiable "$recorded_start" "$pid" && return 0
   [ "$recorded_start" = "$actual_start" ]
 }
 
@@ -995,6 +996,14 @@ fm_remote_job_process_start() {
   [ -n "$value" ] || return 1
   case "$value" in *$'\n'*|*$'\r'*) return 1 ;; esac
   printf '%s\n' "$value"
+}
+
+fm_remote_job_start_unverifiable() { # <recorded-start> <pid>
+  local live
+  case "$1" in proc-starttime=*) return 1 ;; esac
+  live=$(fm_remote_job_process_start "$2" 2>/dev/null) || return 1
+  case "$live" in proc-starttime=*) return 0 ;; esac
+  return 1
 }
 
 fm_remote_job_process_command() {
