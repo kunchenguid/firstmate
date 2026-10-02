@@ -37,6 +37,7 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != -k ] || shift 2
 shift
 exec "$@"
 SH
@@ -69,6 +70,23 @@ make_spawn_case() {
     fm_test_spawn_brief "$home" "$id"
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
+}
+
+make_divert_prober() {
+  local prober=$1 divert_harness=$2 divert_model=$3
+  cat > "$prober" <<SH
+#!/usr/bin/env bash
+set -u
+case " \${*} " in
+  *' --auto-divert '*)
+    printf '%s\\n' 'harness=$divert_harness' 'model=$divert_model'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$prober"
 }
 
 enable_dispatch_profile() {
@@ -989,6 +1007,145 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   pass "Pi launch probing omits --tui-mode on older Pi and preserves it on supporting Pi"
 }
 
+test_quota_divert_to_pi_rebuilds_launch() {
+  local rec id out status launch prober
+  id=profile-quota-divert-pi-z8e
+  rec=$(make_spawn_case profile-quota-divert-pi codex "$id")
+  read_case_record "$rec"
+  prober="$CASE_DIR/jev-quota-prober"
+  make_divert_prober "$prober" pi openai-codex/gpt-5.6-sol
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model codex/gpt-5 --effort max)
+  status=$?
+  expect_code 0 "$status" "quota divert to pi should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$FAKEBIN_DIR/pi' --tui-mode regular" \
+    "quota divert to pi did not rebuild the Pi launch prefix and executable"
+  assert_contains "$launch" "--model 'openai-codex/gpt-5.6-sol' --thinking 'max'" \
+    "quota-diverted model or effort did not reach the rebuilt Pi launch"
+  assert_not_contains "$launch" '__PIBIN__' \
+    "quota divert to pi left the Pi executable placeholder unsubstituted"
+  assert_not_contains "$launch" '__PITUIMODE__' \
+    "quota divert to pi left the TUI-mode placeholder unsubstituted"
+  pass "quota divert to pi rebuilds concrete Pi launch and applies diverted profile"
+}
+
+test_quota_divert_to_cursor_rebuilds_launch() {
+  local rec id out status launch prober
+  id=profile-quota-divert-cursor-z8f
+  rec=$(make_spawn_case profile-quota-divert-cursor pi "$id")
+  read_case_record "$rec"
+  prober="$CASE_DIR/jev-quota-prober"
+  make_divert_prober "$prober" cursor cursor-grok-4.5-high
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "quota divert to cursor should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --trust --yolo --model 'cursor-grok-4.5-high'" \
+    "quota divert to cursor did not resolve the Cursor executable and apply its model"
+  assert_not_contains "$launch" '__CURSORBIN__' \
+    "quota divert to cursor left the Cursor executable placeholder unsubstituted"
+  assert_not_contains "$launch" 'FM_PI_HARNESS=pi' \
+    "quota divert to cursor retained the original Pi launch prefix"
+  pass "quota divert to cursor rebuilds concrete Cursor launch"
+}
+
+test_quota_divert_escapes_unusable_original_harness() {
+  local rec id out status launch prober
+  id=profile-quota-divert-missing-z8h
+  rec=$(make_spawn_case profile-quota-divert-missing pi-signed "$id")
+  read_case_record "$rec"
+  rm -f "$FAKEBIN_DIR/pi-signed"
+  prober="$CASE_DIR/jev-quota-prober"
+  make_divert_prober "$prober" cursor cursor-grok-4.5-high
+
+  out=$(PATH=/usr/bin:/bin:/usr/sbin:/sbin FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness pi-signed --model openai-codex/gpt-5.6-sol --effort high)
+  status=$?
+  expect_code 0 "$status" "a missing original harness should still divert to a viable lane: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "'$FAKEBIN_DIR/cursor-agent' --trust --yolo --model 'cursor-grok-4.5-high'" \
+    "divert away from a missing original harness did not launch the viable Cursor lane"
+  pass "quota divert runs before original-harness setup, so a missing binary does not block it"
+}
+
+test_stalled_quota_prober_is_bounded() {
+  local rec id out status launch prober started
+  id=profile-quota-prober-stall-z8i
+  rec=$(make_spawn_case profile-quota-prober-stall codex "$id")
+  read_case_record "$rec"
+  prober="$CASE_DIR/jev-quota-prober"
+  printf '%s\n' '#!/usr/bin/env bash' 'exec sleep 30' > "$prober"
+  chmod +x "$prober"
+  # The pass-through fake timeout would let the stall run to completion.
+  rm -f "$FAKEBIN_DIR/timeout"
+
+  started=$SECONDS
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" FM_JEV_PROBER_TIMEOUT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model codex/gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "a stalled prober should not block the spawn: $out"
+  [ $((SECONDS - started)) -lt 25 ] || fail "a stalled prober held the spawn for $((SECONDS - started))s"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex" "a stalled prober left the original codex launch unsent"
+  pass "a stalled quota prober is bounded and the spawn proceeds on the original lane"
+}
+
+test_zero_quota_prober_timeout_stays_bounded() {
+  local rec id out status launch prober started
+  id=profile-quota-prober-zero-z8j
+  rec=$(make_spawn_case profile-quota-prober-zero codex "$id")
+  read_case_record "$rec"
+  prober="$CASE_DIR/jev-quota-prober"
+  # The health check fails fast; only the divert call stalls.
+  printf '%s\n' '#!/usr/bin/env bash' 'case " $* " in *" --auto-divert "*) exec sleep 60 ;; esac' 'exit 1' > "$prober"
+  chmod +x "$prober"
+  rm -f "$FAKEBIN_DIR/timeout"
+
+  started=$SECONDS
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" FM_JEV_PROBER_TIMEOUT=0 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness codex --model codex/gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "a zero prober timeout should not unbound the spawn: $out"
+  [ $((SECONDS - started)) -lt 50 ] || fail "FM_JEV_PROBER_TIMEOUT=0 let a stalled prober hold the spawn for $((SECONDS - started))s"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex" "a zero prober timeout left the original codex launch unsent"
+  pass "FM_JEV_PROBER_TIMEOUT=0 falls back to the default bound"
+}
+
+test_raw_launch_quota_divert_runs_command_verbatim() {
+  local rec id out status launch expected prober
+  id=profile-raw-quota-divert-z8g
+  rec=$(make_spawn_case profile-raw-quota-divert claude "$id")
+  read_case_record "$rec"
+  prober="$CASE_DIR/jev-quota-prober"
+  make_divert_prober "$prober" cursor cursor-grok-4.5-high
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_JEV_PROBER_PATH="$prober" run_ship_spawn \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --flag")
+  status=$?
+  expect_code 0 "$status" "raw launch should survive an exhausted-lane prober: $out"
+  assert_contains "$out" "refusing to divert raw launch command 'custom-agent --flag'" \
+    "raw launch divert refusal did not name the raw command"
+  assert_contains "$out" "is exhausted (divert target cursor:cursor-grok-4.5-high)" \
+    "raw launch divert refusal did not name the lane exhaustion"
+  launch=$(cat "$LAUNCH_LOG")
+  expected="export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")custom-agent --flag"
+  [ "$launch" = "$expected" ] || fail "raw launch command was not run verbatim under an exhausted-lane prober"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  assert_not_contains "$launch" "cursor-agent" \
+    "an exhausted-lane prober substituted a harness template for the raw launch command"
+  pass "raw launch command runs verbatim when the prober would divert"
+}
+
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
   id=profile-pi-signed-missing-z8c
@@ -1853,6 +2010,12 @@ test_batch_preserves_native_ultra
 test_pi_scout_launch_enters_recorded_worktree
 test_pi_threads_model_and_max_effort
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
+test_quota_divert_to_pi_rebuilds_launch
+test_quota_divert_to_cursor_rebuilds_launch
+test_quota_divert_escapes_unusable_original_harness
+test_stalled_quota_prober_is_bounded
+test_zero_quota_prober_timeout_stays_bounded
+test_raw_launch_quota_divert_runs_command_verbatim
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity

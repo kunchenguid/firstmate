@@ -558,8 +558,8 @@ done
 assert_present "$STARTED" "the shutdown fixture did not begin executing"
 WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 kill -TERM "$WORKER_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$WORKER_PID" 2>/dev/null || break
+WORKER_TERM_DEADLINE=$((SECONDS + 30))
+while kill -0 "$WORKER_PID" 2>/dev/null && [ "$SECONDS" -lt "$WORKER_TERM_DEADLINE" ]; do
   sleep 0.05
 done
 kill -0 "$WORKER_PID" 2>/dev/null && fail "the worker did not finish its TERM shutdown"

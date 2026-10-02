@@ -2204,6 +2204,103 @@ launch_template() {
   esac
 }
 
+prepare_harness_launch() {
+  # muse, gemini, agy, devin, and rovo are verified as CREWMATE/SCOUT adapters
+  # only. A secondmate is a firstmate instance, so it needs a primary
+  # supervision protocol. None of these adapters has one, so refusing here
+  # keeps that gap loud instead of standing one up with no way to arm its watch
+  # cycle.
+  # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
+  # and this task verified only crewmate-side launch, busy state, interrupt, and
+  # exit, so a gemini secondmate is refused rather than stood up on an unverified
+  # supervision path. muse has none either, and its Claude-compatible hook
+  # dialect explicitly rejects the model-reawakening and asyncRewake handlers
+  # that firstmate's primary turn-end supervision is built on
+  # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing
+  # up a secondmate whose supervision cycle could never be armed.
+  # agy has none either: it exposes no hook surface for primary supervision and
+  # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+  # devin has none either: only its worker lifecycle hooks are verified, and
+  # docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
+  # rovo carries the same primary-supervision gap as muse: no turn-end hook, no
+  # verified primary integration, so a secondmate (a firstmate instance that
+  # must itself act as a primary) could never be supervised.
+  if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ] || [ "$HARNESS" = rovo ]; }; then
+    echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
+
+  case "$HARNESS" in
+  devin)
+    DEVIN_BIN=$(command -v devin) || {
+      echo "error: devin executable not found on PATH" >&2
+      exit 1
+    }
+    ;;
+  pi | pi-signed)
+    PI_BIN=$(resolve_pi_executable "$HARNESS") || {
+      echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
+      exit 1
+    }
+    PI_TUI_MODE=
+    if pi_supports_tui_mode "$PI_BIN"; then
+      PI_TUI_MODE=' --tui-mode regular'
+    fi
+    LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
+    LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
+    ;;
+  cursor)
+    # `cursor` is not the CLI name, and the legacy alias `agent` is far too
+    # generic to launch on its name alone, so resolution runs through the
+    # verified owner rather than a bare command lookup. Refusing here keeps a
+    # missing install a loud spawn refusal instead of a pane that dies with a
+    # command-not-found the supervisor would read as a wedged worker.
+    CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
+    if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
+      if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
+        if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
+          echo "error: Cursor model '$MODEL' is not available from '$CURSOR_BIN --list-models'; choose an id listed by that command or omit --model" >&2
+          exit 1
+        fi
+      fi
+    fi
+    ;;
+  omp)
+    OMP_BIN=$(resolve_pi_executable omp) || {
+      echo "error: omp executable not found on PATH; install Oh My Pi or select a different verified harness" >&2
+      exit 1
+    }
+    OMP_WORKER_CFG="$FM_ROOT/.omp/fm-worker-overlay.yml"
+    [ -f "$OMP_WORKER_CFG" ] || {
+      echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
+      exit 1
+    }
+    ;;
+  agy)
+    AGY_BIN=$(resolve_pi_executable agy) || {
+      echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
+      exit 1
+    }
+    ;;
+  esac
+
+  # Ultra is an explicit native capability, never a Pi thinking-level alias.
+  # Validate the fully resolved profile before worktree or endpoint provisioning.
+  if [ "$EFFORT" = ultra ]; then
+    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
+    [ "$RAW_LAUNCH" = 0 ] || {
+      echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
+      exit 1
+    }
+  fi
+  if [ "$HARNESS" = omp ]; then
+    omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
+  fi
+  if [ "$HARNESS" = agy ]; then
+    agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+  fi
+}
+
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -2251,88 +2348,6 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
-# a firstmate instance, so it needs a primary supervision protocol.
-# gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
-# and this task verified only crewmate-side launch, busy state, interrupt, and
-# exit, so a gemini secondmate is refused rather than stood up on an unverified
-# supervision path. muse has none either, and its
-# Claude-compatible hook dialect explicitly rejects the model-reawakening and
-# asyncRewake handlers that firstmate's primary turn-end supervision is built on
-# (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
-# secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-# devin has none either: only its worker lifecycle hooks are verified, and
-# docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-# rovo carries the same primary-supervision gap as muse: no turn-end hook, no
-# verified primary integration, so a secondmate (a firstmate instance that must
-# itself act as a primary) could never be supervised. Refuse loudly rather than
-# standing one up with no way to arm its watch cycle.
-if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
-  echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-case "$HARNESS" in
-devin)
-  DEVIN_BIN=$(command -v devin) || {
-    echo "error: devin executable not found on PATH" >&2
-    exit 1
-  }
-  ;;
-pi | pi-signed)
-  PI_BIN=$(resolve_pi_executable "$HARNESS") || {
-    echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
-    exit 1
-  }
-  PI_TUI_MODE=
-  if pi_supports_tui_mode "$PI_BIN"; then
-    PI_TUI_MODE=' --tui-mode regular'
-  fi
-  LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
-  LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
-  ;;
-cursor)
-  # `cursor` is not the CLI name, and the legacy alias `agent` is far too
-  # generic to launch on its name alone, so resolution runs through the
-  # verified owner rather than a bare command lookup. Refusing here keeps a
-  # missing install a loud spawn refusal instead of a pane that dies with a
-  # command-not-found the supervisor would read as a wedged worker.
-  CURSOR_BIN=$(fm_cursor_resolve_binary) || exit 1
-  if [ -n "$MODEL" ] && [ "$MODEL" != default ]; then
-    if CURSOR_MODELS=$(fm_cursor_list_models "$CURSOR_BIN"); then
-      if ! printf '%s\n' "$CURSOR_MODELS" | fm_cursor_catalog_has_model "$MODEL"; then
-        echo "error: Cursor model '$MODEL' is not available from '$CURSOR_BIN --list-models'; choose an id listed by that command or omit --model" >&2
-        exit 1
-      fi
-    fi
-  fi
-  ;;
-omp)
-  OMP_BIN=$(resolve_pi_executable omp) || {
-    echo "error: omp executable not found on PATH; install Oh My Pi or select a different verified harness" >&2
-    exit 1
-  }
-  OMP_WORKER_CFG="$FM_ROOT/.omp/fm-worker-overlay.yml"
-  [ -f "$OMP_WORKER_CFG" ] || {
-    echo "error: omp worker posture overlay missing at $OMP_WORKER_CFG; a worker launched without it can park on the captain's own approval or plan-mode settings" >&2
-    exit 1
-  }
-  ;;
-agy)
-  AGY_BIN=$(resolve_pi_executable agy) || {
-    echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
-    exit 1
-  }
-  ;;
-esac
-
 # config/secondmate-harness may carry optional model/effort tokens alongside the
 # harness ("<harness> [<model>] [<effort>]"). They apply only when this is a
 # --secondmate spawn and no explicit per-spawn harness/raw launch was supplied, so
@@ -2354,21 +2369,40 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
-# Ultra is an explicit native capability, never a Pi thinking-level alias.
-# Validate the fully resolved profile before worktree or endpoint provisioning.
-if [ "$EFFORT" = ultra ]; then
-  "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
-  [ "$RAW_LAUNCH" = 0 ] || {
-    echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
-    exit 1
-  }
+# Jev Pattern 9: Pre-flight runway and token health prober. It runs before
+# prepare_harness_launch so an exhausted or unusable original lane can still be
+# diverted, and the one setup pass below always targets the final harness. Each
+# probe is bounded so a stalled prober cannot hold the spawn.
+JEV_QUOTA_PROBER=${FM_TEST_JEV_PROBER_PATH:-$SCRIPT_DIR/fm-jev-quota-prober.sh}
+JEV_QUOTA_PROBER_TIMEOUT=${FM_JEV_PROBER_TIMEOUT:-15}
+# fm_run_timed treats 0 as "no deadline"; keep the prober bound positive.
+case "$JEV_QUOTA_PROBER_TIMEOUT" in
+'' | *[!0-9]* | 0*) JEV_QUOTA_PROBER_TIMEOUT=15 ;;
+esac
+if [ "${FM_TEST_DISABLE_JEV_PROBER:-0}" != 1 ] && [ -x "$JEV_QUOTA_PROBER" ]; then
+  if ! fm_run_timed "$JEV_QUOTA_PROBER_TIMEOUT" "$JEV_QUOTA_PROBER" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} >/dev/null 2>&1; then
+    _divert=$(fm_run_timed "$JEV_QUOTA_PROBER_TIMEOUT" "$JEV_QUOTA_PROBER" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} --auto-divert 2>/dev/null || true)
+    if [ -n "$_divert" ]; then
+      eval "$_divert"
+      if [ -n "${harness:-}" ] && [ -n "${model:-}" ]; then
+        if [ "$RAW_LAUNCH" = 1 ]; then
+          echo "error: refusing to divert raw launch command '$ARG3': lane $HARNESS${MODEL:+:$MODEL} is exhausted (divert target $harness:$model); the raw launch command runs verbatim" >&2
+        else
+          echo "jev-quota-prober: automatically diverted $HARNESS${MODEL:+:$MODEL} to viable lane $harness:$model" >&2
+          if [ "$harness" != "$HARNESS" ]; then
+            LAUNCH=$(launch_template "$harness" "$KIND") || {
+              echo "error: no launch template for diverted harness '$harness'" >&2
+              exit 1
+            }
+          fi
+          HARNESS="$harness"
+          MODEL="$model"
+        fi
+      fi
+    fi
+  fi
 fi
-if [ "$HARNESS" = omp ]; then
-  omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
-fi
-if [ "$HARNESS" = agy ]; then
-  agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
-fi
+prepare_harness_launch
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the

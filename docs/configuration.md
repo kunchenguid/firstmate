@@ -783,7 +783,9 @@ Changing this pin affects the next secondmate spawn or control-plane relaunch; t
 
 ### Per-launch overrides and inherited defaults
 
-An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
+An explicit harness argument to `fm-spawn.sh` overrides either config file when selecting the initial launch profile for that spawn.
+Before creating the worker, `fm-spawn.sh` can run the pre-flight quota prober and divert an unhealthy supported harness and model to the prober's viable lane, including across harnesses; the prober runs before any harness setup, so only the final harness receives executable resolution, validation, and launch setup, and an unusable original harness does not block the divert, while a raw launch command is never diverted. Each prober call is bounded by `FM_JEV_PROBER_TIMEOUT` seconds (default 15; an empty, non-numeric, or zero-leading value also falls back to 15), so a stalled prober cannot hold the spawn.
+The quota prober ships separately, so the divert hook stays inert until `bin/fm-jev-quota-prober.sh` is installed alongside `fm-spawn.sh`; once it ships, the prober owns the health checks and diversion target and [`fm-spawn.sh`](../bin/fm-spawn.sh) owns applying that result to the launch.
 An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
