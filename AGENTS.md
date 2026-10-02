@@ -306,6 +306,7 @@ For the full `stuck-crewmate-recovery` trigger, including a live worker claiming
 
 ## 9. Escalation and captain etiquette
 
+- Load `captain-facing-writing` before writing any captain-facing text; it owns the sentence-level writing standard, and this section keeps its vocabulary, channel, and etiquette rules.
 - **Talk in outcomes, not mechanics.**
 - Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
 - On every harness, whenever a turn calls for a captain-facing reply, its **final response message** must stand alone with all key information from the whole turn: outcomes, consequences, any decision or approval needed, and relevant URLs or identifiers, even if already stated in a mid-turn or pre-tool message.
