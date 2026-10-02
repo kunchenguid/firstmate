@@ -203,8 +203,9 @@ CODEX_LEDGER="$CODEX_LEDGER_DIR/$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' 
 # since then and earns a fresh block budget (whole-second mtimes make a
 # same-second update ambiguous, so it counts as progress).
 # The budget only bounds immediate retries: a stop more than
-# CODEX_RETRY_WINDOW seconds after the last block also starts a fresh budget,
-# so an exhausted ledger cannot leave the rest of a long turn unguarded.
+# CODEX_RETRY_WINDOW seconds after the last block (or before it, after a clock
+# rollback) also starts a fresh budget, so an exhausted ledger cannot leave the
+# rest of a long turn unguarded.
 codex_ledger_read() {
   CODEX_LEDGER_SESSION=$(sed -n '1s/^session=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   CODEX_LEDGER_TURN=$(sed -n '2s/^turn=//p' "$CODEX_LEDGER" 2>/dev/null || true)
@@ -222,7 +223,7 @@ codex_ledger_continues() {
   [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
     && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
     && { [ "$beacon_mtime" -lt "$CODEX_LEDGER_TIME" ] || [ "$beacon_mtime" -gt "$now" ]; } \
-    && [ $((now - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
+    && [ "$CODEX_LEDGER_TIME" -le "$now" ] && [ $((now - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
 }
 
 codex_retry_budget_exhausted() {

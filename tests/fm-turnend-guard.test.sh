@@ -576,6 +576,22 @@ test_hook_codex_exhausted_budget_expires_after_retry_window() {
   pass "fm-turnend-guard: exhausted Codex retry budget expires after the retry window"
 }
 
+test_hook_codex_future_block_time_expires_retry_window() {
+  local dir out status ledger
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-clock-rollback")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" false turn-rollback); status=$?
+  expect_code 2 "$status" "the initial Codex stop must be blocked"
+  ledger=$(codex_ledger_path "$dir")
+  [ -f "$ledger" ] || fail "the Codex block did not persist its retry ledger"
+  # The clock moved back after the block, so the saved block time is in the future.
+  sed "3s/^time=.*/time=$(($(date +%s) + 3600))/" "$ledger" > "$ledger.future" && mv "$ledger.future" "$ledger"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-rollback); status=$?
+  expect_code 2 "$status" "a stop after a clock rollback must treat the retry window as expired and be checked again"
+  assert_contains "$out" "TURN WOULD END BLIND" "the re-armed Codex block must include the supervision alarm"
+  pass "fm-turnend-guard: future-dated Codex block time expires the retry window"
+}
+
 test_hook_codex_same_second_beacon_counts_as_progress() {
   local dir out status ledger beat beat_mtime
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-same-second")
@@ -2406,6 +2422,7 @@ test_hook_codex_future_beacon_is_not_progress
 test_hook_codex_retry_budget_is_per_session
 test_hook_codex_ledgers_pruned_and_removed_on_healthy_stop
 test_hook_codex_exhausted_budget_expires_after_retry_window
+test_hook_codex_future_block_time_expires_retry_window
 test_hook_codex_payload_without_turn_id_keeps_legacy_allow
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
