@@ -64,7 +64,9 @@ fm_cursor_run_timed() {  # <seconds> <command...>
     case $- in *u*) nounset=on ;; esac
     # shellcheck source=bin/fm-timeout-lib.sh
     # shellcheck disable=SC1091
-    . "$dir/fm-timeout-lib.sh" || return 1
+    # Missing sibling stays silent: hooks that source this file require empty
+    # stderr, and a probe without the bound owner must fail closed, not print.
+    . "$dir/fm-timeout-lib.sh" 2>/dev/null || return 1
     [ "$nounset" = on ] || set +u
   fi
   fm_run_timed "$@"
@@ -228,7 +230,7 @@ fm_cursor_resolve_binary() {
       return 0
     fi
   done
-  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. A file named 'agent' is accepted only when it resolves into Cursor's install tree or its --help identifies the Cursor Agent CLI." >&2
+  echo "error: no verified cursor executable found; searched PATH for 'cursor-agent' and 'agent', plus '${HOME:-}/.local/bin/cursor-agent' and '${HOME:-}/.local/bin/agent'. Every candidate must pass one bounded --help probe: Cursor Agent CLI identity, or Cursor install-tree structure with a successful non-refusal run. A name or install-tree match alone is never enough." >&2
   return 1
 }
 

@@ -244,6 +244,49 @@ test_verify_executable_refuses_ide_shim_refusal_text() {
   pass "fm_cursor_verify_executable: IDE-shim refusal text is never launchable"
 }
 
+test_isolated_fixture_timeout_sibling_contract() {
+  # Hook fixtures copy fm-cursor-lib into a temp bin. Process identity must
+  # stay silent with no timeout sibling (no probe), a launch probe without the
+  # sibling must fail closed without stderr noise, and the same probe must
+  # succeed when the timeout sibling sits next to the lib copy.
+  local bare full ver out status
+  bare="$TMP_ROOT/fixture-bare/bin"
+  full="$TMP_ROOT/fixture-full/bin"
+  ver="$TMP_ROOT/fixture-full/share/cursor-agent/versions/2026.10.01-ok"
+  mkdir -p "$bare" "$full" "$ver"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$bare/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$full/fm-cursor-lib.sh"
+  cp "$ROOT/bin/fm-timeout-lib.sh" "$full/fm-timeout-lib.sh"
+  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$full/cursor-agent"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    fm_cursor_process_matches cursor-agent "" cursor-agent || exit 3
+    printf %s ok
+  ' _ "$bare" 2>&1) || fail "process identity without timeout sibling failed: $out"
+  [ "$out" = ok ] \
+    || fail "process identity without timeout sibling must print only ok, got '$out'"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    if fm_cursor_verify_executable /bin/true; then exit 3; fi
+    printf %s refused
+  ' _ "$bare" 2>&1) || fail "missing-timeout probe path crashed: $out"
+  [ "$out" = refused ] \
+    || fail "missing-timeout probe must refuse silently, got '$out'"
+
+  out=$(bash -c '
+    . "$1/fm-cursor-lib.sh" || exit 2
+    fm_cursor_verify_executable "$1/cursor-agent" || exit 3
+    printf %s verified
+  ' _ "$full" 2>&1) || fail "fixture with timeout sibling failed to verify: $out"
+  [ "$out" = verified ] \
+    || fail "fixture with timeout sibling must verify, got '$out'"
+  pass "fm_cursor_run_timed: isolated fixtures keep process identity silent and probe only with the timeout sibling"
+}
+
 test_resolve_binary_prefers_stable_path() {
   # The canonical path carries a version cursor replaces on its own auto-update,
   # so resolution must print the STABLE launcher even though identity is proven
@@ -529,6 +572,7 @@ test_resolve_binary_skips_broken_cursor_agent
 test_resolve_binary_skips_broken_without_coreutils_timeout
 test_verify_executable_single_successful_probe
 test_verify_executable_refuses_ide_shim_refusal_text
+test_isolated_fixture_timeout_sibling_contract
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
