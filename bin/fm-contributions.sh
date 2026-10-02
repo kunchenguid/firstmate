@@ -67,13 +67,17 @@
 #
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
-# before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
-# ack removes
-# only the named pending token. A crash after enqueue can duplicate a wake but
-# cannot consume the pending signal. Source bodies are data, never commands.
-# All mutations serialize on this home's .contributions.lock. Writes refuse
-# symlinks and publish by rename. No forge writes are performed.
+# before any wake. Open pull requests also raise the same pending/wake path when
+# a no-mistakes pipeline attestation in the PR body is bound to a different head
+# than the live head (attestation-stale), or when mergeable newly flips to
+# conflicting (merge-conflicting). This staleness sweep runs on this poll's
+# existing cadence rather than a separate schedule. poll appends ordinary
+# durable check wakes through fm-wake-lib and emits only newly durable signals
+# for the authenticated check to surface. ack removes only the named pending
+# token. A crash after enqueue can duplicate a wake but cannot consume the
+# pending signal. Source bodies are data, never commands. All mutations
+# serialize on this home's .contributions.lock. Writes refuse symlinks and
+# publish by rename. No forge writes are performed.
 #
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
@@ -261,9 +265,15 @@ observe() { # canonical GitHub URL -> normalized JSON
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
-      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
+      --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" --arg url "$url" '
       $core[0] as $c
       | ($reviews[0] | add // []) as $reviews
+      | ($c.body // "") as $body
+      | ([$body
+          | capture("no-mistakes-pipeline-attestation:v1\\s+(?<json>\\{[^<]*\\})\\s*-->"; "m")
+          | .json
+          | fromjson?
+          | .head_sha // empty] | first // "") as $att_head
       | {head:$c.head.sha,state:(if $c.merged_at != null then "merged" else $c.state end),
           draft:$c.draft,mergeable:(if $c.mergeable == true then "mergeable" elif $c.mergeable == false then "conflicting" else "unknown" end),
           can_merge:($repo[0].permissions.push // false),
@@ -277,7 +287,14 @@ observe() { # canonical GitHub URL -> normalized JSON
             | map(select(.user.login != $c.user.login and (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
               | {token:((._signal + ":") + (.id|tostring) + ":" + (.updated_at // .submitted_at // "") + ":" + (.state // "")),
                  type:._signal,source:.html_url,head:.commit_id,
-                 author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
+                 author:.user.login,body:(.body // "" | .[:500])})
+            + (if $c.state == "open" and $c.merged_at == null
+                  and ($att_head | type == "string" and length == 40 and test("^[a-fA-F0-9]{40}$"))
+                  and ($att_head | ascii_downcase) != ($c.head.sha | ascii_downcase) then
+                 [{token:("attestation-stale:" + $c.head.sha + ":" + $att_head),
+                   type:"attestation-stale",source:$url,head:$c.head.sha,
+                   body:("no-mistakes attestation head_sha " + $att_head + " is stale relative to live head " + $c.head.sha)}]
+               else [] end))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
@@ -400,11 +417,20 @@ poll() {
       if [ "$observed" -eq 0 ]; then
         jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
-          | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
-              [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-              else [] end)) as $events
+          | ($o.events
+              + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
+                  [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
+                 else [] end)
+              + (if $old.kind == "pr" and $o.state == "open"
+                    and $o.mergeable == "conflicting"
+                    and (($old.observation.definite_mergeable // "") != "conflicting") then
+                  [{token:("merge-conflicting:" + ($o.head // "") + ":" + $now),
+                    type:"merge-conflicting",source:$old.url,head:($o.head // null),
+                    body:"PR mergeable state flipped to CONFLICTING"}]
+                 else [] end)) as $events
           | $old + {checked_at:$now,error:null,
-            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            observation:($o + {definite_mergeable:(if $o.mergeable == "unknown" then ($old.observation.definite_mergeable // "unknown") else $o.mergeable end),
+              absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else

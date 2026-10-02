@@ -72,7 +72,7 @@ def projected($input; $saved; $now; $max_age):
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
        elif $fresh | not then {actor:"fleet",reason:($record.error // "contribution not recently checked")}
        elif $stale then {actor:"fleet",reason:"STALE maintainer verdict; reassess the current head"}
-       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming maintainer signal needs triage"}
+       elif ($record.pending | length) > 0 then {actor:"fleet",reason:"incoming signal needs triage"}
        elif $record.kind == "issue" then
          if $o.ready then {actor:"fleet",reason:"filed issue is ready-for-pr"}
          else {actor:"maintainer",reason:"awaiting issue triage"} end

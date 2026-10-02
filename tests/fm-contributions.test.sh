@@ -115,6 +115,8 @@ forge_home() {
   printf '[]\n' > "$home/forge/inline.json"
   printf '[]\n' > "$home/forge/labels.json"
   printf '[]\n' > "$home/forge/events.json"
+  : > "$home/forge/body"
+  printf 'true\n' > "$home/forge/mergeable"
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -124,9 +126,13 @@ case "$*" in
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8'|'api repos/o/r/pulls/9'|'api repos/o/r/pulls/10')
-    jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
+    jq -n --arg head "$(cat "$FORGE/head")" \
+      --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" \
+      --arg body "$(cat "$FORGE/body" 2>/dev/null || true)" \
+      --argjson mergeable "$(tr -d '[:space:]' < "$FORGE/mergeable" 2>/dev/null || printf true)" '
       {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
-       mergeable:(if $state == "open" then true else null end),
+       body:$body,
+       mergeable:(if $state == "open" or $mergeable == false then $mergeable else null end),
        merged_at:(if $state == "merged" then "2026-09-16T07:00:00Z" else null end)}' ;;
   'api repos/o/r/issues/9')
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
@@ -1098,8 +1104,110 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+test_attestation_stale_wake() {
+  local home count wake_count pending
+  home=$(new_home attestation-stale)
+  forge_home "$home"
+  # Body attestation still bound to HEAD_A while the live head advances to HEAD_B.
+  printf 'Updates from no-mistakes\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"},{"step":"document","status":"completed"}]} -->\n' \
+    "$HEAD_A" > "$home/forge/body"
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery for attestation-stale'
+  registered_checks "$home" >/dev/null
+  jq -e 'any(.records[0].pending[]; .type == "attestation-stale")' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'stale no-mistakes attestation must become a pending outward signal'
+  [ -s "$home/state/.wake-queue" ] || fail 'stale attestation must enqueue an ordinary durable wake'
+  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ "$wake_count" = 1 ] || fail "stale attestation must enqueue exactly one ordinary durable wake, got $wake_count"
+  count=$wake_count
+  registered_checks "$home" >/dev/null
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] \
+    || fail 're-poll duplicated an already enqueued attestation-stale event'
+  pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$pending" | jq -e 'length == 1 and .[0].type == "attestation-stale"' >/dev/null \
+    || fail "supervisor cannot retrieve attestation-stale signal: $pending"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    || fail 'could not collect contribution input for the stale attestation'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
+    | jq -e '.rows[0].reason == "incoming signal needs triage"' >/dev/null \
+    || fail 'a pending stale attestation must not read as a maintainer comment in the snapshot'
+  pass 'stale no-mistakes attestation wakes once like a maintainer comment'
+}
+
+test_merge_conflicting_wake() {
+  local home count wake_count pending
+  home=$(new_home merge-conflicting)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery for merge-conflicting'
+  registered_checks "$home" >/dev/null
+  # First poll observed mergeable; flip the forge to conflicting.
+  printf 'false\n' > "$home/forge/mergeable"
+  registered_checks "$home" >/dev/null
+  jq -e 'any(.records[0].pending[]; .type == "merge-conflicting")' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'mergeable flipping to CONFLICTING must become a pending outward signal'
+  [ -s "$home/state/.wake-queue" ] || fail 'merge-conflicting must enqueue an ordinary durable wake'
+  wake_count=$(awk 'END { print NR }' "$home/state/.wake-queue")
+  [ "$wake_count" = 1 ] || fail "merge-conflicting must enqueue exactly one ordinary durable wake, got $wake_count"
+  count=$wake_count
+  registered_checks "$home" >/dev/null
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] \
+    || fail 're-poll duplicated an already enqueued merge-conflicting event'
+  pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending)
+  printf '%s' "$pending" | jq -e 'length == 1 and .[0].type == "merge-conflicting"' >/dev/null \
+    || fail "supervisor cannot retrieve merge-conflicting signal: $pending"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$(printf '%s' "$pending" | jq -r '.[0].token')" >/dev/null \
+    || fail 'could not ack merge-conflicting'
+  # GitHub reports mergeable null while it recomputes; that must not reset the conflicting state.
+  printf 'null\n' > "$home/forge/mergeable"
+  registered_checks "$home" >/dev/null
+  printf 'false\n' > "$home/forge/mergeable"
+  registered_checks "$home" >/dev/null
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$count" ] \
+    || fail 'conflicting -> unknown -> conflicting at the same head woke again'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail 'conflicting -> unknown -> conflicting re-pended an acked merge-conflicting event'
+  # A definite clear followed by a new conflict at the same head is a genuine re-flip and must wake again.
+  printf 'true\n' > "$home/forge/mergeable"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll after the conflict cleared failed'
+  printf 'false\n' > "$home/forge/mergeable"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T10:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'poll after the conflict returned failed'
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = "$((count + 1))" ] \
+    || fail 'a genuine mergeable -> conflicting re-flip at the same head did not wake'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 1 and .[0].type == "merge-conflicting"' >/dev/null \
+    || fail 'a genuine re-flip must pend a fresh merge-conflicting event'
+  pass 'mergeable CONFLICTING flip wakes once like a maintainer comment'
+}
+
+test_settled_pr_raises_no_staleness_event() {
+  local mode home later=2026-09-16T09:00:00Z
+  for mode in merged closed; do
+    home=$(new_home "settled-$mode")
+    forge_home "$home"
+    with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+      || fail "could not register delivery for a $mode PR"
+    registered_checks "$home" >/dev/null
+    printf 'Updates from no-mistakes\n<!-- no-mistakes-pipeline-attestation:v1 {"head_sha":"%s","steps":[]} -->\n' \
+      "$HEAD_B" > "$home/forge/body"
+    printf 'false\n' > "$home/forge/mergeable"
+    printf '%s\n' "$mode" > "$home/forge/state"
+    with_home "$home" env FM_CONTRIBUTIONS_NOW="$later" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+      || fail "poll of a $mode PR failed"
+    jq -e '.records[0] | .observation.state == "'"$mode"'" and (.pending | length == 0)' \
+      "$home/data/delivery/contributions.json" >/dev/null \
+      || fail "a $mode PR with a stale attestation and conflicting mergeable raised a pending event"
+    [ ! -s "$home/state/.wake-queue" ] || fail "a $mode PR woke the supervisor"
+  done
+  pass 'merged and closed PRs raise neither attestation-stale nor merge-conflicting'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_attestation_stale_wake test_merge_conflicting_wake test_settled_pr_raises_no_staleness_event; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
