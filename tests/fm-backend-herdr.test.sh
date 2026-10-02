@@ -226,6 +226,12 @@ case "$cmd $sub" in
       "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
     ;;
   "tab list")
+    # Optional .label_sequence[tab_id]: each list call relabels that tab to the
+    # next queued label, modeling Herdr's delayed cwd-derived relabel.
+    jq_state '.label_sequence //= {}
+      | reduce (.label_sequence | to_entries[] | select(.value | length > 0)) as $e (.;
+          .tabs |= map(if .tab_id == $e.key then .label = $e.value[0] else . end)
+          | .label_sequence[$e.key] |= .[1:])' | save
     jq_state --arg w "$ws" '{result:{tabs:[.tabs[]|select(.workspace_id==$w)]}}'
     ;;
   "tab create")
@@ -5436,6 +5442,72 @@ EOF
   pass "fm_backend_herdr_create_task: the label-collision startup-workspace scenario (2026-07-02 incident) leaves the captain's live tab untouched"
 }
 
+test_prune_seeded_tab_label_reverification() {
+  local dir log state fb label agent expected remaining i=0
+  for label in '1' '1 · firstmate' '1 · my shell' 'my shell' '1-other'; do
+    for agent in idle working; do
+      i=$((i + 1))
+      dir="$TMP_ROOT/prune-label-$i"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+      fb=$(make_herdr_statefake "$dir")
+      jq -n --arg label "$label" --arg agent "$agent" '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:$label,workspace_id:"w1",pane_id:"w1:p1"},{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{"w1:p1":$agent}}' > "$state"
+      PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest FM_BACKEND_HERDR_SEEDED_LABEL_POLLS=2 \
+        bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1 direct /work/firstmate' "$ROOT" \
+        || fail "seeded prune failed for label '$label', agent '$agent'"
+      expected=1
+      if [ "$agent" = idle ]; then
+        case "$label" in '1'|'1 · firstmate') expected=0 ;; esac
+      fi
+      remaining=$(jq '[.tabs[] | select(.tab_id == "w1:t1")] | length' "$state")
+      [ "$remaining" = "$expected" ] || fail "seeded label '$label', agent '$agent': expected $expected seeded tabs, got $remaining"
+      jq -e '.tabs[] | select(.tab_id == "w1:t2")' "$state" >/dev/null \
+        || fail "prune closed a tab other than the captured seeded id"
+      if [ "$expected" = 1 ]; then
+        assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "prune closed a renamed or working seeded tab"
+      fi
+    done
+  done
+  pass "seeded prune accepts default and exact creation-cwd-derived labels, preserves renamed and working tabs, and closes only the captured id"
+}
+
+test_prune_seeded_tab_waits_for_label_to_settle() {
+  # Live Herdr 0.9.1 briefly labels the seeded tab from a login-shell helper's
+  # cwd ("1 · path_helper") before settling on the creation cwd's basename.
+  local dir log state fb agent expected remaining
+  for agent in idle working; do
+    dir="$TMP_ROOT/prune-settle-$agent"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+    fb=$(make_herdr_statefake "$dir")
+    jq -n --arg agent "$agent" '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1 · path_helper",workspace_id:"w1",pane_id:"w1:p1"},{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{"w1:p1":$agent},label_sequence:{"w1:t1":["1 · path_helper","1 · path_helper","1 · firstmate"]}}' > "$state"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1 direct /work/firstmate' "$ROOT" \
+      || fail "seeded prune failed after transient label, agent '$agent'"
+    expected=1; [ "$agent" = idle ] && expected=0
+    remaining=$(jq '[.tabs[] | select(.tab_id == "w1:t1")] | length' "$state")
+    [ "$remaining" = "$expected" ] || fail "transient label then '1 · firstmate', agent '$agent': expected $expected seeded tabs, got $remaining"
+    jq -e '.tabs[] | select(.tab_id == "w1:t2")' "$state" >/dev/null \
+      || fail "prune closed a tab other than the captured seeded id"
+  done
+  pass "seeded prune waits out a transient '1 · path_helper' label, prunes once it settles on the creation cwd, and still refuses a working agent"
+}
+
+test_prune_seeded_tab_unsettled_label_returns_within_bound() {
+  local dir log state fb start elapsed lists
+  dir="$TMP_ROOT/prune-unsettled"; mkdir -p "$dir"; log="$dir/log"; state="$dir/state.json"; : > "$log"
+  fb=$(make_herdr_statefake "$dir")
+  jq -n '{next:3,workspaces:[{workspace_id:"w1",label:"firstmate"}],tabs:[{tab_id:"w1:t1",label:"1 · my shell",workspace_id:"w1",pane_id:"w1:p1"},{tab_id:"w1:t2",label:"1",workspace_id:"w1",pane_id:"w1:p2"}],agent_status:{"w1:p1":"idle"}}' > "$state"
+  start=$SECONDS
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w1 w1:t1 direct /work/firstmate' "$ROOT" \
+    || fail "seeded prune should return 0 when the label never settles"
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -le 6 ] || fail "unsettled-label prune should give up after about 3s, took ${elapsed}s"
+  lists=$(grep -c $'\x1f''tab'$'\x1f''list' "$log")
+  [ "$lists" = 12 ] || fail "unsettled-label prune should sample the tab list 12 times by default, sampled $lists"
+  jq -e '.tabs[] | select(.tab_id == "w1:t1" and .label == "1 · my shell")' "$state" >/dev/null \
+    || fail "a seeded tab renamed to '1 · my shell' must be left untouched"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''close' "prune closed a tab whose label never settled"
+  pass "seeded prune leaves a never-settling '1 · my shell' tab untouched and returns within its ~3s bound"
+}
+
 test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   # Defense in depth (not the primary safety mechanism): even for a
   # freshly-created workspace with a genuine non-empty seeded default tab id,
@@ -5832,6 +5904,9 @@ test_workspace_ensure_prunes_default_tab
 test_repeated_cycles_reuse_one_workspace_no_orphans
 test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
+test_prune_seeded_tab_label_reverification
+test_prune_seeded_tab_waits_for_label_to_settle
+test_prune_seeded_tab_unsettled_label_returns_within_bound
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
 test_create_task_refuses_duplicate_label_when_agent_live
