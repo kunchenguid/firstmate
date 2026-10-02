@@ -38,6 +38,7 @@ done
 cat > "$TDIR/stub.py" <<'PY'
 import http.server, json, sys
 ANSWERS = [
+    ("remote-route", "remote-ops", 0.0),
     ("seller", "seller-outreach", 0.1),
     ("morning", "captain_direct", 0.0),
     ("drone", "new_domain", 0.9),
@@ -50,6 +51,7 @@ RAW = {
     "not-an-object": [1],
     "null-confidence": {"answers": {"route": {"choice": "portal-ops", "confidence": None}}},
     "null-noul": {"answers": {"route": {"choice": "portal-ops"}, "needs_new_secondmate": {"noul": None}}},
+    "no-noul": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.9}}},
     "no-choice": {"answers": {"route": {"confidence": 0.9}}},
     "weak-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.34}, "needs_new_secondmate": {"noul": 0.2}}},
     "floor-signal": {"answers": {"route": {"choice": "seller-outreach", "confidence": 0.7}, "needs_new_secondmate": {"noul": 0.2}}},
@@ -227,10 +229,27 @@ assert_contains "$out" "action=unavailable" "unreadable never-send list fails cl
 [ "$(requests)" -eq "$before" ] || fail "nothing may be sent when the never-send list is unreadable"
 
 # 9. Malformed 200 responses are unavailable, not a crash.
-for word in null-answers not-an-object null-confidence null-noul no-choice; do
+for word in null-answers not-an-object null-confidence null-noul no-noul no-choice; do
   out=$("$ROUTER" --task "$word reply") || fail "$word response must not crash the router"
   assert_contains "$out" "action=unavailable" "$word response emits unavailable"
 done
+# A confident route with no needs_new_secondmate answer is never dispatched.
+rm -f "$TDIR/argv"
+out=$("$DISPATCH" --task "no-noul seller leads" --execute)
+assert_contains "$out" "needs_new_secondmate" "a missing noul answer is named"
+[ ! -e "$TDIR/argv" ] || fail "a route without a needs_new_secondmate answer must never be dispatched"
+json=$("$DISPATCH" --task "no-noul seller leads" --json --execute)
+[ "$(printf '%s' "$json" | field action)" = unavailable ] || fail "missing noul json must be unavailable: $json"
+[ ! -e "$TDIR/argv" ] || fail "a route without a needs_new_secondmate answer must never be dispatched (json)"
+
+# jq is not a dependency: a jq that cannot run changes nothing.
+NOJQ="$TDIR/nojq"; mkdir -p "$NOJQ"
+printf '#!/usr/bin/env bash\nexit 127\n' > "$NOJQ/jq"; chmod +x "$NOJQ/jq"
+out=$(env -u TYPESAFE_API_KEY PATH="$NOJQ:$PATH" "$DISPATCH" --task "seller leads") || fail "dispatcher must not need jq"
+assert_contains "$out" "Router unavailable (TYPESAFE_API_KEY unavailable)" "dispatcher falls back without jq"
+rm -f "$TDIR/argv"
+json=$(PATH="$NOJQ:$PATH" "$DISPATCH" --task "seller leads" --json --execute 2>/dev/null) || fail "dispatch must not need jq"
+[ "$(printf '%s' "$json" | field dispatched)" = True ] || fail "dispatch without jq must still send: $json"
 out=$("$DISPATCH" --task "null-answers reply") || fail "dispatcher must survive a malformed response"
 assert_contains "$out" "Router unavailable" "dispatcher falls back on a malformed response"
 
@@ -309,6 +328,14 @@ rm -f "$TDIR/argv"
 code=0; err=$("$DISPATCH" --brief "$HUGE" --execute 2>&1 >/dev/null) || code=$?
 [ "$code" -eq 2 ] || fail "an oversized --execute message must be refused with exit 2, got $code"
 assert_contains "$err" "single-argument limit" "an oversized --execute message is refused loudly"
+# The cap is on the base64 form: one byte past it is refused unsent.
+CAP=90000 # the most raw bytes whose base64 fits MAX_ENCODED_BYTES=120000
+OVER="$TDIR/over.md"
+{ printf 'seller leads\n'; head -c $((CAP + 1 - 13)) /dev/zero | tr '\0' 'y'; } > "$OVER"
+rm -f "$TDIR/argv"
+code=0; "$DISPATCH" --brief "$OVER" --execute >/dev/null 2>&1 || code=$?
+[ "$code" -eq 2 ] || fail "a message one byte over the encoded cap must exit 2, got $code"
+[ ! -e "$TDIR/argv" ] || fail "a message over the encoded cap must not reach fm-send.sh"
 [ ! -e "$TDIR/argv" ] || fail "an oversized message must not reach fm-send.sh"
 code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code=$?
 [ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
@@ -322,19 +349,11 @@ sed -n 2p "$REG" | tr -d '\n' >> "$REG_NONL"
 crit=$(last_request | python3 -c 'import json,sys; print(",".join(sorted(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"])))')
 [ "$crit" = "captain_direct,new_domain,portal-ops,seller-outreach" ] || fail "a final registry line without a newline must be parsed: $crit"
 
-# A multi-line brief reaches the real inbox byte-identical, while Jev sees one line.
+# A brief reaches the real inbox byte-identical - leading and trailing
+# whitespace, CRLF, blank-line runs, trailing newlines - while Jev sees one line.
 BRIEF="$TDIR/brief.md"
-cat > "$BRIEF" <<'EOF'
-seller leads for the spring campaign
-
-- call the Dallas clinics
-- email the Austin list
-
-```sh
-bin/fm-send.sh seller-outreach "done"
-```
-FINAL-REQUIREMENT keep
-EOF
+# shellcheck disable=SC2016
+printf '  seller leads for the spring campaign\r\n\n\n\n- call the Dallas clinics  \r\n\t- email the Austin list\n\n```sh\nbin/fm-send.sh seller-outreach "done"\n```\nFINAL-REQUIREMENT keep\n\n\n' > "$BRIEF"
 REAL="$TDIR/real-home"
 mkdir -p "$REAL/bin" "$REAL/data" "$REAL/state" "$TDIR/fakebin"
 cp -R "$ROOT/bin/." "$REAL/bin/"
@@ -353,11 +372,40 @@ SH
 chmod +x "$TDIR/fakebin/tmux"
 PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$REAL" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
   "$REAL/bin/fm-route-dispatch.sh" --brief "$BRIEF" --execute >/dev/null 2>&1 || fail "real multi-line dispatch failed"
-body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/001.msg")
-[ "${body#*"$(head -n1 "$BRIEF")"}" != "$body" ] || fail "inbox record lost the brief: $body"
-[ "$(head -n1 "$BRIEF")${body#*"$(head -n1 "$BRIEF")"}" = "$(cat "$BRIEF")" ] || fail "inbox body must hold the brief byte-identical: $body"
+bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/001.msg" > "$TDIR/body"
+# The body is the firstmate marker and correlation followed by the brief bytes.
+tail -c "$(wc -c < "$BRIEF")" "$TDIR/body" > "$TDIR/body-tail"
+[ "$(cksum < "$TDIR/body-tail")" = "$(cksum < "$BRIEF")" ] || fail "inbox body must end with the brief byte-identical: $(od -c "$TDIR/body" | head)"
 task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
-[ "$task" = "$(tr -s '\n ' '  ' < "$BRIEF" | sed 's/ $//')" ] || fail "the Jev request must collapse the brief to one line: $task"
+[ "$task" = "$(python3 -c 'import sys; print(" ".join(open(sys.argv[1], "rb").read().decode().split()))' "$BRIEF")" ] || fail "the Jev request must collapse the brief to one line: $task"
+
+# A remote secondmate receives a brief at the encoded cap through the real
+# fm-on.sh, byte-identical, and every argument fits Linux's per-argument limit.
+fm_write_meta "$REAL/state/remote-ops.meta" \
+  "window=fm-remote:w1:p1" "endpoint_task_id=remote-ops" "harness=claude" "kind=secondmate" \
+  "mode=secondmate" "yolo=off" "remote_host=remote-box" "remote_root=/remote/root" \
+  "remote_backend=herdr" "remote_herdr_session=fm-remote" "remote_target=fm-remote:w1:p1"
+printf -- '- remote-ops - Remote ops work. (host: remote-box; root: /remote/root; home: /remote/home; scope: remote ops work; projects: d; added 2026-08-02)\n' >> "$REAL/data/secondmates.md"
+cat > "$TDIR/fakebin/fake-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+while [ "$1" != -- ]; do shift; done
+shift 2
+# sshd hands the joined command to the remote shell as one argument.
+env true "$*" || exit 255
+printf '%s' "$5" | base64 -d > "$FM_SSH_ARGV"
+SH
+chmod +x "$TDIR/fakebin/fake-ssh"
+CAPBRIEF="$TDIR/cap.md"
+{ printf 'remote-route\r\n\n'; head -c $((CAP - 16)) /dev/zero | tr '\0' 'z'; printf '\n'; } > "$CAPBRIEF"
+[ "$(wc -c < "$CAPBRIEF" | tr -d ' ')" -eq "$CAP" ] || fail "cap brief size wrong"
+rm -f "$TDIR/ssh-argv"
+# fm-on.sh only forwards commands tracked by a git checkout, so root at this repo.
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  FM_SSH_BIN="$TDIR/fakebin/fake-ssh" FM_SSH_ARGV="$TDIR/ssh-argv" \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$CAPBRIEF" --execute >/dev/null 2>&1 || fail "a brief at the encoded cap must reach a remote secondmate"
+python3 -c 'import sys; argv = open(sys.argv[1], "rb").read().split(b"\0"); sys.exit(0 if argv[2] == b"remote-ops" and argv[3].endswith(open(sys.argv[2], "rb").read()) else 1)' \
+  "$TDIR/ssh-argv" "$CAPBRIEF" || fail "the remote message must end with the brief byte-identical"
 
 # The text-mode dispatch command keeps a multi-line message on one runnable line.
 cmd=$("$ROUTER" --brief "$BRIEF" | sed -n 's/^dispatch_cmd=//p')

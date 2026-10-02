@@ -226,12 +226,15 @@ def main() -> None:
     elif args.brief is not None:
         if not args.brief.is_file():
             parser.error(f"brief file not found: {args.brief}")
-        task_text = args.brief.read_text(encoding="utf-8", errors="replace")
+        # Bytes, not read_text: text mode would translate CRLF, and the
+        # dispatched message must be the brief byte for byte.
+        task_text = args.brief.read_bytes().decode("utf-8", errors="replace")
     elif not sys.stdin.isatty():
-        task_text = sys.stdin.read()
+        task_text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
 
-    task_text = task_text.strip()
-    if not task_text:
+    # Only Jev's copy is whitespace-collapsed (by withhold); the dispatched
+    # message stays exactly as given.
+    if not task_text.strip():
         emit_result("unavailable", "captain_direct", reason="empty task input", as_json=args.json)
 
     key = get_api_key(fm_root)
@@ -322,8 +325,11 @@ def main() -> None:
         confidence = float(route_ans.get("confidence", 0.0))
         probs = route_ans.get("probabilities", {})
 
-        noul_ans = answers.get("needs_new_secondmate", {})
-        noul_val = float(noul_ans.get("noul", 0.0))
+        # A missing noul is no answer, not a "no": never default it into a dispatch.
+        noul_raw = answers.get("needs_new_secondmate", {}).get("noul")
+        if noul_raw is None:
+            raise ValueError("no needs_new_secondmate answer")
+        noul_val = float(noul_raw)
     except (AttributeError, TypeError, ValueError) as exc:
         emit_result(
             "unavailable",

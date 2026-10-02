@@ -6,8 +6,8 @@
 #   fm-route-dispatch.sh --brief <file> [--execute] [--json]
 #
 # If --execute is specified, it automatically dispatches matched tasks to the
-# owning second mate using bin/fm-send.sh. A dispatch message over
-# MAX_MESSAGE_BYTES is refused unsent (exit 2). With --json --execute, the
+# owning second mate using bin/fm-send.sh. A dispatch message whose base64
+# form exceeds MAX_ENCODED_BYTES is refused unsent (exit 2). With --json --execute, the
 # router JSON is always printed, extended with `dispatched` and
 # `send_exit_code`, and the script exits with the send status.
 set -euo pipefail
@@ -16,7 +16,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 export FM_HOME="${FM_HOME:-$FM_ROOT}"
 
-MAX_MESSAGE_BYTES=131071
+# A remote send base64-encodes the message into one ssh argument, and Linux
+# caps a single argument at 131072 bytes (MAX_ARG_STRLEN). The rest is headroom
+# for the marker, correlation, ids, and the entrypoint's other encoded words.
+MAX_ENCODED_BYTES=120000
 TASK=""
 BRIEF=""
 EXECUTE=0
@@ -46,27 +49,41 @@ done
 
 if [ -n "$BRIEF" ]; then
   [ -f "$BRIEF" ] || { echo "error: brief file not found: $BRIEF" >&2; exit 2; }
-  TASK_INPUT=$(cat "$BRIEF")
+  ROUTER_ARGS=(--brief "$BRIEF")
 elif [ -n "$TASK" ]; then
-  TASK_INPUT="$TASK"
+  ROUTER_ARGS=("--task=$TASK")
 else
   echo "error: either --task or --brief is required" >&2
   exit 2
 fi
 
 # Run Jev domain classifier
-ROUTER_JSON=$(printf '%s' "$TASK_INPUT" | python3 "$SCRIPT_DIR/fm-route-domain.py" --json)
+ROUTER_JSON=$(python3 "$SCRIPT_DIR/fm-route-domain.py" --json "${ROUTER_ARGS[@]}")
 
-ACTION=$(echo "$ROUTER_JSON" | jq -r '.action')
-ROUTE=$(echo "$ROUTER_JSON" | jq -r '.route')
-CONF=$(echo "$ROUTER_JSON" | jq -r '.confidence // 0')
-NOUL=$(echo "$ROUTER_JSON" | jq -r '.needs_new_noul // 0')
-MESSAGE=$(echo "$ROUTER_JSON" | jq -r '.dispatch_message // empty')
+# Prints one router field verbatim, then "x" so $(...) cannot strip the
+# value's own trailing newlines. python3 is already the router's dependency.
+router_field() {
+  printf '%s' "$ROUTER_JSON" | python3 -c '
+import json, sys
+v = json.load(sys.stdin).get(sys.argv[1])
+sys.stdout.write(sys.argv[2] if v is None else str(v))
+sys.stdout.write("x")' "$1" "${2-}"
+}
+field() { local v; v=$(router_field "$@"); printf '%s' "${v%x}"; }
+
+ACTION=$(field action)
+ROUTE=$(field route)
+CONF=$(field confidence 0)
+NOUL=$(field needs_new_noul 0)
+MESSAGE=$(router_field dispatch_message)
+MESSAGE=${MESSAGE%x}
 MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
+# shellcheck disable=SC2017 # ceil(bytes / 3) * 4 is the base64 length
+ENCODED_BYTES=$(( (MESSAGE_BYTES + 2) / 3 * 4 ))
 
 message_fits() {
-  [ "$MESSAGE_BYTES" -le "$MAX_MESSAGE_BYTES" ] && return 0
-  echo "error: dispatch message is $MESSAGE_BYTES bytes, over the $MAX_MESSAGE_BYTES-byte single-argument limit of fm-send.sh; not sent" >&2
+  [ "$ENCODED_BYTES" -le "$MAX_ENCODED_BYTES" ] && return 0
+  echo "error: dispatch message is $MESSAGE_BYTES bytes ($ENCODED_BYTES base64), over the $MAX_ENCODED_BYTES-byte encoded single-argument limit of the send transport; not sent" >&2
   return 1
 }
 
@@ -78,7 +95,12 @@ if [ "$AS_JSON" -eq 1 ]; then
     else
       SEND_RC=2
     fi
-    printf '%s\n' "$ROUTER_JSON" | jq --argjson rc "$SEND_RC" '. + {dispatched: ($rc == 0), send_exit_code: $rc}'
+    printf '%s' "$ROUTER_JSON" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+rc = int(sys.argv[1])
+d.update(dispatched=rc == 0, send_exit_code=rc)
+print(json.dumps(d, indent=2))' "$SEND_RC"
     exit "$SEND_RC"
   fi
   printf '%s\n' "$ROUTER_JSON"
@@ -116,7 +138,7 @@ case "$ACTION" in
     fi
     ;;
   unavailable)
-    REASON=$(echo "$ROUTER_JSON" | jq -r '.reason // "unknown"')
+    REASON=$(field reason unknown)
     printf 'Status: Router unavailable (%s). Falling back to Firstmate direct handling.\n' "$REASON"
     ;;
   *)
