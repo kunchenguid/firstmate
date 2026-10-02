@@ -156,9 +156,9 @@
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   while it still holds the allocation lock recovers only a proven dead
+#   allocator's unchanged, landed lease; unresolved leases keep their claims.
+#   Published task records remain under teardown's ownership.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -245,8 +245,9 @@
 #   Allocation uses a non-interactive Treehouse lease under fm_run_timed, with
 #   FM_SPAWN_ALLOCATOR_TIMEOUT (default 45s) plus its 1s kill grace strictly
 #   below FM_SPAWN_ISOLATION_TIMEOUT (default 60s). Both must be positive
-#   unpadded integers. A timed-out allocation retains any ambiguous slot; only
-#   ownership-aware teardown may return it, never the timeout path.
+#   unpadded integers. Pre-metadata leases are recovered under the project lock
+#   only when their allocator is proven dead and their unchanged slot is landed;
+#   ambiguous leases remain held for ownership-aware cleanup.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -1209,7 +1210,6 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
-SPAWN_SLOT_CLAIMED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1246,6 +1246,59 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Recover pre-metadata allocator leases while the caller holds the project's
+# allocation/return lock. The holder names the home, task, and exec'd allocator
+# PID; a lease ID fences reassignment inside Treehouse's own release transaction.
+# Missing interfaces or evidence preserve the lease. No age is evidence of death.
+spawn_recover_allocator_leases() {  # <project> <state> <home>
+  local project=$1 state=$2 home=$3 home_key listing rows path lease holder id pid pids dirty landed
+  home_key=$(printf '%s' "$home" | git hash-object --stdin) || return 1
+  listing=$(cd "$project" && treehouse status --json 2>/dev/null) || return 0
+  rows=$(printf '%s' "$listing" | jq -er --arg prefix "fm-allocator:$home_key:" '
+    if type != "array" then error("invalid status") else .[] end
+    | select(.status == "leased" and .processes == [] and .recovery_reason == null)
+    | select((.lease_holder | type) == "string" and (.lease_id | type) == "string")
+    | select(.lease_holder | startswith($prefix))
+    | select(.lease_id != "")
+    | [.path, .lease_id, .lease_holder]
+    | select(all(.[]; type == "string" and length > 0 and (test("[\\x00-\\x1f]") | not)))
+    | @tsv' 2>/dev/null) || return 0
+  # A successful process-table read plus absent PID proves death; kill -0 alone
+  # can fail for permissions and must never authorize returning a lease.
+  pids=$(ps -e -o pid= 2>/dev/null) || return 0
+  [ -n "$pids" ] || return 0
+  while IFS=$'\t' read -r path lease holder; do
+    id=${holder#"fm-allocator:$home_key:"}
+    pid=${id##*:}
+    id=${id%:*}
+    fm_task_id_creation_valid "$id" || continue
+    case "$pid" in ''|0*|*[!0-9]*) continue ;; esac
+    if printf '%s\n' "$pids" | awk -v pid="$pid" '$1 == pid { found=1 } END { exit !found }'; then
+      continue
+    fi
+    kill -0 "$pid" 2>/dev/null && continue
+    [ ! -e "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ] || continue
+    fm_treehouse_pool_slot "$project" "$path" || continue
+    fm_treehouse_slot_owner_state "$path" "$id"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      absent) ;;
+      mine) [ "$FM_TREEHOUSE_SLOT_OWNER_HOME" = "$home" ] || continue ;;
+      *) continue ;;
+    esac
+    dirty=$(git -C "$path" status --porcelain --ignored 2>/dev/null) || continue
+    [ -z "$dirty" ] || continue
+    # Only an ancestor of the remote default is proven landed here. Squashed,
+    # local-only, or otherwise ambiguous work stays for ordinary teardown.
+    landed=$(git -C "$project" rev-parse --verify refs/remotes/origin/HEAD 2>/dev/null) || continue
+    git -C "$path" merge-base --is-ancestor HEAD "$landed" 2>/dev/null || continue
+    if (cd "$project" && treehouse return --if-lease-id "$lease" --if-lease-holder "$holder" "$path" < /dev/null); then
+      fm_treehouse_slot_owner_release "$path" "$id"
+    else
+      echo "warning: could not recover allocator lease for task $id; preserving its slot claim" >&2
+    fi
+  done <<< "$rows"
 }
 
 spawn_abort_cleanup() {
@@ -1345,22 +1398,8 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
-  # read-then-remove, so it runs only while the project lock that wrote the
-  # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
-    fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    SPAWN_SLOT_CLAIMED=0
-    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
-    else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
-    fi
+  if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+    spawn_recover_allocator_leases "$PROJ_ABS" "$STATE" "$FM_HOME" || true
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -3046,6 +3085,7 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  spawn_recover_allocator_leases "$PROJ_ABS" "$STATE" "$FM_HOME" || true
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
@@ -4272,7 +4312,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # durable lease keeps a completed allocation protected after the bounded
   # process exits; an interrupted allocation is never returned speculatively.
   # stdin is detached so credential prompts cannot consume later pane input.
-  allocator_command=". $(shell_quote "$SCRIPT_DIR/fm-timeout-lib.sh"); fm_run_timed $FM_SPAWN_ALLOCATOR_TIMEOUT treehouse get --lease --lease-holder $(shell_quote "$ID") < /dev/null"
+  allocator_home=$(printf '%s' "$FM_HOME" | git hash-object --stdin) || exit 1
+  # The bounded child's PID is the lease owner, including when no path reaches
+  # stdout. exec keeps that identity on Treehouse rather than a short-lived shell.
+  allocator_exec='exec treehouse get --lease --lease-holder "$1:$$"'
+  allocator_command=". $(shell_quote "$SCRIPT_DIR/fm-timeout-lib.sh"); fm_run_timed $FM_SPAWN_ALLOCATOR_TIMEOUT bash -c $(shell_quote "$allocator_exec") _ $(shell_quote "fm-allocator:$allocator_home:$ID") < /dev/null"
   spawn_send_text_line "$WT_TARGET" "fm_allocated=\$(bash -c $(shell_quote "$allocator_command")) && cd -- \"\$fm_allocated\""
 
   # Wait for the allocation handoff: the pane's cwd moves to the worktree.
@@ -4310,7 +4354,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 "$FM_SPAWN_ISOLATION_TIMEOUT"); do
+  isolation_poll=0
+  while [ "$isolation_poll" -lt "$FM_SPAWN_ISOLATION_TIMEOUT" ]; do
+    isolation_poll=$((isolation_poll + 1))
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
     if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -4348,7 +4394,6 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
       exit 1
     fi
-    SPAWN_SLOT_CLAIMED=1
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then

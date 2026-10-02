@@ -691,8 +691,8 @@ lay_out_as_pool_slot() {
 
 # The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
 # a launched task's claim names it, a slot that cannot be claimed refuses before
-# anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
+# anything is published, and an ambiguous abort preserves the claim needed for
+# ownership-checked lease recovery.
 test_pool_slot_claim_follows_the_spawn_outcome() {
   local rec id out status before
 
@@ -738,9 +738,11 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   assert_contains "$out" "could not fetch origin" \
     "the aborted spawn did not refuse on its unusable origin"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
-  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
-    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
-  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+  # This fixture provides no readable allocator lease identity. An abort must
+  # preserve the durable ownership claim rather than erase recovery evidence.
+  assert_grep "task=$id" "$SLOT_CLAIM" "ambiguous abort erased its slot ownership claim"
+  assert_grep "home=$HOME_DIR" "$SLOT_CLAIM" "ambiguous abort changed the slot's owning home"
+  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and survives an ambiguous abort"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool

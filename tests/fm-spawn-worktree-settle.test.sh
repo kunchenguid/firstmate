@@ -239,6 +239,7 @@ case "${1:-}" in
   send-keys)
     for arg in "$@"; do
       case "$arg" in
+        'cd -- '*) [ "${FM_ALLOC_CASE:-}" != refuse ] || exit 1 ;;
         'treehouse get'|fm_allocated=*)
           . "$FM_ALLOC_TIMEOUT_LIB"
           cd "$FM_ALLOC_PROJECT" || exit 1
@@ -255,12 +256,41 @@ SH
   cat > "$FAKEBIN_DIR/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+case "${1:-}" in
+  status)
+    if [ -f "${FM_ALLOC_LEASE_STATE:-}" ]; then cat "$FM_ALLOC_LEASE_STATE"; else printf '[]\n'; fi
+    exit 0
+    ;;
+  return)
+    # Emulate Treehouse's conditional, locked release, including reassignment
+    # between listing and return. The fixture's JSON is the public status contract.
+    if [ "${FM_ALLOC_REASSIGN:-0}" = 1 ]; then
+      jq '.[0].lease_id = "successor-generation" | .[0].lease_holder = "successor"' \
+        "$FM_ALLOC_LEASE_STATE" > "$FM_ALLOC_LEASE_STATE.next"
+      mv "$FM_ALLOC_LEASE_STATE.next" "$FM_ALLOC_LEASE_STATE"
+    fi
+    [ "$2" = --if-lease-id ] && [ "$4" = --if-lease-holder ] || exit 1
+    jq -e --arg lease "$3" --arg holder "$5" --arg path "$6" \
+      'length == 1 and .[0].lease_id == $lease and .[0].lease_holder == $holder and .[0].path == $path' \
+      "$FM_ALLOC_LEASE_STATE" >/dev/null || exit 1
+    printf '%s\n' "$*" >> "$FM_ALLOC_RETURNS"
+    printf '[]\n' > "$FM_ALLOC_LEASE_STATE"
+    exit 0
+    ;;
+esac
 printf '%s\n' "$$" > "$FM_ALLOC_PID"
-if [ "$FM_ALLOC_CASE" = success ]; then
-  [ "$*" = "get --lease --lease-holder allocator-success" ] || exit 1
-  printf '%s\n' "$FM_ALLOC_WORKTREE"
-  exit 0
+[ "$1" = get ] && [ "$2" = --lease ] && [ "$3" = --lease-holder ] || exit 1
+if [ -n "${FM_ALLOC_LEASE_STATE:-}" ] && [ "${FM_ALLOC_KEEP_STATE:-0}" != 1 ]; then
+  jq -n --arg path "$FM_ALLOC_WORKTREE" --arg holder "$4" \
+    '[{path:$path, status:"leased", lease_id:"fixture-generation", lease_holder:$holder, processes:[]}]' \
+    > "$FM_ALLOC_LEASE_STATE"
 fi
+case "$FM_ALLOC_CASE" in
+  success|refuse)
+    printf '%s\n' "$FM_ALLOC_WORKTREE"
+    exit 0
+    ;;
+esac
 # A fetch descendant ignores TERM, testing escalation independently of the
 # allocator's response to TERM. A real Git HTTP helper stays in this group.
 bash -c 'trap "" TERM; echo $$ > "$1"; while :; do sleep 1; done' _ "$FM_ALLOC_CHILD" &
@@ -338,11 +368,15 @@ test_allocator_success_with_unset_defaults() {
     FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_CASE=success \
     FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh" \
     FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result" \
+    FM_ALLOC_LEASE_STATE="$HOME_DIR/leases.json" FM_ALLOC_RETURNS="$HOME_DIR/returns" \
     FM_ALLOC_PID="$HOME_DIR/allocator.pid" run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "bounded allocator should hand off a successful lease"$'\n'"$out"
   assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "spawn did not adopt the allocated lease"
   [ -f "$HOME_DIR/completed" ] || fail "successful allocation did not return before worker launch"
+  jq -e 'length == 1 and .[0].lease_id == "fixture-generation"' "$HOME_DIR/leases.json" >/dev/null \
+    || fail "successful metadata handoff lost its durable lease"
+  [ ! -e "$HOME_DIR/returns" ] || fail "successful spawn reclaimed the worker's lease"
   pass "unset timeout defaults allocate a durable lease and hand off the worker cwd"
 }
 
@@ -370,8 +404,138 @@ EOF
   pass "invalid bounds and allocator/grace ordering refuse before allocation"
 }
 
+# These drive the executable spawn and its actual pane allocation command. A
+# durable lease written before stdout stalls must become available on abort;
+# the pre-fix spawn leaves it held with no metadata from which teardown can act.
+test_stranded_allocator_lease() {
+  local behavior=$1 rec id out status
+  id="lease-$behavior"
+  rec=$(make_primary_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  WT_DIR="$HOME_DIR/pool/1/project"
+  mkdir -p "$(dirname "$WT_DIR")"
+  git -C "$PROJ_DIR" worktree add --quiet --detach "$WT_DIR"
+  printf '{"worktrees":[]}\n' > "$HOME_DIR/pool/treehouse-state.json"
+  git -C "$PROJ_DIR" update-ref refs/remotes/origin/main HEAD
+  git -C "$PROJ_DIR" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  make_allocator_fakebin
+  out=$(FM_SPAWN_ALLOCATOR_TIMEOUT=2 FM_SPAWN_ISOLATION_TIMEOUT=6 \
+    FM_ALLOC_PROJECT="$PROJ_DIR" FM_ALLOC_WORKTREE="$WT_DIR" \
+    FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_CASE="$behavior" \
+    FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh" \
+    FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result" \
+    FM_ALLOC_PID="$HOME_DIR/allocator.pid" FM_ALLOC_CHILD="$HOME_DIR/child.pid" \
+    FM_ALLOC_LEASE_STATE="$HOME_DIR/leases.json" FM_ALLOC_RETURNS="$HOME_DIR/returns" \
+    run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "stranded lease fixture unexpectedly launched a worker: $out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published metadata"
+  [ -s "$HOME_DIR/returns" ] || fail "pre-metadata $behavior stranded its durable lease: $out"
+  jq -e 'length == 0' "$HOME_DIR/leases.json" >/dev/null || fail "lease was not returned"
+  [ ! -e "$HOME_DIR/pool/1/.fm-slot-owner" ] || fail "returned slot retained its claim"
+  pass "pre-metadata $behavior returns only its dead allocator generation"
+}
+
+# Recovery on a later spawn uses status even without any allocation path or task
+# record. Preserve every uncertain case; never let timestamps authorize return.
+test_allocator_lease_recovery_guards() {
+  local scenario rec id out status owner home_key holder lease
+  for scenario in dead live metadata dirty ignored unlanded other-claim other-home legacy recovered busy reassigned; do
+    id="recover-$scenario"
+    rec=$(make_primary_case "$id" "$id" 0)
+    read_settle_record "$rec"
+    WT_DIR="$HOME_DIR/pool/1/project"
+    mkdir -p "$(dirname "$WT_DIR")"
+    git -C "$PROJ_DIR" worktree add --quiet --detach "$WT_DIR"
+    printf '{"worktrees":[]}\n' > "$HOME_DIR/pool/treehouse-state.json"
+    git -C "$PROJ_DIR" update-ref refs/remotes/origin/main HEAD
+    git -C "$PROJ_DIR" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+    make_allocator_fakebin
+    # A real process that has exited and been reaped, rather than an invented PID.
+    owner=$(bash -c 'printf "%s\n" "$$"')
+    home_key=$(printf '%s' "$HOME_DIR" | git hash-object --stdin)
+    holder="fm-allocator:$home_key:orphan:$owner"
+    lease=fixture-generation
+    case "$scenario" in
+      live) holder="fm-allocator:$home_key:orphan:$$" ;;
+      metadata) printf 'worktree=%s\n' "$WT_DIR" > "$HOME_DIR/state/orphan.meta" ;;
+      dirty) printf 'keep\n' > "$WT_DIR/unlanded" ;;
+      ignored)
+        printf 'keep\n' > "$WT_DIR/ignored"
+        printf 'ignored\n' >> "$HOME_DIR/primary/.git/info/exclude"
+        ;;
+      unlanded)
+        git -C "$WT_DIR" -c user.name=test -c user.email=test@example.com commit --quiet --allow-empty -m unlanded
+        ;;
+      other-claim) printf 'task=successor\nhome=%s\n' "$HOME_DIR" > "$HOME_DIR/pool/1/.fm-slot-owner" ;;
+      other-home) holder="fm-allocator:another-home:orphan:$owner" ;;
+      legacy) lease= ;;
+    esac
+    jq -n --arg path "$WT_DIR" --arg holder "$holder" --arg lease "$lease" --arg scenario "$scenario" '
+      [{path:$path, status:"leased", lease_id:$lease, lease_holder:$holder,
+        leased_at:"2000-01-01T00:00:00Z",
+        processes:(if $scenario == "busy" then [{pid:1,name:"worker"}] else [] end)}]
+      | if $scenario == "recovered" then .[0].recovery_reason = "ambiguous" else . end
+    ' > "$HOME_DIR/leases.json"
+    # This new spawn is refused at its own isolation deadline; only the previous
+    # orphan is eligible for recovery at the shared allocation boundary.
+    out=$(FM_SPAWN_ALLOCATOR_TIMEOUT=2 FM_SPAWN_ISOLATION_TIMEOUT=6 \
+      FM_ALLOC_PROJECT="$PROJ_DIR" FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_CASE=success \
+      FM_ALLOC_WORKTREE="$PROJ_DIR" FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh" \
+      FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result" \
+      FM_ALLOC_PID="$HOME_DIR/allocator.pid" FM_ALLOC_LEASE_STATE="$HOME_DIR/leases.json" \
+      FM_ALLOC_RETURNS="$HOME_DIR/returns" FM_ALLOC_REASSIGN="$([ "$scenario" = reassigned ] && echo 1 || echo 0)" \
+      FM_ALLOC_KEEP_STATE=1 run_settle_spawn "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "recovery fixture unexpectedly spawned: $out"
+    if [ "$scenario" = dead ]; then
+      [ -s "$HOME_DIR/returns" ] || fail "dead owner's orphan lease was not recovered: $out"
+      jq -e 'length == 0' "$HOME_DIR/leases.json" >/dev/null || fail "orphan lease remains held"
+    else
+      [ ! -e "$HOME_DIR/returns" ] || fail "$scenario lease was reclaimed"
+      jq -e 'length == 1' "$HOME_DIR/leases.json" >/dev/null || fail "$scenario lease was changed"
+      if [ "$scenario" = reassigned ]; then
+        jq -e '.[0].lease_id == "successor-generation" and .[0].lease_holder == "successor"' \
+          "$HOME_DIR/leases.json" >/dev/null || fail "reassigned generation was not preserved"
+      fi
+    fi
+  done
+  pass "recovery requires dead ownership, landed work, and an unchanged unambiguous lease"
+}
+
+# Fail the eager sequence producer without constructing its enormous output.
+# The successful executable spawn must reach its settled path immediately even
+# with the largest accepted bound. Other fixed, small seq callers still work.
+test_large_isolation_timeout_polls_immediately() {
+  local rec id out status
+  id=allocator-large-timeout
+  rec=$(make_primary_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  cat > "$FAKEBIN_DIR/seq" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "$#" = 2 ] && [ "$1" = 1 ] && [ "$2" -le 1000 ] || exit 1
+n=1
+while [ "$n" -le "$2" ]; do
+  printf '%s\n' "$n"
+  n=$((n + 1))
+done
+SH
+  chmod +x "$FAKEBIN_DIR/seq"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(FM_SPAWN_ALLOCATOR_TIMEOUT=2 FM_SPAWN_ISOLATION_TIMEOUT=999999999 run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "large timeout must poll immediately without expanding its bound"$'\n'"$out"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "large bound did not hand off the settled path"
+  pass "largest isolation timeout reaches the settled pane without eager expansion"
+}
+
 # Existing successful spawn cases also cover defaults under set -u.
 unset FM_SPAWN_ALLOCATOR_TIMEOUT FM_SPAWN_ISOLATION_TIMEOUT
+test_large_isolation_timeout_polls_immediately
+test_stranded_allocator_lease stall
+test_stranded_allocator_lease refuse
+test_allocator_lease_recovery_guards
 test_allocator_success_with_unset_defaults
 test_timeout_ordering_refuses_before_allocation
 test_allocator_bound stall
