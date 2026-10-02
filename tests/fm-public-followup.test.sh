@@ -323,7 +323,7 @@ test_ambient_tasks_axi_env_never_reaches_a_real_backlog() {
 # non-ASCII characters, and control characters must never survive into the typed
 # event or the thread.
 test_outcome_text_is_bounded_without_corrupting_characters() {
-  local home event text long
+  local home event text source id
   home=$(make_home outcome-text)
   seed_commitment "$home" pf-text req-text discord main work-text
 
@@ -340,19 +340,20 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
 
   # A very long sentence is capped by codepoint, so the JSON stays valid.
   rm -f "$event"
-  long=$(python3 -c 'print("é" * 5000, end="")')
-  "$EMIT" --home "$home" --obligation pf-text --relation rel-code \
-    --source-home main --work-id work-text --generation 1 --outcome pr-merged \
-    --deliverable pr_url=https://github.com/example/repo/pull/4 \
-    --outcome-text "$long" >/dev/null \
-    || fail "emit failed for an over-long outcome text"
-  event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
-  text=$(jq -r '.public_safe_outcome' "$event") \
-    || fail "an over-long outcome must still produce valid JSON"
-  [ "${#text}" -le 600 ] || fail "the outcome text was not bounded, got ${#text} characters"
-  case "$text" in
-    *[!é]*) fail "codepoint bounding split a multi-byte character" ;;
-  esac
+  jq -nr '"é" * 100000' > "$home/long-outcome.txt"
+  id=4
+  for source in "$home/long-outcome.txt" -; do
+    "$EMIT" --home "$home" --obligation pf-text --relation rel-code \
+      --source-home main --work-id work-text --generation 1 --outcome pr-merged \
+      --deliverable "pr_url=https://github.com/example/repo/pull/$id" \
+      --outcome-text-file "$source" < "$home/long-outcome.txt" >/dev/null \
+      || fail "emit failed for outcome text from $source"
+    event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
+    jq -e '.public_safe_outcome == ("é" * 600)' "$event" >/dev/null \
+      || fail "over-long outcome was not capped by codepoint"
+    rm -f "$event"
+    id=$((id + 1))
+  done
   pass "outcome text is collapsed to one line, bounded by codepoint, and never corrupts characters"
 }
 
@@ -3208,8 +3209,9 @@ seed_typed_commitment() {
       received_at:"2026-08-21T01:12:00Z",
       followup_expires_at:"2026-08-28T01:12:00Z",
       reservation_expires_at:"2026-08-28T01:12:00Z"}' > "$home/request.json"
-  jq -n --arg t "$expected" --argjson k "$keys" \
-    '{type:$t, project:"firstmate", required_deliverables:$k, completion_policy:"all-required"}' \
+  jq -n --arg t "$expected" --argjson k "$keys" --arg project "${8-firstmate}" \
+    '{type:$t, project:$project, required_deliverables:$k, completion_policy:"all-required"}
+     | if .project == "" then del(.project) else . end' \
     > "$home/expected.json"
   jq -n --arg h "$work_home" --arg w "$work_id" \
     '{relation_id:"rel-code", work_ref:{home_id:$h, task_id:$w},
@@ -3909,6 +3911,40 @@ test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one() {
   pass "a refusal whose event was retained repeats its wake instead of a new one"
 }
 
+test_rechain_preserves_large_deliverable_key_arrays() {
+  local home project key out
+  local -a args
+  for project in firstmate ''; do
+    home=$(make_home "rechain-large-${project:-no-project}")
+    seed_typed_commitment "$home" pf-large-source req-large pr-merged '["pr_url"]' main work-large "$project"
+    emit_terminal "$home" "$home" pf-large-source main work-large >/dev/null || fail "large rechain source emit failed"
+    FAKE_CURL_LOG="$home/curl.log" run_pf "$home" consume >/dev/null || fail "large rechain consume failed"
+    FAKE_CURL_LOG="$home/curl.log" run_pf "$home" deliver pf-large-source >/dev/null || fail "large rechain deliver failed"
+    jq -n '[range(0;2200) | "key_" + tostring + "_" + ("x" * 54)]' > "$home/keys.json"
+    jq -e '(tojson | length) > 131072' "$home/keys.json" >/dev/null || fail "key array is too small"
+    args=()
+    while IFS= read -r key; do
+      args+=(--deliverable-key "$key")
+    done < <(jq -r '.[]' "$home/keys.json")
+    out="$home/rechain.txt"
+    FAKE_CURL_LOG="$home/curl.log" run_pf "$home" rechain pf-large-next --from pf-large-source \
+      --work-home main --work-id work-next --expected pr-merged "${args[@]}" > "$out" \
+      || fail "large key rechain failed"
+    tasks_in "$home" public-followup list --json | jq -e --slurpfile keys "$home/keys.json" --arg project "$project" '
+      .public_followups[] | select(.id == "pf-large-next") | .public_followup
+      | .expected_final.required_deliverables == $keys[0]
+        and .expected_final.type == "pr-merged" and .expected_final.completion_policy == "all-required"
+        and (if $project == "" then (.expected_final | has("project") | not)
+             else .expected_final.project == $project end)
+        and .request.request_id == "req-large"
+        and .work_relations[0].work_ref == {home_id:"main",task_id:"work-next"}
+    ' >/dev/null || fail "rechain lost keys or changed the retained contract"
+    assert_present "$home/state/public-followup/registry/pf-large-next" "new registration missing"
+    assert_absent "$home/state/public-followup/registry/pf-large-source" "source registration was not retired"
+  done
+  pass "rechain preserves full key arrays with and without a project"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3952,6 +3988,7 @@ test_session_start_surfaces_only_when_owed
 test_typed_records_exclude_raw_public_material
 test_dropped_baton_now_surfaces_open_loop
 test_control_registered_followon_is_guarded
+test_rechain_preserves_large_deliverable_key_arrays
 test_rechain_delivers_second_post_on_same_thread
 test_rechain_resumes_after_partial_add
 test_rechain_claims_delivered_source_once

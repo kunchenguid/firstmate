@@ -3377,6 +3377,26 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_large_return_catchup_reason_preserves_gate_projection() {
+  local home fakebin out
+  home=$(make_home large-catchup)
+  fakebin=$(make_fakebin "$home")
+  jq -nr '"retained lifecycle " + ("x" * 180000) + " tail"' > "$home/reason.txt"
+  {
+    printf 'schema\tfm-afk-return.v1\nevidence\tlifecycle\t'
+    cat "$home/reason.txt"
+  } > "$home/state/.afk-return-catchup"
+  out="$home/bearings.json"
+  run "$home" "$fakebin" --json > "$out" || fail "large catchup reason aborted bearings"
+  jq -e --rawfile reason "$home/reason.txt" '
+    .gates[] | select(.id == "(return-catchup)")
+    | .reason == "away-return catch-up" and .owner == "(main)"
+      and .title == (("catch-up retained: " + ($reason | rtrimstr("\n")))[0:60] + "…")
+  ' "$out" >/dev/null || fail "large catchup reason changed the gate projection"
+  pass "large catchup reason keeps the existing bounded gate projection"
+}
+
+test_large_return_catchup_reason_preserves_gate_projection
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state

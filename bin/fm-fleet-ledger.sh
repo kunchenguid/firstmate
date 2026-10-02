@@ -160,7 +160,7 @@ append_status() { # <task> <status-line>
   text=${line#*:}
   append task.status "$task" \
     "{state: (\$state | n), key: (\$key | n), text: \$text[0:$TEXT_MAX_CHARS]}" \
-    --arg state "$verb" --arg key "$key" --arg text "$text"
+    --arg state "$verb" --arg key "$key" --rawfile text <(printf '%s' "$text")
 }
 
 capture_task() { # <task>; caller holds the lock

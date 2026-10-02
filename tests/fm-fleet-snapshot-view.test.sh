@@ -1152,6 +1152,81 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_large_contribution_input_preserves_every_record() {
+  local home i=0 out
+  home=$(make_home large-contribution-input)
+  printf '## In flight\n' > "$home/data/backlog.md"
+  while [ "$i" -lt 2000 ]; do
+    printf -- '- [ ] contribution-%s - Contribution %s (repo: alpha) (kind: ship)\n' "$i" "$i" >> "$home/data/backlog.md"
+    fm_write_meta "$home/state/contribution-$i.meta" "kind=ship" "mode=no-mistakes" "yolo=off" \
+      "pr=https://github.com/example/repo/pull/$((i + 1))" "pr_head=0123456789abcdef"
+    i=$((i + 1))
+  done
+  out="$home/contribution-input.json"
+  FM_HOME="$home" "$SNAPSHOT" --contribution-input > "$out" || fail "large contribution input failed"
+  jq -e '
+    (.backlog | tojson | length) > 131072 and (.tasks | tojson | length) > 131072
+    and (.backlog.records | map(.id) | sort) == ([range(0;2000) | "contribution-\(.)"] | sort)
+    and (.tasks | map(.id) | sort) == ([range(0;2000) | "contribution-\(.)"] | sort)
+    and all(.backlog.records[]; .title == ("Contribution " + (.id | ltrimstr("contribution-")))
+      and .state == "in_flight" and .kind == "ship" and .repo == "alpha")
+    and all(.tasks[]; .merge_authority == "attended" and .kind == "ship" and .pr.head == "0123456789abcdef"
+      and .pr.url == ("https://github.com/example/repo/pull/" + ((.id | ltrimstr("contribution-") | tonumber) + 1 | tostring)))
+  ' "$out" >/dev/null || fail "contribution input lost records or PR fields"
+  pass "contribution input preserves both arrays above the argument limit"
+}
+
+test_large_decisions_and_status_text_survive_all_snapshot_paths() {
+  local home child fakebin out mode
+  home=$(make_home large-decisions)
+  child="$home/secondmate-home"
+  mkdir -p "$child/state" "$child/data" "$child/config" "$child/projects"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$child/data/backlog.md"
+  fm_write_meta "$home/state/large-mate.meta" "kind=secondmate" "mode=secondmate" \
+    "harness=codex" "home=$child" "project=$child" "worktree=$child" "window=firstmate:fm-large-mate"
+  jq -n '[range(0;2000) | "project-" + tostring + "-" + ("x" * 70)]' > "$home/projects.json"
+  printf 'projects=%s\n' "$(jq -r 'join(",")' "$home/projects.json")" >> "$home/state/large-mate.meta"
+  jq -n '[range(0;160) | {key:("call-" + tostring),verb:"needs-decision",summary:("choice " + tostring + " " + ("x" * 1200))}]' \
+    > "$home/expected-decisions.json"
+  jq -r '.[] | "\(.verb) [key=\(.key)]: \(.summary)"' "$home/expected-decisions.json" > "$home/state/large-mate.status"
+  jq -nr '"working: " + ("z" * 180000) + " quoted \"tail\""' > "$home/latest-event.txt"
+  cat "$home/latest-event.txt" >> "$home/state/large-mate.status"
+  fakebin=$(make_fakebin "$home")
+  for mode in fallback structured; do
+    if [ "$mode" = structured ]; then
+      FM_HOME="$child" "$SNAPSHOT" --secondmate-home-summary > "$child/state/home-summary.json" \
+        || fail "child summary failed"
+    fi
+    out="$home/$mode.json"
+    PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json > "$out" || fail "$mode large snapshot failed"
+    jq -e --slurpfile expected "$home/expected-decisions.json" --rawfile latest "$home/latest-event.txt" --slurpfile projects "$home/projects.json" --arg mode "$mode" '
+      ($latest | rtrimstr("\n")) as $raw
+      | ($expected[0] | sort_by(.key)) as $decisions
+      | (.tasks[] | select(.id == "large-mate")) as $task
+      | (.secondmate_current.records[] | select(.id == "large-mate")) as $mate
+      | ($task.hints.open_decisions | tojson | length) > 131072
+        and ($task.hints.open_decisions | sort_by(.key)) == $decisions
+        and $task.hints.pending_decision == true and $task.hints.blocked_event == false
+        and $task.hints.last_event_text == $raw
+        and $task.current_state.state == "working" and $task.current_state.source == "status-log"
+        and $task.current_state.detail == ($raw | ltrimstr("working: "))
+        and ($task.current_state.raw | endswith($task.current_state.detail))
+        and $task.secondmate_projects == $projects[0]
+        and $task.paths.status_log.last_event.raw == $raw
+        and $task.paths.status_log.last_event.note == ($raw | ltrimstr("working: "))
+        and $mate.parent_event.raw == $raw and $mate.parent_event.note == ($raw | ltrimstr("working: "))
+        and ($mate.parent_event.open_decisions | sort_by(.key)) == $decisions
+        and (if $mode == "structured" then
+          $mate.provenance.selected == "structured-home" and
+          ($mate.parent_event.reconciliation.decisions | map({key,verb,summary}) | sort_by(.key)) == $decisions
+          else $mate.current.state == "unknown" end)
+    ' "$out" >/dev/null || fail "$mode snapshot lost decisions or status text"
+  done
+  pass "full decisions and status text survive task, fallback, and structured projections"
+}
+
+test_large_contribution_input_preserves_every_record
+test_large_decisions_and_status_text_survive_all_snapshot_paths
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

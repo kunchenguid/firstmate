@@ -795,6 +795,56 @@ test_default_ceiling_bites_before_the_registered_loop_limit() {
   pass "cursor bounds nest: firstmate's default ceiling stops the loop before Cursor's loop_limit does"
 }
 
+test_sessionstart_preserves_large_digest() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/session-large")
+  jq -nr '"FIRSTMATE DIGEST\n" + ("é" * 100000) + "\nquoted \"tail\""' > "$dir/digest.txt"
+  cat > "$dir/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+cat "$FM_HOME/digest.txt"
+SH
+  chmod +x "$dir/bin/fm-session-start.sh"
+  out=$(run_session "$dir" sessionStart startup) || fail "large Cursor session failed"
+  printf '%s' "$out" | jq -e --rawfile digest "$dir/digest.txt" \
+    '.additional_context == ($digest | rtrimstr("\n")) and (.additional_context | utf8bytelength) > 131072' >/dev/null \
+    || fail "Cursor lost the large startup digest"
+  pass "Cursor startup preserves large multiline and non-ASCII context"
+}
+
+test_park_preserves_large_wake_and_repair_text() {
+  local dir out mode
+  for mode in wake repair; do
+    dir=$(make_primary_dir "$TMP_ROOT/park-large-$mode")
+    : > "$dir/state/task1.meta"
+    jq -nr '"quoted \"event\" " + ("x" * 180000) + " tail"' > "$dir/large-text.txt"
+    if [ "$mode" = wake ]; then
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'stale: '
+cat "$FM_HOME/large-text.txt"
+SH
+    else
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: FAILED '
+cat "$FM_HOME/large-text.txt"
+exit 1
+SH
+    fi
+    chmod +x "$dir/bin/fm-watch-arm.sh"
+    out=$(run_park "$dir") || fail "large Cursor $mode park failed"
+    printf '%s' "$out" | jq -e --rawfile text "$dir/large-text.txt" \
+      '.followup_message | contains($text | rtrimstr("\n"))' >/dev/null \
+      || fail "Cursor lost the large $mode text"
+    if [ "$mode" = wake ]; then
+      [ "$(kind_of_followup "$out")" = watcher ] || fail "large wake changed operational kind"
+    else
+      [ "$(kind_of_followup "$out")" = turn-end-guard ] || fail "large repair changed operational kind"
+    fi
+  done
+  pass "Cursor wake and repair follow-ups preserve text above the argument limit"
+}
+
 test_turnend_guard_stands_down_on_cursor_payload
 test_turnend_guard_still_blocks_for_claude_payload
 test_autoarm_stands_down_on_cursor_payload
@@ -821,6 +871,8 @@ test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
 test_park_inert_in_child_worktree
 test_park_ignores_malformed_payload
+test_sessionstart_preserves_large_digest
+test_park_preserves_large_wake_and_repair_text
 test_sessionstart_emits_additional_context
 test_sessionstart_silent_in_child_worktree
 test_tracked_registration_covers_the_primary_events

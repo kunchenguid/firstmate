@@ -1520,12 +1520,12 @@ cmd_rechain() {
     project=$(pf_field "$src_payload" '.public_followup.expected_final.project')
   fi
   if [ -n "$project" ]; then
-    jq -n --arg t "$expected" --arg p "$project" --argjson keys "$keys_json" \
-      '{type:$t, project:$p, required_deliverables:$keys, completion_policy:"all-required"}' \
+    printf '%s' "$keys_json" | jq -Rs --arg t "$expected" --arg p "$project" \
+      '{type:$t, project:$p, required_deliverables:(fromjson), completion_policy:"all-required"}' \
       > "$expected_file"
   else
-    jq -n --arg t "$expected" --argjson keys "$keys_json" \
-      '{type:$t, required_deliverables:$keys, completion_policy:"all-required"}' \
+    printf '%s' "$keys_json" | jq -Rs --arg t "$expected" \
+      '{type:$t, required_deliverables:(fromjson), completion_policy:"all-required"}' \
       > "$expected_file"
   fi
   jq -n --arg h "$work_home" --arg w "$work_id" \

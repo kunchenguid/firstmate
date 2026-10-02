@@ -226,7 +226,7 @@ if [ "$GUARD_RC" -eq 4 ]; then
   case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
   CATCHUP_REASON=""
   case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
-  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
+  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --rawfile reason <(printf '%s' "$CATCHUP_REASON") \
     '{pending:true,blockers:$blockers,reason:$reason}')
 fi
 
@@ -380,9 +380,10 @@ MODEL=$(printf '%s\n%s\n' "$SNAP" "$CANDIDATE_PRS" | jq -s \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson return_catchup "$RETURN_CATCHUP" \
+  --rawfile return_catchup <(printf '%s' "$RETURN_CATCHUP") \
   "$FM_LANDED_JQ_DEFS"'
-  def trunc($n): if . == null then null else
+  ($return_catchup | fromjson) as $return_catchup
+  | def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
     tostring | gsub("\\s+"; " ")
