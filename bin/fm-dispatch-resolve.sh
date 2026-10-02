@@ -58,9 +58,9 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   Exit 2 only for a usage or configuration error, which is actionable,
+#   never selected around. docs/configuration.md "Outcomes and exit status"
+#   owns those error conditions.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -219,8 +219,16 @@ fi
 
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
 PMAP='{}'
+PI_HOME_ACCOUNT=false
 while IFS= read -r h; do
   [ -n "$h" ] || continue
+  if [ "$h" = pi ] || [ "$h" = pi-signed ]; then
+    if fm_quota_pi_home_matches "$CONFIG"; then
+      PI_HOME_ACCOUNT=true
+    elif [ "$?" -ne 1 ]; then
+      exit 2
+    fi
+  fi
   p=$(fm_quota_single_provider_for_harness "$h" 2>/dev/null) || p=''
   PMAP=$(jq -c --arg h "$h" --arg p "$p" '. + {($h): (if $p == "" then null else $p end)}' <<<"$PMAP")
 done < <(jq -r '
@@ -352,10 +360,10 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  --argjson pi_home "$PI_HOME_ACCOUNT" --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  def prov($p; $lane): quota_row($q; $p; $lane);
+  def prov($p; $lane): quota_row($q; $p; $lane; $pi_home);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);

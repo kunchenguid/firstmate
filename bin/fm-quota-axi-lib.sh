@@ -25,7 +25,7 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 # Prepend them to a consumer's program:
 #   quota_lane($harness; $model)   the candidate's account key, or "" when none
 #                                  is identified by the contract.
-#   quota_row($snapshot; $provider; $lane)
+#   quota_row($snapshot; $provider; $lane; $pi_home)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
@@ -35,14 +35,32 @@ FM_QUOTA_ROW_JQ='
     elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first | if . == "codex-native" then "codex-home" else . end)
     else "" end;
-  def quota_row($snapshot; $provider; $lane):
+  def quota_row($snapshot; $provider; $lane; $pi_home):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |
     if $snapshot.schemaVersion == 6 then
       (([$rows[] | select(.accountKey == $lane)] | first) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+       (if $lane == "openai-codex"
+        then (if $pi_home then ([$rows[] | select(.accountKey == "codex-home")] | first) else null end)
+        else ([$rows[] | select(.accountKey == "default")] | first)
+        end) // null)
     else ($rows | first) // null
     end;
 '
+
+fm_quota_pi_home_matches() {
+  local selection root ordinary="${HOME:?HOME is required to resolve the Pi account}/.pi/agent"
+  # shellcheck source=bin/fm-worker-account-lib.sh
+  . "${BASH_SOURCE[0]%/*}/fm-worker-account-lib.sh"
+  selection=$(fm_worker_account_resolve pi "$1") || return 2
+  [ -n "$selection" ] || return 1
+  case " ${selection##*$'\t'} " in
+    *" openai-codex "*) ;;
+    *) return 1 ;;
+  esac
+  root=${selection#*$'\t'}
+  root=${root%%$'\t'*}
+  [ "$root" = "$ordinary" ] || [ "$root" -ef "$ordinary" ]
+}
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
