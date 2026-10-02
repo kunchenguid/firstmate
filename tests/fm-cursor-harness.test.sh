@@ -137,6 +137,34 @@ test_verify_executable_refuses_unrelated_agent() {
   pass "fm_cursor_verify_executable: the legacy alias is accepted only with cursor evidence"
 }
 
+test_resolve_binary_skips_broken_cursor_agent() {
+  # Measured on a real host: Cursor's installer wrote its `cursor` IDE shim
+  # through ~/.local/bin/cursor -> cursor-agent into an older versioned
+  # cursor-agent, leaving a file with Cursor's own name and install-tree path
+  # that only prints this error and exits non-zero. Both structural signals
+  # match, so only running it can tell it apart.
+  local base broken good out
+  base="$TMP_ROOT/broken"
+  broken="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  good="$base/share/cursor-agent/versions/2026.10.01-e373342"
+  mkdir -p "$broken" "$good" "$base/bin"
+  printf '#!/bin/sh\necho "Error: No Cursor IDE installation found. Use '"'"'cursor agent'"'"' or '"'"'agent'"'"' to run the agent." >&2\nexit 1\n' \
+    > "$broken/cursor-agent"
+  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$good/cursor-agent"
+  chmod +x "$broken/cursor-agent" "$good/cursor-agent"
+  ln -sf "$broken/cursor-agent" "$base/bin/cursor-agent"
+  ln -sf "$good/cursor-agent" "$base/bin/agent"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep cursor's structural evidence on the broken file"
+  ! fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "a cursor-agent that fails to run must NOT verify"
+  out=$(PATH="$base/bin:$PATH" fm_cursor_resolve_binary) \
+    || fail "resolve must fall through to the working agent alias"
+  [ "$out" = "$base/bin/agent" ] \
+    || fail "resolve must pick the working agent, got '$out'"
+  pass "fm_cursor_resolve_binary: a broken cursor-agent is skipped for a working agent"
+}
+
 test_resolve_binary_prefers_stable_path() {
   # The canonical path carries a version cursor replaces on its own auto-update,
   # so resolution must print the STABLE launcher even though identity is proven
@@ -418,6 +446,7 @@ test_transcript_fold_excludes_prior_conversations() {
 test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
+test_resolve_binary_skips_broken_cursor_agent
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode

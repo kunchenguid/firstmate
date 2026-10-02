@@ -28,6 +28,10 @@
 #   timeout, a non-zero exit, or missing markers - a bare zero exit is never
 #   accepted as proof.
 #
+# Resolving an executable to LAUNCH additionally requires a structural match to
+# run its --help successfully (see fm_cursor_verify_executable), because a
+# right-looking path can hold a broken file.
+#
 # Process detection deliberately uses the structural signal only. Probing an
 # arbitrary pid's executable during an ancestry walk or a liveness poll would
 # execute a stranger's binary, which is exactly the hazard this file exists to
@@ -84,14 +88,18 @@ fm_cursor_path_is_cursor() {  # <path>
 # True when running `$1 --help` produces Cursor's own CLI identity. Bounded and
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
+fm_cursor_timeout_runner() {
+  if command -v timeout >/dev/null 2>&1; then printf 'timeout\n'
+  elif command -v gtimeout >/dev/null 2>&1; then printf 'gtimeout\n'
+  else return 1
+  fi
+}
+
 fm_cursor_bounded_output() {  # <path> <args...>
-  local path=$1 runner=
+  local path=$1 runner
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  if command -v timeout >/dev/null 2>&1; then runner=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
-  fi
-  [ -n "$runner" ] || return 1
+  runner=$(fm_cursor_timeout_runner) || return 1
   "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
@@ -109,16 +117,22 @@ fm_cursor_probe_is_cursor() {  # <path>
 
 # True when executable $1 may be launched as Cursor.
 #
-# An executable whose own name is cursor-agent is accepted on the ordinary
-# executable check: the name is Cursor's and is specific enough to stand alone.
-# Anything else - which in practice means the legacy `agent` alias - must first
-# prove itself Cursor, structurally or by the bounded probe.
+# A name or install-tree match alone is not enough to launch: Cursor's own
+# installer writes its `cursor` IDE shim through the ~/.local/bin/cursor ->
+# cursor-agent symlink, which can replace a versioned
+# cursor-agent/versions/<version>/cursor-agent with a script that only prints
+# "No Cursor IDE installation found" and exits non-zero. Every candidate,
+# whatever its name, must therefore either print Cursor's CLI identity under the
+# bounded probe, or carry the structural evidence AND run its --help
+# successfully. A host with no bounded runner cannot run either check, so there
+# the structural verdict stands on its own, as it always has.
 fm_cursor_verify_executable() {  # <path>
   local path=$1
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  case "${path##*/}" in cursor-agent) return 0 ;; esac
-  fm_cursor_path_is_cursor "$path" && return 0
-  fm_cursor_probe_is_cursor "$path"
+  fm_cursor_probe_is_cursor "$path" && return 0
+  fm_cursor_path_is_cursor "$path" || return 1
+  fm_cursor_timeout_runner >/dev/null || return 0
+  fm_cursor_bounded_output "$path" --help >/dev/null
 }
 
 fm_cursor_list_models() {  # <path>
@@ -150,9 +164,10 @@ fm_cursor_catalog_has_model() {  # <model>
 # cursor-agent on PATH, `agent` on PATH, then the ~/.local/bin installs of
 # both. cursor-agent is preferred over the alias at every stage. The
 # ~/.local/bin fallbacks exist because Cursor's user-local install is routinely
-# absent from a non-interactive login PATH. Every `agent` candidate passes
+# absent from a non-interactive login PATH. Every candidate passes
 # fm_cursor_verify_executable before it is accepted, so an unrelated executable
-# named agent is rejected rather than launched with Cursor's flags.
+# named agent, or a broken cursor-agent, is skipped rather than launched with
+# Cursor's flags.
 #
 # The STABLE path is printed, not the canonical one. Identity is proven THROUGH
 # canonicalization (that is what makes the `agent` alias safe), but cursor's
