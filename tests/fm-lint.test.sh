@@ -1533,13 +1533,13 @@ test_root_memory_limit_reports_a_named_death() {
 }
 
 test_memory_failure_retries_without_external_sources() {
-  local tmp fakebin fixture out rc log roots_log rss_kib
+  local tmp fakebin fixture out rc log rss_kib require_bounds=0
+  fm_lint_bounds_supported && require_bounds=1
   tmp=$(fm_test_tmproot fm-lint-memory-fallback)
   fakebin=$(fm_fakebin "$tmp")
   fixture="$tmp/teardown.sh"
   log="$tmp/flags.log"
-  roots_log="$tmp/pass.roots.tsv"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
+  printf '#!/usr/bin/env bash\n# shellcheck source=lib.sh\nexit 0\n' > "$fixture"
   cat > "$fakebin/shellcheck" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -1566,9 +1566,12 @@ SH
   chmod +x "$fakebin/shellcheck"
 
   rc=0
-  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS="$require_bounds" \
     FM_TEST_FALLBACK_LOG="$log" "$LINT" --telemetry "$tmp/pass.tsv" "$fixture" 2>&1) || rc=$?
   [ "$rc" -eq 0 ] || fail "a clean no-source fallback did not pass"$'\n'"$out"
+  assert_grep $'source_directives\t1' "$tmp/pass.tsv" "telemetry lost the root's source directive"
+  assert_grep $'source_followed_directives\t0' "$tmp/pass.tsv" \
+    "telemetry counted a source directive that the passing fallback did not follow"
   [ "$(cat "$log")" = "$(printf 'yes\tnone\nno\tSC1091,SC2034,SC2153,SC2329')" ] \
     || fail "the memory failure did not retry without external sources and exclude only cross-file codes"$'\n'"$(cat "$log")"
   assert_contains "$out" "hit the memory ceiling with --external-sources (reason=memory rc=251)" \
@@ -1604,7 +1607,7 @@ SH
   printf '#!/usr/bin/env bash\nx=$1\nprintf "%%s\\n" $x\n' > "$fixture"
   rc=0
   out=$(PATH="$fakebin:$PATH" FM_REAL_SHELLCHECK="$real_shellcheck" \
-    FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+    FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS="$require_bounds" \
     "$LINT" --telemetry "$tmp/finding.tsv" "$fixture" 2>&1) || rc=$?
   [ "$rc" -eq 1 ] || fail "a real ShellCheck finding in the fallback did not fail lint (exit $rc)"$'\n'"$out"
   assert_contains "$out" "fallback reason=findings rc=1" \

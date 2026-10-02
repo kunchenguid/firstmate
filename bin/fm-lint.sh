@@ -266,6 +266,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   local fallback_err="$output_dir/root.$shard_index.$index.fallback.err"
   local fallback_rss="$output_dir/root.$shard_index.$index.fallback.rss"
   local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib initial_rc initial_reason
+  local final_follow_sources=${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}
   local -a fallback_args
   start_ms=$(fm_lint_now_ms)
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
@@ -292,6 +293,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     [ -z "$LOCAL_NOX_EXCLUDE" ] || fallback_args+=("--exclude=$LOCAL_NOX_EXCLUDE")
     fm_lint_exec_root "$path" "$fallback_out" "$fallback_err" "$fallback_rss" \
       "${fallback_args[@]}"
+    final_follow_sources=0
     invocation_rc=$FM_LINT_LAST_RC
     reason=$(fm_lint_classify_root "$invocation_rc" "$fallback_err")
     rss_kib=$(fm_lint_max_root_rss \
@@ -315,9 +317,9 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   end_ms=$(fm_lint_now_ms)
   duration_ms=$((end_ms - start_ms))
   if [ -n "${FM_LINT_INTERNAL_ROOTS_LOG:-}" ]; then
-    printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf 'end\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$index" "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-}" \
-      "$start_ms" "$end_ms" "$duration_ms" "$invocation_rc" "$reason" "$rss_kib" \
+      "$start_ms" "$end_ms" "$duration_ms" "$invocation_rc" "$reason" "$rss_kib" "$final_follow_sources" \
       >> "$FM_LINT_INTERNAL_ROOTS_LOG"
   fi
   if [ "${FM_LINT_INTERNAL_PROGRESS:-0}" = 1 ] || { [ "$reason" != ok ] && [ "$reason" != findings ] && [ "$reason" != memory-fallback ]; }; then
@@ -1266,7 +1268,11 @@ if [ -n "$TELEMETRY" ]; then
   : > "$TMP_ROOT/source-targets"
   source_directives=0
   source_boundaries=0
+  source_followed=0
+  awk -F '\t' '$1 == "end" && $12 == 0 { print $2 }' "$ROOTS_LOG" > "$TMP_ROOT/no-source-indices"
+  root_index=0
   for path in "${ROOTS[@]}"; do
+    root_index=$((root_index + 1))
     if [ -f "$path" ]; then
       bytes=$(wc -c < "$path" 2>/dev/null | tr -d '[:space:]')
       case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
@@ -1279,17 +1285,18 @@ if [ -n "$TELEMETRY" ]; then
           sub(/[[:space:]].*$/, "", target)
           print target
         }
-      ' "$path" >> "$TMP_ROOT/source-targets"
+      ' "$path" > "$TMP_ROOT/root-source-targets"
+      cat "$TMP_ROOT/root-source-targets" >> "$TMP_ROOT/source-targets"
+      if [ "$FOLLOW_SOURCES" -eq 1 ] \
+        && ! grep -qx "$root_index" "$TMP_ROOT/no-source-indices"; then
+        followed_here=$(grep -cv '^/dev/null$' "$TMP_ROOT/root-source-targets" || true)
+        source_followed=$((source_followed + followed_here))
+      fi
     fi
   done
   source_directives=$(wc -l < "$TMP_ROOT/source-targets" | tr -d '[:space:]')
   source_boundaries=$(grep -c '^/dev/null$' "$TMP_ROOT/source-targets" 2>/dev/null || true)
   case "$source_boundaries" in ''|*[!0-9]*) source_boundaries=0 ;; esac
-  if [ "$FOLLOW_SOURCES" -eq 1 ]; then
-    source_followed=$((source_directives - source_boundaries))
-  else
-    source_followed=0
-  fi
   source_targets=$(LC_ALL=C sort -u "$TMP_ROOT/source-targets" | wc -l | tr -d '[:space:]')
   content_cksum=$(cksum "$TMP_ROOT/content-cksums" | awk '{print $1 "-" $2}')
   git_head=$(git rev-parse HEAD 2>/dev/null || printf 'unavailable')
