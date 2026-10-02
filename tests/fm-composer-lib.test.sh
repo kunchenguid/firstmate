@@ -737,7 +737,7 @@ test_matrix_grok_status_line_error_footer() {
   # status-line failure sits flush under the box, above the shortcuts bar.
   # Neither row is typed input. A script's own stdout and any other unclaimed
   # row in that slot stay a refusal.
-  local idle typed activity script dialog timed shortcuts dot_only
+  local idle typed activity script dialog timed shortcuts prefix_script dot_only
   idle=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
   assert_screen "grok status-line exit footer on herdr" empty "$CAPS_STYLED" "$idle"
   assert_screen "grok status-line exit footer on zellij" empty "$CAPS_STYLED_NOID" "$idle"
@@ -756,6 +756,12 @@ test_matrix_grok_status_line_error_footer() {
   assert_screen "grok status-line timeout footer" empty "$CAPS_STYLED" "$timed"
   shortcuts=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
   assert_screen "grok shortcuts bar flush under the box" empty "$CAPS_STYLED" "$shortcuts"
+  # A status-line script that only starts like the shortcuts bar is still its
+  # own stdout: the furniture pattern is the complete bar, not a prefix, so
+  # this row cannot authorize exit/relaunch on an unproven pane.
+  prefix_script=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+.:shortcuts and deploy notes'
+  assert_screen "grok shortcuts-prefix script stdout is not furniture" unknown "$CAPS_STYLED" "$prefix_script"
+  assert_screen "grok shortcuts-prefix script stdout on plain" unknown "$CAPS_PLAIN" "$prefix_script"
   dot_only=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯'
   assert_screen "grok aligned middle-dot title alone" empty "$CAPS_STYLED" "$dot_only"
   pass "matrix: grok's status-line error footer stays empty only when the composer itself is idle"

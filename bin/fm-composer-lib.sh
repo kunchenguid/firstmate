@@ -521,9 +521,12 @@ FM_COMPOSER_PI_STATUS_RE_DEFAULT='^\$[0-9]+(\.[0-9]+)?([[:space:]]|$)'
 # script`). Successful script stdout is whatever the script printed and is
 # NOT this pattern: it stays unclaimed activity so an arbitrary footer cannot
 # prove the composer empty. The shortcuts bar under that row (or flush under
-# the box when no status line is configured) is `Shift+Tab:mode │ Ctrl+…`.
+# the box when no status line is configured) is the whole
+# `Shift+Tab:mode │ Ctrl+.:shortcuts` / `Ctrl+x:shortcuts` row, end-anchored,
+# so a status-line script that only begins with the same prefix cannot prove
+# the pane idle.
 FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT='^\[status line: (exit [0-9]+|timed out|killed by signal|could not start the script:.*)\]$'
-FM_COMPOSER_GROK_SHORTCUTS_RE_DEFAULT='^Shift\+Tab:mode[[:space:]]+│[[:space:]]+Ctrl\+'
+FM_COMPOSER_GROK_SHORTCUTS_RE_DEFAULT='^Shift\+Tab:mode[[:space:]]+│[[:space:]]+Ctrl\+[^[:space:]]+:shortcuts$'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
