@@ -1055,6 +1055,45 @@ ROWS
   pass "fm-project-mode: the forge binds from its own token and is reported only through --forge"
 }
 
+# mr-pipeline composes freely with the other tokens: it never influences mode,
+# yolo, branch, or forge, and none of those influence it. --mr-pipeline reports
+# it directly instead of folding it into the default two-word output, exactly
+# how --forge already works.
+test_project_mode_binds_the_mr_pipeline_orthogonally() {
+  local home out err label registry expect mrpipeline
+  home="$TMP_ROOT/mr-pipeline-binding/home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label registry expect mrpipeline; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
+    [ "$out" = "$expect" ] || fail "$label: expected default output '$expect', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --mr-pipeline fp 2>/dev/null)
+    [ "$out" = "$mrpipeline" ] || fail "$label: expected --mr-pipeline '$mrpipeline', got '$out'"
+  done <<'ROWS'
+no annotation at all|- fp - fixture (added 2026-01-01)|no-mistakes off|required
+mr-pipeline beside a mode|- fp [no-mistakes mr-pipeline=none] - fixture (added 2026-01-01)|no-mistakes off|none
+mr-pipeline as the only token leaves the default mode|- fp [mr-pipeline=none] - fixture (added 2026-01-01)|no-mistakes off|none
+mr-pipeline before yolo and branch|- fp [direct-PR mr-pipeline=none +yolo branch=custom/] - fixture (added 2026-01-01)|direct-PR on|none
+mr-pipeline beside forge|- fp [no-mistakes mr-pipeline=none forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|none
+a project with no mr-pipeline keeps yolo and branch|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|required
+an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|required
+ROWS
+
+  # Composition is symmetric: --forge still answers gerrit on a project that
+  # also carries mr-pipeline=none, and --branch-prefix still answers the
+  # override untouched by either token.
+  printf '%s\n' '- fp [no-mistakes mr-pipeline=none forge=gerrit branch=custom/] - fixture (added 2026-01-01)' \
+    > "$home/data/projects.md"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null)
+  [ "$out" = gerrit ] || fail "mr-pipeline=none changed the forge binding ('$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix fp 2>/dev/null)
+  [ "$out" = custom/ ] || fail "mr-pipeline=none changed the branch-prefix binding ('$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --mr-pipeline fp 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a registered mr-pipeline warned as unknown: $err"
+  pass "fm-project-mode: mr-pipeline binds from its own token, orthogonal to mode, yolo, branch, and forge"
+}
+
 # The registry keeps its old tolerance: a token the parser does not know is
 # ignored, keyed or not, and an unknown mode falls back to the most rigorous
 # default with a warning. The one exception is a malformed forge binding - a
@@ -1133,6 +1172,56 @@ a transposed key|- fp [no-mistakes frge=gerrit] - fixture (added 2026-01-01)|frg
 a capitalized key|- fp [no-mistakes Forge=gerrit] - fixture (added 2026-01-01)|Forge=gerrit|no-mistakes off
 ROWS
   pass "fm-project-mode: only a malformed forge binding refuses; every other token keeps its old tolerance"
+}
+
+# A malformed mr-pipeline=<value> - empty or outside the closed set - refuses
+# under --mr-pipeline, the form the merge path reads, because resolving it to
+# "required" would hide a typo behind the safe default. Every other form ignores
+# the token like any other key, so spawn and sync never block on it.
+test_project_mode_refuses_only_a_malformed_mr_pipeline_binding() {
+  local home out err status label registry token expect
+  home="$TMP_ROOT/mr-pipeline-token/home"
+  mkdir -p "$home/data"
+  while IFS='|' read -r label registry token expect; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --mr-pipeline fp 2>/dev/null)
+    status=$?
+    [ "$status" -eq 3 ] || fail "$label: --mr-pipeline did not refuse (status $status, got '$out')"
+    [ -z "$out" ] || fail "$label: a refused binding still handed the caller a posture: '$out'"
+    err=$(FM_HOME="$home" "$PROJECT_MODE" --mr-pipeline fp 2>&1 >/dev/null) || true
+    assert_contains "$err" "\"$token\"" "$label: the refusal did not name the token it could not read"
+    assert_contains "$err" 'mr-pipeline=none' "$label: the refusal did not name the accepted binding"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null) \
+      || fail "$label: the default form refused a token it does not read"
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null) \
+      || fail "$label: --forge refused a token it does not read"
+    [ "$out" = none ] || fail "$label: expected --forge 'none', got '$out'"
+  done <<'ROWS'
+an unknown mr-pipeline value|- fp [no-mistakes mr-pipeline=sometimes] - fixture (added 2026-01-01)|sometimes|no-mistakes off
+a misspelled mr-pipeline value|- fp [direct-PR mr-pipeline=noen] - fixture (added 2026-01-01)|noen|direct-PR off
+an empty mr-pipeline value|- fp [no-mistakes +yolo mr-pipeline=] - fixture (added 2026-01-01)|mr-pipeline=|no-mistakes on
+ROWS
+
+  # --mr-pipeline reads only its own token: a malformed forge binding, or a
+  # forge on local-only, still refuses the forms that read the forge but never
+  # changes the merge path's pipeline answer.
+  while IFS='|' read -r label registry expect; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --mr-pipeline fp 2>/dev/null) \
+      || fail "$label: --mr-pipeline refused over a forge token it does not read"
+    [ "$out" = "$expect" ] || fail "$label: expected --mr-pipeline '$expect', got '$out'"
+    status=0
+    FM_HOME="$home" "$PROJECT_MODE" fp >/dev/null 2>&1 || status=$?
+    [ "$status" -eq 3 ] || fail "$label: the default form stopped refusing the malformed forge (status $status)"
+  done <<'ROWS'
+an unknown forge with no mr-pipeline token|- fp [no-mistakes forge=gitea] - fixture (added 2026-01-01)|required
+an empty forge beside mr-pipeline=none|- fp [no-mistakes forge= mr-pipeline=none] - fixture (added 2026-01-01)|none
+a forge on local-only|- fp [local-only forge=gerrit] - fixture (added 2026-01-01)|required
+ROWS
+  pass "fm-project-mode: a malformed mr-pipeline binding refuses only under --mr-pipeline; other forms ignore it"
 }
 
 # Yolo is inactive for the Gerrit forge on the captain's decision of 2026-09-15,
@@ -1627,6 +1716,8 @@ test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
+test_project_mode_binds_the_mr_pipeline_orthogonally
+test_project_mode_refuses_only_a_malformed_mr_pipeline_binding
 test_forge_gerrit_refuses_yolo
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
