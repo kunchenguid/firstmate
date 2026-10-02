@@ -36,18 +36,27 @@
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
-# a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# a direct child) with a three-second margin. Every read is capped at
+# FM_CONTRIBUTIONS_READ_TIMEOUT seconds (default 5, 1..25, cut down to the
+# effective budget); a configured value rides the generated check shim too, so
+# a home on a slow link can raise the cap instead of only ever reading
+# unmeasured. A read a bound stopped answered nothing and is unmeasured, never
+# a forge failure: that covers the per-read cap, the deadline, and the
+# termination signals an outer bound or a teardown sends while a read is still
+# running. Only the forge's own nonzero exit, including a crash of the client,
+# is unavailable evidence. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
-# the effective budget and 15 seconds for those waves. URLs needing forge
+# the effective budget and three per-read bounds for those waves.
+# URLs needing forge
 # reads are sorted by URL and rotated by the current five-minute epoch bucket
 # modulo their count, without stored scheduling state or freshness-based
 # reordering. Terminal URLs settle separately before the forge budget starts
 # and consume no rotation slots.
-# A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
+# A deliberately smaller configured budget or per-read bound remains bounded
+# and may be unmeasured, rather than being mislabeled unavailable. A URL on an
+# unsupported forge is never read and stays unmeasured for the same reason.
+# Each distinct URL is
 # attempted at most once per poll and its observation applied to every owner.
 # A final observation applies
 # to every owner without another forge read. When the budget refuses a read
@@ -104,11 +113,16 @@ BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
+READ_TIMEOUT=${FM_CONTRIBUTIONS_READ_TIMEOUT:-5}
+case "$READ_TIMEOUT" in ''|*[!0-9]*) fail 'invalid per-read bound' ;; esac
+[ "$READ_TIMEOUT" -ge 1 ] && [ "$READ_TIMEOUT" -le 25 ] || fail 'per-read bound must be 1..25 seconds'
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
 case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
 BUDGET_CAP=$((CHECK_TIMEOUT - 3))
 [ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
 [ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
+# No single read may outlast the whole poll.
+[ "$READ_TIMEOUT" -le "$BUDGET" ] || READ_TIMEOUT=$BUDGET
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
 LOCK_HELD=0
 cleanup() {
@@ -201,19 +215,37 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+# A read nothing answered leaves the URL unmeasured. The flag carries that
+# within one shell and the marker file carries it out of a backgrounded read.
+unmeasured() {
+  BUDGET_EXHAUSTED=1
+  : > "$TMP/budget-exhausted"
+}
+
+# fm-timeout-lib.sh owns which statuses report its bound, so ask it rather than
+# re-deriving one of them here. TERM, INT and HUP are how an outer bound or a
+# teardown stops a read that is still running, and a read those stopped never
+# reached a verdict either. A crash of the client is not in that set: it stays
+# unavailable evidence.
+read_cut_short() { # exit-status
+  if fm_timed_out "$1"; then return 0; fi
+  case $1 in 129|130|143) return 0 ;; esac
+  return 1
+}
+
 forge() {
   local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
+  [ "$remaining" -gt 0 ] || { unmeasured; return 1; }
+  [ "$remaining" -le "$READ_TIMEOUT" ] || remaining=$READ_TIMEOUT
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A kill at the read bound or the deadline is budget refusal too; only the
-  # forge's own nonzero exit is unavailable evidence.
-  if [ "$rc" -eq 124 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
+  # A read stopped at its own bound, at the deadline, or by an outer bound's
+  # signal is unmeasured; only the forge's own nonzero exit is unavailable
+  # evidence.
+  if read_cut_short "$rc"; then
+    unmeasured
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
@@ -233,11 +265,14 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
-  part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
-  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
+  # Reset before every exit path: the poll reads this flag after any return,
+  # and an unsupported forge is never read at all, so it stays unmeasured
+  # rather than inheriting the previous URL's result or becoming an error.
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   BUDGET_EXHAUSTED=0
+  case "$url" in https://github.com/*) ;; *) unmeasured; return 1 ;; esac
+  part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
+  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) unmeasured; return 1 ;; esac
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
@@ -377,7 +412,9 @@ poll() {
     [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
     | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
-  OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  # A pull's three dependent waves can each spend the whole per-read bound.
+  OBSERVATION_RESERVE=$((READ_TIMEOUT * 3))
+  [ "$OBSERVATION_RESERVE" -le "$BUDGET" ] || OBSERVATION_RESERVE=$BUDGET
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
@@ -437,6 +474,9 @@ arm() {
     "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
   if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
     shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
+  fi
+  if [ -n "${FM_CONTRIBUTIONS_READ_TIMEOUT:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_READ_TIMEOUT=$(printf '%q' "$FM_CONTRIBUTIONS_READ_TIMEOUT")")
   fi
   shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
   printf '%s\n' "${shim[@]}" > "$staged"
