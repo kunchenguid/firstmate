@@ -1100,7 +1100,7 @@ test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode rule content
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -1112,6 +1112,9 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     sed 's/{TASK}/Fix the promotion relaunch contract./; s/{FIRSTMATE_SPEC}/Preserve the current delivery mode./' \
       "$brief" > "$brief.filled"
     mv "$brief.filled" "$brief"
+    content=$(cat "$brief")
+    content=${content//'{CLEAR}'/$'Context: The relaunch must keep the recorded delivery mode.\nLayout: One ship contract after promotion.\nExamples: Match the mode-specific safety rule already in the brief.\nAudience: The replacement worker that continues this task.\nRole: Careful builder of the promoted ship contract.\nFallback: Flag a missing delivery fact instead of inventing one.\nEvidence: The relaunch carries the selected mode and branch.'}
+    printf '%s\n' "$content" > "$brief"
     {
       echo "window=fmses:fm-$id"
       echo "endpoint_task_id=$id"

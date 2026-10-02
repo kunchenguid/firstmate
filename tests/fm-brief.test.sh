@@ -211,8 +211,10 @@ test_ship_modes_generate_clean_briefs() {
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
+    assert_grep "{CLEAR}" "$brief" "$id: brief missing the {CLEAR} placeholder"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
     assert_grep "## Firstmate spec" "$brief" "$id: brief missing Firstmate spec subsection"
+    assert_grep "## CLEAR" "$brief" "$id: brief missing the CLEAR section"
     assert_grep 'never a bare number such as "PR 108"' "$brief" "$id: brief missing the full-PR-URL rule"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
@@ -1017,7 +1019,9 @@ test_scout_and_secondmate_scaffold() {
   assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
   assert_grep "## Captain's intent" "$brief" "scout brief missing Captain's intent subsection"
   assert_grep "## Firstmate spec" "$brief" "scout brief missing Firstmate spec subsection"
+  assert_grep "## CLEAR" "$brief" "scout brief missing the CLEAR section"
   assert_grep "{FIRSTMATE_SPEC}" "$brief" "scout brief missing the spec placeholder"
+  assert_grep "{CLEAR}" "$brief" "scout brief missing the CLEAR placeholder"
 
   FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
     FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
@@ -1030,6 +1034,10 @@ test_scout_and_secondmate_scaffold() {
     "secondmate charter must not grow ship/scout Task subsections"
   assert_no_grep "{FIRSTMATE_SPEC}" "$brief" \
     "secondmate charter must not carry the Firstmate spec placeholder"
+  assert_no_grep "## CLEAR" "$brief" \
+    "secondmate charter must not carry a CLEAR block"
+  assert_no_grep "{CLEAR}" "$brief" \
+    "secondmate charter must not carry the CLEAR placeholder"
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
