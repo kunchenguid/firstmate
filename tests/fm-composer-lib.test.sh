@@ -821,8 +821,7 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   done
   rm -rf "$fakebin"
   pass 'pi codex banner adapter requires a pinned version: only the named Pi executable when the caller knows it, every installed one otherwise'
-}test_matrix_opencode_leftbar_signals() {
-  # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
+}test_matrix_opencode_leftbar_signals() {  # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).

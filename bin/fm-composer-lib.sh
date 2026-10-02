@@ -189,11 +189,6 @@ FM_COMPOSER_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" &&
 # plain text (stdin-only, matching fm_composer_strip_ghost). The character class
 # includes ':' so an ITU colon-form SGR (38:2::r:g:b) is stripped whole, not left
 # with a dangling tail.
-# Named, version-pinned Pi rendered-screen adapter (VISION.md).
-# shellcheck source=bin/fm-composer-pi-adapter.sh
-FM_COMPOSER_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd) || return 1
-. "$FM_COMPOSER_LIB_DIR/fm-composer-pi-adapter.sh"
-
 fm_composer_strip_ansi() {
   local esc; esc=$(printf '\033')
   LC_ALL=C sed "s/${esc}\\[[0-9;:?]*[[:alpha:]]//g"

@@ -20,13 +20,11 @@
 # because the identity probe reports `pi` for both, so the adapter checks every
 # Pi executable on PATH and requires at least one to exist and all found to be
 # pinned. FM_COMPOSER_PI_ADAPTER_VERSION overrides the lookup (test fixtures pin
-# it explicitly). Outside the pin set, or when no version can
-# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
+# it explicitly). Outside the pin set, or when no version can# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
 # rendering cannot become a shared empty proof and the classifier keeps its
 # ordinary unknown answer. The live guard proves the pinned shape on a pinned
 # install, and on an unpinned install proves that refusal and names the release
-# whose pin needs refreshing.#
-# Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
+# whose pin needs refreshing.## Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
 
 # shellcheck shell=bash
 
@@ -105,7 +103,6 @@ fm_composer_pi_adapter_installed_pinned() {
     fm_composer_pi_adapter_version_pinned "$v" || return 1
   done
   [ "$found" = 1 ]}
-
 # 0 when the last non-blank row above the scanned pair's opening separator is
 # pi's terminal provider-error banner, tolerating at most one occurrence of
 # pi's fixed bug-report hint row directly beneath it. Rows are read plain.
