@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # tests/fm-afk-inject-herdr-e2e.test.sh - real-herdr end-to-end test for the
-# away-mode daemon's herdr transport (bin/fm-supervise-daemon.sh), the herdr
-# complement to tests/fm-afk-inject-e2e.test.sh's guarded Herdr cases.
+# away-mode daemon's Herdr transport and real-Herdr composer guard
+# (bin/fm-supervise-daemon.sh), complementing
+# tests/fm-afk-inject-e2e.test.sh's guarded Herdr cases.
 # Mirrors tests/fm-backend-herdr-smoke.test.sh and tests/herdr-test-safety.sh's
 # isolation patterns: everything runs on a throwaway, named, NEVER-default
-# HERDR_SESSION, torn down with herdr_safe_stop_and_delete. Skips cleanly when
-# herdr or jq is not installed.
+# HERDR_SESSION, provisioned and torn down by fm-herdr-lab.sh. Skips cleanly
+# when herdr or jq is not installed.
 #
 # The daemon receives an explicit Herdr backend and a session-qualified pane.
-# Its ordinary escalation submission uses Herdr's native prompt API; literal
-# pane input below exists only to exercise the separate overwrite guard.
+# Its synthetic shell loop is not a Herdr native agent. Native submission is
+# therefore intercepted at the public command boundary and delivered to that
+# loop by the fixture, while composer reads and target routing use real Herdr.
 
 #
 # The "supervisor pane" is a tiny deterministic bash loop (not a real harness
@@ -17,10 +19,7 @@
 # bordered branch of fm_backend_herdr_composer_state, and logs every submitted
 # line (hex + text + injection/user classification) - the same technique
 # tests/fm-afk-inject-e2e.test.sh uses for its supervisor pane, so this
-# test asserts on submitted CONTENT, not pane appearance. It also registers
-# itself as a real Herdr agent via `herdr pane report-agent` so the native
-# prompt API has an agent endpoint. Its reported idle/working/idle cycle is
-# fixture behavior, not a submission receipt consumed by firstmate.
+# test asserts on submitted content, preserved drafts, and durable alarm state.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,10 +39,12 @@ herdr_forget_inherited_pane
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
+HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
+SESSION=${FM_HERDR_LAB_SESSION:-$("$HERDR_LAB_HELPER" name "${FM_HERDR_LAB_TASK:-afk-inject-herdr-e2e}")}
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
 HERDR_SHIM_DIR=
+HERDR_GUARD_DIR=
 LOG_FILE=
 DAEMON_PID=
 SUPERVISOR_TARGET=
@@ -56,12 +57,17 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  "$HERDR_LAB_HELPER" teardown "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
+  rm -rf "${HERDR_GUARD_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+"$HERDR_LAB_HELPER" provision "$SESSION" || fail "could not prepare isolated Herdr lab session"
+HERDR_GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-guard.XXXXXX")
+herdr_test_guard_cli "$SESSION" "$HERDR_GUARD_DIR" "$HERDR_LAB_HELPER" \
+  || fail "could not install the guarded Herdr lab wrapper"
+export PATH="$HERDR_GUARD_DIR:$PATH"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null
@@ -112,42 +118,23 @@ for _ in $(seq 1 100); do
 done
 [ "$PANE_READY" = true ] || fail "the supervisor pane's shell did not become ready"
 
-# A second, independent live task tab in the same workspace, mirroring the other
-# e2e's fake fm-fake-c1 crewmate window - not required by scan_signals (which
-# only watches state/*.status mtimes, no window/pane dependency), but kept for
-# parity with the companion guarded e2e.
-FAKE_CREW_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-fake-c1" /tmp) \
-  || fail "could not create the fake crewmate scratch tab"
-read -r _FAKE_TAB_ID FAKE_CREW_PANE_ID <<EOF
-$FAKE_CREW_IDS
-EOF
-
 # --- deterministic bare-composer loop, drawn in the scratch pane -------------
 # Mirrors tests/fm-afk-inject-e2e.test.sh's supervisor-loop.sh, but draws the
 # shared classifier's positively identified bare-agent shape (`❯ <buf>`). This
 # remains readable under the strict blank-row posture without pretending that
-# one side-bordered row is a complete composer box. The loop registers itself
-# through `herdr pane report-agent`, Herdr's documented integration primitive
-# for a non-built-in harness, so native prompts have a registered destination.
-# The composer and state transitions remain useful fixture observations, but
-# ordinary submission does not inspect either one as a prerequisite or receipt.
+# one side-bordered row is a complete composer box. It is intentionally only a
+# composer fixture, not a claimed native agent endpoint.
 LOOP_SCRIPT="$STATE_DIR/supervisor-loop.sh"
 cat > "$LOOP_SCRIPT" <<'LOOP'
 #!/usr/bin/env bash
 MARK=$'\xE2\x81\xA3'
 LOG="$1"
-AGENT_SOURCE=fm-test-supervisor
-AGENT_LABEL=fm-test-supervisor
-report_agent_state() {  # <idle|working>
-  herdr pane report-agent "$HERDR_PANE_ID" --source "$AGENT_SOURCE" --agent "$AGENT_LABEL" --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
-}
 OLD_STTY=$(stty -g 2>/dev/null || true)
 [ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
 cleanup() {
   [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
-report_agent_state idle
 
 _buf=
 # redraw: keep the composer visually pinned to ONE terminal row regardless of
@@ -184,11 +171,6 @@ submit_line() {
   _buf=
   printf '\r\033[K\n'
   redraw
-  # Model a real harness's idle->working->idle cycle after receipt. Firstmate
-  # does not wait for this transition to confirm native prompt submission.
-  report_agent_state working
-  sleep 0.6
-  report_agent_state idle
 }
 
 redraw
@@ -210,18 +192,22 @@ fm_backend_herdr_send_text_line "$SUPERVISOR_TARGET" "bash '$LOOP_SCRIPT' '$LOG_
   || fail "could not start the supervisor-loop script in the scratch herdr pane"
 sleep 1  # let the loop start and settle
 
-# --- Herdr shim: forwards to the real binary -------------------------------
-REAL_HERDR=$(command -v herdr)
+# --- Native command seam for the synthetic destination ----------------------
+# The lower wrapper routes every real Herdr operation through the named lab
+# helper. For the one operation the shell fixture cannot natively receive, this
+# seam records the public agent command and emulates its accepted delivery into
+# the exact pane. It does not stand in for the separate real-agent lab proof.
+REAL_HERDR="$HERDR_GUARD_DIR/herdr"
 HERDR_SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-shim.XXXXXX")
 cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
 #!/usr/bin/env bash
-if [ "\${1:-}" = "pane" ] && [ "\${2:-}" = "send-keys" ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  found_enter=0
-  for _a in "\$@"; do [ "\$_a" = "enter" ] && found_enter=1; done
-  if [ "\$found_enter" = 1 ]; then
-    rm -f "$STATE_DIR/.swallow-enter"
-    exit 0
-  fi
+set -eu
+if [ "\${1:-}" = agent ] && { [ "\${2:-}" = prompt ] || [ "\${2:-}" = send ]; }; then
+  [ "\${3:-}" = "$PANE_ID" ] || { echo 'refused wrong synthetic target' >&2; exit 97; }
+  printf '%s\t%s\t%s\n' "\$2" "\$3" "\${4:-}" >> "$STATE_DIR/.native-submit"
+  "$REAL_HERDR" pane send-text "\$3" "\${4:-}" >/dev/null
+  "$REAL_HERDR" pane send-keys "\$3" enter >/dev/null
+  exit 0
 fi
 exec "$REAL_HERDR" "\$@"
 SHIM
@@ -290,7 +276,7 @@ reset_state() {
          "$STATE_DIR"/.stale-* \
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
-         "$STATE_DIR"/.swallow-enter \
+         "$STATE_DIR"/.native-submit \
          2>/dev/null || true
   : > "$LOG_FILE"
 }
@@ -327,41 +313,39 @@ test_scenario_a() {
 
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "human draft text"
   sleep 0.5
-
   echo "done: PR https://example.test/pr/100" > "$STATE_DIR/fake-c1.status"
-
   sleep 8
 
-  if grep -q 'Supervisor escalate' "$LOG_FILE"; then
-    fail "Scenario A: daemon injected while the herdr pane had pending input"
-  fi
+  [ ! -s "$STATE_DIR/.native-submit" ] \
+    || fail "Scenario A: daemon submitted while the real Herdr pane had pending input"
   if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" 2>/dev/null || \
      grep -q 'Supervisor escalate.*human draft text' "$LOG_FILE" 2>/dev/null; then
     fail "Scenario A: human text and digest were merged into one line"
   fi
 
   fm_backend_herdr_send_key "$SUPERVISOR_TARGET" Enter
-  sleep 0.5
-
   sleep 8
 
   grep -q 'human draft text' "$LOG_FILE" \
     || fail "Scenario A: human text not in log after submit"
   grep -q 'Supervisor escalate' "$LOG_FILE" \
-    || fail "Scenario A: digest not injected after the pane went idle"
+    || fail "Scenario A: digest not submitted after the pane went idle"
+  [ "$(wc -l < "$STATE_DIR/.native-submit")" -eq 1 ] \
+    || fail "Scenario A: deferred digest did not use exactly one native command"
+  awk -F '\t' -v pane="$PANE_ID" '$2 == pane && $3 ~ /Supervisor escalate/ { found=1 } END { exit !found }' \
+    "$STATE_DIR/.native-submit" \
+    || fail "Scenario A: native command changed the target or escalation text"
   if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" || \
      grep -q 'Supervisor escalate.*human draft text' "$LOG_FILE"; then
-    fail "Scenario A: human text and digest merged into one line (after idle)"
+    fail "Scenario A: human text and digest merged into one line after idle"
   fi
 
-  local human_line
+  local human_line digest_line
   human_line=$(grep 'human draft text' "$LOG_FILE" | head -1)
   case "$human_line" in
     *user) ;;
     *) fail "Scenario A: human text misclassified (expected user): $human_line" ;;
   esac
-
-  local digest_line
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   case "$digest_line" in
     *injection) ;;
@@ -369,61 +353,44 @@ test_scenario_a() {
   esac
 
   stop_daemon
-  pass "real herdr Scenario A: partial input defers injection; digest arrives clean after idle"
+  pass "real herdr Scenario A: partial input defers the native command; exact digest arrives after idle"
 }
 
-# --- Scenario B: native prompt remains independent of terminal Enter --------
+# --- Scenario B: native command shape is single-shot ------------------------
 
 test_scenario_b() {
   reset_state
   afk_enter "$STATE_DIR"
-
-  touch "$STATE_DIR/.swallow-enter"
-
   start_daemon
-
   echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
-
   sleep 10
 
-  local marker_count
-  marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
-  [ "$marker_count" -eq 1 ] \
-    || fail "Scenario B: expected exactly 1 U+2063 marker, got $marker_count (duplicate or lost)"
-
-  local digest_line digest_hex
-  digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
-  digest_hex=$(printf '%s' "$digest_line" | cut -f1)
-  case "$digest_hex" in
-    e281a3*) ;;
-    *) fail "Scenario B: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
-  esac
-
-  local user_count
-  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
-  [ "$user_count" -eq 0 ] \
-    || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted an empty line?)"
+  [ "$(wc -l < "$STATE_DIR/.native-submit")" -eq 1 ] \
+    || fail "Scenario B: expected exactly one native agent command"
+  awk -F '\t' -v pane="$PANE_ID" \
+    '($1 == "prompt" || $1 == "send") && $2 == pane && $3 ~ /Supervisor escalate/ { found=1 } END { exit !found }' \
+    "$STATE_DIR/.native-submit" \
+    || fail "Scenario B: native command changed the capability, target, or text"
+  [ "$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")" -eq 1 ] \
+    || fail "Scenario B: expected exactly one delivered sentinel marker"
 
   stop_daemon
-  pass "real herdr Scenario B: swallowed Enter (via the herdr shim) produces exactly one clean digest"
+  pass "real herdr Scenario B: one capability-selected native command carries one exact digest"
 }
 
-# --- Scenario C: normal digest -----------------------------------------------
+# --- Scenario C: normal digest content --------------------------------------
 
 test_scenario_c() {
   reset_state
   afk_enter "$STATE_DIR"
   start_daemon
-
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
   sleep 8
 
-  local marker_count
+  local marker_count digest_line digest_hex
   marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
   [ "$marker_count" -eq 1 ] \
     || fail "Scenario C: expected exactly 1 U+2063 marker, got $marker_count"
-
-  local digest_line digest_hex
   digest_line=$(grep 'Supervisor escalate' "$LOG_FILE" | head -1)
   case "$digest_line" in
     *injection) ;;
@@ -434,14 +401,11 @@ test_scenario_c() {
     e281a3*) ;;
     *) fail "Scenario C: digest does not start with the terminal-safe sentinel marker (hex: $digest_hex)" ;;
   esac
-
-  local user_count
-  user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
-  [ "$user_count" -eq 0 ] \
-    || fail "Scenario C: expected 0 user lines, got $user_count (spurious submission?)"
+  [ "$(grep -c $'\tuser$' "$LOG_FILE" || true)" -eq 0 ] \
+    || fail "Scenario C: expected no unrelated user submission"
 
   stop_daemon
-  pass "real herdr Scenario C: a normal captain status injects exactly one clean single-line sentinel digest"
+  pass "real herdr Scenario C: a normal status produces one clean sentinel digest"
 }
 
 # --- Scenario D: max-defer alarm on a persistently non-clearing composer -----
@@ -505,9 +469,8 @@ test_scenario_b
 test_scenario_c
 test_scenario_d_max_defer
 
-echo "all real-herdr afk injection e2e tests passed"
+echo "all real-herdr afk transport and composer-guard e2e tests passed"
 
 fm_backend_herdr_kill "$SUPERVISOR_TARGET" 2>/dev/null || true
-fm_backend_herdr_kill "$SESSION:$FAKE_CREW_PANE_ID" 2>/dev/null || true
 cleanup_all
 trap - EXIT

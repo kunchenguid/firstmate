@@ -52,8 +52,8 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   command  the pane's foreground process name, which IS the agent-state
 #            classifier's input (bin/backends/herdr.sh).
 #   cwd      the pane's current path.
-#   literal  every `pane send-text` or `pane run` payload, one per line - exactly what was
-#            typed into the composer.
+#   literal  every native `agent send` or lifecycle-only `pane send-text` /
+#            `pane run` payload, one per line.
 #   keys     every named key send, one per line.
 #   pane     optional pane-read override, for an adapter whose busy verdict
 #            is read from the rendered tail.
@@ -71,7 +71,8 @@ set -u
 D=$FM_FAKE_DIR
 case "$1 ${2:-}" in
   'status --json') echo '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}' ;;
-  'pane send-text'|'pane run')
+  'agent --help') printf 'Commands:\n  send  Submit a prompt\n' ;;
+  'agent send'|'agent prompt'|'pane send-text'|'pane run')
     payload=${4:-}
     printf '%s\n' "$payload" >> "$D/literal"
     if [ -z "${FM_FAKE_NEVER_DIES:-}" ] && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then

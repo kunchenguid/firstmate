@@ -467,10 +467,10 @@ do_exit() {
   case "$composer_state" in
     empty) ;;
     pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      die "task $ID's composer visibly holds pending text; refusing native prompt submission of the $cmd exit command because lifecycle ordering would be ambiguous. Clear or submit the pending text, then retry '$VERB'"
       ;;
     *)
-      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      die "task $ID's composer state is '$composer_state', not proven empty; refusing native prompt submission of the $cmd exit command because lifecycle ordering would be ambiguous. Clear the composer, then retry '$VERB'"
       ;;
   esac
   # The submit verdict is NOT the postcondition here: native API acceptance does

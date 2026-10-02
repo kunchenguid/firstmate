@@ -949,7 +949,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     notify=0
   else
     WEDGE_ALARM_LAST_EPOCH=$now
-    log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
+    log "ERROR: away-mode escalation undelivered ${age}s; native submission was deferred or refused (supervisor pane busy, pending, unreadable, or transport failed). Buffer + wake-queue preserved; alarm marker written."
   fi
   {
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"

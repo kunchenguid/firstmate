@@ -496,7 +496,7 @@ else
     esac
   fi
   if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
-    echo 'REFUSED: lifecycle actions cannot use the typed plane' >&2; exit 6
+    echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
@@ -558,7 +558,7 @@ else
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-    3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
+    3) echo "fm-send: doorbell native submission skipped because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     4)
       fm_task_inbox_record_escalated "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD" || true
       fm_wake_append stale "$T" "stale: $T (doorbell submission outcome is uncertain for $INBOX_RECORD; do not replay blindly; inspect the worker)" || true
