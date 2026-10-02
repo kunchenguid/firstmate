@@ -564,13 +564,13 @@ An SSH exit status of 255 while fetching a referenced document leaves the delta 
 ### Reply settlement
 
 The process-event runner applies each captured delta through this adapter as soon as it is captured.
-So a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
+So a mirrored report reaches the primary status channel without depending on the wake handler running the adapter itself.
 A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
 
-A remote reply reaches the primary only through this asynchronous mirror.
+A remote report reaches the primary only through this asynchronous mirror.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
-A remote mate that did answer is therefore never asked to repost while its answer is still in flight.
-A genuinely missing answer still gets exactly one repost once the mirror is known to be current.
+A remote mate that appended a correlated line is therefore never asked to repost while that line is still in flight.
+A genuinely missing correlated report still gets exactly one repost once the mirror is known to be current.
 
 The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns automatic application, one-announcement replay deduplication, and the unhandled fallback path.
 
