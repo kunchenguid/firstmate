@@ -3509,9 +3509,9 @@ test_large_required_check_runs() {
       "large-required-runs-$variant: JSON was still passed through an oversized argument"
     if [ "$expected" -eq 0 ]; then
       if [ "$variant" = waived-red ]; then
-        assert_logged_gh_merge "$case_dir" 112 example/repo --admin
+        assert_logged_gh_merge "$case_dir" 112 example/repo --squash --admin
       else
-        assert_logged_gh_merge "$case_dir" 112 example/repo
+        assert_logged_gh_merge "$case_dir" 112 example/repo --squash
       fi
     else
       assert_no_grep 'pr merge' "$case_dir/gh.log" "large-required-runs-$variant: refusal reached merge"
