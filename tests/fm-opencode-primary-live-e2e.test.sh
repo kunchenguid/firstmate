@@ -28,7 +28,11 @@ test_native_command_discovery() (
 )
 test_native_command_discovery || exit 1
 
-fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
+if [ "${FM_OPENCODE_LIVE_WATCH_ONLY:-0}" = 1 ]; then
+  fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux
+else
+  fm_live_gate opt-in FM_OPENCODE_LIVE_E2E opencode tmux sqlite3
+fi
 
 TMUX=$(command -v tmux)
 SOCKET="fm-opencode-live-e2e-$$"
@@ -86,11 +90,12 @@ dismiss_update_offer() {
   wait_for_absent "Update Available" 60
 }
 
-wait_for_handled() {
-  local i=0
+wait_for_handled_count() {
+  local expected=$1 i=0 actual
   while [ "$i" -lt 240 ]; do
     dismiss_update_offer || return 1
-    [ -f "$HOME_DIR/state/opencode-model-handled" ] && return 0
+    actual=$(cat "$HOME_DIR/state/opencode-model-handled-count" 2>/dev/null || true)
+    [ "$actual" = "$expected" ] && return 0
     sleep 0.5
     i=$((i + 1))
   done
@@ -302,20 +307,36 @@ run_native_ahoy_regressions() {
 }
 
 mkdir -p "$LAB"
-run_ahoy_transcript_regressions
-run_native_ahoy_regressions
+if [ "${FM_OPENCODE_LIVE_WATCH_ONLY:-0}" != 1 ]; then
+  run_ahoy_transcript_regressions
+  run_native_ahoy_regressions
+fi
 git clone -q "$ROOT" "$PROJECT"
 mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$PROJECT/.opencode/plugins/lib/fm-operational-input.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
-chmod +x "$PROJECT/bin/fm-operational-input.sh"
+cat > "$PROJECT/bin/fm-opencode-live-e2e-handle.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+count_file="$FM_HOME/state/opencode-model-handled-count"
+if [ ! -f "$count_file" ]; then
+  printf 'blocked\n' > "$FM_HOME/state/opencode-model-delivery-blocked"
+  while [ ! -f "$FM_HOME/state/opencode-model-release" ]; do
+    sleep 0.1
+  done
+fi
+bin/fm-wake-drain.sh >/dev/null
+count=$(cat "$count_file" 2>/dev/null || printf '0\n')
+printf '%s\n' "$((count + 1))" > "$count_file"
+SH
+chmod +x "$PROJECT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-opencode-live-e2e-handle.sh"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config"
 printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
-PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
+PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. On every later watcher wake, run `bin/fm-opencode-live-e2e-handle.sh`, then respond briefly. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
   "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
@@ -355,7 +376,64 @@ while [ "$i" -lt 240 ]; do
 done
 grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "OpenCode plugin did not start and ledger-link a successor after the actionable close"
-wait_for_handled || fail "OpenCode did not drain and settle after plugin-owned re-arm"
+
+i=0
+while [ "$i" -lt 240 ]; do
+  [ -f "$HOME_DIR/state/opencode-model-delivery-blocked" ] && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -f "$HOME_DIR/state/opencode-model-delivery-blocked" ] \
+  || fail "OpenCode did not hold the first watcher delivery for the overlap regression"
+
+first_successor_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+[ -n "$first_successor_pid" ] && kill -0 "$first_successor_pid" 2>/dev/null \
+  || fail "OpenCode first actionable wake did not leave a live successor"
+
+printf 'done: opencode live e2e queued wake\n' >> "$HOME_DIR/state/opencode-e2e.status"
+i=0
+while [ "$i" -lt 120 ]; do
+  queued_successor_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+  actionable_count=$(grep -Ec 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null || true)
+  [ "$actionable_count" -ge 2 ] && [ -n "$queued_successor_pid" ] \
+    && [ "$queued_successor_pid" != "$first_successor_pid" ] \
+    && kill -0 "$queued_successor_pid" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ "${actionable_count:-0}" -ge 2 ] && [ -n "${queued_successor_pid:-}" ] \
+  && [ "$queued_successor_pid" != "$first_successor_pid" ] \
+  && kill -0 "$queued_successor_pid" 2>/dev/null \
+  || fail "OpenCode did not queue the second wake behind blocked delivery with a live successor"
+
+kill -HUP "$queued_successor_pid" 2>/dev/null \
+  || fail "OpenCode queued-wake successor could not be failed for the overlap regression"
+i=0
+while [ "$i" -lt 120 ]; do
+  replacement_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+  [ -n "$replacement_pid" ] && [ "$replacement_pid" != "$queued_successor_pid" ] \
+    && kill -0 "$replacement_pid" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ -n "${replacement_pid:-}" ] && [ "$replacement_pid" != "$queued_successor_pid" ] \
+  && kill -0 "$replacement_pid" 2>/dev/null \
+  || fail "OpenCode did not replace a failed successor while wake delivery remained blocked"
+[ ! -f "$HOME_DIR/state/opencode-model-handled-count" ] \
+  || fail "OpenCode released queued delivery before the overlap replacement was verified"
+
+printf 'release\n' > "$HOME_DIR/state/opencode-model-release"
+wait_for_handled_count 2 \
+  || fail "OpenCode did not drain both ordered wakes after the replacement became durable"
+kill -0 "$replacement_pid" 2>/dev/null \
+  || fail "OpenCode queued delivery retired the current replacement watcher"
+
+printf 'done: opencode live e2e next idle wake\n' >> "$HOME_DIR/state/opencode-e2e.status"
+wait_for_handled_count 3 \
+  || fail "OpenCode durable successor did not supervise the next idle wake"
+final_watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
+[ -n "$final_watcher_pid" ] && kill -0 "$final_watcher_pid" 2>/dev/null \
+  || fail "OpenCode next idle wake did not leave a durable successor"
 
 pane=$(capture)
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
@@ -364,4 +442,8 @@ if printf '%s\n' "$pane" | grep -Fq '$ bin/fm-watch-arm.sh'; then
   fail "OpenCode model attempted to re-arm instead of leaving continuity to the plugin"
 fi
 
-printf 'ok - OpenCode %s live E2E covered native Ahoy first/later messages, near misses, and watcher continuity\n' "$OPENCODE_VERSION"
+if [ "${FM_OPENCODE_LIVE_WATCH_ONLY:-0}" = 1 ]; then
+  printf 'ok - OpenCode %s live E2E covered queued wake delivery, failed-successor replacement, and next-idle continuity\n' "$OPENCODE_VERSION"
+else
+  printf 'ok - OpenCode %s live E2E covered native Ahoy first/later messages, near misses, queued wake delivery, failed-successor replacement, and next-idle continuity\n' "$OPENCODE_VERSION"
+fi
