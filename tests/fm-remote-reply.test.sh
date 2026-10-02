@@ -1072,6 +1072,17 @@ if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
 fi
 assert_grep 'retained remote tail differs' "$TMP_ROOT/rebase-changed-tail.out" \
   "changed retained bytes did not explain the rebase refusal"
+cp "$TMP_ROOT/rebase-short-source" "$REMOTE/state/parent-replies.status"
+perl -e 'my ($p,$n)=@ARGV; truncate($p,$n+5) or die $!' \
+  "$REMOTE/state/parent-replies.status" "$replay_offset" \
+  || fail "could not leave only an incomplete retained line"
+perl -0pi -e 's/note:/Note:/' "$REMOTE/state/parent-replies.status"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-changed-fragment.out" 2>&1; then
+  fail "rebase accepted changed bytes in an incomplete retained line"
+fi
+assert_grep 'retained remote tail differs' "$TMP_ROOT/rebase-changed-fragment.out" \
+  "changed incomplete bytes bypassed the rebase proof"
 assert_grep "offset=$rebase_old_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "a refused rebase changed the committed cursor"
 assert_absent "$PARENT/state/procevent/$SID.source" \
@@ -1259,5 +1270,52 @@ assert_grep 'attached launch after detached failure' "$PARENT/state/ios.status" 
   "an attached launch did not ingest after detached confirmation failed"
 stop_reply_listener || fail "attached recovery listener did not stop"
 pass "a failed detached launch surfaces durably and an attached launch ingests the backlog"
+
+# Re-arm can expose another break immediately. Force it after ensure-listening
+# returns, before the rebase command exits, so the resolution must already
+# precede the new block in the durable status stream.
+GEN=$(find "$PARENT/state/procevent-inbox" -maxdepth 1 -name "$SID.*.result" -print \
+  | awk -F. '{ print $(NF - 1) }' | sort -n | tail -1)
+GEN=${GEN:-0}
+printf 'note: rebase ordering anchor\n' >> "$REMOTE/state/parent-replies.status"
+printf 'done [corr=abcdef0123456789]: rebase ordering tail\n' \
+  >> "$REMOTE/state/parent-replies.status"
+order_old_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the ordering fixture was not ingested"
+stop_reply_listener || fail "the ordering fixture listener did not stop"
+perl -e 'my $p=shift; my $n=-s $p; truncate($p,$n-5) or die $!' \
+  "$REMOTE/state/parent-replies.status" || fail "could not shorten the ordering fixture"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/order-break.out" 2>&1 &
+RUNNER=$!
+wait "$RUNNER" || fail "the ordering fixture did not publish its first break"
+assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the ordering fixture break was not acknowledged"
+order_next_gen=$((GEN + 1))
+cat > "$TMP_ROOT/rebase-order-hook" <<'SH'
+#!/usr/bin/env bash
+printf 'failed: a second continuity break after rebase\n' > "$FM_TEST_REBASE_REMOTE_LOG"
+for _ in $(seq 1 800); do
+  [ -f "$FM_TEST_REBASE_NEXT_HANDLED" ] && exit 0
+  sleep 0.05
+done
+exit 1
+SH
+chmod +x "$TMP_ROOT/rebase-order-hook"
+FM_TEST_REBASE_AFTER_ENSURE_HOOK="$TMP_ROOT/rebase-order-hook" \
+  FM_TEST_REBASE_REMOTE_LOG="$REMOTE/state/parent-replies.status" \
+  FM_TEST_REBASE_NEXT_HANDLED="$PARENT/state/procevent-inbox/$SID.$order_next_gen.handled" \
+  remote_env "$ADAPTER" rebase ios --expect-offset "$order_old_offset" \
+  > "$TMP_ROOT/rebase-order.out" 2>&1 \
+  || fail "the second break could not be reproduced during re-arm: $(cat "$TMP_ROOT/rebase-order.out")"
+order_resolved_line=$(grep -nF 'resolved [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1 | cut -d: -f1)
+order_blocked_line=$(grep -nF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1 | cut -d: -f1)
+[ "$order_blocked_line" -gt "$order_resolved_line" ] \
+  || fail "a rebase resolution hid the immediately subsequent continuity break"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "the second continuity break left its source registered"
+pass "rebase resolution precedes a break detected during listener re-arm"
 
 echo "ALL TESTS PASSED"

@@ -581,7 +581,7 @@ The [process-to-event operating contract](configuration.md#process-to-event-sour
 
 The relay never truncates or consumes the source log.
 A source shortened or changed by another writer stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
-For a shortened source, `bin/fm-procevent-remote-reply.sh rebase` requires an expected cursor and compares the retained complete remote tail with its acknowledged ingested bytes before rewinding and re-arming; its script header owns the exact command and refusal contract.
+For a shortened source, `bin/fm-procevent-remote-reply.sh rebase` requires an expected cursor and compares every retained remote byte with its acknowledged ingested bytes before rewinding to a complete-line boundary and re-arming; its script header owns the exact command and refusal contract.
 Changed bytes or missing ingestion evidence remain blocked for investigation.
 
 ### SSH exit 255 and unavailable homes

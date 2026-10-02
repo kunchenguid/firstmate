@@ -46,7 +46,7 @@
 # after the terminal result was handled: it requires the exact current cursor,
 # an acknowledged truncation result, and the last ingested delta result. It
 # re-reads the remote log from that delta's verified start, compares every
-# retained complete byte with the ingested payload, rewinds only to that proven
+# retained byte with the ingested payload, rewinds only to that proven
 # complete-line boundary, and re-arms the listener. It refuses changed bytes,
 # missing receipts, an active registration, and a non-shortened source.
 #
@@ -448,8 +448,8 @@ rebase_find_evidence() {  # <id>
 
 cmd_rebase() {  # <id> --expect-offset <offset>
   local id=${1:-} expected=${3:-} sid source cursor status_file remote_size
-  local probe old_payload new_payload old_bytes new_bytes new_to new_hash new_from new_from_hash
-  local blank rc=0 backup rollback tmp arm_out line
+  local probe old_payload retained_payload old_bytes retained_bytes retained_hash
+  local new_to new_hash verified_size complete_bytes schema blank rc=0 backup rollback tmp arm_out line
   [ "$#" -eq 3 ] && [ "$2" = --expect-offset ] \
     || die "usage: fm-procevent-remote-reply.sh rebase <secondmate-id> --expect-offset <offset>"
   validate_id "$id"
@@ -488,49 +488,50 @@ cmd_rebase() {  # <id> --expect-offset <offset>
       || die "cannot stage rebase proof"
     REBASE_TMP=$tmp
     trap 'rm -rf -- "$REBASE_TMP"; fm_lock_release "$REBASE_LIFECYCLE_LOCK"' EXIT
+    old_bytes=$(result_field "$REBASE_DELTA" payload_bytes) \
+      || die "ingested payload size is ambiguous"
+    case "$old_bytes" in ''|*[!0-9]*) die "ingested payload size is invalid" ;; esac
+    retained_bytes=$((remote_size - REBASE_FROM))
+    [ "$retained_bytes" -le "$old_bytes" ] \
+      || die "remote tail extends beyond the last ingested delta"
+    blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$REBASE_DELTA")
+    case "$blank" in ''|*[!0-9]*) die "ingested delta has no payload boundary" ;; esac
+    old_payload="$tmp/ingested-payload"
+    tail -n "+$((blank + 1))" "$REBASE_DELTA" > "$old_payload" \
+      || die "cannot read ingested tail"
+    [ "$(LC_ALL=C wc -c < "$old_payload" | tr -d ' ')" = "$old_bytes" ] \
+      || die "ingested payload size changed"
+    retained_payload="$tmp/retained-payload"
+    head -c "$retained_bytes" "$old_payload" > "$retained_payload" \
+      || die "cannot stage retained ingested tail"
+    [ "$(LC_ALL=C wc -c < "$retained_payload" | tr -d ' ')" = "$retained_bytes" ] \
+      || die "retained ingested tail is incomplete"
+    retained_hash=$(sha256_file "$retained_payload") \
+      || die "cannot hash retained ingested tail"
     probe="$tmp/remote-result"
     fm_run_timed 30 "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-      "$REMOTE_LOG" "$REBASE_FROM" "$REBASE_FROM_HASH" 0 \
+      verify-rebase "$REMOTE_LOG" "$REBASE_FROM" "$REBASE_FROM_HASH" \
+      "$retained_bytes" "$retained_hash" \
       > "$probe" 2> "$tmp/remote-error" || rc=$?
-    new_to=$REBASE_FROM
-    new_hash=$REBASE_FROM_HASH
-    case "$rc" in
-      75) [ ! -s "$probe" ] || die "remote rebase probe returned an ambiguous empty window" ;;
-      0)
-        [ "$(classify_result "$probe")" = delta ] \
-          || die "remote tail changed or no longer has the ingested prefix"
-        new_from=$(result_field "$probe" from_offset) || die "remote rebase start is ambiguous"
-        new_from_hash=$(result_field "$probe" from_prefix_sha256) \
-          || die "remote rebase start hash is ambiguous"
-        new_to=$(result_field "$probe" to_offset) || die "remote rebase end is ambiguous"
-        new_hash=$(result_field "$probe" to_prefix_sha256) \
-          || die "remote rebase end hash is ambiguous"
-        new_bytes=$(result_field "$probe" payload_bytes) \
-          || die "remote rebase payload size is ambiguous"
-        old_bytes=$(result_field "$REBASE_DELTA" payload_bytes) \
-          || die "ingested payload size is ambiguous"
-        case "$new_to$new_bytes$old_bytes" in *[!0-9]*) die "rebase evidence has an invalid size" ;; esac
-        [ "$new_from" = "$REBASE_FROM" ] && [ "$new_from_hash" = "$REBASE_FROM_HASH" ] \
-          && [ "$new_to" -lt "$CURSOR_OFFSET" ] && [ "$new_bytes" -le "$old_bytes" ] \
-          && [ "$new_to" -eq $((REBASE_FROM + new_bytes)) ] \
-          || die "remote rebase result is outside the last ingested delta"
-        blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$REBASE_DELTA")
-        case "$blank" in ''|*[!0-9]*) die "ingested delta has no payload boundary" ;; esac
-        old_payload="$tmp/ingested-payload"
-        tail -n "+$((blank + 1))" "$REBASE_DELTA" > "$old_payload" \
-          || die "cannot read ingested tail"
-        blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$probe")
-        case "$blank" in ''|*[!0-9]*) die "remote probe has no payload boundary" ;; esac
-        new_payload="$tmp/remote-payload"
-        tail -n "+$((blank + 1))" "$probe" > "$new_payload" \
-          || die "cannot read remote tail"
-        [ "$(LC_ALL=C wc -c < "$new_payload" | tr -d ' ')" = "$new_bytes" ] \
-          || die "remote probe payload size changed"
-        head -c "$new_bytes" "$old_payload" | cmp -s - "$new_payload" \
-          || die "retained remote tail differs from the ingested bytes"
-        ;;
-      *) die "remote rebase probe failed (exit $rc)" ;;
-    esac
+    [ "$rc" -eq 0 ] \
+      || die "retained remote tail differs or could not be verified (exit $rc): $(head -n 1 "$tmp/remote-error")"
+    schema=$(result_field "$probe" schema) || die "remote rebase proof has no schema"
+    verified_size=$(result_field "$probe" remote_bytes) \
+      || die "remote rebase proof has no source size"
+    new_to=$(result_field "$probe" offset) || die "remote rebase proof has no cursor"
+    new_hash=$(result_field "$probe" prefix_sha256) \
+      || die "remote rebase proof has no cursor hash"
+    complete_bytes=$(LC_ALL=C od -An -v -tu1 "$retained_payload" | awk '
+      { for (i = 1; i <= NF; i++) { bytes++; if ($i == 10) complete=bytes } }
+      END { print complete + 0 }
+    ')
+    [ "$schema" = fm-remote-rebase-verification.v1 ] \
+      && [ "$verified_size" = "$remote_size" ] \
+      && [ "$new_to" = "$((REBASE_FROM + complete_bytes))" ] \
+      && [ "$new_to" -lt "$CURSOR_OFFSET" ] \
+      || die "remote rebase proof does not match the retained ingested tail"
+    case "$new_hash" in *[!A-Fa-f0-9]*|'') die "remote rebase proof has an invalid cursor hash" ;; esac
+    [ "${#new_hash}" -eq 64 ] || die "remote rebase proof has an invalid cursor hash"
     backup=$(umask 077; mktemp "$CURSOR_DIR/$id.rebase-prior.XXXXXX") \
       || die "cannot preserve prior cursor"
     cp -P "$cursor" "$backup" || die "cannot preserve prior cursor"
@@ -548,13 +549,19 @@ cmd_rebase() {  # <id> --expect-offset <offset>
       fi
       die "registration returned failure after a source appeared; rebased cursor retained and prior cursor backed up at $backup"
     fi
+    line="resolved [key=remote-reply-continuity-$id] [at=$(date +%s)]: verified retained remote reply tail and registered source at offset $new_to"
+    append_status_once "$status_file" "$line" \
+      || die "rebase succeeded but could not publish its resolution"
     fm_lock_release "$REBASE_LIFECYCLE_LOCK" || die "cannot release remote reply lifecycle lock"
     trap 'rm -rf -- "$REBASE_TMP"' EXIT
     "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$sid" >/dev/null \
       || die "rebased cursor and registered source, but listener is not confirmed; run bin/fm-procevent.sh ensure-listening $sid"
-    line="resolved [key=remote-reply-continuity-$id] [at=$(date +%s)]: verified retained remote reply tail and re-armed at offset $new_to"
-    append_status_once "$status_file" "$line" \
-      || die "rebase succeeded but could not publish its resolution"
+    # The test seam holds this command after the launch while a second break is
+    # captured, pinning the durable order of resolution and renewed blockage.
+    if [ "${FM_TEST_SEAM:-0}" = 1 ] && [ -n "${FM_TEST_REBASE_AFTER_ENSURE_HOOK:-}" ]; then
+      "$FM_TEST_REBASE_AFTER_ENSURE_HOOK" "$sid" \
+        || die "rebase test hook failed"
+    fi
     printf 'rebased: %s offset=%s prior-cursor=%s\n' "$id" "$new_to" "$backup"
   )
 }
