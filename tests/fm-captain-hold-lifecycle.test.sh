@@ -1007,8 +1007,8 @@ EOF
   grep -E "^captain-held \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: operator review pending$" \
     "$home/state/$id.status" >/dev/null \
     || fail "hold did not declare the hold on the task's status log"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$id.status")
   bash -c '. "$1"; status_is_captain_held "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$last" \
     || fail "a held lane's last status line does not classify as captain-held: $last"
@@ -1029,8 +1029,8 @@ EOF
   grep -E "^resolved \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: captain call released by fm-captain-hold$" \
     "$home/state/$id.status" >/dev/null \
     || fail "release did not retract the status-log declaration"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$id.status")
   [ "$last" = "paused: waiting on the sample upstream release" ] \
     || fail "a settled mirror pair did not read through to the worker's own last event: $last"
   FM_STATE_OVERRIDE="$home/state" bash -c '
@@ -1056,8 +1056,8 @@ EOF
   grep -E "^resolved \\[key=captain-hold-$id-2\\]( \\[at=[0-9]+\\])?: captain call answered by fm-captain-hold$" \
     "$home/state/$id.status" >/dev/null \
     || fail "a closing answer did not retract the status-log declaration"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$id.status")
   [ "$last" = "paused: waiting on the sample upstream release" ] \
     || fail "a closing answer left the lane reading as the mirror instead of the worker: $last"
   run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
@@ -1090,8 +1090,8 @@ EOF
     || fail "could not hold a separate captain task for the transfer lane"
   run_captain "$home" complete "$lane" "$call" >/dev/null \
     || fail "could not transfer the lane's decision to its captain-held task"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
   [ "$(unstamp_line "$last")" = "captain-held [key=route]: tracked by $call" ] \
     || fail "complete did not leave its transfer as the lane's last line: $last"
   printf 'Take route north.\n' > "$home/transfer.txt"
@@ -1106,8 +1106,8 @@ EOF
   [ "$(grep -cE "^resolved \\[key=captain-hold-$lane-1\\]( \\[at=[0-9]+\\])?: captain call answered by fm-captain-hold$" "$home/state/$lane.status")" = 1 ] \
     || fail "settlement did not retract the hold mirror under the transfer exactly once: $(cat "$home/state/$lane.status")"
   for reader in last_status_line last_worker_status_line; do
-    last=$(bash -c '. "$1"; "$3" "$2"' _ \
-      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status" "$reader")
+    last=$(bash -c '. "$1"; . "$2"; "$4" "$3"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status" "$reader")
     [ "$last" = "needs-decision [key=route]: choose route north or route south" ] \
       || fail "$reader did not read past the settled transfer to the answered decision: $last"
   done
@@ -1130,15 +1130,15 @@ EOF
     || fail "could not transfer the inventory lane's decisions"
   run_captain "$home" answer sample-route-choice --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the route call"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
   bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
     || fail "settling one call retracted a transfer that still names an open call: $last"
   printf 'Keep sample access restricted.\n' > "$home/access.txt"
   run_captain "$home" answer sample-access-choice --decision-file "$home/access.txt" >/dev/null \
     || fail "answer could not close the access call"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
   [ "$last" = "needs-decision [key=access]: choose open or restricted sample access" ] \
     || fail "settling the last named call did not read past the lane's transfers: $last"
 
@@ -1160,14 +1160,14 @@ EOF
     || fail "a hold over a standing transfer duplicated its declaration"
   run_captain "$home" answer sample-scope-choice --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the scope call"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
   bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
     || fail "settling another call stripped the lane's own standing hold: $last"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the gated lane"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  last=$(bash -c '. "$1"; . "$2"; last_status_line "$3"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$lane.status")
   [ "$last" = "needs-decision [key=scope]: choose the sample scope" ] \
     || fail "settling the lane's own call left its transfer standing: $last"
 
@@ -1247,8 +1247,8 @@ test_settlement_retracts_a_buried_hold_mirror() {
       || fail "the $how answer retry was not idempotent"
     [ "$(grep -cE "^resolved \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: captain call $how by fm-captain-hold$" "$home/state/$id.status")" = 1 ] \
       || fail "the $how settlement did not retract the buried mirror exactly once: $(cat "$home/state/$id.status")"
-    wait=$(bash -c '. "$1"; status_declared_wait_line "$2"' _ \
-      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+    wait=$(bash -c '. "$1"; . "$2"; status_declared_wait_line "$3"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-hold-status-lib.sh" "$home/state/$id.status")
     [ "$wait" = "paused: waiting on the sample upstream" ] \
       || fail "the $how settlement left the pause hidden under the buried mirror: '$wait'"
   done

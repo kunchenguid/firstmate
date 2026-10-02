@@ -185,6 +185,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # classification predicates have exactly one definition.
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_DAEMON_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$FM_DAEMON_DIR/fm-hold-status-lib.sh"
 # The away-posture record owner: while state/.afk-contract exists an item held
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh

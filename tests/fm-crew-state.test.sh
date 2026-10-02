@@ -47,6 +47,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-classify-lib.sh"
+. "$ROOT/bin/fm-hold-status-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-pr-lib.sh"
 

@@ -125,7 +125,7 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
+#   3. Reconcile the status log through fm-hold-status-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
 #      decisions. If it says needs-decision/blocked but
@@ -173,6 +173,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$SCRIPT_DIR/fm-hold-status-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
