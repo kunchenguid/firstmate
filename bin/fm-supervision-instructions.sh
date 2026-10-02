@@ -24,12 +24,13 @@ READ_ONLY=0
 AFK=0
 AFK_MODE=away
 X_MODE=0
+DISCORD_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--discord-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
@@ -73,6 +74,11 @@ while [ "$#" -gt 0 ]; do
     --x-mode)
       [ "$#" -gt 1 ] || { echo "error: --x-mode requires 0 or 1" >&2; exit 2; }
       X_MODE=$(bool_value "$2")
+      shift 2
+      ;;
+    --discord-mode)
+      [ "$#" -gt 1 ] || { echo "error: --discord-mode requires 0 or 1" >&2; exit 2; }
+      DISCORD_MODE=$(bool_value "$2")
       shift 2
       ;;
     --queue-pending)
@@ -125,6 +131,7 @@ pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
 omp_turnend_ext="$FM_ROOT/.omp/extensions/fm-primary-turnend-guard.ts"
 x_mode_env="$CONFIG/x-mode.env"
+discord_mode_env="$CONFIG/discord-mode.env"
 
 shell_quote() {
   printf "'"
@@ -133,9 +140,13 @@ shell_quote() {
 }
 
 x_mode_env_sh=$(shell_quote "$x_mode_env")
+discord_mode_env_sh=$(shell_quote "$discord_mode_env")
 
 if [ "$X_MODE" -eq 0 ] && [ -f "$x_mode_env" ]; then
   X_MODE=1
+fi
+if [ "$DISCORD_MODE" -eq 0 ] && [ -f "$discord_mode_env" ]; then
+  DISCORD_MODE=1
 fi
 
 render_snippet() {  # [snippet]
@@ -180,6 +191,9 @@ repair_line() {
   fi
   if [ "$X_MODE" -eq 1 ]; then
     prefix="${prefix}source ${x_mode_env_sh} first, then "
+  fi
+  if [ "$DISCORD_MODE" -eq 1 ]; then
+    prefix="${prefix}source ${discord_mode_env_sh} first, then "
   fi
 
   case "$HARNESS" in
@@ -267,6 +281,9 @@ if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 else
   printf '%s\n' '- X mode: inactive; use the default watcher cadence.'
+fi
+if [ "$DISCORD_MODE" -eq 1 ]; then
+  printf '%s%s%s\n' '- Discord mode: active; source ' "$discord_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'
 fi
 if [ -n "$HOST_SNIPPET" ]; then
   printf '%s\n' '- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block).'

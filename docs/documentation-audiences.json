@@ -325,6 +325,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/discord-integration.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },

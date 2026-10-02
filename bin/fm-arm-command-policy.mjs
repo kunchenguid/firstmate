@@ -867,10 +867,17 @@ function analyzeProgram(command, context, depth = 0) {
   return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
+// Generated fast-cadence env paths an agent may source or test before
+// arming a watcher: the Relay cadence file and the native Discord one.
 function xModePathAllowed(value, home) {
-  if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
+  for (const name of ["config/x-mode.env", "./config/x-mode.env",
+    "config/discord-mode.env", "./config/discord-mode.env"]) {
+    if (value === name) return true;
+  }
   if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  const norm = path.normalize(value);
+  return norm === path.join(path.normalize(home), "config/x-mode.env")
+    || norm === path.join(path.normalize(home), "config/discord-mode.env");
 }
 
 function ordinaryWordsOnly(tokens) {

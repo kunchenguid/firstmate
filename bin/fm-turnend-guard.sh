@@ -225,12 +225,14 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode discord_mode reason rule
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  discord_mode=0
+  [ -f "$CONFIG/discord-mode.env" ] && discord_mode=1
+  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --discord-mode "$discord_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {

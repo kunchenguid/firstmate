@@ -29,16 +29,17 @@ fm_sup_stat_mtime() {
 #                         with the state/<id>.check-trust binding that
 #                         bin/fm-check-register.sh writes. Task PR polls carry no
 #                         such binding and are torn down with their task, and the
-#                         relay shim keeps its own trust path, so neither counts
-#                         here. Presence of the binding is the whole test: whether
-#                         those bytes are still the registered ones is the check
-#                         sweep's call at execution time, and a home whose check
-#                         no longer validates needs the watcher precisely so the
-#                         sweep can report the rejection instead of going quiet.
+#                         relay and Discord shims keep their own trust paths,
+#                         so none counts here. Presence of the binding is the
+#                         whole test: whether those bytes are still the
+#                         registered ones is the check sweep's call at execution
+#                         time, and a home whose check no longer validates needs
+#                         the watcher precisely so the sweep can report the
+#                         rejection instead of going quiet.
 #   FM_SUP_NEEDED         true/false - in-flight work, an X-mode relay poll, a
-#                         registered event source (a source is a wait on an
-#                         external process, not a task, so it has no metadata),
-#                         or a registered custom check
+#                         native Discord poll, a registered event source (a
+#                         source is a wait on an external process, not a task,
+#                         so it has no metadata), or a registered custom check
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
@@ -69,11 +70,15 @@ fm_supervision_status() {
     if [ "$id" = x-watch ]; then
       continue
     fi
+    if [ "$id" = discord-watch ]; then
+      continue
+    fi
     [ -e "$state/$id.check-trust" ] || continue
     FM_SUP_CHECKS=$((FM_SUP_CHECKS + 1))
   done
   if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] \
     || [ -f "$state/x-watch.check.sh" ] \
+    || [ -f "$state/discord-watch.check.sh" ] \
     || [ "$FM_SUP_SOURCES" -gt 0 ] \
     || [ "$FM_SUP_CHECKS" -gt 0 ]; then
     FM_SUP_NEEDED=true

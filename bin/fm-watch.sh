@@ -208,6 +208,8 @@ WATCH_HOME_EXISTED=0
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-discord-lib.sh
+. "$SCRIPT_DIR/fm-discord-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
@@ -2749,6 +2751,15 @@ while :; do
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
+          out=$FM_CHECK_RESULT
+        else
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+      elif [ "$(basename "$c")" = discord-watch.check.sh ]; then
+        if discord_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
+          && [ -f "$FM_ROOT/bin/fm-discord-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-discord-poll.sh" ]; then
+          FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-discord-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
           rejected_checks="$rejected_checks $c"

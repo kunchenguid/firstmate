@@ -804,6 +804,8 @@ AFK_PRESENT=0
 AFK_MODE=$(fm_afk_mode "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
+DISCORD_MODE_PRESENT=0
+[ -f "$CONFIG/discord-mode.env" ] && DISCORD_MODE_PRESENT=1
 
 if [ "$PRIMARY_HARNESS" = pi ] || [ "$PRIMARY_HARNESS" = pi-signed ]; then
   PI_EXT="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
@@ -843,7 +845,8 @@ fi
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
   --afk-mode "$AFK_MODE" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --discord-mode "$DISCORD_MODE_PRESENT"
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -1041,10 +1044,10 @@ load /afk and ensure the daemon is running, because the daemon owns watcher
 supervision.
 
 EOF
-elif [ -f "$CONFIG/x-mode.env" ]; then
+elif [ -f "$CONFIG/x-mode.env" ] || [ -f "$CONFIG/discord-mode.env" ]; then
   cat <<EOF
 Follow the supervision operating instructions block above for harness '$PRIMARY_HARNESS'.
-X mode is active, so the emitted block's cadence instruction applies.
+Fast-cadence mode is active (Relay and/or native Discord), so the emitted block's cadence instruction applies.
 This script never starts supervision itself.
 
 EOF

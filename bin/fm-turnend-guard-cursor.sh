@@ -298,6 +298,9 @@ fi
 # X mode cadence: an opted-in home polls Relay at its generated cadence.
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# Discord mode cadence: an opted-in home polls Discord at its generated cadence.
+# shellcheck source=/dev/null
+[ -f "$CONFIG/discord-mode.env" ] && . "$CONFIG/discord-mode.env"
 
 # --- the park ----------------------------------------------------------------
 # The arm runs as a tracked child of THIS hook process, which stays alive and

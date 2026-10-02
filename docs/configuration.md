@@ -1741,6 +1741,34 @@ The session-start digest separately prints a "Public commitments" subsection fro
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, failed terminal outcomes, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
+## Discord native bot (.env)
+
+A directly-connected Discord bot channel with no myfirstmate.io involvement: all traffic goes to Discord's own APIs.
+It is off unless the home's gitignored `.env` contains a non-empty `DISCORD_BOT_TOKEN`.
+`docs/discord-integration.md` owns the operator setup, Portal steps, and wake-consumer contract; this section owns only the key schema and activation.
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `DISCORD_BOT_TOKEN` | yes | Bot token; activation opt-in, sole long-lived secret. |
+| `DISCORD_CLIENT_ID` | setup | Application id for OAuth install URL and slash-command registration. |
+| `DISCORD_CLIENT_SECRET` | setup | Used once per OAuth code exchange; never persisted. |
+| `DISCORD_PUBLIC_KEY` | interactions | Application public key for Ed25519 interaction verification. |
+| `DISCORD_GUILD_ID` | inbound | Authorized server; unknown guilds refuse closed. |
+| `DISCORD_OWNER_USER_ID` | inbound | The single authorized user; unknown senders refuse closed. |
+| `DISCORD_REDIRECT_URI` | setup | OAuth redirect URI, must match the Portal entry. |
+| `DISCORD_CHANNEL_ID` | no | REST fallback poll channel for the watcher shim. |
+| `DISCORD_CHANNEL_IDS` | no | Optional comma-separated inbound channel allowlist. |
+| `DISCORD_SEND_CHANNEL_IDS` | no | Optional comma-separated outbound channel allowlist. |
+| `DISCORD_MESSAGE_CONTENT` | no | Isolated privileged message-content intent opt-in (`1` to enable). |
+| `DISCORD_BOT_USER_ID` | no | Explicit bot user id override; `verify` persists the resolved one. |
+| `DISCORD_API_BASE` | no | REST base override, default `https://discord.com/api/v10`. |
+| `DISCORD_ENV_FILE` | no | Alternate `.env`-style file for direct client invocations. |
+
+Environment wins over the file for every key; bootstrap activation keys off `.env` presence so watcher artifacts stay explicit local opt-in state.
+The locked session-start bootstrap step turns the token into `state/discord-watch.check.sh` (byte-static shim for `bin/fm-discord-poll.sh`) and `config/discord-mode.env` (`FM_CHECK_INTERVAL=30`); removing the token removes both.
+Non-secret binding (guild name, bot user id, owner id, connected flag) lives in `config/discord.json` (mode 600), written only by `verify` after it proves the bot token can read the guild.
+Inbound routing is owner-only and fails closed on unknown sender, guild, channel, or missing owner/guild configuration; polling refuses until `verify` has resolved the bot user id.
+
 ## Trusted external process-event adapters (config/extensions.d)
 
 A home can explicitly enable a trusted external `process-event-adapter/1` package without adding package code to Firstmate.

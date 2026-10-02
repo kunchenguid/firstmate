@@ -324,9 +324,13 @@ trap 'handle_autoarm_signal TERM' TERM
 trap 'handle_autoarm_signal INT' INT
 
 # X mode cadence: source the generated config so an X instance polls at its
-# 30s cadence (fm-bootstrap.sh x_mode_setup contract).
+# 30s cadence (fm-bootstrap.sh x_mode_setup contract). Discord mode cadence:
+# source the generated config so a Discord instance polls at its 30s cadence
+# (fm-bootstrap.sh discord_mode_setup contract, owned by bin/fm-discord-lib.sh).
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+# shellcheck source=/dev/null
+[ -f "$CONFIG/discord-mode.env" ] && . "$CONFIG/discord-mode.env"
 
 # --- foreground the real arm wrapper ------------------------------------------
 # The arm is a tracked child this hook waits on, never a fire-and-forget shell

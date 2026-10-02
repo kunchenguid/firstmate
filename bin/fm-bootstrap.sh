@@ -197,6 +197,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-discord-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-discord-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
@@ -1603,6 +1605,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # discord_mode_setup writes local native-Discord artifacts only the same
+  # way: the shim and cadence for bin/fm-discord-poll.sh, gated on the bot
+  # token, never leaving the machine.
+  local_phase && discord_mode_setup
   # Adopt existing durable contribution links without making a network call.
   # Detection-only startup must never publish a check registration.
   if local_phase && command -v jq >/dev/null 2>&1 \
