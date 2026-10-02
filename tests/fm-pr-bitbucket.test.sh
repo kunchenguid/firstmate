@@ -46,8 +46,20 @@ case "$1 $2 $3" in
   "bb pull-requests get")
     statuses=$FM_TEST_TWG_STATUSES
     [ -n "$statuses" ] || statuses='[{"state":"SUCCESSFUL"}]'
+    state=${FM_TEST_TWG_STATE:-OPEN}
+    # A merge that has been accepted reads back as FM_TEST_TWG_STATE_AFTER_MERGE.
+    if [ -n "${FM_TEST_TWG_STATE_AFTER_MERGE:-}" ] && grep -q ' merge ' "$FM_TEST_TWG_LOG"; then
+      state=$FM_TEST_TWG_STATE_AFTER_MERGE
+    fi
+    if [ -n "${FM_TEST_TWG_OMIT:-}" ]; then
+      jq -n --arg state "$state" --arg head "${FM_TEST_TWG_HEAD:-abc123def456}" \
+        --arg omit "$FM_TEST_TWG_OMIT" --argjson tasks "${FM_TEST_TWG_TASKS:-0}" \
+        --argjson statuses "$statuses" \
+        '{state: $state, source: {commit: {hash: $head}}, task_count: $tasks, statuses: $statuses} | del(.[$omit])'
+      exit 0
+    fi
     jq -n \
-      --arg state "${FM_TEST_TWG_STATE:-OPEN}" \
+      --arg state "$state" \
       --arg head "${FM_TEST_TWG_HEAD:-abc123def456}" \
       --argjson tasks "${FM_TEST_TWG_TASKS:-0}" \
       --argjson statuses "$statuses" \
@@ -252,7 +264,7 @@ EOF
 }
 
 test_bitbucket_verify_mergeable_refusals() {
-  local dir url rc out
+  local dir url rc out field
   dir=$(make_case bitbucket-verify-refusals)
   url=https://bitbucket.org/ws/repo/pull-requests/9
   write_task_meta "$dir"
@@ -278,6 +290,16 @@ test_bitbucket_verify_mergeable_refusals() {
   set -e
   [ "$rc" -ne 0 ] || fail "merge wrapper merged a pull request with a failing build status"
   grep -qF 'not SUCCESSFUL' "$dir/build.err" || fail "failing-build refusal did not name the status"
+
+  for field in task_count statuses; do
+    set +e
+    FM_TEST_TWG_OMIT=$field run_merge_entry "$dir" task-a "$url" >/dev/null 2> "$dir/omit.err"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "merge wrapper merged a pull request missing $field"
+    grep -qF "the $field field is missing" "$dir/omit.err" \
+      || fail "missing-$field refusal did not name the field"
+  done
 
   # A pull request with no reported build status at all is not thereby
   # unmergeable, unlike one with a failing status.
@@ -310,6 +332,23 @@ test_bitbucket_merge_confirms_and_binds_extra_flags() {
   [ "$rc" -eq 0 ] || fail "an accepted merge that reads back as still open should not fail the run: $(cat "$dir/unconfirmed.out")"
   grep -qF 'landed state could not be confirmed' "$dir/unconfirmed.out" \
     && fail "an accepted merge that reads back as open should be silent about confirmation, not report an unreadable state"
+
+  # A merge that reads back as MERGED is the confirmed path: the landed
+  # outcome is recorded and nothing is reported as unconfirmed.
+  set +e
+  : > "$dir/twg.log"
+  FM_TEST_TWG_STATE_AFTER_MERGE=MERGED run_merge_entry "$dir" task-a "$url" >"$dir/confirmed.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a confirmed Bitbucket merge failed: $(cat "$dir/confirmed.out")"
+  [ "$(grep -c 'bb pull-requests get' "$dir/twg.log")" -ge 2 ] \
+    || fail "merge wrapper did not read the pull request back after merging"
+  grep -qF 'landed state could not be confirmed' "$dir/confirmed.out" \
+    && fail "a confirmed merge was reported as unconfirmed"
+  grep -qF 'could not record the outcome' "$dir/confirmed.out" \
+    && fail "a confirmed merge failed to record its landed outcome"
+  grep -rqF "merge landed: task-a $url" "$dir/home/state" \
+    || fail "a confirmed Bitbucket merge did not record the landed outcome"
 
   # --allow-red and --allow-missing have no matching per-check waiver here and
   # must be refused rather than silently ignored.

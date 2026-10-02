@@ -632,13 +632,16 @@ bitbucket_verify_mergeable() {
   # One named field per line, mirroring gitlab_verify_mergeable above. build_status
   # is "failing" when any reported commit status for the pull request is not
   # SUCCESSFUL, and "clean" otherwise, including when none has reported at all:
-  # a repository with no configured pipelines is not thereby unmergeable.
+  # a repository with no configured pipelines is not thereby unmergeable. A
+  # response that omits task_count or statuses is "unverified", not a pass.
   if ! fields=$(printf '%s' "$json" | jq -r '
       if type == "object" then
         "state=" + ((.state // "") | tostring),
         "head=" + ((.source.commit.hash // "") | tostring),
-        "tasks=" + ((.task_count // 0) | tostring),
-        "build_status=" + (if ([(.statuses // [])[] | select((.state // "") != "SUCCESSFUL")] | length) > 0 then "failing" else "clean" end)
+        "tasks=" + (if (.task_count | type) == "number" then (.task_count | tostring) else "unverified" end),
+        "build_status=" + (if (.statuses | type) != "array" then "unverified"
+          elif ([.statuses[] | select((.state // "") != "SUCCESSFUL")] | length) > 0 then "failing"
+          else "clean" end)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -670,12 +673,20 @@ FIELDS
   [ "$state" = OPEN ] \
     || refusals="$refusals  - state is \"${state:-unreadable}\", not OPEN
 "
-  [ "$task_count" = 0 ] \
-    || refusals="$refusals  - $task_count open task(s) remain on the pull request
-"
-  [ "$build_status" = clean ] \
-    || refusals="$refusals  - a reported build status is not SUCCESSFUL
-"
+  case "$task_count" in
+    0) ;;
+    unverified) refusals="$refusals  - the task_count field is missing from the pull request, so open tasks are unverified
+" ;;
+    *) refusals="$refusals  - $task_count open task(s) remain on the pull request
+" ;;
+  esac
+  case "$build_status" in
+    clean) ;;
+    unverified) refusals="$refusals  - the statuses field is missing from the pull request, so the build status is unverified
+" ;;
+    *) refusals="$refusals  - a reported build status is not SUCCESSFUL
+" ;;
+  esac
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
