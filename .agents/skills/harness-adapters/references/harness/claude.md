@@ -45,6 +45,11 @@ Inspect the pane to identify which dialog is on screen, and report it rather tha
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
+## Launch brief submission
+
+Claude takes the launch brief as a positional argument, but a multi-line brief is not always submitted by that alone: it was observed live sitting in the composer awaiting Enter while the pane read as a busy worker.
+`claude_confirm_brief_submitted` in `../../../../../bin/fm-spawn.sh` therefore polls the shared composer classifier after launch, presses Enter while the brief is pending, and fails the spawn if it stays pending; its header comment owns the readiness window and the `unknown` pass-through.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.

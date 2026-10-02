@@ -52,6 +52,12 @@ export FM_GATE_REFUSE_BYPASS=1
 # leaked harness pin alone stays inert outside a suite.
 export FM_TEST_SEAM=1
 
+# Fake tmux panes rarely draw a classifiable Claude composer, so a claude spawn's
+# brief-submission gate would sleep through its whole readiness window on every
+# spawn in the suite. Poll without sleeping; fm_live_gate restores the real
+# interval for a live run, where Claude genuinely needs time to boot.
+export FM_CLAUDE_SUBMIT_SLEEP=0
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
@@ -388,6 +394,7 @@ fm_live_gate() {
   done
 
   export DISABLE_AUTOUPDATER=1
+  unset FM_CLAUDE_SUBMIT_SLEEP
   return 0
 }
 
