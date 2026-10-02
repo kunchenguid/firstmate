@@ -387,8 +387,9 @@ done
   || fail "OpenCode did not hold the first watcher delivery for the overlap regression"
 
 first_successor_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
-[ -n "$first_successor_pid" ] && kill -0 "$first_successor_pid" 2>/dev/null \
-  || fail "OpenCode first actionable wake did not leave a live successor"
+if [ -z "$first_successor_pid" ] || ! kill -0 "$first_successor_pid" 2>/dev/null; then
+  fail "OpenCode first actionable wake did not leave a live successor"
+fi
 
 printf 'done: opencode live e2e queued wake\n' >> "$HOME_DIR/state/opencode-e2e.status"
 i=0
@@ -401,10 +402,11 @@ while [ "$i" -lt 120 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ "${actionable_count:-0}" -ge 2 ] && [ -n "${queued_successor_pid:-}" ] \
-  && [ "$queued_successor_pid" != "$first_successor_pid" ] \
-  && kill -0 "$queued_successor_pid" 2>/dev/null \
-  || fail "OpenCode did not queue the second wake behind blocked delivery with a live successor"
+if [ "${actionable_count:-0}" -lt 2 ] || [ -z "${queued_successor_pid:-}" ] \
+  || [ "$queued_successor_pid" = "$first_successor_pid" ] \
+  || ! kill -0 "$queued_successor_pid" 2>/dev/null; then
+  fail "OpenCode did not queue the second wake behind blocked delivery with a live successor"
+fi
 
 kill -HUP "$queued_successor_pid" 2>/dev/null \
   || fail "OpenCode queued-wake successor could not be failed for the overlap regression"
@@ -416,9 +418,10 @@ while [ "$i" -lt 120 ]; do
   sleep 0.5
   i=$((i + 1))
 done
-[ -n "${replacement_pid:-}" ] && [ "$replacement_pid" != "$queued_successor_pid" ] \
-  && kill -0 "$replacement_pid" 2>/dev/null \
-  || fail "OpenCode did not replace a failed successor while wake delivery remained blocked"
+if [ -z "${replacement_pid:-}" ] || [ "$replacement_pid" = "$queued_successor_pid" ] \
+  || ! kill -0 "$replacement_pid" 2>/dev/null; then
+  fail "OpenCode did not replace a failed successor while wake delivery remained blocked"
+fi
 [ ! -f "$HOME_DIR/state/opencode-model-handled-count" ] \
   || fail "OpenCode released queued delivery before the overlap replacement was verified"
 
@@ -432,8 +435,9 @@ printf 'done: opencode live e2e next idle wake\n' >> "$HOME_DIR/state/opencode-e
 wait_for_handled_count 3 \
   || fail "OpenCode durable successor did not supervise the next idle wake"
 final_watcher_pid=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || true)
-[ -n "$final_watcher_pid" ] && kill -0 "$final_watcher_pid" 2>/dev/null \
-  || fail "OpenCode next idle wake did not leave a durable successor"
+if [ -z "$final_watcher_pid" ] || ! kill -0 "$final_watcher_pid" 2>/dev/null; then
+  fail "OpenCode next idle wake did not leave a durable successor"
+fi
 
 pane=$(capture)
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
