@@ -128,6 +128,7 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 
 An inventory entry absent from the active home's backlog is still durable when a local secondmate home registered in `data/secondmates.md` holds that exact task id for the captain or records its captain answer, because a call handed to a secondmate stays in that authoritative home.
 A registered home is consulted only while it is still that mate's seeded home: its `.fm-secondmate-home` marker must be a regular file, not a symlink, naming the registered id, the same marker `bin/fm-backlog-handoff.sh` demands of a handoff destination.
+When several registered homes carry that id, the first row that also passes the origin check is the one accepted, so a same-named call an earlier registered home holds for another origin cannot hide the one handed off for this origin.
 `complete` applies the same check and names the registered secondmate beside each such entry in its completion line.
 A remote route has no local backlog to read and is never consulted, so an entry held nowhere readable still refuses.
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
@@ -531,7 +532,8 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
 - A call held in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog, and once answered there it still passes `verify`.
   The same holds for a held call that `bin/fm-backlog-handoff.sh` moved out of the main backlog into a home seeded by `bin/fm-home-seed.sh`.
-  An unregistered home, a remote route, a registered home whose marker is missing, symlinked, or names another id, an entry held nowhere, and a secondmate task closed without a recorded answer still fail `verify`.
+  It also holds when an earlier registered home holds the same task id for another origin.
+  An unregistered home, a remote route, a registered home whose marker is missing, symlinked, or names another id, an entry held nowhere or only for another origin, and a secondmate task closed without a recorded answer still fail `verify`.
 
 ### Answers, stamps, and deferral
 
