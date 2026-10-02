@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Firstmate watcher.
+# Remote fleet-seat serving has a 20s whole-pass deadline plus a 2s cleanup
+# grace. Failed-host lines are retained in state/.watch-triage.log.
 # Classifies supervision wakes in bash. In normal mode it absorbs benign wakes
 # and keeps blocking; it queues and exits only for actionable wakes.
 # The no-verb signal and stale path is absorb-only-on-positive-evidence: a wake
@@ -2364,6 +2366,18 @@ event_wait_or_sleep() {
   esac
 }
 
+fleet_seats_serve() {
+  local out line rc=0
+  out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+    fm_exec_timed 20 2 "$SCRIPT_DIR/fm-fleet-seats.sh" serve-remotes 2>&1) || rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      unreachable\ *) triage_log "fleet seat serving: ${line:0:512}" ;;
+    esac
+  done <<< "$out"
+  [ "$rc" -eq 0 ] || triage_log "fleet seat serving unavailable (rc=$rc)"
+}
+
 # --- Main entry: the runtime below runs only when this file is executed as a
 # script. When sourced (unit tests loading the functions above), return here
 # before acquiring the singleton lock or entering the blocking loop.
@@ -2730,6 +2744,23 @@ while :; do
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
+  fi
+
+  # Fleet seat maintenance, then policy and grants for remote secondmates
+  # (bin/fm-fleet-seats.sh owns the contract). Mechanical and silent, at most
+  # every 30 seconds: a bounded reconcile pass first tries to finish seats whose
+  # launching process ended - each one inside its own task's lifecycle episode,
+  # skipped while that episode is busy, never killing anything - and then only
+  # the fleet root serves inside one whole-pass deadline.
+  if { [ -e "$CONFIG/fleet-seats" ] || [ -d "$STATE/fleet-seats" ]; } \
+    && [ "$(age_of "$STATE/.fleet-seats-served")" -ge 30 ]; then
+    touch "$STATE/.fleet-seats-served" 2>/dev/null || true
+    if [ -d "$STATE/fleet-seats/holders" ] \
+      && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-fleet-seats.sh" reconcile --limit 8 >/dev/null 2>&1; then
+      triage_log "fleet seat reconciliation unavailable"
+    fi
+    fleet_seats_serve
   fi
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).

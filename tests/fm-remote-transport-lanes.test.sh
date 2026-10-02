@@ -56,6 +56,8 @@ cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" \
   "$ROOT/bin/fm-composer-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" \
   "$ROOT/bin/fm-classify-lib.sh" "$ROOT/bin/fm-timeout-lib.sh" \
   "$ROOT/bin/fm-ff-lib.sh" "$ROOT/bin/fm-secondmate-registry-lib.sh" \
+  "$ROOT/bin/fm-secondmate-liveness-lib.sh" "$ROOT/bin/fm-remote-readiness-lib.sh" \
+  "$ROOT/bin/fm-control-lib.sh" \
   "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"

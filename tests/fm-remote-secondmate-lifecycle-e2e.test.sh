@@ -48,7 +48,7 @@ cleanup() {
     . "$ROOT/bin/fm-remote-job-lib.sh"
     fm_remote_job_stop_worker_tree "$worker_pid" || true
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup EXIT
 
@@ -150,11 +150,28 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  print join("\t", map { defined $_ ? $_ : "" } @args[0..2]);
+  my $op = "-";
+  for (my $i = 0; $i < @args; $i++) { $op = $args[$i + 1] if $args[$i] eq "--operation"; }
+  print join("\t", (map { defined $_ ? $_ : "" } @args[0..2]), $op);
 ' "$argv_b64")
-IFS=$'\t' read -r command_name _command_action command_rel <<EOF
+IFS=$'\t' read -r command_name _command_action command_rel seat_op <<EOF
 $command_fields
 EOF
+# Launch-response overrides must preserve the host's predecessor evidence.
+case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$_command_action" in
+  launch-*:fm-remote-secondmate-control.sh:disposition)
+    exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@" ;;
+esac
+# fake_seat_disposition <disposition> <startup> [actual]: an operation-bound host answer.
+fake_seat_disposition() {
+  local actual=null route=null
+  if [ -n "${3:-}" ]; then
+    actual="\"$3\""
+    route='{"placement":"remote","backend":"herdr","target":"fm-remote:w1:p2","home":null,"host":null,"remote_root":null,"spawn_gen":null}'
+  fi
+  printf 'seat_disposition={"schema":"fm-remote-seat-operation.v2","task":"ios","operation":"%s","requested_generation":"%s","actual_generation":%s,"previous_generation":null,"disposition":"%s","startup_confirmed":%s,"old_stopped":false,"route":%s,"actual_model":null,"complete":true}\n' \
+    "$seat_op" "$seat_op" "$actual" "$1" "$2" "$route"
+}
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
   inherit-partial:fm-remote-inherit.sh:config/crew-harness) exit 255 ;;
   inherit-block:fm-remote-inherit.sh:data/captain-shared.md)
@@ -215,21 +232,52 @@ if [ "${FM_FAKE_SSH_MODE:-normal}" = doctor-fixable ] \
   exit 0
 fi
 case "${FM_FAKE_SSH_MODE:-normal}:$command_name:$command_rel" in
-  launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
+  state-dead:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = state ] || exit 93
+    printf 'dead\n'
+    exit 0
+    ;;
+  state-missing:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = state ] || exit 93
+    printf 'missing\n'
+    exit 0
+    ;;
+  launch-prelaunch-refusal:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    [ "$seat_op" = - ] || fake_seat_disposition prelaunch false >&2
+    printf 'relaunch_failure=prelaunch\n' >&2
+    exit 1
+    ;;
+  launch-missing-model:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
     printf 'schema=fm-remote-secondmate-control.v1\n'
-    printf 'backend=tmux\n'
-    printf 'target=firstmate:fm-ios\n'
+    printf 'backend=herdr\n'
+    printf 'target=fm-remote:w1:p2\n'
+    printf 'herdr_session=fm-remote\n'
     printf 'harness=codex\n'
+    [ "$seat_op" = - ] || fake_seat_disposition started true "$seat_op"
+    exit 0
+    ;;
+  launch-default-model:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=%s\n' "$FM_FAKE_ROUTE_TARGET"
+    printf 'herdr_session=fm-remote\n'
+    printf 'harness=codex\n'
+    printf 'model=default\n'
+    exit 0
+    ;;
+  launch-nonherdr-route:fm-remote-secondmate-control.sh:*)
+    [ "$_command_action" = launch ] || exit 93
+    route_out=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@") || exit $?
+    printf '%s\n' "$route_out" | sed 's/^backend=.*/backend=tmux/; s/^target=.*/target=firstmate:fm-ios/'
     exit 0
     ;;
   launch-default-session-route:fm-remote-secondmate-control.sh:*)
     [ "$_command_action" = launch ] || exit 93
-    printf 'schema=fm-remote-secondmate-control.v1\n'
-    printf 'backend=herdr\n'
-    printf 'target=default:w1:p2\n'
-    printf 'herdr_session=default\n'
-    printf 'harness=codex\n'
+    route_out=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@") || exit $?
+    printf '%s\n' "$route_out" | sed 's/^target=.*/target=default:w1:p2/; s/^herdr_session=.*/herdr_session=default/'
     exit 0
     ;;
   provision-block-fail:fm-remote-home-provision.sh:*)
@@ -829,6 +877,24 @@ EOF
 remote_env "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "mixed local and remote registry validation failed"
 pass "mixed local and remote routes validate without migration"
 
+printf 'wrong\n' > "$REMOTE_HOME/.fm-secondmate-home"
+if FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" launch ios codex pool-model-a - herdr \
+  > "$TMP_ROOT/launch-bad-home.out" 2>&1; then
+  fail "host control accepted an invalid secondmate home"
+fi
+assert_grep 'relaunch_failure=prelaunch' "$TMP_ROOT/launch-bad-home.out" \
+  "host home validation did not confirm prelaunch failure"
+printf 'ios\n' > "$REMOTE_HOME/.fm-secondmate-home"
+if FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" launch ios codex pool-model-a ultra herdr \
+  > "$TMP_ROOT/launch-bad-effort.out" 2>&1; then
+  fail "host control accepted unsupported native effort"
+fi
+assert_grep 'relaunch_failure=prelaunch' "$TMP_ROOT/launch-bad-effort.out" \
+  "native effort validation did not confirm prelaunch failure"
+pass "host launch validation confirms refusal before any agent starts"
+
 # Launch on the remote home's own configured backend. Parent metadata records
 # host placement separately from that backend and arms the reply source.
 printf 'pi\n' > "$PARENT/config/crew-harness"
@@ -843,7 +909,147 @@ launches_after_inherit=0
 [ "$launches_before_inherit" -eq "$launches_after_inherit" ] \
   || fail "remote spawn reached launch after ambiguous partial inheritance"
 assert_absent "$PARENT/state/ios.meta" "failed remote inheritance published launch metadata"
-out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
+printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]},{"name":"other","capacity":1,"models":["pool-model-b"]}]}\n' \
+  > "$PARENT/config/fleet-seats"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null \
+  || fail "remote seat policy could not be confirmed before launch"
+ios_seats() { remote_env "$ROOT/bin/fm-fleet-seats.sh" show ios; }
+ios_latest() {  # the counted incarnation, else the most recent terminal one
+  ios_seats | jq -r '(([.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | last)
+    // (.incarnations | last)) | .generation + " " + .lifecycle'
+}
+# The host is now pooled: a launch that does not come through the parent's
+# seat operation is refused before anything is touched.
+if remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh launch ios codex pool-model-a - herdr \
+  > "$TMP_ROOT/launch-unaccounted.out" 2>&1; then
+  fail "a pooled host accepted a supervisor launch with no parent seat operation"
+fi
+assert_grep "parent's seat operation" "$TMP_ROOT/launch-unaccounted.out" \
+  "the unaccounted host launch was not refused by name"
+if FM_FAKE_SSH_MODE=launch-prelaunch-refusal remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-prelaunch-refusal.out" 2>&1; then
+  fail "remote spawn accepted a confirmed prelaunch refusal"
+fi
+assert_grep 'relaunch_failure=prelaunch' "$TMP_ROOT/spawn-prelaunch-refusal.out" \
+  "the remote launch did not reach its confirmed prelaunch refusal"
+assert_absent "$PARENT/state/ios.meta" "confirmed prelaunch refusal published metadata"
+case "$(ios_latest)" in *" released") ;; *) fail "a token-scoped prelaunch refusal retained its reservation: $(ios_seats)" ;; esac
+if FM_FAKE_SSH_MODE=launch-missing-model remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-missing-model.out" 2>&1; then
+  fail "remote spawn accepted a route without a confirmed model"
+fi
+assert_grep 'did not confirm its model' "$TMP_ROOT/spawn-missing-model.out" \
+  "a route without a model was not refused before publication"
+assert_absent "$PARENT/state/ios.meta" "an unconfirmed model was published to the parent route"
+missing_model_gen=$(ios_latest)
+case "$missing_model_gen" in *" confirmed") ;; *) fail "a started launch without a confirmed model lost its seat: $(ios_seats)" ;; esac
+missing_model_gen=${missing_model_gen%% *}
+# The fixture's synthetic agent never ran on the host, so its death receipt
+# for that exact operation ends it.
+printf '{"schema":"fm-remote-seat-operation.v2","task":"ios","operation":"%s","requested_generation":"%s","actual_generation":"%s","previous_generation":null,"disposition":"dead-after-start","startup_confirmed":true,"old_stopped":false,"route":null,"actual_model":null,"complete":true}\n' \
+  "$missing_model_gen" "$missing_model_gen" "$missing_model_gen" > "$TMP_ROOT/missing-model-death.json"
+chmod 0600 "$TMP_ROOT/missing-model-death.json"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" reconcile-remote ios --generation "$missing_model_gen" \
+  --response-file "$TMP_ROOT/missing-model-death.json" >/dev/null \
+  || fail "the exact death receipt did not end the unconfirmed launch"
+cat > "$FAKEBIN/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do last=\$arg; done
+[ "\$last" != "$PARENT/state/ios.meta" ] || exit 1
+exec /bin/mv "\$@"
+SH
+chmod +x "$FAKEBIN/mv"
+if PATH="$FAKEBIN:$PATH" remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-publication-failure.out" 2>&1; then
+  fail "remote spawn reported success after parent publication failed"
+fi
+assert_grep 'task record could not be published' "$TMP_ROOT/spawn-publication-failure.out" \
+  "the injected parent publication failure was not reached"
+assert_absent "$PARENT/state/ios.meta" "failed parent publication unexpectedly published metadata"
+[ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \
+  || fail "the publication failure fixture did not launch a remote agent"
+started_gen=$(ios_latest)
+case "$started_gen" in *" confirmed") ;; *) fail "the host-confirmed start was not confirmed despite the failed publication: $(ios_seats)" ;; esac
+started_gen=${started_gen%% *}
+assert_grep "requested_generation=$started_gen" "$REMOTE_HOME/state/parent-route/ios.seat-operation.$started_gen" \
+  "the host receipt does not name the parent's operation"
+if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --generation g-another1 --harness codex --model pool-model-a \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-held-seat.out" 2>&1; then
+  fail "an unpublished remote agent lost its primary reservation"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-held-seat.out" \
+  "the unpublished remote agent did not consume the sole seat"
+assert_grep 'ios' "$TMP_ROOT/spawn-held-seat.out" \
+  "the retained seat did not identify the launched remote supervisor"
+# A retry replaces the ledger's confirmed generation, not the stale record: the
+# host reports the live agent as existing and launches nothing twice.
+if PATH="$FAKEBIN:$PATH" remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate \
+  --model pool-model-a > "$TMP_ROOT/spawn-same-model-retry.out" 2>&1; then
+  fail "a repeated publication failure was reported as a successful retry"
+fi
+assert_grep 'task record could not be published' "$TMP_ROOT/spawn-same-model-retry.out" \
+  "the matching-model retry did not reach publication"
+assert_equals confirmed "$(ios_seats | jq -r --arg g "$started_gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" \
+  "the retry disturbed the running generation"
+# Transport failure and repeated reconciliation never free the running seat.
+if FM_FAKE_SSH_MODE=unreachable remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve uncertain --generation g-uncertain \
+  --harness codex --model pool-model-a --holder-pid "$$" \
+  > "$TMP_ROOT/spawn-unknown-seat.out" 2>&1; then
+  fail "an unavailable remote host freed an unpublished supervisor seat"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-unknown-seat.out" \
+  "unknown remote liveness did not keep the unpublished seat"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" reclaim ios --generation "$started_gen" > "$TMP_ROOT/reclaim-live.out" 2>&1 \
+  || fail "reconciling a live generation failed: $(cat "$TMP_ROOT/reclaim-live.out")"
+assert_equals confirmed "$(ios_seats | jq -r --arg g "$started_gen" '.incarnations[] | select(.generation == $g) | .lifecycle')" \
+  "reconciliation freed a live remote supervisor"
+rm -f "$PARENT"/state/ios.meta.tmp.*
+out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-a) \
+  || fail "the publication repair launch failed: $out"
+assert_grep "fleet_seat_generation=$started_gen" "$PARENT/state/ios.meta" \
+  "the repaired record does not name the running generation"
+if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --generation g-another2 --harness codex --model pool-model-a \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-published-seat.out" 2>&1; then
+  fail "a published remote supervisor lost its seat"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-published-seat.out" \
+  "the published supervisor did not consume the sole seat"
+if out_mismatch=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --model pool-model-b 2>&1); then
+  fail "a remote retry reported the unlaunched requested model as successful"
+fi
+assert_contains "$out_mismatch" 'remains on confirmed model pool-model-a' \
+  "the retry did not report the model the host kept running"
+assert_equals pool-model-a "$(sed -n 's/^model=//p' "$PARENT/state/ios.meta")" \
+  "the retry published its unconfirmed requested model"
+if remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --generation g-another3 --harness codex --model pool-model-a \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-mismatch-shared.out" 2>&1; then
+  fail "the confirmed model lost its seat after a mismatched retry"
+fi
+assert_grep 'pool shared is full' "$TMP_ROOT/spawn-mismatch-shared.out" \
+  "the confirmed model was not counted after the retry"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" reserve another --generation g-another4 --harness codex --model pool-model-b \
+  --holder-pid "$$" > "$TMP_ROOT/spawn-mismatch-other.out" 2>&1 \
+  || fail "the unlaunched requested model kept a seat"
+rm -f "$PARENT/config/fleet-seats"
+remote_env "$ROOT/bin/fm-fleet-seats.sh" serve-remotes >/dev/null \
+  || fail "the cleared seat policy could not be delivered"
+pass "remote initial launch accounts started, refused, unconfirmed, and republished generations exactly"
+default_parent="$TMP_ROOT/default-parent"
+mkdir -p "$default_parent/state"
+cp -R "$PARENT/config" "$PARENT/data" "$default_parent/"
+cp "$PARENT/state/ios.meta" "$default_parent/state/ios.meta"
+cp "$PARENT/state/.remote-inherit-ios.generation" "$default_parent/state/.remote-inherit-ios.generation"
+default_route_target=$(sed -n 's/^remote_target=//p' "$PARENT/state/ios.meta")
+if ! default_out=$(PARENT="$default_parent" FM_FAKE_ROUTE_TARGET="$default_route_target" FM_FAKE_SSH_MODE=launch-default-model \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+  fail "an undeclared unpinned remote spawn was refused: $default_out"
+fi
+assert_not_contains "$default_out" 'requested model' \
+  "equivalent default spellings were reported as a model mismatch"
+assert_equals '' "$(sed -n 's/^model=//p' "$default_parent/state/ios.meta")" \
+  "an unpinned remote route gained an explicit model"
+cp "$default_parent/state/.remote-inherit-ios.generation" "$PARENT/state/.remote-inherit-ios.generation"
+pass "undeclared unpinned remote spawn preserves default-model behavior"
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"

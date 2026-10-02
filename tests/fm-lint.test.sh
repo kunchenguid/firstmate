@@ -1879,6 +1879,28 @@ test_pinned_shellcheck_memory_limit() {
   pass "the pinned ShellCheck both respects and survives under the memory envelope"
 }
 
+test_spawn_lifecycle_lint_fits_ci_memory_limit() {
+  if ! pinned_ready || ! fm_lint_bounds_supported; then
+    pass "SKIP (pinned ShellCheck or enforced bounds unavailable): spawn lifecycle memory regression"
+    return
+  fi
+  local tmp out rc=0
+  tmp=$(fm_test_tmproot fm-lint-spawn-memory)
+  # Exercise the real source-aware consumer: importing the lifecycle library
+  # alongside its dependencies used to exhaust the CI address-space limit.
+  out=$(FM_LINT_REQUIRE_BOUNDS=1 FM_LINT_ROOT_MEMORY_KIB=12582912 \
+    "$LINT" --jobs 1 --telemetry "$tmp/lint.tsv" \
+    bin/fm-spawn.sh bin/fm-secondmate-liveness-lib.sh 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "spawn lifecycle lint exceeded the CI envelope or reported findings"$'\n'"$out"
+  # The roots sidecar is the linter's public execution-evidence contract.
+  awk -F '\t' '
+    $1 == "end" && $5 == "full" && $9 == 0 && $10 == "ok" { roots[$3]++ }
+    END { exit !(roots["bin/fm-spawn.sh"] == 1 &&
+                 roots["bin/fm-secondmate-liveness-lib.sh"] == 1) }
+  ' "$tmp/lint.roots.tsv" || fail "spawn and its lifecycle library did not both complete full analysis"
+  pass "spawn and its lifecycle library pass full source-aware lint within the CI memory limit"
+}
+
 test_sidecar_result_exit_reflects_final_status() {
   local tmp fakebin log telemetry roots_log out rc
   tmp=$(fm_test_tmproot fm-lint-sidecar-result)
@@ -2057,6 +2079,7 @@ test_memory_evidence_outranks_findings_and_signal_reasons
 test_source_excerpt_with_oom_text_stays_findings
 test_require_bounds_refuses_when_enforcement_is_missing
 test_pinned_shellcheck_memory_limit
+test_spawn_lifecycle_lint_fits_ci_memory_limit
 test_sidecar_result_exit_reflects_final_status
 test_roots_sidecar_records_per_root_lifecycle
 test_seeded_module_boundary_parity

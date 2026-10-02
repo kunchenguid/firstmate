@@ -4289,6 +4289,76 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_descendant_episode_refuses_before_coordination() {
+  local case_dir home nested holder rc ready
+  case_dir=$(make_case descendant-episode)
+  write_meta "$case_dir" local-only secondmate
+  configure_nested_secondmate_with_herdr_grandchild "$case_dir"
+  home="$case_dir/secondmate-home"
+  nested="$home/nested-home"
+  ready="$case_dir/episode-ready"
+  ROOT="$ROOT" HOME_STATE="$home/state" READY="$ready" bash -c '
+    . "$ROOT/bin/fm-secondmate-liveness-lib.sh"
+    fm_supervisor_lifecycle_acquire "$HOME_STATE" nested-sm 0 || exit 1
+    : > "$READY"
+    exec sleep 600
+  ' &
+  holder=$!
+  for _ in $(seq 1 100); do [ ! -e "$ready" ] || break; sleep 0.1; done
+  [ -e "$ready" ] || { kill "$holder"; fail "the child episode did not start"; }
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "cleanup ignored the descendant's supervisor episode"
+  assert_grep 'descendant secondmate nested-sm has a lifecycle episode in flight' "$case_dir/stderr" "the busy episode did not stop cleanup"
+  assert_present "$home/state/nested-sm.meta" "the busy episode lost its route"
+  assert_present "$nested" "the busy episode lost its home"
+  assert_absent "$home/state/.task-set.lock" "episode refusal leaked coordination"
+  pass "a descendant supervisor episode refuses cleanup before its coordination locks"
+}
+
+test_accounting_failure_preserves_the_containing_home() {
+  local case_dir home rc holder ready
+  case_dir=$(make_case accounting-retention)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  printf '{"pools":[{"name":"unrelated","capacity":1,"models":["other-model"]}]}\n' > "$home/config/fleet-seats"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-fleet-seats.sh" reserve child-a \
+    --generation g-child --kind ship --harness claude --model child-model --holder-pid "$$" >/dev/null \
+    || fail "could not seed the child's holder"
+  printf 'spawn_gen=g-child\nmodel=child-model\n' >> "$home/state/child-a.meta"
+  ready="$case_dir/fleet-lock-ready"
+  ROOT="$ROOT" HOME_STATE="$home/state" READY="$ready" bash -c '
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$HOME_STATE/.fleet-seats.lock" || exit 1
+    : > "$READY"
+    exec sleep 600
+  ' &
+  holder=$!
+  for _ in $(seq 1 100); do [ ! -e "$ready" ] || break; sleep 0.1; done
+  [ -e "$ready" ] || { kill "$holder"; fail "the accounting lock did not start"; }
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  kill "$holder"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "cleanup discarded a home after accounting failed"
+  assert_present "$home" "failed accounting discarded the containing home"
+  assert_present "$home/state/child-a.meta" "failed accounting discarded the child's route"
+  assert_present "$case_dir/state/task-x1.meta" "failed accounting discarded the parent's route"
+  assert_grep 'spawn_gen=g-child' "$home/state/child-a.meta" "failed accounting damaged the child's binding"
+  assert_equals reserved "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-fleet-seats.sh" show child-a | jq -r '.incarnations[0].lifecycle')" "failed accounting released the child's generation"
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "cleanup retry after accounting unlock: $(cat "$case_dir/retry.stderr")"
+  assert_absent "$home" "a successful cleanup retry retained the retired home"
+  assert_absent "$case_dir/state/task-x1.meta" "a successful cleanup retry retained its parent route"
+  pass "cleanup restores generation bindings and retains homes after release failure, then completes on retry"
+}
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
@@ -4392,3 +4462,6 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+
+test_descendant_episode_refuses_before_coordination
+test_accounting_failure_preserves_the_containing_home

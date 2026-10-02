@@ -44,9 +44,9 @@
 #          quarantine diagnostics for divergent shared captain-preference
 #          copies; no-op/current and successful updates stay quiet.
 #          SECONDMATE_LIVENESS lines report only actionable failures from the
-#          recovery-grade state owned by bin/fm-backend.sh's
-#          fm_backend_agent_state: skipped distinguishes an existing ambiguous
-#          process, an unreadable target, and an unverified backend; respawn
+#          shared recovery owner bin/fm-secondmate-liveness-lib.sh:
+#          skipped includes inconclusive endpoint state, an unverified backend,
+#          and unresolved generation-bound seat evidence; respawn
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.

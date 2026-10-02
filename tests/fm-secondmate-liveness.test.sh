@@ -702,6 +702,220 @@ test_remote_poll_probe_unreachable_preserves_route() {
   pass "poll probe: unreachable or inconclusive remote reads preserve the route"
 }
 
+# --- library level: generation-fenced recovery of a pooled supervisor --------
+# Recovery binds its verdict to the probed generation, re-probes under the same
+# episode before acting, and asks the fleet seat owner to reclaim exactly that
+# generation; a submitted launch that never confirmed startup stays counted and
+# is never replaced. bin/fm-fleet-seats.sh owns the transitions.
+
+# make_pooled_world <name>: a pooled primary with one local secondmate record,
+# a fake tmux endpoint (<w>/endpoint/{windows,command}), and a stub launch owner
+# that records the lifecycle carrier it inherits. Sets W.
+make_pooled_world() {
+  local w="$TMP_ROOT/$1" fakebin
+  mkdir -p "$w/home/state" "$w/home/config" "$w/home/data" "$w/mate/state" "$w/endpoint" "$w/root/bin"
+  printf '{"pools":[{"name":"shared","capacity":1,"models":["pool-model-a"]}]}\n' > "$w/home/config/fleet-seats"
+  printf 'fm-sm1\n' > "$w/endpoint/windows"
+  printf 'bash\n' > "$w/endpoint/command"
+  fakebin=$(fm_fakebin "$w")
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+D="$w/endpoint"
+case "\$1" in
+  list-windows) cat "\$D/windows" ;;
+  display-message) case "\$*" in *pane_current_command*) cat "\$D/command" ;; *) printf 'fakepane\\n' ;; esac ;;
+  kill-window) : > "\$D/windows" ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat > "$w/root/bin/fm-spawn.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_SUPERVISOR_LIFECYCLE_CARRIER:-none}" >> "$FM_TEST_SPAWN_LOG"
+exit 0
+SH
+  chmod +x "$w/root/bin/fm-spawn.sh"
+  W=$w
+}
+
+pooled_meta() {  # <generation>
+  cat > "$W/home/state/sm1.meta" <<EOF
+window=firstmate:fm-sm1
+endpoint_task_id=sm1
+worktree=$W/mate
+project=$W/mate
+harness=claude
+kind=secondmate
+model=pool-model-a
+home=$W/mate
+spawn_gen=$1
+EOF
+}
+
+pooled_seats() {
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$W/fakebin:$PATH" FM_HOME="$W/home" "$ROOT/bin/fm-fleet-seats.sh" "$@"
+}
+
+# pooled_dispatch <generation>: a launch owner reserves and dispatches that
+# generation to the recorded endpoint, then exits (its spawner is gone).
+pooled_dispatch() {
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$W/fakebin:$PATH" FM_HOME="$W/home" SEATS="$ROOT/bin/fm-fleet-seats.sh" bash -c '
+      "$SEATS" reserve sm1 --generation "$1" --kind secondmate --harness claude --model pool-model-a --holder-pid "$$" >/dev/null || exit 1
+      route=$(mktemp "${TMPDIR:-/tmp}/route.XXXXXX")
+      printf "{\"placement\":\"local\",\"backend\":\"tmux\",\"target\":\"firstmate:fm-sm1\",\"home\":null,\"host\":null,\"remote_root\":null,\"spawn_gen\":\"%s\",\"operation\":null}\n" "$1" > "$route"
+      "$SEATS" dispatch sm1 --generation "$1" --route-file "$route" >/dev/null; rc=$?
+      rm -f "$route"
+      exit "$rc"
+    ' _ "$1" || fail "the launch owner could not reserve and dispatch $1"
+}
+
+pooled_lifecycle() {  # <generation>
+  pooled_seats show sm1 | jq -r --arg g "$1" '.incarnations[] | select(.generation == $g) | .lifecycle'
+}
+
+# pooled_recover [before-relaunch-shell]: one watcher-shaped episode; prints
+# "<rc>|<status>|<reason>".
+pooled_recover() {
+  # shellcheck disable=SC2016 # the child shell or fixture expands these.
+  env -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
+    PATH="$W/fakebin:$PATH" FM_HOME="$W/home" FM_ROOT="$W/root" FM_ROOT_OVERRIDE="$W/root" \
+    STATE="$W/home/state" CONFIG="$W/home/config" DATA="$W/home/data" \
+    FM_TEST_SPAWN_LOG="$W/spawn.log" FM_TEST_BEFORE="${1:-}" bash -c '
+      . "$0/bin/fm-secondmate-liveness-lib.sh"
+      fm_secondmate_liveness_lock sm1 || { echo "lock|busy|"; exit 0; }
+      fm_secondmate_liveness_probe "$STATE/sm1.meta" sm1 poll
+      [ "$FM_SM_LIVE_STATUS" = relaunchable ] || { echo "probe|$FM_SM_LIVE_STATUS|$FM_SM_LIVE_REASON"; exit 0; }
+      [ -z "$FM_TEST_BEFORE" ] || eval "$FM_TEST_BEFORE"
+      rc=0
+      fm_secondmate_liveness_relaunch "$STATE/sm1.meta" sm1 || rc=$?
+      printf "%s|%s|%s\n" "$rc" "$FM_SM_LIVE_STATUS" "$FM_SM_LIVE_REASON"
+      fm_secondmate_liveness_unlock sm1
+    ' "$ROOT" 2>&1
+}
+
+test_recovery_leaves_an_unconfirmed_launch_counted() {
+  local out
+  make_pooled_world pooled-pending
+  pooled_meta g1
+  pooled_dispatch g1
+  out=$(pooled_recover)
+  case "$out" in
+    1\|skipped\|*"was not reclaimed"*) ;;
+    *) fail "recovery acted on a shell-only submitted launch: $out" ;;
+  esac
+  assert_absent "$W/spawn.log" "recovery spawned beside an unconfirmed launch"
+  assert_equals reserved "$(pooled_lifecycle g1)" "recovery freed the unconfirmed launch's seat"
+  pass "recovery treats a shell-only submitted launch as pending startup, not death"
+}
+
+test_recovery_reclaims_exactly_the_probed_dead_generation() {
+  local out
+  make_pooled_world pooled-dead
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming the started generation failed"
+  printf 'bash\n' > "$W/endpoint/command"
+  out=$(pooled_recover)
+  case "$out" in 0\|*) ;; *) fail "recovery of a dead confirmed supervisor failed: $out" ;; esac
+  assert_equals reclaimed "$(pooled_lifecycle g1)" "the dead generation's seat was not reclaimed"
+  grep -q "/.secondmate-liveness-sm1.lock|" "$W/spawn.log" \
+    || fail "the replacement launch did not inherit the episode carrier: $(cat "$W/spawn.log")"
+  pass "recovery reclaims exactly the probed dead generation and relaunches inside its episode"
+}
+
+test_recovery_abandons_a_verdict_whose_generation_changed() {
+  local out
+  make_pooled_world pooled-changed
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming the started generation failed"
+  printf 'bash\n' > "$W/endpoint/command"
+  # Between the probe and the mutation the record names another incarnation.
+  out=$(pooled_recover "\"$ROOT/bin/fm-fleet-seats.sh\" reserve sm1 --generation g2 --previous-generation g1 --kind secondmate --harness claude --model pool-model-a --holder-pid \"\$\$\" >/dev/null; sed -i.bak 's/^spawn_gen=.*/spawn_gen=g2/' \"\$STATE/sm1.meta\"")
+  case "$out" in
+    1\|skipped\|*"changed since it was probed"*) ;;
+    *) fail "recovery acted on a stale verdict: $out" ;;
+  esac
+  assert_absent "$W/spawn.log" "a stale verdict launched a replacement"
+  assert_equals confirmed "$(pooled_lifecycle g1)" "a stale verdict changed the seat"
+  pass "recovery abandons a death verdict once the recorded generation changed"
+}
+
+test_recovery_adopts_current_ledger_generation() {
+  local out
+  make_pooled_world pooled-stale-parent
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  printf 'bash\n' > "$W/endpoint/command"
+  pooled_seats reclaim sm1 --generation g1 >/dev/null || fail "reclaiming g1"
+  pooled_dispatch g2
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g2 >/dev/null || fail "confirming g2"
+  printf 'bash\n' > "$W/endpoint/command"
+  out=$(pooled_recover)
+  assert_equals '0|relaunchable|' "$out" "stale parent did not reconcile the current ledger generation"
+  assert_equals reclaimed "$(pooled_lifecycle g2)" "the authoritative generation remained counted"
+  assert_present "$W/spawn.log" "recovery did not launch after exact-generation reclamation"
+  pass "recovery adopts the current ledger generation when the parent names a terminal predecessor"
+}
+
+test_recovery_retains_confirmed_missing_generation() {
+  local out
+  make_pooled_world pooled-confirmed-missing
+  pooled_meta g1
+  pooled_dispatch g1
+  printf 'claude\n' > "$W/endpoint/command"
+  pooled_seats confirm sm1 --generation g1 >/dev/null || fail "confirming g1"
+  : > "$W/endpoint/windows"
+  out=$(pooled_recover)
+  assert_contains "$out" '1|skipped|' "unproven confirmed absence did not skip recovery"
+  assert_equals confirmed "$(pooled_lifecycle g1)" "unproven absence freed capacity"
+  assert_absent "$W/spawn.log" "unproven absence launched a replacement"
+  pass "liveness recovery consumes the absence-proof refusal before any replacement"
+}
+
+test_recovery_does_not_kill_a_late_confirmed_start() {
+  local out
+  make_pooled_world pooled-late-start
+  pooled_meta g1
+  pooled_dispatch g1
+  cat > "$W/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+D="$W/endpoint"
+case "\$1" in
+  list-windows) cat "\$D/windows" ;;
+  display-message)
+    case "\$*" in
+      *pane_current_command*)
+        n=0
+        [ ! -f "\$D/reads" ] || n=\$(cat "\$D/reads")
+        n=\$((n + 1))
+        printf '%s\n' "\$n" > "\$D/reads"
+        [ "\$n" -lt 3 ] || printf 'claude\n' > "\$D/command"
+        cat "\$D/command"
+        ;;
+      *) printf 'fakepane\n' ;;
+    esac
+    ;;
+  kill-window) : > "\$D/killed"; : > "\$D/windows" ;;
+esac
+SH
+  chmod +x "$W/fakebin/tmux"
+  out=$(pooled_recover)
+  assert_contains "$out" '1|skipped|' "late startup confirmation authorized recovery: $out"
+  assert_equals confirmed "$(pooled_lifecycle g1)" "the fresh alive observation was not recorded"
+  assert_absent "$W/endpoint/killed" "recovery killed the newly confirmed endpoint"
+  assert_absent "$W/spawn.log" "recovery launched after confirmation rather than reclamation"
+  pass "a late startup confirmation never authorizes destructive recovery"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -721,5 +935,13 @@ test_sweep_skips_mate_whose_liveness_lock_is_held
 test_sweep_refuses_relaunch_on_ledger_errors
 test_remote_poll_probe_maps_states
 test_remote_poll_probe_unreachable_preserves_route
+test_recovery_leaves_an_unconfirmed_launch_counted
+test_recovery_reclaims_exactly_the_probed_dead_generation
+test_recovery_abandons_a_verdict_whose_generation_changed
 
 echo "# all fm-secondmate-liveness tests passed"
+
+test_recovery_adopts_current_ledger_generation
+test_recovery_retains_confirmed_missing_generation
+
+test_recovery_does_not_kill_a_late_confirmed_start
