@@ -382,6 +382,48 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A scout spawned on a named base keeps that base through promotion: the ship
+# instructions start from it and the PR targets it; local-only cannot carry it.
+test_promotion_keeps_the_recorded_base_branch() {
+  local home id meta out status mode
+  home="$TMP_ROOT/promote-base-home"
+  for mode in direct-PR local-only; do
+    id="promote-base-$mode"
+    meta="$home/state/$id.meta"
+    mkdir -p "$home/state" "$home/data/$id"
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=feature/hub\n' "$id" > "$meta"
+    cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Fix the hub bug.
+
+## Firstmate spec
+Reproduce it first.
+
+# Setup
+You are in a disposable git worktree of proj, at a detached HEAD on a clean copy of its base branch.
+Base branch: feature/hub
+EOF
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" "$id" --mode "$mode" --yolo off 2>&1)
+    status=$?
+    if [ "$mode" = direct-PR ]; then
+      expect_code 0 "$status" "promoting a scout with a recorded base should succeed"$'\n'"$out"
+      # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
+      assert_grep 'Return to a clean copy of the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not start the ship from the recorded base"
+      # shellcheck disable=SC2016
+      assert_grep 'against the base branch `feature/hub`' "$home/data/$id/ship-instructions.md" \
+        "promotion did not target the PR at the recorded base"
+      assert_grep 'base_branch=feature/hub' "$meta" "promotion dropped the recorded base"
+    else
+      [ "$status" -ne 0 ] || fail "promoting a based scout to local-only should be refused"
+      assert_contains "$out" "mode=local-only" "the local-only promotion refusal did not explain itself"
+      assert_grep 'kind=scout' "$meta" "a refused promotion changed the task record"
+    fi
+  done
+  pass "promotion keeps a scout's recorded base branch and refuses local-only for it"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
@@ -400,5 +442,6 @@ test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 test_fenced_and_indented_captain_lines_are_not_intent
 test_pr_based_dod_draft_check_uses_gh_axi
+test_promotion_keeps_the_recorded_base_branch
 
 echo "all fm-dod-lib tests passed"

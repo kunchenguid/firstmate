@@ -743,10 +743,82 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+publish_feature_branch() { # <branch>
+  git -C "$CASE_DIR/publisher" checkout --quiet -b "$1"
+  printf 'only on %s\n' "$1" > "$CASE_DIR/publisher/feature-only.txt"
+  git -C "$CASE_DIR/publisher" add feature-only.txt
+  git -C "$CASE_DIR/publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm feature
+  git -C "$CASE_DIR/publisher" push --quiet origin "$1"
+}
+
+brief_with_base() { # <id> <base>
+  fm_test_spawn_brief "$HOME_DIR" "$1"
+  printf '\n# Setup\nYou are in a disposable git worktree.\nBase branch: %s\n\n# Rules\nBase branch: ignored\n' "$2" \
+    >> "$HOME_DIR/data/$1/brief.md"
+}
+
+test_named_base_branch_starts_from_that_branch() {
+  local rec id out status kind
+  for kind in ship scout; do
+    id="pool-named-base-$kind-r1"
+    rec=$(make_case "named-base-$kind" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    brief_with_base "$id" feature/hub
+    if [ "$kind" = ship ]; then
+      out=$(run_spawn "$id" --mode direct-PR --yolo off)
+    else
+      out=$(run_spawn "$id" --scout)
+    fi
+    status=$?
+    expect_code 0 "$status" "a $kind brief naming a base branch should launch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
+      || fail "the $kind copy did not start from origin/feature/hub"
+    assert_grep 'only on feature/hub' "$POOL_DIR/feature-only.txt" \
+      "the $kind copy is missing the base branch content"
+    assert_grep 'base_branch=feature/hub' "$HOME_DIR/state/$id.meta" \
+      "the $kind spawn did not record its base branch"
+  done
+
+  id='pool-named-base-missing-r1'
+  rec=$(make_case named-base-missing "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/missing
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch origin lacks should refuse the spawn"
+  assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused base-branch spawn published task metadata"
+
+  id='pool-named-base-local-only-r1'
+  rec=$(make_case named-base-local-only "$id")
+  read_case_record "$rec"
+  brief_with_base "$id" feature/hub
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
+  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+
+  id='pool-named-base-intent-only-r1'
+  rec=$(make_case named-base-intent-only "$id")
+  read_case_record "$rec"
+  publish_feature_branch feature/hub
+  fm_test_spawn_brief "$HOME_DIR" "$id" 'Base branch: feature/hub'
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a brief without a Setup base line should launch"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
+    || fail "a Base branch line in the captain's intent changed the copy's starting point"
+  ! grep -q '^base_branch=' "$HOME_DIR/state/$id.meta" \
+    || fail "a Base branch line in the captain's intent was recorded as the task base"
+  pass "a brief's Setup base branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
+test_named_base_branch_starts_from_that_branch
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
