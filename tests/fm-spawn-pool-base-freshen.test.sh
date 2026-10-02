@@ -689,18 +689,41 @@ lay_out_as_pool_slot() {
   SLOT_CLAIM="$slot_root/1/.fm-slot-owner"
 }
 
-# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads:
-# a launched task's claim names it, a slot that cannot be claimed refuses before
-# anything is published, and an abort while the allocation lock is still held
-# leaves no claim naming a task with no record.
+# A treehouse stub that records every call the spawn makes on the slot, so the
+# durable reservation and its release are asserted from the command line the
+# real provider would have received. FM_FAKE_TREEHOUSE_LEASE_FAIL=1 makes it
+# refuse a lease the way a provider that cannot reserve the slot does.
+install_logging_treehouse() {  # <fakebin-dir>
+  local fakebin=$1
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+{ printf 'treehouse'; for a in "$@"; do printf ' %s' "$a"; done; printf '\n'; } >>"${FM_FAKE_TREEHOUSE_LOG:?}"
+if [ "${1:-}" = lease ] && [ -n "${FM_FAKE_TREEHOUSE_LEASE_FAIL:-}" ]; then
+  printf '%s\n' 'treehouse: refusing to lease this slot' >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
+# The spawn side of the slot-owner claim that bin/fm-teardown.sh later reads,
+# and of the durable Treehouse lease that keeps a recorded task's slot out of
+# every later allocation: a launched task's claim names it and its slot carries
+# a lease under the task id, a slot that cannot be claimed or reserved refuses
+# before anything is published, and an abort while the allocation lock is still
+# held leaves neither a claim nor a lease behind.
 test_pool_slot_claim_follows_the_spawn_outcome() {
-  local rec id out status before
+  local rec id out status before slot_real lease_log
 
   id='pool-slot-claim-r1'
   rec=$(make_case slot-claim "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
-  out=$(run_spawn "$id" --scout)
+  install_logging_treehouse "$FAKEBIN_DIR"
+  lease_log="$CASE_DIR/treehouse.log"
+  : >"$lease_log"
+  out=$(FM_FAKE_TREEHOUSE_LOG="$lease_log" run_spawn "$id" --scout)
   status=$?
   expect_code 0 "$status" "spawn from a Treehouse slot should launch"$'\n'"$out"
   assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
@@ -710,29 +733,66 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
     || fail "the slot claim does not name the spawned task: $(cat "$SLOT_CLAIM")"
   grep -Fxq -- "home=$HOME_DIR" "$SLOT_CLAIM" \
     || fail "the slot claim does not name the spawning home: $(cat "$SLOT_CLAIM")"
+  assert_grep "treehouse lease 1 --lease-holder $id" "$lease_log" \
+    "spawn did not durably lease its Treehouse slot under the task id"
 
   id='pool-slot-unclaimable-r1'
   rec=$(make_case slot-unclaimable "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
   mkdir -p "$SLOT_CLAIM"
+  install_logging_treehouse "$FAKEBIN_DIR"
+  lease_log="$CASE_DIR/treehouse.log"
+  : >"$lease_log"
   before=$(git -C "$POOL_DIR" rev-parse HEAD)
-  out=$(run_spawn "$id" --scout)
+  out=$(FM_FAKE_TREEHOUSE_LOG="$lease_log" run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
   assert_contains "$out" "could not claim Treehouse pool slot" \
     "spawn did not name the unclaimable slot as the reason"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
+  assert_no_grep "lease" "$lease_log" \
+    "spawn leased a slot it could not claim"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved the slot's HEAD after failing to claim it"
+
+  # A provider that will not reserve the slot must block the launch: the whole
+  # point of the reservation is that a recorded task keeps its slot after its
+  # worker exits, and a worker launched on an unreserved slot has none.
+  id='pool-slot-lease-refused-r1'
+  rec=$(make_case slot-lease-refused "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  install_logging_treehouse "$FAKEBIN_DIR"
+  lease_log="$CASE_DIR/treehouse.log"
+  : >"$lease_log"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  out=$(FM_FAKE_TREEHOUSE_LOG="$lease_log" FM_FAKE_TREEHOUSE_LEASE_FAIL=1 run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not reserve"
+  assert_contains "$out" "could not durably reserve Treehouse pool slot" \
+    "spawn did not name the slot it could not reserve as the reason"
+  assert_contains "$out" "refusing to lease this slot" \
+    "spawn dropped the provider's own complaint about the refused reservation"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unreserved slot"
+  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
+    || fail "the refused reservation left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
+  assert_no_grep "return --force" "$lease_log" \
+    "spawn returned a slot it never reserved"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot's HEAD after failing to reserve it"
 
   id='pool-slot-claim-aborted-r1'
   rec=$(make_originless_case slot-claim-aborted "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
   git -C "$POOL_DIR" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  install_logging_treehouse "$FAKEBIN_DIR"
+  lease_log="$CASE_DIR/treehouse.log"
+  : >"$lease_log"
+  slot_real=$(CDPATH='' cd -- "$POOL_DIR" && pwd -P)
+  out=$(FM_FAKE_TREEHOUSE_LOG="$lease_log" run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unusable origin on the slot"
   assert_contains "$out" "could not fetch origin" \
@@ -740,7 +800,11 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
   [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
     || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
-  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+  assert_grep "treehouse lease 1 --lease-holder $id" "$lease_log" \
+    "the aborted spawn never leased the slot it was about to use"
+  assert_grep "treehouse return --force $slot_real" "$lease_log" \
+    "the aborted spawn left its durable slot reservation behind"
+  pass "a Treehouse slot is claimed and leased under its task, refuses when either fails, and is dropped by a locked abort"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
