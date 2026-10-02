@@ -94,7 +94,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "$field" = "$FM_TEST_FAIL_FIELD" ]; then
-  if [ "$FM_TEST_FAIL_AT" = self ] || [ "$pid" = 1 ]; then
+  if [ "$FM_TEST_FAIL_AT" = self ] || [ "$pid" = 424242 ]; then
     exit 1
   fi
 fi
@@ -106,7 +106,13 @@ case "$field" in
       printf '/bin/bash\n'
     fi
     ;;
-  ppid=) [ "$pid" = 1 ] && printf '0\n' || printf '1\n' ;;
+  ppid=)
+    case "$pid" in
+      1) printf '0\n' ;;
+      424242) printf '1\n' ;;
+      *) printf '424242\n' ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -247,7 +253,6 @@ EOF
   for match in 0 1; do
     for at in self parent; do
       for field in comm= args= ppid=; do
-        [ "$match:$at:$field" != 1:parent:ppid= ] || continue
         status=0
         out=$(FM_TEST_FAIL_FIELD="$field" FM_TEST_FAIL_AT="$at" FM_TEST_MATCH_SELF="$match" \
           run_lock "$home" "$fakebin" 2>&1) || status=$?
@@ -324,6 +329,42 @@ EOF
   pass "status reports a pid a denied ps cannot classify as unknown, never stale or held"
 }
 
+# The owner lookup fails while self-inspection works. A successful lookup of
+# this shell is not evidence that the recorded owner is dead.
+test_status_unknown_under_owner_inspection_failure() {
+  local rec home fakebin gone out status listing
+  rec=$(new_home status-owner-uninspectable)
+  IFS='|' read -r home fakebin <<EOF
+$rec
+EOF
+  gone=$(dead_pid)
+  printf '%s\n' "$gone" > "$home/state/.lock"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"-p $FM_TEST_OWNER_PID"*) exit 1 ;;
+  *"-e"*)
+    [ "$FM_TEST_LISTING" = present ] || exit 1
+    printf '  %s\n' "$FM_TEST_OWNER_PID"
+    ;;
+  *) printf '/bin/bash\n' ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  for listing in denied present; do
+    status=0
+    out=$(FM_TEST_OWNER_PID="$gone" FM_TEST_LISTING="$listing" \
+      run_lock "$home" "$fakebin" status 2>&1) || status=$?
+    expect_code 0 "$status" "status must always exit 0"
+    assert_contains "$out" "lock: unknown" "owner inspection failure must be unknown (listing=$listing)"
+    assert_not_contains "$out" "lock: stale" "self-inspection cannot establish the recorded owner is dead"
+    [ "$(cat "$home/state/.lock")" = "$gone" ] || fail "status changed the uninspectable owner's lock"
+  done
+
+  pass "status reports an uninspectable owner as unknown despite working self-inspection"
+}
+
 test_acquire_success
 test_lock_held
 test_harness_detect_failed
@@ -332,3 +373,4 @@ test_ancestry_inspection_failures
 test_status_free_under_denied_ps
 test_status_stale_with_working_ps
 test_status_unknown_under_denied_ps
+test_status_unknown_under_owner_inspection_failure

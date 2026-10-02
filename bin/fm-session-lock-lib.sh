@@ -164,15 +164,6 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True when `ps` can inspect a process that is alive by construction: the
-# invoking shell itself, the very process running this code. A false verdict
-# is the one honest signal that process inspection itself failed or was
-# denied - the shape a Codex sandbox produces - and is never evidence about
-# any other process, live or dead.
-fm_harness_ps_inspects_live_shell() {
-  ps -o comm= -p $$ >/dev/null 2>&1
-}
-
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
@@ -346,7 +337,7 @@ FM_LOCK_INSPECT_STATE=unknown
 FM_LOCK_INSPECT_PID=
 FM_LOCK_INSPECT_LIVE_HARNESS=unknown
 fm_session_lock_inspect() {  # <state>
-  local state=$1 lock pid
+  local state=$1 lock pid pids inspected_pid
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=unknown
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
@@ -390,14 +381,15 @@ fm_session_lock_inspect() {  # <state>
     FM_LOCK_INSPECT_STATE=unknown
     return 0
   fi
-  # A `ps` that cannot inspect even this live invoking shell cannot prove the
-  # recorded pid dead either, so the honest verdict stays unknown; stale is
-  # reserved for a pid a working inspection itself could not find.
-  fm_harness_ps_inspects_live_shell || {
-    # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
-    FM_LOCK_INSPECT_STATE=unknown
-    return 0
-  }
+  # A failed per-pid query cannot distinguish an absent owner from denied
+  # inspection. Only a successful process listing that omits the owner can
+  # establish that it is gone; inspecting this shell proves nothing about it.
+  pids=$(ps -e -o pid= 2>/dev/null) || return 0
+  while read -r inspected_pid; do
+    [ "$inspected_pid" != "$pid" ] || return 0
+  done <<EOF
+$pids
+EOF
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
   FM_LOCK_INSPECT_STATE=stale
   # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
