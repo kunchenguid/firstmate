@@ -1383,6 +1383,170 @@ EOF
   pass "main-home and secondmate-home captain calls remain correctly routed"
 }
 
+# A scout's captain call can be handed to a registered secondmate home and held
+# there, so the main home's completion gate accepts an attested entry that is
+# durably held or answered in a registered secondmate home's backlog, and still
+# refuses one held nowhere, in a home the registry does not name, or in a
+# registered path that is no longer that mate's seeded home.
+test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home() {
+  local parent mate origin err out rc
+  parent=$(make_home main-cross-home)
+  mate=$(make_home mate-cross-home)
+  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  origin=sample-cross-home-proposal
+  tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call
+  run_captain "$mate" hold sample-provider-call --title "Choose the sample provider" \
+    --reason "captain provider choice pending" --repo sample --until 2099-12-31 >/dev/null \
+    || fail "secondmate-home hold creation failed"
+
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted a call held only in a home the registry does not name"
+  assert_contains "$err" "sample-provider-call" "the unregistered refusal did not name the entry"
+
+  printf -- '- sample-mate - synthetic scope (host: somewhere; root: /opt/fm; home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a remote secondmate route as a local backlog"
+  fi
+
+  printf -- '- sample-mate - synthetic scope (home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$mate" > "$parent/data/secondmates.md"
+  rm -f "$mate/.fm-secondmate-home"
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify read a registered home that carries no secondmate marker"
+  assert_contains "$err" "sample-provider-call" "the unmarked-home refusal did not name the entry"
+  printf 'other-mate\n' > "$mate/.fm-secondmate-home"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a registered home marked for another secondmate"
+  fi
+  rm -f "$mate/.fm-secondmate-home"
+  printf 'sample-mate\n' > "$mate/marker-source"
+  ln -s "$mate/marker-source" "$mate/.fm-secondmate-home"
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify read a registered home whose secondmate marker is a symlink"
+  fi
+  rm -f "$mate/.fm-secondmate-home"
+  printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call durably held in a registered secondmate home"
+  out=$(run_captain "$parent" complete "$origin" sample-provider-call) \
+    || fail "complete refused a call durably held in a registered secondmate home"
+  assert_contains "$out" "sample-provider-call=sample-mate" \
+    "complete did not name the secondmate home that carries the call"
+  run_teardown "$parent" "$origin" >/dev/null 2> "$parent/cross-home-teardown.err" \
+    || fail "scout cleanup refused a call held in a registered secondmate home: $(cat "$parent/cross-home-teardown.err")"
+  assert_no_grep "sample-provider-call" "$parent/data/backlog.md" \
+    "the secondmate-held call leaked into the main backlog"
+
+  printf 'Use the sample provider.\n' > "$mate/provider-decision.txt"
+  run_captain "$mate" answer sample-provider-call --decision-file "$mate/provider-decision.txt" >/dev/null \
+    || fail "answering the secondmate-held call failed"
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call answered in a registered secondmate home"
+
+  write_scout_with_attested_inventory "$parent" "$origin" sample-provider-call,sample-ghost-call
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted an entry held in no home"
+  assert_contains "$err" "sample-ghost-call" "the held-nowhere refusal did not name the entry"
+
+  tasks_in "$mate" add sample-plain-work "Finish plain work" --repo sample >/dev/null
+  tasks_in "$mate" "done" sample-plain-work >/dev/null
+  write_scout_with_attested_inventory "$parent" "$origin" sample-plain-work
+  if run_captain "$parent" verify "$origin" >/dev/null 2>&1; then
+    fail "verify accepted a secondmate task closed without a recorded captain answer"
+  fi
+  pass "the completion gate accepts a call held or answered in a registered secondmate home only"
+}
+
+# The same acceptance through the real route: bin/fm-home-seed.sh seeds the
+# secondmate and writes its data/secondmates.md row, the scout's call is held in
+# the main home, and bin/fm-backlog-handoff.sh moves that held row into the
+# secondmate's backlog before the main home tears the scout down.
+test_completion_gate_accepts_a_call_handed_to_a_seeded_secondmate() {
+  local parent mate origin out
+  parent=$(make_home main-handoff)
+  mate="$TMP_ROOT/handoff-mate-home"
+  origin=sample-handoff-proposal
+  FM_SECONDMATE_CHARTER='Sample provider decisions.' FM_HOME="$parent" \
+    "$ROOT/bin/fm-home-seed.sh" handoff-mate "$mate" --no-projects > "$parent/seed.out" 2>&1 \
+    || fail "real secondmate seeding failed: $(cat "$parent/seed.out")"
+  mate=$(cd "$mate" && pwd -P)
+  fm_write_secondmate_meta "$parent/state/handoff-mate.meta" "$mate" \
+    "firstmate:fm-handoff-mate" sample
+  tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
+  run_captain "$parent" hold sample-handoff-call --title "Choose the sample provider" \
+    --reason "captain provider choice pending" --repo sample --origin "$origin" --until 2099-12-31 >/dev/null \
+    || fail "main-home hold creation failed"
+  PATH="$parent/fakebin:$PATH" FM_HOME="$parent" FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$ROOT/bin/fm-backlog-handoff.sh" handoff-mate sample-handoff-call > "$parent/handoff.out" 2>&1 \
+    || fail "handing the captain call to the seeded secondmate failed: $(cat "$parent/handoff.out")"
+  assert_no_grep "sample-handoff-call" "$parent/data/backlog.md" "the handed-off call stayed in the main backlog"
+  run_captain "$mate" open sample-handoff-call >/dev/null \
+    || fail "the handed-off call is not held for the captain in the secondmate home"
+
+  write_scout_with_attested_inventory "$parent" "$origin" sample-handoff-call
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused a call handed to and held in a seeded secondmate home"
+  out=$(run_captain "$parent" complete "$origin" sample-handoff-call) \
+    || fail "complete refused a call handed to and held in a seeded secondmate home"
+  assert_contains "$out" "sample-handoff-call=handoff-mate" \
+    "complete did not name the seeded secondmate that carries the call"
+  run_teardown "$parent" "$origin" >/dev/null 2> "$parent/handoff-teardown.err" \
+    || fail "scout cleanup refused a call handed to a seeded secondmate: $(cat "$parent/handoff-teardown.err")"
+  pass "the completion gate accepts a call handed to a seeded secondmate through the real handoff"
+}
+
+# Task ids are unique only within one home, so two registered secondmate homes
+# can each hold a call with the same id. The completion gate passes over a
+# same-named call an earlier registered home holds for another origin and
+# accepts the later one held for this origin, and it refuses while no
+# registered home holds the id for this origin.
+test_completion_gate_skips_a_secondmate_call_held_for_another_origin() {
+  local parent early late origin err out rc
+  parent=$(make_home main-shared-id)
+  early=$(make_home early-mate-shared-id)
+  late=$(make_home late-mate-shared-id)
+  printf 'early-mate\n' > "$early/.fm-secondmate-home"
+  printf 'late-mate\n' > "$late/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    | tee "$early/.fm-secondmate-parent" > "$late/.fm-secondmate-parent"
+  origin=sample-shared-id-proposal
+  tasks_in "$parent" add "$origin" "Investigate the sample proposal" --kind scout --repo sample --start >/dev/null
+  run_captain "$early" hold sample-shared-call --title "Choose another sample provider" \
+    --reason "another scout's provider choice pending" --repo sample --origin sample-other-proposal >/dev/null \
+    || fail "the earlier secondmate's hold creation failed"
+  run_captain "$late" hold sample-shared-call --title "Choose the sample provider" \
+    --reason "captain provider choice pending" --repo sample --origin "$origin" >/dev/null \
+    || fail "the later secondmate's hold creation failed"
+  write_scout_with_attested_inventory "$parent" "$origin" sample-shared-call
+
+  printf -- '- early-mate - synthetic scope (home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$early" > "$parent/data/secondmates.md"
+  rc=0
+  err=$(run_captain "$parent" verify "$origin" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted a secondmate call held only for another origin"
+  assert_contains "$err" "sample-shared-call" "the other-origin refusal did not name the entry"
+
+  printf -- '- late-mate - synthetic scope (home: %s; scope: sample work; projects: sample; added 2026-09-30)\n' \
+    "$late" >> "$parent/data/secondmates.md"
+  run_captain "$parent" verify "$origin" >/dev/null \
+    || fail "verify refused the call held for this origin because an earlier registered home holds the same id for another origin"
+  out=$(run_captain "$parent" complete "$origin" sample-shared-call) \
+    || fail "complete refused the call held for this origin because an earlier registered home holds the same id for another origin"
+  assert_contains "$out" "sample-shared-call=late-mate" \
+    "complete did not name the secondmate that holds the call for this origin"
+  run_teardown "$parent" "$origin" >/dev/null 2> "$parent/shared-id-teardown.err" \
+    || fail "scout cleanup refused the call held for this origin in a later registered home: $(cat "$parent/shared-id-teardown.err")"
+  pass "the completion gate passes over a same-named secondmate call held for another origin"
+}
+
 # Inside a secondmate home a hold and its answer reach the parent channel from
 # the script itself, keyed per hold occurrence, so a re-held task opens and
 # closes a distinct parent decision and a retry never duplicates a line. A main
@@ -4649,6 +4813,9 @@ test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_completion_gate_accepts_a_call_held_in_a_registered_secondmate_home
+test_completion_gate_accepts_a_call_handed_to_a_seeded_secondmate
+test_completion_gate_skips_a_secondmate_call_held_for_another_origin
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time

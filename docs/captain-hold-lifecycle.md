@@ -25,7 +25,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 A decision is not a separate thing in this system.
 It is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
 `bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
-The command addresses the active home's configured data directory.
+The command addresses the active home's configured data directory for every mutation and for every read except the completion gate's [registered-secondmate lookup](#checking-before-scout-teardown-verify).
 As a result, the existing backlog remains the only durable work database, and a secondmate-owned captain call stays in the secondmate home.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
@@ -126,6 +126,11 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 - Every recorded inventory entry still passes the [completion inventory checks](#recording-a-reviewed-inventory-complete).
 - No keyed status decision opened after the last `complete`.
 
+An inventory entry absent from the active home's backlog is still durable when a local secondmate home registered in `data/secondmates.md` holds that exact task id for the captain or records its captain answer, because a call handed to a secondmate stays in that authoritative home.
+A registered home is consulted only while it is still that mate's seeded home: its `.fm-secondmate-home` marker must be a regular file, not a symlink, naming the registered id, the same marker `bin/fm-backlog-handoff.sh` demands of a handoff destination.
+When several registered homes carry that id, the first row that also passes the origin check is the one accepted, so a same-named call an earlier registered home holds for another origin cannot hide the one handed off for this origin.
+`complete` applies the same check and names the registered secondmate beside each such entry in its completion line.
+A remote route has no local backlog to read and is never consulted, so an entry held nowhere readable still refuses.
 A keyed status decision opened after the last `complete` makes `verify` fail, and re-running `complete` is the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
@@ -525,6 +530,10 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - A report-only unresolved captain call refuses `--none` completion before teardown can erase the source.
 - Non-forced scout teardown always requires the durable inventory verification.
 - The recorded-answer guard holds: a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call.
+- A call held in a registered local secondmate home passes `verify`, `complete`, and scout teardown without entering the main backlog, and once answered there it still passes `verify`.
+  The same holds for a held call that `bin/fm-backlog-handoff.sh` moved out of the main backlog into a home seeded by `bin/fm-home-seed.sh`.
+  It also holds when an earlier registered home holds the same task id for another origin.
+  An unregistered home, a remote route, a registered home whose marker is missing, symlinked, or names another id, an entry held nowhere or only for another origin, and a secondmate task closed without a recorded answer still fail `verify`.
 
 ### Answers, stamps, and deferral
 

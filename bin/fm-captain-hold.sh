@@ -15,9 +15,11 @@
 # `<origin>-decision-<key>` identities through bin/fm-decision-hold.sh; those
 # rows are already plain task ids, so they keep working here unchanged, and
 # the legacy inputs noted below resolve them without a migration.
-# All backlog reads and mutations address the active home's configured data
-# directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
-# and secondmate-home ownership aligned with the work that discovered the call.
+# All backlog mutations, and every read except the completion gate's
+# registered-secondmate lookup described beside `complete` below, address the
+# active home's configured data directory the way
+# bin/fm-backlog-transition-lib.sh does, which keeps main-home and
+# secondmate-home ownership aligned with the work that discovered the call.
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
@@ -151,6 +153,12 @@
 # erase a source before this gate has succeeded: every recorded inventory
 # entry must still satisfy the same durability and origin checks as `complete`,
 # and no keyed status decision may be open.
+# Both gates read the active home's backlog first; an entry absent there is
+# durable only when a local secondmate home registered in data/secondmates.md
+# holds that exact task id for the captain or records its captain answer, and
+# `complete` names that mate beside the entry. A registered home is read only
+# while its .fm-secondmate-home marker is a regular file, not a symlink, naming
+# that registered id. A remote route is never read.
 # Metadata compatibility: the attestation keeps the historical
 # `decisions_reviewed=1` and `decision_keys=` keys, and an inventory entry that
 # names no existing task resolves through the legacy `<origin>-decision-<entry>`
@@ -237,6 +245,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -523,20 +534,55 @@ resolution_block() {  # <mode>
 
 # Durable state of one captain call: an active captain hold (annotations
 # surviving even when a date gate has expired) or a recorded captain answer.
+shown_hold_is_durable() {  # <show-output>
+  local show=$1
+  body_has_resolution_record "$(show_field "$show" body)" && return 0
+  [ "$(show_field "$show" state)" != "done" ] \
+    && [ "$(show_field_value "$show" hold_kind)" = captain ]
+}
+
 verify_hold_durable() {  # <task-id>
-  local id=$1 show state hold_kind body
+  local id=$1
   task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
-  show=$TASK_SHOW_OUTPUT
-  state=$(show_field "$show" state)
-  hold_kind=$(show_field_value "$show" hold_kind)
-  body=$(show_field "$show" body)
-  if body_has_resolution_record "$body"; then
+  shown_hold_is_durable "$TASK_SHOW_OUTPUT" \
+    || fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+}
+
+# A call the origin handed to a registered secondmate home is held in THAT
+# home's backlog, not this one's. Look the exact task id up in each local home
+# data/secondmates.md registers and accept the first row that is durably
+# captain-held or answered there and passes the origin check, so a same-named
+# call another origin holds in an earlier registered home is passed over. A
+# remote route has no local backlog to read, so it is never consulted, and
+# neither is a registered path that is not still the seeded home of that mate:
+# its .fm-secondmate-home marker must be a regular file, not a symlink, naming
+# the registered id. Prints the mate id on its first line and that row's full
+# show output after it, so the caller applies the same identity checks as a
+# row in this home; returns 1 when no registered home carries it that way.
+# Callers run it in a command substitution, so rebinding DATA to each home
+# cannot leak into this shell; DATA returns to this home for the origin check.
+resolve_entry_in_secondmate_home() {  # <origin-or-empty> <origin-id> <entry>
+  local origin=$1 origin_id=$2 entry=$3 reg="$DATA/secondmates.md" home_data=$DATA line own mate_data show
+  [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
+  own=$(fm_backlog_data_absolute "$DATA") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" = 0 ] || continue
+    case "$SECONDMATE_REGISTRY_HOME" in /*) ;; *) continue ;; esac
+    [ "$(fm_parent_channel_home_id "$SECONDMATE_REGISTRY_HOME")" = "$SECONDMATE_REGISTRY_ID" ] || continue
+    mate_data=$(fm_backlog_data_absolute "$SECONDMATE_REGISTRY_HOME/data" 2>/dev/null) || continue
+    [ "$mate_data" != "$own" ] || continue
+    DATA=$mate_data
+    task_show "$entry" || continue
+    shown_hold_is_durable "$TASK_SHOW_OUTPUT" || continue
+    show=$TASK_SHOW_OUTPUT
+    DATA=$home_data
+    hold_origin_matches "$origin" "$origin_id" "$(shown_hold_origin "$show")" || continue
+    printf '%s\n%s' "$SECONDMATE_REGISTRY_ID" "$show"
     return 0
-  fi
-  if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
-    return 0
-  fi
-  fail "captain-held task $id is neither held for the captain nor closed with a recorded captain answer"
+  done < "$reg"
+  return 1
 }
 
 # --- migrated legacy-id resolution on the Beads backend ---------------------
@@ -736,8 +782,11 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # beads backend - the migrated row the markdown-to-beads hold migration wrote.
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
-resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
+# With the optional --quiet-absent, an entry that resolves to nothing here
+# returns 3 without a message, so a caller can look further before refusing.
+resolve_entry() {  # <origin-or-empty> <entry> [--quiet-absent]; prints "<id> <how>" or fails
+  local origin=$1 entry=$2 quiet_absent=0 legacy migrated rc
+  [ "${3:-}" != --quiet-absent ] || quiet_absent=1
   if task_show "$entry"; then
     printf '%s exact' "$entry"
     return 0
@@ -756,11 +805,17 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     2) return 2 ;;
     124) return 124 ;;
   esac
+  [ "$quiet_absent" = 0 ] || return 3
+  fail_entry_absent "$origin" "$entry"
+}
+
+fail_entry_absent() {  # <origin-or-empty> <entry> [<suffix>]
+  local origin=$1 entry=$2 suffix=${3:-} legacy
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
-    fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
+    fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing$suffix"
   fi
-  fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
+  fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)$suffix"
 }
 
 body_hold_set_timestamp() {  # <decoded-task-body>
@@ -821,6 +876,20 @@ task_identity() {
   printf '%s' "$id"
 }
 
+shown_hold_origin() {  # <show-output>
+  body_hold_origin "$(decode_shown_value "$(show_field "$1" body)")"
+}
+
+# Whether a row whose recorded origin is <stored> was held for <origin>, whose
+# backend identity in this home is <origin-id>. A row with no recorded origin,
+# or a check for no particular origin, always matches.
+hold_origin_matches() {  # <origin-or-empty> <origin-id> <stored-or-empty>
+  local stored_id
+  [ -n "$3" ] && [ -n "$1" ] && [ "$1" != "$BINDING_ANY" ] || return 0
+  stored_id=$(task_identity "$3") || exit $?
+  [ "$stored_id" = "$2" ]
+}
+
 write_hold_origin() {  # <task-id> <shown-body> <origin-or-empty>
   local id=$1 body=$2 origin=$3 stamp rest new_body tmp
   body=$(decode_shown_value "$body") \
@@ -862,41 +931,47 @@ refuse_self_inventory() {
 # resolution failure that is not the read bound keeps resolve_entry's own
 # status - its stderr already named the entry; 124 means the backend never
 # answered, which is not the same as an unknown entry and must not be spent
-# as absence. The result carries the attestation evidence and whether an
-# origin was recorded, so completion can disclose the legacy fallback.
+# as absence. An entry absent from this home is accepted only when a
+# registered secondmate home durably carries it for this origin, and <how>
+# then names that mate; its row passes the same identity checks. The result
+# carries the attestation evidence and whether an origin was recorded, so
+# completion can disclose the legacy fallback.
 verify_entry_durable() {  # <origin-or-empty> <entry>; prints "<id> <how> <origin-state>"
-  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id stored_id
-  # The origin task is never its own captain-call inventory: it is the work the
-  # calls were found in, so accepting it would let a refused hold look recorded.
-  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ] && [ "$entry" = "$origin" ]; then
-    refuse_self_inventory "$origin" "$entry"
+  local origin=$1 entry=$2 resolved resolve_status=0 id how stored origin_state=unrecorded origin_id=$1
+  if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
+    # The origin task is never its own captain-call inventory: it is the work the
+    # calls were found in, so accepting it would let a refused hold look recorded.
+    [ "$entry" != "$origin" ] || refuse_self_inventory "$origin" "$entry"
+    origin_id=$(task_identity "$origin") || exit $?
   fi
-  resolved=$(resolve_entry "$origin" "$entry") || resolve_status=$?
-  if [ "$resolve_status" -ne 0 ]; then
+  resolved=$(resolve_entry "$origin" "$entry" --quiet-absent) || resolve_status=$?
+  if [ "$resolve_status" -eq 3 ]; then
+    resolve_status=0
+    resolved=$(resolve_entry_in_secondmate_home "$origin" "$origin_id" "$entry") || resolve_status=$?
+    case "$resolve_status" in
+      0) ;;
+      124) fail "the backlog backend of a registered secondmate home exceeded its read bound resolving $entry" ;;
+      *) fail_entry_absent "$origin" "$entry" ", and no registered secondmate home holds it for the captain or records its captain answer without naming another origin" ;;
+    esac
+    how=secondmate:${resolved%%$'\n'*}
+    TASK_SHOW_OUTPUT=${resolved#*$'\n'}
+  elif [ "$resolve_status" -ne 0 ]; then
     [ "$resolve_status" -ne 124 ] \
       || fail "the backlog backend exceeded its read bound resolving $entry"
     exit "$resolve_status"
+  else
+    how=${resolved##* }
+    verify_hold_durable "${resolved%% *}"
   fi
-  id=${resolved%% *}
-  how=${resolved##* }
-  verify_hold_durable "$id"
   id=$(show_field_value "$TASK_SHOW_OUTPUT" id)
   validate_slug backend-task-id "$id"
-  stored=$(body_hold_origin "$(decode_shown_value "$(show_field "$TASK_SHOW_OUTPUT" body)")")
-  origin_id=$origin
+  stored=$(shown_hold_origin "$TASK_SHOW_OUTPUT")
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
-    origin_id=$(task_identity "$origin") || exit $?
     [ "$id" != "$origin_id" ] || refuse_self_inventory "$origin" "$entry"
   fi
-  if [ -n "$stored" ]; then
-    if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
-      stored_id=$(task_identity "$stored") || exit $?
-      if [ "$stored_id" != "$origin_id" ]; then
-        fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
-      fi
-    fi
-    origin_state=recorded
-  fi
+  hold_origin_matches "$origin" "$origin_id" "$stored" \
+    || fail "captain-held task $id was held for origin $stored, not $origin; hold a task for $origin or list the right one"
+  [ -z "$stored" ] || origin_state=recorded
   printf '%s %s %s\n' "$id" "$how" "$origin_state"
 }
 
@@ -1731,7 +1806,7 @@ reconcile_note() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
-  local resolved_how attested_by_prefix='' origin_state unrecorded_origin=''
+  local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' held_in_secondmate=''
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1773,6 +1848,9 @@ command_complete() {
       if [ "$resolved_how" = migrated-prefix ]; then
         attested_by_prefix="${attested_by_prefix}${attested_by_prefix:+ }$entry=$resolved"
       fi
+      case "$resolved_how" in
+        secondmate:*) held_in_secondmate="${held_in_secondmate}${held_in_secondmate:+ }$entry=${resolved_how#secondmate:}" ;;
+      esac
     done <<EOF
 $(printf '%s\n' "$keys" | tr ',' '\n')
 EOF
@@ -1811,9 +1889,10 @@ EOF
       fi
     fi
   fi
-  printf 'complete: %s captain-call inventory reviewed%s%s%s\n' "$origin" "${keys:+ ($keys)}" \
+  printf 'complete: %s captain-call inventory reviewed%s%s%s%s\n' "$origin" "${keys:+ ($keys)}" \
     "${attested_by_prefix:+ [attested through the configured prefix: $attested_by_prefix]}" \
-    "${unrecorded_origin:+ [no recorded origin on: $unrecorded_origin; not checked against $origin]}"
+    "${unrecorded_origin:+ [no recorded origin on: $unrecorded_origin; not checked against $origin]}" \
+    "${held_in_secondmate:+ [held in a registered secondmate home: $held_in_secondmate]}"
 }
 
 command_verify() {
