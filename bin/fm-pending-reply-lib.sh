@@ -212,10 +212,17 @@ fm_pending_reply_summarize() {  # <text>
   printf '%s' "$cleaned"
 }
 
+# The last "<key>=" line wins. Pure bash, because every tick reads many fields
+# from every record and each external helper costs a process launch.
 fm_pending_reply_get() {  # <record-path> <key>
-  local rec=$1 key=$2
+  local rec=$1 key=$2 line value='' found=0
   [ -f "$rec" ] || return 0
-  grep "^${key}=" "$rec" 2>/dev/null | tail -1 | cut -d= -f2- || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) value=${line#"$key="}; found=1 ;;
+    esac
+  done 2>/dev/null < "$rec"
+  [ "$found" = 0 ] || printf '%s\n' "$value"
 }
 
 fm_pending_reply_sighting_encode() {  # <path> <line-number>
@@ -1518,14 +1525,37 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
   '
 }
 
+# Read the fields the tick routes on in one pass with no subprocess, into
+# _FM_PENDING_REPLY_TICK_*. The last line for a key wins, as in
+# fm_pending_reply_get.
+_fm_pending_reply_tick_fields() {  # <record-path>
+  local line
+  _FM_PENDING_REPLY_TICK_CORR=''
+  _FM_PENDING_REPLY_TICK_TASK=''
+  _FM_PENDING_REPLY_TICK_PHASE=''
+  _FM_PENDING_REPLY_TICK_ESCALATED=''
+  _FM_PENDING_REPLY_TICK_CLOSED=''
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      corr_id=*) _FM_PENDING_REPLY_TICK_CORR=${line#corr_id=} ;;
+      task_id=*) _FM_PENDING_REPLY_TICK_TASK=${line#task_id=} ;;
+      phase=*) _FM_PENDING_REPLY_TICK_PHASE=${line#phase=} ;;
+      escalated_epoch=*) _FM_PENDING_REPLY_TICK_ESCALATED=${line#escalated_epoch=} ;;
+      escalation_closed_epoch=*) _FM_PENDING_REPLY_TICK_CLOSED=${line#escalation_closed_epoch=} ;;
+    esac
+  done 2>/dev/null < "$1"
+}
+
 # Scan every pending record for this parent state. Safe to call every poll.
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks. Records are
 # selected in one pass first (_fm_pending_reply_select_needing_work), so a
-# settled record costs no lock and no fork, and the per-record path below runs,
-# unchanged, only for the records that selection returns.
-fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+# settled record costs no lock and no fork, and the per-record path below runs
+# only for the records that selection returns.
+# The optional progress command runs before each selected record, so a caller
+# can show liveness across a long scan.
+fm_pending_reply_tick() {  # <state-dir> [progress-command]
+  local state=$1 progress=${2-} dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
@@ -1546,14 +1576,20 @@ fm_pending_reply_tick() {  # <state-dir>
     selected+=("$rec")
   done < <(_fm_pending_reply_select_needing_work ${records[@]+"${records[@]}"})
   for rec in ${selected[@]+"${selected[@]}"}; do
-    corr=$(fm_pending_reply_get "$rec" corr_id)
-    [ -n "$corr" ] || corr=$(basename "$rec")
-    task_id=$(fm_pending_reply_get "$rec" task_id)
-    phase=$(fm_pending_reply_get "$rec" phase)
+    [ -z "$progress" ] || "$progress"
+    _fm_pending_reply_tick_fields "$rec"
+    corr=$_FM_PENDING_REPLY_TICK_CORR
+    [ -n "$corr" ] || corr=${rec##*/}
+    task_id=$_FM_PENDING_REPLY_TICK_TASK
+    phase=$_FM_PENDING_REPLY_TICK_PHASE
     if [ "$phase" = resolved ]; then
-      # Cheap no-op unless an escalation for this record is still open; this is
-      # the retry that makes the close converge after a transient write failure.
-      fm_pending_reply_close_escalation "$state" "$corr" || true
+      # Only an escalation still open needs the locked close. This is the retry
+      # that makes the close converge after a transient write failure. The
+      # locked path re-checks both fields, and a resolved record never gains a
+      # new escalation, so skipping a settled record changes nothing.
+      if [ -n "$_FM_PENDING_REPLY_TICK_ESCALATED" ] && [ -z "$_FM_PENDING_REPLY_TICK_CLOSED" ]; then
+        fm_pending_reply_close_escalation "$state" "$corr" || true
+      fi
       continue
     fi
     fm_pending_reply_reconcile_delivery "$state" "$corr" || true

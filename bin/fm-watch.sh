@@ -282,6 +282,13 @@ WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derive
 # fm_watcher_stall_bound (bin/fm-wake-lib.sh) owns the derivation, shared with
 # the arm that follows this watcher.
 WATCHER_STALL_BOUND=$(fm_watcher_stall_bound "$POLL")
+# A cycle phase that walks many records, checks, logs, or panes also touches
+# the beacon as each item advances, at most once per WATCHER_BEAT_SECS, so a
+# long legitimate scan never reads as a dead watcher. Only forward progress
+# touches it. A loop that stops advancing stops beating, and the stall bound
+# above still retires it (watcher_progress_beat below).
+WATCHER_BEAT_SECS=${FM_WATCHER_BEAT_SECS:-10}
+case "$WATCHER_BEAT_SECS" in ''|*[!0-9]*|0) WATCHER_BEAT_SECS=10 ;; esac
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
@@ -1964,6 +1971,20 @@ surface_nonterminal_stale() {  # <window> <hash>
   wake "stale: $win"
 }
 
+# Liveness beacon for fm-guard.sh: a fresh mtime means a watcher is alive and
+# advancing. watcher_progress_beat reads the shell's own SECONDS counter, so an
+# item inside the throttle window costs no process launch.
+_WATCHER_BEAT_AT=$SECONDS
+watcher_beat() {
+  touch "$STATE/.last-watcher-beat"
+  _WATCHER_BEAT_AT=$SECONDS
+}
+
+watcher_progress_beat() {
+  [ $((SECONDS - _WATCHER_BEAT_AT)) -ge "$WATCHER_BEAT_SECS" ] || return 0
+  watcher_beat
+}
+
 # Check and heartbeat cadence must survive actionable exits and restarts: the
 # watcher may be relaunched before in-memory counters reach their threshold on a
 # busy fleet. Persist the schedule as file mtimes instead.
@@ -2201,6 +2222,7 @@ signal_files_actionable() {  # <status-file> ...
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_NEEDS_DECISION_FILES=''
   for f in "$@"; do
+    watcher_progress_beat
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -2266,6 +2288,7 @@ heartbeat_scan_finds_actionable() {
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
+    watcher_progress_beat
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
@@ -2661,9 +2684,8 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Supervision scripts warn when the beacon goes stale with tasks in flight.
+  watcher_beat
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -2684,7 +2706,7 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  fm_pending_reply_tick "$STATE" watcher_progress_beat || true
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
@@ -2695,6 +2717,7 @@ while :; do
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
   }
+  watcher_progress_beat
 
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
@@ -2703,6 +2726,7 @@ while :; do
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
   }
+  watcher_progress_beat
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
@@ -2731,6 +2755,7 @@ while :; do
   else
     triage_log "inactive-outcome reconciliation unavailable"
   fi
+  watcher_progress_beat
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
@@ -2743,6 +2768,7 @@ while :; do
     rejected_checks=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
+      watcher_progress_beat
       [ -e "$c" ] || continue
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
@@ -2998,6 +3024,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watcher_progress_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
