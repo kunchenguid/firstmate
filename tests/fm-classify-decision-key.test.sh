@@ -536,6 +536,36 @@ test_keyless_wait_survives_stated_default_retraction() {
   pass "a stated default retraction closes its decision and leaves an unrelated keyless wait standing"
 }
 
+# A worker writes the key as a bare word after a bracketed tag ("blocked [at=N]
+# key=x: ..."); it must stay the stated key, so two such blockers stay distinct
+# and a resolved line with the same spelling closes only its own key (issue #6399).
+test_unbracketed_key_word_is_the_stated_key() {
+  local dir f expected
+  dir=$(case_dir unbracketed-key)
+  f="$dir/two.status"
+  printf '%s\n' \
+    'blocked [at=1790943990] key=nm-mirror-rebased: mirror refuses' \
+    'blocked [at=1790944213] key=nm-agent-grok-refused: grok refused' > "$f"
+  expected=$(printf 'nm-mirror-rebased\tblocked\tmirror refuses\nnm-agent-grok-refused\tblocked\tgrok refused')
+  assert_fold "$f" "$expected" "two unbracketed-key blockers"
+
+  printf '%s\n' 'resolved [at=3] key=nm-mirror-rebased: answered' >> "$f"
+  assert_fold "$f" "$(printf 'nm-agent-grok-refused\tblocked\tgrok refused')" "resolve by unbracketed key"
+
+  printf '%s\n' 'blocked key=a: no tag before the key' > "$dir/notag.status"
+  assert_fold "$dir/notag.status" "$(printf 'a\tblocked\tno tag before the key')" "key word without a preceding tag"
+
+  printf '%s\n' 'blocked [at=1] key=a [corr=0123456789abcdef]: tag after' > "$dir/mixed.status"
+  assert_fold "$dir/mixed.status" "$(printf 'a\tblocked\ttag after')" "key word between bracketed tags"
+
+  printf '%s\n' 'blocked [key=b] key=a: documented form wins' > "$dir/both.status"
+  assert_fold "$dir/both.status" "$(printf 'b\tblocked\tdocumented form wins')" "bracketed key wins over key word"
+
+  printf '%s\n' 'blocked [at=1] key=bad/slug: invalid slug' 'blocked x=1: arbitrary token' > "$dir/bad.status"
+  assert_fold "$dir/bad.status" "" "invalid slug or arbitrary token stays a non-transition"
+  pass "an unbracketed key=<slug> word before the colon is the stated key"
+}
+
 # The supervisors' declared-wait read keeps a pause standing behind answers
 # for other keys even when those answers outrun the bounded tail window, and a
 # resolved line for the pause's own key still retracts it from there.
@@ -558,6 +588,7 @@ test_declared_wait_survives_answers_past_the_event_window() {
   pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
 }
 
+test_unbracketed_key_word_is_the_stated_key
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
