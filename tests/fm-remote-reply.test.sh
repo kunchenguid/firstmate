@@ -827,9 +827,8 @@ fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
-# A failed transport used to leave a registered source with no owner until a
-# watcher cycle restarted it. Keep the same runner while reads fail, publish
-# one durable failure after three attempts, then recover without reconcile.
+# A failed transport retries briefly under the same owner, then publishes one
+# durable failure and exits so reconcile's launch floor owns recovery.
 : > "$TMP_ROOT/failed-polls"
 touch "$TMP_ROOT/fail-remote-read"
 FM_REMOTE_REPLY_FAIL_FLAG="$TMP_ROOT/fail-remote-read" \
@@ -837,32 +836,29 @@ FM_REMOTE_REPLY_FAIL_FLAG="$TMP_ROOT/fail-remote-read" \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
   remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
 failed_reader=$!
-for _ in $(seq 1 100); do
-  [ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -ge 3 ] && break
-  sleep 0.1
-done
-[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -ge 3 ] \
-  || fail "the listener did not retry three failed reads"
-[ "$(reply_owner)" = live ] || fail "a failed read orphaned the registered source"
-for _ in $(seq 1 100); do
-  grep -q 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue" 2>/dev/null && break
-  sleep 0.1
-done
+wait "$failed_reader" || fail "failed reader did not leave the runner"
+sleep 2
+[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 3 ] \
+  || fail "the listener did not stop after its three-read retry budget"
 assert_grep 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue" \
   "three failed reads did not publish a durable failure"
+[ -f "$PARENT/state/remote-replies/ios.source-failed" ] \
+  || fail "the failed-read episode left no durable marker"
 printf 'working: recovered after transport failure\n' >> "$REMOTE/state/parent-replies.status"
 rm -f "$TMP_ROOT/fail-remote-read"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
 for _ in $(seq 1 100); do
   grep -q 'recovered after transport failure' "$PARENT/state/ios.status" && break
   sleep 0.1
 done
 assert_grep 'recovered after transport failure' "$PARENT/state/ios.status" \
-  "the retained listener did not ingest after transport recovery"
+  "a relaunched listener did not ingest after transport recovery"
+assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
+  "a recovered read did not close the failed-read episode"
 [ "$(grep -c 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue")" -eq 1 ] \
   || fail "one failed-read episode published duplicate wakes"
 stop_reply_listener || fail "the recovered listener did not stop"
-wait "$failed_reader" || true
-pass "a failed remote read retries under one owner, wakes once, and recovers without a watcher"
+pass "a failed remote read retries a bounded number of times, wakes once, and exits"
 
 # Make local ingestion persistently fail after the delta has been captured.
 # Its durable generation must remain the only copy until reconciliation.
@@ -1068,7 +1064,8 @@ assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 # A watcher compares the remote log size with the committed cursor. One lag
-# episode wakes only after the bound, then cursor progress clears its marker.
+# episode re-ensures the listener and wakes only after the bound, then cursor
+# progress clears its marker.
 remote_env "$ADAPTER" arm ios >/dev/null
 FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-first.out"
@@ -1082,13 +1079,12 @@ sleep 1.1
 FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-third.out"
 [ ! -s "$TMP_ROOT/lag-third.out" ] || fail "one lag episode woke repeatedly"
-remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/lag-catchup.out" 2>&1 &
 for _ in $(seq 1 100); do
   grep -q 'source was replaced' "$PARENT/state/ios.status" && break
   sleep 0.1
 done
 assert_grep 'source was replaced' "$PARENT/state/ios.status" \
-  "lagged reply was not ingested after the listener restarted"
+  "a stalled-channel episode did not re-ensure its listener and ingest the backlog"
 stop_reply_listener || fail "lag catchup listener did not stop"
 for _ in $(seq 1 100); do
   [ "$(reply_owner)" = none ] && break
@@ -1099,7 +1095,7 @@ FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-caught-up.out"
 [ ! -s "$TMP_ROOT/lag-caught-up.out" ] || fail "a caught-up channel still woke"
 assert_absent "$PARENT/state/remote-replies/ios.lag" "catchup did not clear the lag episode"
-pass "an aged remote reply lag wakes once and catchup resets its episode"
+pass "an aged remote reply lag re-ensures its listener, wakes once, and catchup resets its episode"
 
 # The live failure mode is a detached reconcile launch that never proves a
 # claim, followed by an attached start that can read and apply the same reply.

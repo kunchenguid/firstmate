@@ -1136,8 +1136,9 @@ secondmate_liveness_tick() {
 }
 
 # The remote reply mirror has its own progress evidence: the remote log size
-# and the committed local cursor. The adapter owns the episode marker and wake
-# publication; this watcher only gives its new actionable result a live cycle.
+# and the committed local cursor. The adapter owns the episode marker, its one
+# ensure-listening repair, and wake publication; this watcher only gives its new
+# actionable result a live cycle.
 remote_reply_lag_tick() {
   local meta id kind host result
   for meta in "$STATE"/*.meta; do
@@ -2736,7 +2737,8 @@ while :; do
   procevent_surface_queued
 
   # A live source can still stop advancing its cursor. Its remote adapter
-  # compares remote bytes with that cursor and owns the once-per-episode wake.
+  # compares remote bytes with that cursor and owns the once-per-episode
+  # listener repair and wake.
   remote_reply_lag_tick
 
   # A process-event result carries richer adapter-owned wake context than the

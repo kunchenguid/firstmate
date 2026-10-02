@@ -568,8 +568,8 @@ So a mirrored reply reaches the primary status channel without depending on the 
 A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
 
 A remote reply reaches the primary only through this asynchronous mirror.
-The listener retains its process-event owner across transient read failures, retries three times, and queues one actionable failure for a continuing episode while it keeps relistening.
-The primary watcher also samples the remote log size against the committed local cursor on a bounded cadence and queues one stalled-channel wake when the remote log stays ahead beyond the configured threshold.
+The listener retains its process-event owner across transient read failures and retries three times; when all three fail it queues one actionable failure for a continuing episode and exits, leaving recovery to the reconcile launch floor.
+The primary watcher also samples the remote log size against the committed local cursor on a bounded cadence; when the remote log stays ahead beyond the configured threshold it runs `fm-procevent.sh ensure-listening` for that source once in the episode and queues one stalled-channel wake.
 Cursor progress or catchup resets that lag episode.
 Because of that, the primary treats a missing correlated report as a missed report only once the mirror has been read through the end of the remote log after that turn ended.
 A remote mate that did answer is therefore never asked to repost while its answer is still in flight.

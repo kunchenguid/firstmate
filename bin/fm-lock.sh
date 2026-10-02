@@ -32,6 +32,12 @@
 #                             or watcher beacon was recently active. This is
 #                             the guarded recovery when a Desktop thread ends
 #                             but its shared daemon remains alive.
+#                             A Codex Desktop primary live during the upgrade
+#                             to recorded Codex thread ids has no sidecar and
+#                             sees its own lock as foreign. Recover it: stop
+#                             that thread's watcher (fm-watch-arm.sh --stop),
+#                             wait out the quiet window, then run take-over
+#                             --expect-pid PID --expect-session none.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

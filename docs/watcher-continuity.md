@@ -82,7 +82,6 @@ It re-arms by parking that awaited hook on `bin/fm-watch-arm.sh` and returning a
 ### Claude Stop hook
 
 Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`) owns routine tokenless re-arm.
-The async auto-arm hook is registered before the synchronous turn-end guard in the same Stop group, so a blocking guard cannot prevent Claude from reaching the arm hook.
 Do not run the hook as a manual arm from a tool turn: a short-lived tool process cannot own its park; its header and help own the invocation contract.
 The hook fires on every Stop.
 On each Stop, an eligible primary with supervision need admits one home-scoped owner, which foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
@@ -197,6 +196,13 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 - Codex retains its bounded foreground checkpoint protocol.
 - Grok retains its tracked background-task notification protocol.
+
+A Codex Desktop primary that was live during the upgrade to sidecar-recorded Codex thread identity holds a shared-daemon lock with no `state/.lock-session`, so its own thread now reads that lock as foreign.
+There is no automatic adoption; recover it explicitly:
+
+1. Stop that thread's watcher: `bin/fm-watch-arm.sh --stop`.
+2. Wait out the quiet window (`FM_LOCK_TAKEOVER_QUIET_SECONDS`, default 300 seconds) so neither `state/.lock` nor `state/.last-watcher-beat` was touched within it.
+3. From the Codex thread taking the lock, run `bin/fm-lock.sh take-over --expect-pid PID --expect-session none`, with `PID` from `bin/fm-lock.sh status`.
 
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
 The Claude hook's detached handling successor is launched by the hook itself, which waits for the successor's status line before it exits.

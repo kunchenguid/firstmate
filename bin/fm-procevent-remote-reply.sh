@@ -278,8 +278,8 @@ cmd_source() {
   marker="$CURSOR_DIR/$id.source-failed"
   [ ! -e "$marker" ] || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
   # The runner retains its claim during brief transport/read failures. Three
-  # consecutive failures open one durable failure episode; its next relisten
-  # keeps repairing even when the parent watcher is temporarily absent.
+  # consecutive failures open one durable failure episode and exit the runner,
+  # leaving recovery to reconcile's launch floor.
   for attempt in 1 2 3; do
     read_cursor "$id"
     started=$(fm_pending_reply_now)
@@ -306,15 +306,14 @@ cmd_source() {
       (umask 077; printf '%s\n' "$rc" > "$marker") || true
     fi
   fi
-  sleep 5
-  return "$WINDOW_CLOSED_EMPTY"
+  return "$rc"
 }
 
 # The process-event claim can disappear after a failed remote read while its
 # registration remains. A watcher normally re-ensures it, but a live watcher
 # alone does not prove the cursor is advancing. Probe the remote append-only
-# log's size on a bounded cadence and announce one episode when it stays ahead
-# of the committed cursor. A moving cursor resets the episode; a failed probe
+# log's size on a bounded cadence and, once per episode where it stays ahead of
+# the committed cursor, re-ensure the listener and announce the episode. A moving cursor resets the episode; a failed probe
 # proves no lag and leaves the existing observation untouched.
 cmd_lag_check() {  # <secondmate-id>
   local id=${1:-} threshold=${FM_REMOTE_REPLY_LAG_SECONDS:-120}
@@ -374,6 +373,7 @@ cmd_lag_check() {  # <secondmate-id>
     return 1
   fi
   printf '%s %s 1\n' "$CURSOR_OFFSET" "$since" > "$tmp" && mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$(source_id "$id")" >/dev/null 2>&1 || true
   printf '%s\n' "$reason"
 }
 
