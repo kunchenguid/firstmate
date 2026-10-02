@@ -73,18 +73,13 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-# The walk-failure classification is probed rather than threaded through the
-# anchor call because a command substitution subshell would strand any global
-# the walk could set; the probe re-answers the walk's own first question, the
-# one inspection target that is alive by construction.
 me=$(fm_session_lock_anchor_pid) || {
-  reason=$(fm_harness_walk_fail_reason)
-  case "$reason" in
-    ps-unavailable)
+  case "$?" in
+    2)
       echo "FM_LOCK_REASON=ps-unavailable" >&2
       echo "error: cannot inspect processes to identify this session's harness (ps failed or was denied); operate read-only until resolved" >&2
       ;;
-    harness-detect-failed)
+    *)
       echo "FM_LOCK_REASON=harness-detect-failed" >&2
       echo "error: cannot locate harness process in ancestry; operate read-only until resolved" >&2
       ;;

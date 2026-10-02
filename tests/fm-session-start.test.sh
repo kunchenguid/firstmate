@@ -250,8 +250,8 @@ case "$*" in
     exit 0
     ;;
   *"ppid="*)
-    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
-    /bin/ps -o ppid= -p "$pid"
+    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || { printf '0\n'; exit 0; }
+    exec /bin/ps -o ppid= -p "$pid"
     ;;
 esac
 exit 1

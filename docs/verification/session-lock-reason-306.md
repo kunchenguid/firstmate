@@ -13,10 +13,10 @@ An operator therefore could not tell a genuinely held lock apart from an identit
 `bin/fm-lock.sh` prints a stable `FM_LOCK_REASON=<reason>` line to stderr on every identity-relevant acquire failure, beside its human-readable message, and still exits 1:
 
 - `lock-held` - another live firstmate session genuinely holds the lock.
-- `ps-unavailable` - `ps` cannot inspect even the live invoking shell, so process inspection itself failed or was denied.
-- `harness-detect-failed` - `ps` inspected the live invoking shell but the ancestry walk completed without finding a verified harness.
+- `ps-unavailable` - a required ancestry inspection (`comm`, `args`, or `ppid`) failed or was denied.
+- `harness-detect-failed` - all required ancestry inspections succeeded but the walk found no verified harness.
 
-The classification probe inspects the invoking shell itself (`ps -o comm= -p $$`), the one target that is alive by construction, so a failure there is honest evidence about inspection rather than about any other process.
+The ancestry walker returns its inspection failure through the anchor result, so acquisition classifies the failed walk without a second probe.
 State-directory, write, and ownership-verification failures carry no reason line and keep the generic banner.
 `bin/fm-session-start.sh` branches its banner and NEXT STEP on the reason, and for `ps-unavailable` and `harness-detect-failed` explicitly says it cannot verify the session's identity and does not claim another session holds the lock.
 Every acquire failure remains read-only: the session skips every mutating step regardless of reason.
@@ -36,7 +36,8 @@ Run the focused suite, which fakes `ps` to produce each class on a temporary hom
 bin/fm-test-run.sh tests/fm-lock.test.sh tests/fm-session-start.test.sh
 ```
 
-The controlled manual shape from the issue still reproduces the acquire failure under a denied `ps`, and `bin/fm-lock.sh status` now reports `lock: free` for the same empty state instead of implying another holder.
+The controlled shape from the issue reproduces the acquire failure under a denied `ps`; status already reported `lock: free` for that empty state before this change.
+The acquisition diagnostic and session-start banner now identify the inspection failure instead of implying another holder.
 
 ## Follow-up plan: managed Codex identity (#1933)
 

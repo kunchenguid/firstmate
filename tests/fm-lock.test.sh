@@ -48,6 +48,7 @@ set -u
 case "$*" in
   *"comm="*) printf '/usr/local/bin/claude\n'; exit 0 ;;
   *"args="*) printf 'claude\n'; exit 0 ;;
+  *"ppid="*) printf '0\n'; exit 0 ;;
 esac
 exit 1
 SH
@@ -79,19 +80,35 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_ps_climb_fails <fakebin>: `ps` inspects the invoking process but
-# fails every parent lookup, so the walk is cut short above a working
-# inspection of the live current process itself.
 make_fake_ps_climb_fails() {
   local fakebin=$1
   cat > "$fakebin/ps" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "$*" in
-  *"comm="*) printf '/bin/bash\n'; exit 0 ;;
-  *"args="*) printf 'bash\n'; exit 0 ;;
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$field" = "$FM_TEST_FAIL_FIELD" ]; then
+  if [ "$FM_TEST_FAIL_AT" = self ] || [ "$pid" = 1 ]; then
+    exit 1
+  fi
+fi
+case "$field" in
+  comm=|args=)
+    if [ "$pid" != 1 ] && [ "${FM_TEST_MATCH_SELF:-0}" = 1 ]; then
+      printf 'claude\n'
+    else
+      printf '/bin/bash\n'
+    fi
+    ;;
+  ppid=) [ "$pid" = 1 ] && printf '0\n' || printf '1\n' ;;
+  *) exit 1 ;;
 esac
-exit 1
 SH
   chmod +x "$fakebin/ps"
 }
@@ -219,21 +236,31 @@ EOF
 
 # --- boundary: a working self-inspection whose climb fails ------------------
 
-test_climb_failure_is_not_ps_unavailable() {
-  local rec home fakebin out status
+test_ancestry_inspection_failures() {
+  local rec home fakebin out status field at match
   rec=$(new_home climb-fails)
   IFS='|' read -r home fakebin <<EOF
 $rec
 EOF
   make_fake_ps_climb_fails "$fakebin"
 
-  status=0
-  out=$(run_lock "$home" "$fakebin" 2>&1) || status=$?
-  expect_code 1 "$status" "a cut-short walk must still exit 1"
-  assert_contains "$out" "FM_LOCK_REASON=harness-detect-failed" "a ps that inspects the live invoking shell was misclassified as unavailable"
-  assert_not_contains "$out" "FM_LOCK_REASON=ps-unavailable" "ps-unavailable must stay reserved for a ps that cannot inspect the live invoking shell"
+  for match in 0 1; do
+    for at in self parent; do
+      for field in comm= args= ppid=; do
+        [ "$match:$at:$field" != 1:parent:ppid= ] || continue
+        status=0
+        out=$(FM_TEST_FAIL_FIELD="$field" FM_TEST_FAIL_AT="$at" FM_TEST_MATCH_SELF="$match" \
+          run_lock "$home" "$fakebin" 2>&1) || status=$?
+        expect_code 1 "$status" "$at $field failure must refuse acquisition (match=$match)"
+        assert_contains "$out" "FM_LOCK_REASON=ps-unavailable" "$at $field inspection failure lost its cause (match=$match)"
+        assert_not_contains "$out" "FM_LOCK_REASON=harness-detect-failed" "an incomplete walk was classified as completed"
+        assert_not_contains "$out" "another live firstmate session holds the lock" "inspection failure falsely claimed another holder"
+        [ ! -e "$home/state/.lock" ] || fail "an incomplete walk published a lock"
+      done
+    done
+  done
 
-  pass "a walk cut short above a working self-inspection stays harness-detect-failed"
+  pass "comm, args, and parent inspection failures refuse acquisition even after a harness match"
 }
 
 # --- status stays honest -----------------------------------------------------
@@ -301,7 +328,7 @@ test_acquire_success
 test_lock_held
 test_harness_detect_failed
 test_ps_unavailable
-test_climb_failure_is_not_ps_unavailable
+test_ancestry_inspection_failures
 test_status_free_under_denied_ps
 test_status_stale_with_working_ps
 test_status_unknown_under_denied_ps

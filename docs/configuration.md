@@ -142,7 +142,7 @@ tmux list-panes -a
 ps -axo pid,ppid,stat,lstart,command
 ```
 
-If `bin/fm-lock.sh status` reports `lock: free` and no other firstmate session is running, the read-only state was caused by denied process inspection, not a real lock holder.
+A `lock: free` status means no lock file exists; use the acquisition reason to distinguish denied or failed process inspection (`ps-unavailable`) from a walk that found no verified harness (`harness-detect-failed`).
 An `unknown` status line is the honest verdict for a recorded pid that process inspection cannot classify as a live verified harness or provably dead.
 Under a Codex sandbox, granting the approval that lets `ps` run - or launching the harness where its ancestry is inspectable - lets the next session start acquire the lock normally.
 `bin/fm-lock.sh` emits a stable `FM_LOCK_REASON=<lock-held|ps-unavailable|harness-detect-failed>` line to stderr on an identity-relevant acquire failure so this classification is scriptable; its header owns the reasons, and every acquire failure still exits 1.

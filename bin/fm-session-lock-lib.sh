@@ -119,8 +119,8 @@ fm_harness_process_matches() {  # <comm> <args>
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 2
+    args=$(ps -o args= -p "$pid" 2>/dev/null) || return 2
     if fm_harness_process_matches "$comm" "$args"; then
       printf '%s\n' "$pid"
       printed=1
@@ -129,7 +129,8 @@ fm_harness_ancestry_pids() {
     elif [ "$extending" -eq 1 ]; then
       break
     fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 2
+    pid=${pid// /}
     # Examine the top of the chain before stopping. Inside a PID namespace the
     # harness itself is pid 1, so stopping as soon as the next pid is 1 hides the
     # very process this walk exists to find. A host's real pid 1 (init, systemd,
@@ -147,7 +148,7 @@ fm_harness_ancestry_pids() {
 # reports a single pid, so this remains its innermost match unchanged.
 fm_harness_ancestry_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   _fm_harness_outermost_pid "$pids"
 }
 
@@ -170,25 +171,6 @@ EOF
 # any other process, live or dead.
 fm_harness_ps_inspects_live_shell() {
   ps -o comm= -p $$ >/dev/null 2>&1
-}
-
-# Classify why an ancestry walk that found no verified harness failed. The
-# walk's own first inspection target is that same live invoking shell, so one
-# probe of it separates the two honest causes: `ps` failing there is process
-# inspection itself failing or being denied (ps-unavailable), while a probe
-# that succeeds means the walk really ran and completed without finding a
-# verified harness (harness-detect-failed), which covers both a sandboxed PID
-# namespace that hides the harness above its pid 1 and a plain shell with no
-# harness above it at all - no walk can tell those apart, and the label does
-# not pretend to. bin/fm-lock.sh prints this verdict as its stable
-# FM_LOCK_REASON classification for callers that must never conflate either
-# with another live session holding the lock.
-fm_harness_walk_fail_reason() {
-  if fm_harness_ps_inspects_live_shell; then
-    printf '%s\n' harness-detect-failed
-  else
-    printf '%s\n' ps-unavailable
-  fi
 }
 
 # True if $1 is a live process that looks like a verified harness.
@@ -232,7 +214,7 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
   if [ -z "$pids" ]; then
-    pids=$(fm_harness_ancestry_pids) || return 1
+    pids=$(fm_harness_ancestry_pids) || return $?
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
@@ -281,7 +263,7 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # outermost pid of its contiguous run, exactly as before.
 fm_session_lock_anchor_pid() {
   local pids
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
     printf '%s\n' "$CLAUDE_PID"
     return 0
@@ -307,7 +289,7 @@ fm_session_lock_owned_by_self() {
   case "$lock_pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF
@@ -333,7 +315,7 @@ fm_session_lock_foreign_owner_live() {
     ''|*[!0-9]*) return 1 ;;
   esac
   fm_harness_pid_alive "$lock_pid" || return 1
-  pids=$(fm_harness_ancestry_pids) || return 1
+  pids=$(fm_harness_ancestry_pids) || return $?
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 1
   done <<EOF
