@@ -58,10 +58,12 @@
 #
 # The one exception is a watcher whose live parent is an away daemon while
 # state/.afk is absent: that daemon outlived away mode and would take every
-# wake, so the arm never attaches to it. It stops that daemon (which stops its
+# wake, so the arm never attaches to it. Before any health or beacon check, in
+# plain, --restart, and --take-over modes, it stops that daemon (which stops its
 # own watcher), then stops this home's watcher if one remains, then re-runs
-# itself in place to own a fresh cycle (take_over_from_leftover_daemon;
-# bin/fm-afk-daemon-lib.sh proves the ownership).
+# itself in place with its own arguments to own a fresh cycle
+# (take_over_from_leftover_daemon; bin/fm-afk-daemon-lib.sh proves the
+# ownership). The attach paths repeat that check for a successor that appears later.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -334,14 +336,15 @@ report_attached() {
 # outlived away mode: following it would hand every wake to that daemon, which
 # drains and acknowledges it into a buffer nothing delivers. So before attaching
 # to such a holder, stop that daemon (it stops its own watcher) and this home's
-# watcher, then re-run this arm in place to own a fresh cycle. Only the daemon
-# that bin/fm-afk-daemon-lib.sh proves runs this home's watcher is signalled.
-take_over_from_leftover_daemon() {  # <holder-pid>
-  local holder=$1 daemon survivors
+# watcher, then re-run this arm in place with its own arguments to own a fresh
+# cycle. Only the daemon that bin/fm-afk-daemon-lib.sh proves runs this home's
+# watcher is signalled.
+take_over_from_leftover_daemon() {  # <holder-pid> <holder-identity>
+  local holder=$1 identity=$2 daemon survivors
   [ ! -e "$STATE/.afk" ] || return 0
   daemon=$(fm_afk_daemon_watcher_owner "$STATE" "$WATCH" "$FM_HOME") || return 0
   [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$holder" ] || return 0
-  [ "$cycle_active" -eq 1 ] || cycle_begin "$holder" leftover-daemon "$HEALTHY_IDENTITY"
+  [ "$cycle_active" -eq 1 ] || cycle_begin "$holder" leftover-daemon "$identity"
   if [ "${FM_WATCH_ARM_TOOK_OVER:-}" = 1 ]; then
     cycle_log_append none none leftover-daemon-returned "daemon:$daemon"
     echo "watcher: FAILED - a leftover away daemon pid=$daemon still runs this home's watcher after a takeover"
@@ -356,7 +359,7 @@ take_over_from_leftover_daemon() {  # <holder-pid>
   cycle_log_append none none leftover-daemon-stopped "daemon:$daemon"
   [ -z "${child_out:-}" ] || rm -f "$child_out" 2>/dev/null || true
   trap - HUP TERM INT
-  FM_WATCH_ARM_TOOK_OVER=1 exec "$SCRIPT_DIR/fm-watch-arm.sh"
+  FM_WATCH_ARM_TOOK_OVER=1 exec "$SCRIPT_DIR/fm-watch-arm.sh" ${ARM_ARGS[@]+"${ARM_ARGS[@]}"}
 }
 
 # Give a successor the same bounded confirmation window used for a fresh child.
@@ -439,7 +442,7 @@ attach_and_wait() {
   while :; do
     if healthy_watcher; then
       if [ "$HEALTHY_PID" != "$attached_pid" ] || [ "$HEALTHY_IDENTITY" != "$cycle_watcher_identity" ]; then
-        take_over_from_leftover_daemon "$HEALTHY_PID"
+        take_over_from_leftover_daemon "$HEALTHY_PID" "$HEALTHY_IDENTITY"
         cycle_log_append unknown unknown lock-replaced "attached:$HEALTHY_PID"
         attached_pid=$HEALTHY_PID
         cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -459,7 +462,7 @@ attach_and_wait() {
       return 1
     fi
     if wait_for_healthy_successor; then
-      take_over_from_leftover_daemon "$HEALTHY_PID"
+      take_over_from_leftover_daemon "$HEALTHY_PID" "$HEALTHY_IDENTITY"
       cycle_log_append unknown unknown attached-cycle-ended "attached:$HEALTHY_PID"
       attached_pid=$HEALTHY_PID
       cycle_begin "$attached_pid" attached "$HEALTHY_IDENTITY"
@@ -519,6 +522,7 @@ handling_successor_generation() {
   esac
 }
 
+ARM_ARGS=("$@")
 mode=arm
 handling_generation=
 handling_watcher_pid=
@@ -574,6 +578,13 @@ stop_home_watcher() {
     return 1
   fi
 }
+
+# The leftover-daemon takeover (header) runs before any health or beacon
+# check, so a stale beacon cannot hide that daemon's watcher.
+if [ "$mode" != stop ]; then
+  take_over_from_leftover_daemon "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" \
+    "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)"
+fi
 
 if [ "$mode" = restart ]; then
   stop_home_watcher || exit 1
@@ -658,7 +669,6 @@ fi
 # then, not as an immediate empty wake. (--restart skips this: it just stopped
 # this home's watcher and wants a fresh one.)
 if [ "$mode" = arm ] && healthy_watcher; then
-  take_over_from_leftover_daemon "$HEALTHY_PID"
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached
@@ -741,7 +751,7 @@ owned_child_finished() {
 
   if [ "$rc" -eq 0 ]; then
     if wait_for_healthy_successor; then
-      take_over_from_leftover_daemon "$HEALTHY_PID"
+      take_over_from_leftover_daemon "$HEALTHY_PID" "$HEALTHY_IDENTITY"
       cycle_log_append "$rc" "$signal" unexpected-clean-exit "attached:$HEALTHY_PID"
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true

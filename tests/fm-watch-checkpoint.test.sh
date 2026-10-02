@@ -227,8 +227,8 @@ ack_wakes() {  # <home>
 # queued wake whatever state/.afk says. The watcher sees it only as its parent
 # process running fm-supervise-daemon.sh.
 LEFTOVER_PID=
-start_leftover_daemon() {  # <home>
-  local home=$1 i watcher
+start_leftover_daemon() {  # <home> [<watcher-poll>]
+  local home=$1 poll=${2:-1} i watcher
   mkdir -p "$home/old-bin"
   cat > "$home/old-bin/fm-supervise-daemon.sh" <<'SH'
 #!/usr/bin/env bash
@@ -248,8 +248,8 @@ done
 SH
   chmod +x "$home/old-bin/fm-supervise-daemon.sh"
   fm_test_track_watcher_state "$home/state"
-  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    FM_TEST_WATCH="$ROOT/bin/fm-watch.sh" FM_TEST_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
+  FM_HOME="$home" FM_POLL="$poll" FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_WATCHER_STALL_BOUND=600 FM_TEST_WATCH="$ROOT/bin/fm-watch.sh" FM_TEST_DRAIN="$ROOT/bin/fm-wake-drain.sh" \
     "$home/old-bin/fm-supervise-daemon.sh" &
   LEFTOVER_PID=$!
   i=0
@@ -311,6 +311,34 @@ test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
   pass "checkpoint: with away mode off, it stops a leftover away daemon and its watcher, and worker events reach the attended drain"
 }
 
+# A Codex home that runs the supervision host, beside a leftover daemon whose
+# watcher polls every 60s, so its beacon is stale past the 3s grace.
+test_host_checkpoint_takes_over_a_leftover_away_daemon() {
+  local home fakebin old_watcher status
+  home=$(make_home host-leftover-daemon)
+  : > "$home/config/supervision-host"
+  fakebin="$TMP_ROOT/host-leftover-daemon-bin"
+  mkdir -p "$fakebin"
+  ln -s /bin/bash "$fakebin/codex"
+  start_leftover_daemon "$home" 60
+  old_watcher=$(cat "$home/state/.watch.lock/pid")
+  sleep 5
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_GUARD_GRACE=3 FM_WATCHER_STALE_GRACE=3 FM_WATCHER_STALL_BOUND=600 "$fakebin/codex" -c '
+    printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    "$0" --seconds 8
+  ' "$CHECKPOINT" >"$home/out.txt" 2>"$home/err.txt" || status=$?
+  if pid_running "$LEFTOVER_PID"; then
+    kill -TERM "$LEFTOVER_PID" 2>/dev/null
+    fail "the host checkpoint left the leftover away daemon running: rc=$status $(cat "$home/out.txt" "$home/err.txt")"
+  fi
+  ! pid_running "$old_watcher" || fail "the host checkpoint left the leftover daemon's watcher running"
+  expect_code 0 "$status" "the host takeover checkpoint: $(cat "$home/out.txt" "$home/err.txt")"
+  assert_contains "$(cat "$home/out.txt")" "check: rearm-resurface" "the host checkpoint did not announce the gap the takeover left"
+  pass "checkpoint: on a supervision-host home, it stops a leftover away daemon and its stale-beacon watcher"
+}
+
 test_checkpoint_keeps_an_away_daemon_while_away_mode_is_on() {
   local home out status
   home=$(make_home away-daemon)
@@ -331,6 +359,7 @@ test_checkpoint_keeps_an_away_daemon_while_away_mode_is_on() {
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon
+test_host_checkpoint_takes_over_a_leftover_away_daemon
 test_checkpoint_keeps_an_away_daemon_while_away_mode_is_on
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success

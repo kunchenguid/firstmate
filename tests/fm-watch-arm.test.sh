@@ -1476,8 +1476,8 @@ test_reaper_stops_a_tracked_watcher() {
 # wakes the attended firstmate needs. The watcher sees it only as its parent
 # process running fm-supervise-daemon.sh.
 LEFTOVER_PID=
-start_leftover_daemon() {  # <dir> <state> <fakebin>
-  local dir=$1 state=$2 fakebin=$3 i watcher
+start_leftover_daemon() {  # <dir> <state> <fakebin> [<watcher-poll>]
+  local dir=$1 state=$2 fakebin=$3 poll=${4:-1} i watcher
   mkdir -p "$dir/old-bin"
   cat > "$dir/old-bin/fm-supervise-daemon.sh" <<'SH'
 #!/usr/bin/env bash
@@ -1496,8 +1496,9 @@ while [ "$(date +%s)" -lt "$end" ]; do
 done
 SH
   chmod +x "$dir/old-bin/fm-supervise-daemon.sh"
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_TEST_WATCH="$WATCH" FM_TEST_DRAIN="$DRAIN" \
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL="$poll" FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCHER_STALL_BOUND=600 \
+    FM_TEST_WATCH="$WATCH" FM_TEST_DRAIN="$DRAIN" \
     "$dir/old-bin/fm-supervise-daemon.sh" &
   LEFTOVER_PID=$!
   i=0
@@ -1577,6 +1578,39 @@ test_arm_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
   pass "watch-arm: with away mode off, the arm stops a leftover away daemon instead of attaching, and worker events reach the attended drain"
 }
 
+# The leftover daemon's watcher polls every 60s, so its beacon goes stale past
+# the arm's 3s grace while it stays far below the stall bound.
+test_arm_takes_over_a_leftover_away_daemon_watcher_with_a_stale_beacon() {
+  local dir state fakebin armout old_watcher age
+  dir=$(make_case arm-leftover-daemon-stale)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  start_leftover_daemon "$dir" "$state" "$fakebin" 60
+  old_watcher=$(cat "$state/.watch.lock/pid")
+  sleep 5
+  age=$(( $(date +%s) - $(stat -c %Y "$state/.last-watcher-beat" 2>/dev/null || stat -f %m "$state/.last-watcher-beat") ))
+  [ "$age" -gt 3 ] || { kill -TERM "$LEFTOVER_PID" 2>/dev/null; fail "fixture beacon is not stale: ${age}s"; }
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_ARM_ATTACH_POLL=0.1 \
+    FM_ARM_CONFIRM_TIMEOUT="$REARM_CONFIRM_SECONDS" FM_GUARD_GRACE=3 FM_WATCHER_STALE_GRACE=3 \
+    FM_WATCHER_STALL_BOUND=600 "$WATCH_ARM" > "$armout" 2>&1 &
+  ARM_PID=$!
+  wait_for_exit "$LEFTOVER_PID" 100 >/dev/null 2>&1 || true
+  if is_live_non_zombie "$LEFTOVER_PID"; then
+    kill -TERM "$LEFTOVER_PID" "$ARM_PID" 2>/dev/null
+    fail "the leftover away daemon is still running beside a stale-beacon watcher: $(cat "$armout")"
+  fi
+  ! is_live_non_zombie "$old_watcher" || fail "the leftover daemon's stale-beacon watcher is still running"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  grep -q "reason=leftover-daemon-stopped" "$state/.watch-cycle-exits.log" \
+    || fail "the stale-beacon takeover was not recorded in the lifecycle ledger"
+  grep -qxF 'check: rearm-resurface' "$armout" \
+    || fail "the arm did not own a fresh cycle after the stale-beacon takeover: $(cat "$armout")"
+  pass "watch-arm: the arm stops a leftover away daemon whose watcher beacon is stale"
+}
+
 test_arm_attaches_to_an_away_daemon_watcher_while_away_mode_is_on() {
   local dir state fakebin armout old_watcher
   dir=$(make_case arm-away-daemon)
@@ -1597,6 +1631,7 @@ test_arm_attaches_to_an_away_daemon_watcher_while_away_mode_is_on() {
 }
 
 test_arm_takes_over_a_watcher_owned_by_a_leftover_away_daemon
+test_arm_takes_over_a_leftover_away_daemon_watcher_with_a_stale_beacon
 test_arm_attaches_to_an_away_daemon_watcher_while_away_mode_is_on
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
