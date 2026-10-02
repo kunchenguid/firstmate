@@ -549,13 +549,13 @@ cmd_rebase() {  # <id> --expect-offset <offset>
       fi
       die "registration returned failure after a source appeared; rebased cursor retained and prior cursor backed up at $backup"
     fi
-    line="resolved [key=remote-reply-continuity-$id] [at=$(date +%s)]: verified retained remote reply tail and registered source at offset $new_to"
+    "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$sid" >/dev/null \
+      || die "rebased cursor and registered source, but listener is not confirmed; run bin/fm-procevent.sh ensure-listening $sid"
+    line="resolved [key=remote-reply-continuity-$id] [at=$(date +%s)]: verified retained remote reply tail and re-armed at offset $new_to"
     append_status_once "$status_file" "$line" \
       || die "rebase succeeded but could not publish its resolution"
     fm_lock_release "$REBASE_LIFECYCLE_LOCK" || die "cannot release remote reply lifecycle lock"
     trap 'rm -rf -- "$REBASE_TMP"' EXIT
-    "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$sid" >/dev/null \
-      || die "rebased cursor and registered source, but listener is not confirmed; run bin/fm-procevent.sh ensure-listening $sid"
     # The test seam holds this command after the launch while a second break is
     # captured, pinning the durable order of resolution and renewed blockage.
     if [ "${FM_TEST_SEAM:-0}" = 1 ] && [ -n "${FM_TEST_REBASE_AFTER_ENSURE_HOOK:-}" ]; then
