@@ -291,6 +291,22 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
   fm_test_reap_orphans
 fi
 
+# --- primary checkout ------------------------------------------------------
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/primary-checkout-helpers.sh"
+
+if ! fm_test_plain_checkout "$ROOT"; then
+  FM_TEST_SOURCE_ROOT=$(cd -P "$ROOT" && pwd -P)
+  if ! FM_TEST_PRIMARY_BASE=$(fm_test_tmproot fm-test-primary) ||
+    ! ROOT=$(fm_test_primary_snapshot "$FM_TEST_SOURCE_ROOT" "$FM_TEST_PRIMARY_BASE"); then
+    printf 'not ok - could not stage a plain primary checkout for this suite\n' >&2
+    exit 1
+  fi
+  if [ "$(pwd -P)" = "$FM_TEST_SOURCE_ROOT" ]; then
+    cd "$ROOT" || exit 1
+  fi
+fi
+
 # --- live-capability gate ---------------------------------------------------
 #
 # fm_live_gate <policy> <vars> [tool ...]

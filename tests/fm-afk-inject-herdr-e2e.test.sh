@@ -58,6 +58,7 @@ DAEMON_PID=
 SUPERVISOR_TARGET=
 PANE_ID=
 LOOP_SCRIPT=
+PRIMARY_BASE=
 
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
@@ -68,9 +69,22 @@ cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
+  rm -rf "${PRIMARY_BASE:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+
+# Supervisor-only entrypoints refuse a linked worktree, so run them from a
+# temporary primary checkout (tests/primary-checkout-helpers.sh).
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$ROOT/tests/primary-checkout-helpers.sh"
+if ! fm_test_plain_checkout "$ROOT"; then
+  if ! PRIMARY_BASE=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e-primary.XXXXXX") ||
+    ! ROOT=$(fm_test_primary_snapshot "$ROOT" "$PRIMARY_BASE"); then
+    fail "could not stage a plain primary checkout for this suite"
+  fi
+fi
+DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null

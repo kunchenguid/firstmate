@@ -129,6 +129,11 @@ FM_AFK_CONTRACT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_CONTRACT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  # shellcheck source=bin/fm-primary-scope-lib.sh
+  . "$FM_AFK_CONTRACT_DIR/fm-primary-scope-lib.sh"
+  fm_primary_supervisor_guard "bin/fm-afk-contract.sh" || exit 1
+fi
 
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
