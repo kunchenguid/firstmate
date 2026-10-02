@@ -106,8 +106,8 @@ test_routine_then_terminal_after_restart() {
   [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" -eq 1 ] \
     || fail "catch-all scan duplicated the already-buffered digest"
 
-  # With afk active, the buffered digest flushes to the supervisor pane as ONE
-  # submission (one typed line + one Enter), then the buffer clears.
+  # With afk active, the buffered digest flushes through ONE native backend
+  # submission, then the buffer clears.
   local sent
   sent="$dir/sent.log"; : > "$sent"
   printf '❯\n' > "$dir/pane.txt"
@@ -115,7 +115,10 @@ test_routine_then_terminal_after_restart() {
   PATH="$fakebin:$PATH" FM_FAKE_HERDR_PANE_ALIVE=1 FM_FAKE_HERDR_SENT="$sent" \
     FM_FAKE_HERDR_CAPTURE="$dir/pane.txt" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
     || fail "escalate_flush failed for the buffered digest"
-  [ "$(grep -c '\[ENTER\]' "$sent")" -eq 1 ] || fail "buffered digest was not submitted exactly once"
+  [ "$(grep -c 'Supervisor escalate' "$sent")" -eq 1 ] \
+    || fail "buffered digest was not submitted exactly once through the native backend"
+  [ "$(wc -l < "$sent" | tr -d ' ')" -eq 1 ] \
+    || fail "native backend submission emitted an extra terminal operation"
   [ ! -s "$state/.subsuper-escalations" ] || fail "buffer not cleared after a successful flush"
   pass "lifecycle: routine self-handles, terminal survives a watcher restart, buffers once, no dup, injects once"
 }

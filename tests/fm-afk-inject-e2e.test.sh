@@ -7,17 +7,19 @@
 #     DEFER (not merge the digest into the human's text). After the pane goes
 #     idle, the digest arrives as a separate, clean submission.
 #
-#   Scenario B (swallowed-Enter): the first Enter the daemon sends is dropped.
-#     The daemon must retry Enter (NOT retype the digest) and deliver exactly
-#     ONE clean submission: no concatenation, no duplicate.
+#   Scenario B (native-submit-once): the daemon must use exactly one supported
+#     native agent command carrying the complete digest, with no terminal-key
+#     submission or duplicate.
 #
-#   Scenario C (normal digest): no human input and no swallowed Enter.
+#   Scenario C (normal digest): no human input.
 #     A captain-relevant status must deliver exactly ONE sentinel-prefixed,
 #     single-line digest with no duplicate or spurious user submission.
 #
 # Isolation: all direct and indirect terminal commands use the guarded named
 # Herdr lab; the daemon sees only a throwaway state dir and exact test pane.
-# The test shim can swallow one Enter while forwarding through the lab owner.
+# The test shim observes the public native-agent command and adapts that one
+# command to the synthetic shell composer; real-agent coverage lives in the
+# separate native Herdr lab.
 #
 # Assert on submitted CONTENT (logged verbatim by the supervisor pane), not pane
 # appearance - terminal line-wrapping looks like newlines but isn't.
@@ -39,7 +41,7 @@ DAEMON_PID=
 SUPERVISOR_PANE=
 LOOP_SCRIPT=
 
-fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
+fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 cleanup_all() {
@@ -138,8 +140,12 @@ HERDR_SHIM_DIR="$STATE_DIR/shim"
 mkdir -p "$HERDR_SHIM_DIR"
 cat > "$HERDR_SHIM_DIR/herdr" <<SHIM
 #!/usr/bin/env bash
-if [ "\${1:-} \${2:-}" = 'pane send-keys' ] && [ "\${4:-}" = Enter ] && [ -f "$STATE_DIR/.swallow-enter" ]; then
-  rm -f "$STATE_DIR/.swallow-enter"
+set -eu
+if [ "\${1:-}" = agent ] && { [ "\${2:-}" = prompt ] || [ "\${2:-}" = send ]; }; then
+  [ "\${3:-}" = "$PANE" ] || { echo 'refused wrong synthetic target' >&2; exit 97; }
+  printf '%s\t%s\t%s\n' "\$2" "\$3" "\${4:-}" >> "$STATE_DIR/.native-submit"
+  "$STATE_DIR/guard/herdr" pane send-text "\$3" "\${4:-}" >/dev/null
+  "$STATE_DIR/guard/herdr" pane send-keys "\$3" enter >/dev/null
   exit 0
 fi
 exec "$STATE_DIR/guard/herdr" "\$@"
@@ -197,9 +203,9 @@ reset_state() {
          "$STATE_DIR"/.stale-* \
          "$STATE_DIR"/.seen-* \
          "$STATE_DIR"/.heartbeat-streak \
-         "$STATE_DIR"/.swallow-enter \
          2>/dev/null || true
   : > "$LOG_FILE"
+  : > "$STATE_DIR/.native-submit"
 }
 
 # --- pane_input_pending environment self-check ------------------------------
@@ -309,24 +315,28 @@ test_scenario_a() {
   pass "Scenario A: partial input defers injection; digest arrives clean after idle"
 }
 
-# --- Scenario B: swallowed-Enter --------------------------------------------
+# --- Scenario B: one native agent command -----------------------------------
 
 test_scenario_b() {
   reset_state
   afk_enter "$STATE_DIR"
-
-  # Arm the swallow: the daemon's first Enter will be dropped by the shim.
-  touch "$STATE_DIR/.swallow-enter"
 
   start_daemon
 
   # Write a captain-relevant status to trigger a real escalation.
   echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
 
-  # Wait for the daemon to process the escalation and attempt inject (with the
-  # swallowed Enter, the retry path fires).
+  # Wait for the daemon to process the escalation and submit it natively.
   sleep 8
 
+  # The daemon must issue one capability-selected native agent command. The
+  # shim's private shell adaptation is not production transport evidence.
+  [ "$(wc -l < "$STATE_DIR/.native-submit")" -eq 1 ] \
+    || fail "Scenario B: expected exactly one native agent command"
+  awk -F '\t' -v pane="$PANE" \
+    '($1 == "prompt" || $1 == "send") && $2 == pane && $3 ~ /Supervisor escalate/ { found=1 } END { exit !found }' \
+    "$STATE_DIR/.native-submit" \
+    || fail "Scenario B: native command changed the capability, target, or text"
   # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
   local marker_count
   marker_count=$(awk -F '\t' '{ hex=$1; count += gsub(/e281a3/, "", hex) } END { print count + 0 }' "$LOG_FILE")
@@ -349,14 +359,14 @@ test_scenario_b() {
   local user_count
   user_count=$(grep -c $'\tuser$' "$LOG_FILE" || true)
   [ "$user_count" -eq 0 ] \
-    || fail "Scenario B: expected 0 user lines, got $user_count (spurious Enter submitted empty line?)"
+    || fail "Scenario B: expected 0 user lines, got $user_count (spurious submission?)"
 
   stop_daemon
-  pass "Scenario B: swallowed Enter produces exactly one clean digest"
+  pass "Scenario B: one capability-selected native command carries one exact digest"
 }
 
 # --- Scenario C: normal status, single clean digest -------------------------
-# No human input, no swallowed Enter: a captain-relevant status must produce
+# With no human input, a captain-relevant status must produce
 # exactly ONE sentinel-prefixed, single-line digest, submitted once. This owns
 # the marker + single-line + no-duplicate operator contract that the deleted
 # earlier transport-unit tests used to assert through internal send counts.

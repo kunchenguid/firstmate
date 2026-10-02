@@ -105,14 +105,9 @@ case "$1 ${2:-}" in
     fi ;;
   'pane send-keys')
     case "${4:-}" in Enter|enter)
-      swallow=${FM_FAKE_SWALLOW:-${FM_FAKE_HERDR_SWALLOW_FILE:-}}
-      if [ -n "$swallow" ] && [ -f "$swallow" ]; then
-        [ "${FM_FAKE_PERSIST_SWALLOW:-0}" = 1 ] || rm -f "$swallow"
-      else
-        printf '[ENTER]\n' >> "$sent"
-        if [ -n "$capture" ]; then
-          if [ -n "${FM_FAKE_COMPOSER:-}" ]; then write_composer ''; else printf '❯\n' > "$capture"; fi
-        fi
+      printf '[ENTER]\n' >> "$sent"
+      if [ -n "$capture" ]; then
+        if [ -n "${FM_FAKE_COMPOSER:-}" ]; then write_composer ''; else printf '❯\n' > "$capture"; fi
       fi ;;
     esac ;;
   *) exit 1 ;;

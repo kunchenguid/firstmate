@@ -2559,25 +2559,10 @@ test_fm_send_exits_nonzero_on_initial_send_failure() {
   if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
     FM_FAKE_SEND_FAIL=1 FM_SEND_SLEEP=0.05 \
     "$ROOT/bin/fm-send.sh" sess:w1:win 'route this work' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero despite initial tmux send-keys failure"
+    fail "fm-send exited zero despite native prompt refusal"
   fi
   grep -F 'text not sent' "$err" >/dev/null || fail "fm-send did not explain initial send failure: $(cat "$err")"
   pass "fm-send exits non-zero when initial text send fails"
-}
-
-test_fm_send_exits_nonzero_on_unproven_submit() {
-  local dir fakebin err
-  dir=$(make_bordered_case send-unproven)
-  fakebin="$dir/fakebin"; err="$dir/send.err"
-  touch "$dir/.swallow"
-  if PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_FAKE_COMPOSER="$dir/composer" \
-    FM_FAKE_SWALLOW="$dir/.swallow" FM_FAKE_PERSIST_SWALLOW=1 FM_SEND_SLEEP=0.05 \
-    "$ROOT/bin/fm-send.sh" sess:w1:win '修复' >/dev/null 2>"$err"; then
-    fail "fm-send exited zero when submit proof remained pending-unproven"
-  fi
-  grep -F 'verdict=pending-unproven' "$err" >/dev/null \
-    || fail "fm-send did not preserve the unproven-submit verdict: $(cat "$err")"
-  pass "fm-send exits non-zero unless delivery is proven empty"
 }
 
 # --- herdr backend-awareness (fm-turnend-guard-h6-adjacent transport fix) ----
