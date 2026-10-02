@@ -20,11 +20,14 @@
 # because the identity probe reports `pi` for both, so the adapter checks every
 # Pi executable on PATH and requires at least one to exist and all found to be
 # pinned. FM_COMPOSER_PI_ADAPTER_VERSION overrides the lookup (test fixtures pin
-# it explicitly). Outside the pin set, or when no version can# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
+# it explicitly). Outside the pin set, or when no version can
+# be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
 # rendering cannot become a shared empty proof and the classifier keeps its
 # ordinary unknown answer. The live guard proves the pinned shape on a pinned
 # install, and on an unpinned install proves that refusal and names the release
-# whose pin needs refreshing.## Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
+# whose pin needs refreshing.
+#
+# Sourced only from bin/fm-composer-lib.sh. Not a standalone entrypoint.
 
 # shellcheck shell=bash
 
@@ -48,7 +51,8 @@ FM_COMPOSER_PI_BANNER_PINNED_VERSIONS=${FM_COMPOSER_PI_BANNER_PINNED_VERSIONS:-'
 # error banner. It is vendor boilerplate attached to the banner, not a
 # transcript row proving a new turn, so the scan skips at most one occurrence.
 # FM_COMPOSER_PI_TERMINAL_ERROR_RE and FM_COMPOSER_PI_ERROR_HINT_RE override
-# for an unverified rendering.# Fixed banner Pi draws once a turn ended on Codex's usage limit.
+# for an unverified rendering.
+# Fixed banner Pi draws once a turn ended on Codex's usage limit.
 FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT='^Error: Codex error: The usage limit has been reached$'
 # Fixed bug-report hint row pi 0.87.1 draws under every error banner.
 FM_COMPOSER_PI_ERROR_HINT_RE_DEFAULT='^If this looks like a pi bug, /bug sends a report to the developers\.$'
@@ -65,7 +69,8 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   [ -n "$v" ] || return 1
   v=${v%%[[:space:]]*}
   for pin in $FM_COMPOSER_PI_BANNER_PINNED_VERSIONS; do
-    [ "$v" = "$pin" ] && return 0  done
+    [ "$v" = "$pin" ] && return 0
+  done
   return 1
 }
 
