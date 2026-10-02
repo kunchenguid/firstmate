@@ -192,13 +192,16 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-CODEX_LEDGER="$STATE/.turnend-codex-ledger"
+CODEX_LEDGER_DIR="$STATE/.turnend-codex-ledgers"
+CODEX_LEDGER="$CODEX_LEDGER_DIR/$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' -f1)"
 
-# One ledger per home records the last blocked Codex session and turn; a new
-# session or turn overwrites it, and a healthy pass-through removes it. A
-# watcher beacon written at or after the last block proves that a checkpoint
-# may have run since then and earns a fresh block budget (whole-second mtimes
-# make a same-second update ambiguous, so it counts as progress).
+# Each Codex session owns one ledger file recording its last blocked turn, so
+# concurrent sessions in one home cannot reset each other's count. A new turn
+# overwrites it, a healthy pass-through removes it, and every ledger write
+# prunes ledgers older than 24 hours. A watcher beacon written at or after the
+# last block, but not in the future, proves that a checkpoint may have run
+# since then and earns a fresh block budget (whole-second mtimes make a
+# same-second update ambiguous, so it counts as progress).
 # The budget only bounds immediate retries: a stop more than
 # CODEX_RETRY_WINDOW seconds after the last block also starts a fresh budget,
 # so an exhausted ledger cannot leave the rest of a long turn unguarded.
@@ -212,13 +215,14 @@ codex_ledger_read() {
 }
 
 codex_ledger_continues() {
-  local beacon_mtime
+  local beacon_mtime now
+  now=$(date +%s)
   beacon_mtime=$(fm_path_mtime "$STATE/.last-watcher-beat" 2>/dev/null || true)
   case "$beacon_mtime" in ''|*[!0-9]*) beacon_mtime=-1 ;; esac
   [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
     && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
-    && [ "$beacon_mtime" -lt "$CODEX_LEDGER_TIME" ] \
-    && [ $(($(date +%s) - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
+    && { [ "$beacon_mtime" -lt "$CODEX_LEDGER_TIME" ] || [ "$beacon_mtime" -gt "$now" ]; } \
+    && [ $((now - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
 }
 
 codex_retry_budget_exhausted() {
@@ -246,6 +250,8 @@ codex_ledger_record_block() {
   else
     count=1
   fi
+  mkdir -p "$CODEX_LEDGER_DIR" 2>/dev/null || true
+  find "$CODEX_LEDGER_DIR" -type f -mmin +1440 -exec rm -f {} + 2>/dev/null || true
   tmp="$CODEX_LEDGER.tmp.$$"
   if printf 'session=%s\nturn=%s\ntime=%s\ncount=%s\n' \
     "$SESSION_ID" "$CODEX_TURN_ID" "$(date +%s)" "$count" > "$tmp" 2>/dev/null \

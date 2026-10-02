@@ -302,8 +302,8 @@ The registrations in detail:
 
 Claude and Codex can block a Stop directly with exit status 2 and stderr.
 Both payloads carry `stop_hook_active`.
-In default mode, a Codex payload with `turn_id` uses one state ledger per home (holding the last blocked session and turn, removed when a healthy watcher lets the stop through) and the watcher beacon to distinguish a retry without progress from a later stop after a checkpoint.
-The guard rechecks the latter and starts a fresh retry budget when the beacon was written at or after the last block, so a same-second update counts as progress.
+In default mode, a Codex payload with `turn_id` uses one state ledger per session (holding its last blocked turn, removed when a healthy watcher lets the stop through, with ledgers older than 24 hours pruned on every ledger write) and the watcher beacon to distinguish a retry without progress from a later stop after a checkpoint.
+The guard rechecks the latter and starts a fresh retry budget when the beacon was written at or after the last block, so a same-second update counts as progress; a future-dated beacon does not count.
 `FM_CODEX_TURNEND_BLOCK_BUDGET` (default 3) bounds repeated blocks without beacon progress, then allows the stop with a stderr diagnostic.
 The budget only bounds immediate retries: a stop more than `FM_CODEX_TURNEND_RETRY_WINDOW` seconds (default 120) after the last block is checked again with a fresh budget.
 Payloads without `turn_id` retain the legacy behavior of allowing a true `stop_hook_active` value.

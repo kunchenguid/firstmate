@@ -282,6 +282,11 @@ run_codex_turn_hook() {
     | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
+codex_ledger_path() {
+  local dir=$1 session=${2:-codex-test-session}
+  printf '%s/state/.turnend-codex-ledgers/%s' "$dir" "$(printf '%s' "$session" | cksum | cut -d' ' -f1)"
+}
+
 nonexistent_pid() {
   local pid=999999
   while kill -0 "$pid" 2>/dev/null; do
@@ -560,7 +565,7 @@ test_hook_codex_exhausted_budget_expires_after_retry_window() {
   expect_code 2 "$status" "the initial Codex stop must be blocked"
   out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-window); status=$?
   expect_code 0 "$status" "an immediate no-progress retry must spend the exhausted budget"
-  ledger="$dir/state/.turnend-codex-ledger"
+  ledger=$(codex_ledger_path "$dir")
   [ -f "$ledger" ] || fail "the Codex block did not persist its retry ledger"
   sed "3s/^time=.*/time=$(($(date +%s) - 3600))/" "$ledger" > "$ledger.aged" && mv "$ledger.aged" "$ledger"
   out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-window); status=$?
@@ -575,7 +580,7 @@ test_hook_codex_same_second_beacon_counts_as_progress() {
   local dir out status ledger beat beat_mtime
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-same-second")
   : > "$dir/state/task1.meta"
-  ledger="$dir/state/.turnend-codex-ledger"
+  ledger=$(codex_ledger_path "$dir")
   beat="$dir/state/.last-watcher-beat"
   out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=999999999 run_codex_turn_hook "$dir" false turn-same-second); status=$?
   expect_code 2 "$status" "the initial Codex stop must be blocked"
@@ -592,18 +597,52 @@ test_hook_codex_same_second_beacon_counts_as_progress() {
   pass "fm-turnend-guard: Codex beacon update in the block's second counts as progress"
 }
 
-test_hook_codex_ledger_is_single_per_home() {
-  local dir out status session count pid identity
-  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-single-ledger")
+test_hook_codex_future_beacon_is_not_progress() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-future-beacon")
   : > "$dir/state/task1.meta"
-  for session in session-a session-b session-c; do
-    out=$(run_codex_turn_hook "$dir" false "turn-$session" "$session"); status=$?
-    expect_code 2 "$status" "$session's first stop must block"
-  done
-  count=$(find "$dir/state" -maxdepth 1 -name '.turnend-codex-ledger*' ! -name '.turnend-codex-ledger.lock' | wc -l | tr -d ' ')
-  [ "$count" -le 1 ] || fail "expected at most one Codex ledger file after several sessions, found $count"
-  grep -qx 'session=session-c' "$dir/state/.turnend-codex-ledger" \
-    || fail "the latest session must overwrite the Codex ledger"
+  # A beacon dated after now (e.g. after the clock moved back) is not progress.
+  touch -t 203001010000 "$dir/state/.last-watcher-beat"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" false turn-future); status=$?
+  expect_code 2 "$status" "the initial Codex stop must be blocked"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-future); status=$?
+  expect_code 0 "$status" "a future-dated beacon must not reset the Codex retry budget"
+  assert_contains "$out" "retry budget exhausted" "the no-progress fail-open must be loud on stderr"
+  pass "fm-turnend-guard: future-dated watcher beacon does not count as Codex progress"
+}
+
+test_hook_codex_retry_budget_is_per_session() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-sessions")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" false turn-a session-a); status=$?
+  expect_code 2 "$status" "session A's first stop must block"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" false turn-b session-b); status=$?
+  expect_code 2 "$status" "session B's first stop must block"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-a session-a); status=$?
+  expect_code 2 "$status" "session A's first no-progress retry must block"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-b session-b); status=$?
+  expect_code 2 "$status" "session B's first no-progress retry must block"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-a session-a); status=$?
+  expect_code 0 "$status" "session B's blocks must not reset session A's retry budget"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=2 run_codex_turn_hook "$dir" true turn-b session-b); status=$?
+  expect_code 0 "$status" "session A's blocks must not reset session B's retry budget"
+  pass "fm-turnend-guard: interleaved Codex sessions in one home keep separate retry budgets"
+}
+
+test_hook_codex_ledgers_pruned_and_removed_on_healthy_stop() {
+  local dir out status stale pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-ledger-prune")
+  : > "$dir/state/task1.meta"
+  out=$(run_codex_turn_hook "$dir" false turn-old session-old); status=$?
+  expect_code 2 "$status" "the old session's stop must block"
+  stale=$(codex_ledger_path "$dir" session-old)
+  [ -f "$stale" ] || fail "the old session's block did not persist its retry ledger"
+  touch -t 202001010000 "$stale"
+  out=$(run_codex_turn_hook "$dir" false turn-new session-new); status=$?
+  expect_code 2 "$status" "the new session's stop must block"
+  [ ! -e "$stale" ] || fail "a ledger write must prune ledgers older than 24 hours"
+  [ -f "$(codex_ledger_path "$dir" session-new)" ] || fail "the new session's block did not persist its retry ledger"
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
@@ -613,12 +652,12 @@ test_hook_codex_ledger_is_single_per_home() {
   }
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
-  out=$(run_codex_turn_hook "$dir" true turn-session-c session-c); status=$?
+  out=$(run_codex_turn_hook "$dir" true turn-new session-new); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   expect_code 0 "$status" "a healthy watcher must allow the Codex stop"
-  [ ! -e "$dir/state/.turnend-codex-ledger" ] || fail "the healthy pass-through must remove the Codex ledger"
-  pass "fm-turnend-guard: one Codex ledger per home, removed on healthy pass-through"
+  [ ! -e "$(codex_ledger_path "$dir" session-new)" ] || fail "the healthy pass-through must remove this session's Codex ledger"
+  pass "fm-turnend-guard: Codex ledgers are pruned after 24 hours and removed on healthy pass-through"
 }
 
 test_hook_codex_retry_budget_allows_without_progress() {
@@ -2363,7 +2402,9 @@ test_hook_codex_loop_guard_rechecks_same_turn_retry
 test_hook_codex_retry_rechecks_after_checkpoint_progress
 test_hook_codex_retry_budget_allows_without_progress
 test_hook_codex_same_second_beacon_counts_as_progress
-test_hook_codex_ledger_is_single_per_home
+test_hook_codex_future_beacon_is_not_progress
+test_hook_codex_retry_budget_is_per_session
+test_hook_codex_ledgers_pruned_and_removed_on_healthy_stop
 test_hook_codex_exhausted_budget_expires_after_retry_window
 test_hook_codex_payload_without_turn_id_keeps_legacy_allow
 test_hook_blocks_in_secondmate_own_home
