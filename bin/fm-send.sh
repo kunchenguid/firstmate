@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--idempotent] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -201,6 +201,7 @@ fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
 ACTION_ID=
+IDEMPOTENT=0
 if [ "${1:-}" = --action-id ]; then
   [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
   ACTION_ID=$2
@@ -284,6 +285,10 @@ while :; do
     esac
     shift 2
     ;;
+  --idempotent)
+    IDEMPOTENT=1
+    shift
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -303,6 +308,11 @@ while :; do
   *) break ;;
   esac
 done
+
+if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$ACTION_ID$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+  echo 'REFUSED: --idempotent is only for an ordinary Branch continuation to its admitted task' >&2
+  exit 6
+fi
 
 if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
   [ -n "$ACTION_ID" ] && [ -n "$EXPECTED_GENERATION" ] && [ -n "$TARGET_META" ] || exit 2
@@ -518,6 +528,9 @@ else
   if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
     echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
   fi
+  if [ "$IDEMPOTENT" = 1 ] && [ "$INBOX_PLANE" != 1 ]; then
+    echo 'REFUSED: --idempotent requires ordinary task inbox text' >&2; exit 6
+  fi
   if [ "$INBOX_PLANE" = 1 ]; then
     INBOX_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
     INBOX_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || exit 1
@@ -556,6 +569,8 @@ else
       if [ "${inbox_write_rc:-0}" -eq 0 ]; then
         fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
       fi
+    elif [ "$IDEMPOTENT" = 1 ]; then
+      INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
     else
       INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
     fi

@@ -130,6 +130,54 @@ test_resend_enqueues_new_sequence() {
   pass "fm-send inbox: a re-send is a new durable record, never a retyped payload"
 }
 
+test_branch_idempotent_continuation_reuses_unread_and_handled_receipt() {
+  local dir err token branch_env count
+  dir=$(setup_case branch-idempotent)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data/t1"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' > "$dir/home/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 "Continue the accepted validation" --kind ship \
+    --body "Keep the existing task identity." --start >/dev/null || fail 'compact task fixture failed'
+  printf 'Continue the accepted validation\n' > "$dir/home/data/t1/brief.md"
+  printf 'spawn_gen=s1\n' >> "$dir/home/state/t1.meta"
+  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --expected-token "$token" \
+    --progress '{"acceptance":"The accepted checks pass","current_state":"The checkpoint is ready","remaining_gap":"Validation has not started","next_step":"Start the existing no-mistakes run"}' >/dev/null \
+    || fail 'compact progress fixture failed'
+  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-wake-grant.sh" activate "$$" 1 >/dev/null \
+    || fail 'branch generation fixture failed'
+  printf '%s\n' '{"type":"session","version":3,"id":"branch-idempotent"}' > "$dir/home/main.jsonl"
+  branch_env="FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}"
+
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail "first Branch continuation failed: $(cat "$err")"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail "unread Branch continuation readback failed: $(cat "$err")"
+  count=$(find "$dir/home/state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "an unread automatic continuation was duplicated: $count records"
+
+  mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail "handled Branch continuation readback failed: $(cat "$err")"
+  [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'an acknowledged automatic continuation was duplicated'
+
+  if run_send "$dir" "$err" -- t1 --idempotent "Start the existing no-mistakes run"; then
+    fail 'MAIN gained the Branch-only idempotent send mode'
+  fi
+  assert_contains "$(cat "$err")" "only for an ordinary Branch continuation" \
+    'the idempotent-mode refusal lost its actor boundary'
+  pass 'Branch automatic continuation reuses one exact unread or handled inbox receipt'
+}
+
 test_pending_composer_does_not_gate_native_prompt() {
   local dir err rc
   dir=$(setup_case pendingskip)
@@ -358,6 +406,7 @@ test_empty_message_refused() {
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
+test_branch_idempotent_continuation_reuses_unread_and_handled_receipt
 test_pending_composer_does_not_gate_native_prompt
 test_failed_ring_is_still_sent
 test_uncertain_ring_persists_recovery_before_suppression

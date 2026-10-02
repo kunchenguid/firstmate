@@ -71,7 +71,7 @@ For anything it tells you to escalate, or any failure that survives the playbook
 The durable task brief owns the intended outcome, acceptance evidence, scope and exclusions, and hard-block condition.
 For every material worker return, compare the current artifacts and verified state with that contract before deciding what the event means.
 For ordinary work, read the compact original-row progress supplied by the admission. MAIN alone writes that progress after a material change; do not create or reconstruct lifecycle JSON, evidence references, or a second progress record.
-Route the recorded next step through its existing action owner and verify its receipt. For a no-mistakes checkpoint, use `bin/fm-send.sh` to direct the same worker to start or continue the pipeline; the worker alone calls `no-mistakes axi run/respond` and retains branch custody.
+Route the recorded next step through its existing action owner and verify its receipt. For a no-mistakes checkpoint, use `bin/fm-send.sh --idempotent` to direct the same worker to start or continue the pipeline; the worker alone calls `no-mistakes axi run/respond` and retains branch custody.
 If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
 A process exit, provider success, report, implementation commit, `done:` event, PR, or other intermediate milestone is not objective acceptance by itself.
 When evidence still has an authorized, recoverable gap, send one specific bounded continuation and keep the task active; an empty worker inbox is not a reason to replace progress with waiting.

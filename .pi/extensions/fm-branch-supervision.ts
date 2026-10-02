@@ -1603,7 +1603,8 @@ export default function (pi: ExtensionAPI) {
           }
           const binding = branchTaskBindings[task];
           const progressToken = branchProgressBindings[task];
-          let unchangedContinuation = false;
+          let safeRoutineContinuation = false;
+          let continuationChange: "none" | "material" = "none";
           if (progressToken) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1612,8 +1613,11 @@ export default function (pi: ExtensionAPI) {
             }
             const before = branchProgressSnapshots[task];
             const handoffs = Object.values(branchHandoffObservations[task] || {});
-            unchangedContinuation = Boolean(before) && await compactResumeSnapshot(task) === before &&
-              handoffs.every((handoff) => handoff.change === "none");
+            const after = await compactResumeSnapshot(task);
+            safeRoutineContinuation = Boolean(before) && Boolean(after) &&
+              handoffs.every((handoff) => handoff.change !== "uncertain");
+            continuationChange = after === before && handoffs.every((handoff) => handoff.change === "none")
+              ? "none" : "material";
           } else if (binding) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task], { env: scriptEnv });
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
@@ -1623,17 +1627,19 @@ export default function (pi: ExtensionAPI) {
               return { content: [{ type: "text", text: "report refused: newer task intent invalidated this branch result" }], details: undefined, isError: true };
             }
           }
-          if (quietContinuation && unchangedContinuation) {
+          if (quietContinuation && safeRoutineContinuation) {
             const manager = branch?.sessionManager;
             const entryId = manager?.appendCustomEntry("fm-task-continuation-settlement", {
               task, admission: wakeTaskScope?.token, record_token: progressToken, summary,
+              change: continuationChange,
             });
             if (!entryId || !manager?.getEntries().some((entry) => entry.id === entryId)) {
               return { content: [{ type: "text", text: "quiet continuation settlement was not retained" }], details: undefined, isError: true };
             }
             durableReportRevision += 1;
             appendBranchRoutingTrace(state, {
-              token: wakeTaskScope?.token || progressToken, actor: "branch", stage: "report", reason: "routine-silent",
+              token: wakeTaskScope?.token || progressToken, actor: "branch", stage: "report",
+              reason: continuationChange === "material" ? "routine-progress-silent" : "routine-silent",
               generation: toolGeneration, selectionRevision: branchSelectionRevision,
             }, pi.events);
             return { content: [{ type: "text", text: "routine continuation retained quietly in branch" }], details: undefined };
@@ -2464,6 +2470,7 @@ ${context.command}
         record_token: progress.record_token, goal: progress.goal, acceptance: progress.acceptance,
         current_state: progress.current_state, remaining_gap: progress.remaining_gap,
         next_step: progress.next_step, task_state: progress.task_state,
+        executor_state: offer.progress.executor_state,
       });
       const sessionFile = sessionManager.getSessionFile();
       if (!sessionFile || !sessionManager.getEntries().some((entry) => entry.id === entryId)) throw new Error("branch admission was not retained");
@@ -2493,15 +2500,16 @@ ${context.command}
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
           `Compare the goal and acceptance method with actual task artifacts and current executor state. Perform or route the next already-authorized routine step without asking MAIN to rewrite progress first. ` +
-          `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
+          `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh --idempotent for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
           `For an already-authorized cross-task instruction, use fm_task_handoff with this admitted task as source, the exact target, a stable id, and the exact instruction; reuse that id for readback or recovery. ` +
           `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text. Route bounded ordinary gate continuations back to that same worker; do not run or respond to no-mistakes yourself. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
-          `Request silent routine reporting only when the executor and resumable task state are unchanged. Material progress is delivered through the existing outcome channel so MAIN can update the original task record. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
+          `Use silent routine reporting after verified ordinary advancement as well as unchanged healthy observation; the next executor result receives another bounded admission without a MAIN progress rewrite. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
           `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,
             next_step: progress.next_step, task_state: progress.task_state,
+            executor_state: offer.progress.executor_state,
             record_token: progress.record_token }));
         recordContinuationReceipt();
         if (!receipted) throw new Error("branch admission has no durable receipt");

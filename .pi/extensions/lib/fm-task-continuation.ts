@@ -11,7 +11,7 @@ import { NATIVE_FEISHU_CUSTOM_TYPE, verifyFeishuSessionMessage } from "../../../
 
 type Observation = { task_id: string; state: string; reason: string; key: string; record_token: string;
   goal: string; acceptance: string; current_state: string; remaining_gap: string; next_step: string;
-  task_state: string };
+  task_state: string; executor_state: string };
 type Reconciliation = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string;
   update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string };
@@ -140,14 +140,20 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         const current = await runCommandAsync("bash", [join(root, "bin/fm-task-state.sh"), "--durable-only", id], {
           env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_DATA_OVERRIDE: data }, maxBuffer: 64 * 1024,
         });
-        const match = current.stdout.match(/(?:^|\n)state: ([a-z-]+)/);
+        const executorState = current.stdout.trim();
+        const match = executorState.match(/(?:^|\n)state: ([a-z-]+)/);
         const taskState = current.status === 0 && match ? match[1] : "unknown";
         if (["running", "working", "pending", "paused", "parked"].includes(taskState)) continue;
         const reason = `goal: ${progress.goal}; acceptance: ${progress.acceptance}; current state: ${progress.current_state}; remaining gap: ${progress.remaining_gap}; next step: ${progress.next_step}`;
-        const key = createHash("sha256").update(JSON.stringify([id, progress.record_token, taskState])).digest("hex");
+        // The task row deliberately changes only when MAIN records semantic
+        // progress. Executor detail is therefore part of the admission key:
+        // a new terminal result can receive a fresh bounded Branch turn even
+        // while the compact row still names the original checkpoint.
+        const key = createHash("sha256").update(JSON.stringify([id, progress.record_token, executorState])).digest("hex");
         observations.push({ task_id: id, state: taskState, reason, key, record_token: progress.record_token,
           goal: progress.goal, acceptance: progress.acceptance, current_state: progress.current_state,
-          remaining_gap: progress.remaining_gap, next_step: progress.next_step, task_state: progress.task_state });
+          remaining_gap: progress.remaining_gap, next_step: progress.next_step, task_state: progress.task_state,
+          executor_state: executorState });
       } catch (error) {
         if (epoch !== generation || !owns()) throw error;
         const reason = String(error instanceof Error ? error.message : error).slice(0, 1200);

@@ -35,8 +35,9 @@ When a material result leaves an authorized gap without a healthy executor, it f
 The branch may inspect current artifacts and route the already-authorized next step through the existing owner; a no-mistakes start or ordinary gate continuation goes back to the same worker, which alone runs or responds to the pipeline.
 A declined or failed branch offer falls back to MAIN.
 It never derives task identity from a backend endpoint label.
-A healthy unchanged wait is retained quietly in the branch session.
-Material routine advancement, goal-ready evidence, a genuine blocker, or an authority decision is delivered to MAIN; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
+A healthy unchanged wait and verified routine advancement are retained quietly in the branch session.
+A changed executor observation admits another bounded Branch turn without a MAIN progress rewrite.
+Only goal-ready evidence, a genuine blocker, or an authority decision is delivered to MAIN; two unsuccessful unchanged offers may be paced before one visible coordination escalation.
 These transcript entries are delivery receipts only and never become another progress source.
 Topic switches, session reload and compaction therefore recover from the original task row, while ordinary commands and unchanged observations add no progress writes.
 

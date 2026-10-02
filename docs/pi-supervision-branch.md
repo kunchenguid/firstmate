@@ -62,9 +62,10 @@ A healthy working executor, unchanged wait, task with no compact progress, or ta
 An actionable gap without healthy execution is offered to the branch with the canonical task id, goal, acceptance method, current state, remaining gap and next step.
 The branch inspects current artifacts and routes an already-authorized next step through its existing owner; failure or refusal falls back to MAIN.
 Endpoint text is never substituted for task identity.
-For a no-mistakes checkpoint, the branch instructs the same worker to start or continue its run; only that worker calls `no-mistakes axi run/respond` and retains branch custody.
+For a no-mistakes checkpoint, the branch uses the inbox owner's idempotent continuation mode to instruct the same worker to start or continue its run; only that worker calls `no-mistakes axi run/respond` and retains branch custody.
 A healthy unchanged executor or wait is settled quietly in the branch session.
-Material routine advancement, goal-ready evidence, genuine blockers and authority decisions reach MAIN; repeated unsuccessful offers retain the bounded escalation path.
+Verified routine advancement is also settled quietly, and a changed executor observation admits the next bounded Branch turn without requiring MAIN to rewrite progress first.
+Only goal-ready evidence, genuine blockers and authority decisions reach MAIN; repeated unchanged or unsuccessful offers retain the bounded escalation path.
 The extension paces at most two unchanged offers and one visible coordination escalation in the session transcript.
 Those entries are delivery receipts only; reload and compaction recover task progress from the original row, not from transcript pacing.
 

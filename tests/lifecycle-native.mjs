@@ -149,6 +149,20 @@ session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Clarify t
 const correction = session.getLeafId();
 await tool({ action: 'route', task: 'task', input: correction, update_brief: true });
 assert.match(readFileSync(home + '/data/task/brief.md', 'utf8'), /Clarify the acceptance wording\./);
+const correctedRead = await tool({ action: 'read', task: 'task' });
+assert.notEqual(correctedRead.record_token, completed.record_token,
+  'authenticated intent change did not invalidate the old progress scope');
+const staleScope = await rawTool({ action: 'update', task: 'task', record_token: completed.record_token,
+  progress: { ...progress, current_state: 'Old scope attempted to continue',
+    remaining_gap: 'Old scope must remain refused', next_step: 'Do not execute this stale step' } });
+assert.equal(staleScope.isError, true, 'old progress scope remained writable after intent changed');
+assert.match(staleScope.content[0].text, /task record changed/);
+const correctedProgress = { ...progress, current_state: 'Authenticated correction is recorded',
+  remaining_gap: 'The clarified acceptance check remains', next_step: 'Run the explicitly permitted clarified check' };
+const repermitted = await tool({ action: 'update', task: 'task', record_token: correctedRead.record_token,
+  progress: correctedProgress });
+assert.equal(repermitted.next_step, correctedProgress.next_step,
+  'fresh MAIN scope did not permit the revised next step');
 
 const oldInspect = command('fm-task-state.sh', ['inspect', 'task']);
 const compactRead = await rawTool({ action: 'read', task: 'task' });

@@ -6060,7 +6060,7 @@ EOF
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot }; })()`);
 const { pi, fire, settle, sentToMain, defaultSessionCtx, home, realRoot } = globalThis.__t;
-const { appendFileSync, chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
+const { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } = await import("node:fs");
 const { spawnSync } = await import("node:child_process");
 
 mkdirSync(`${home}/state`, { recursive: true });
@@ -6076,6 +6076,16 @@ case "$1 $2" in
 esac
 `);
 chmodSync(`${home}/fakebin/herdr`, 0o755);
+const candidateBranch = spawnSync("git", ["-C", realRoot, "branch", "--show-current"], { encoding: "utf8" }).stdout.trim();
+const candidateHead = spawnSync("git", ["-C", realRoot, "rev-parse", "--short", "HEAD"], { encoding: "utf8" }).stdout.trim();
+writeFileSync(`${home}/fakebin/no-mistakes`, `#!/bin/sh
+case "$1 $2" in
+  "axi status") [ -f '${home}/nm-status' ] || exit 1; cat '${home}/nm-status' ;;
+  "daemon status") exit 0 ;;
+  *) exit 0 ;;
+esac
+`);
+chmodSync(`${home}/fakebin/no-mistakes`, 0o755);
 process.env.PATH = `${home}/fakebin:${process.env.PATH}`;
 const run = (script, args, actor = "main", extra = {}) => spawnSync(`${realRoot}/bin/${script}`, args, {
   encoding: "utf8",
@@ -6085,7 +6095,10 @@ const run = (script, args, actor = "main", extra = {}) => spawnSync(`${realRoot}
 let result = run("fm-tasks-axi.sh", ["add", "viewer", "Make the viewer responsive", "--kind", "ship",
   "--body", "Keep the existing task identity.", "--start"]);
 if (result.status !== 0) throw new Error(result.stderr);
-writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
+result = run("fm-tasks-axi.sh", ["add", "other", "Advance the existing dependent work", "--kind", "ship",
+  "--body", "Keep the existing dependent task identity.", "--start"]);
+if (result.status !== 0) throw new Error(result.stderr);
+writeFileSync(`${home}/state/viewer.meta`, `window=fixture:w1:p1\nendpoint_task_id=viewer\nproject=${home}/project\nworktree=${realRoot}\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t1\nherdr_pane_id=w1:p1\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
 mkdirSync(`${home}/data/viewer`, { recursive: true });
 writeFileSync(`${home}/data/viewer/brief.md`, "# Task\n## Captain's intent\nMake the viewer responsive.\n");
 writeFileSync(`${home}/state/other.meta`, `window=fixture:w1:p2\nendpoint_task_id=other\nproject=${home}/project\nbackend=herdr\nherdr_session=fixture\nherdr_workspace_id=w1\nherdr_tab_id=w1:t2\nherdr_pane_id=w1:p2\nharness=pi\nkind=ship\nspawn_gen=g1\n`);
@@ -6099,6 +6112,7 @@ const fields = {
   remaining_gap: "The same worker has not started ordinary no-mistakes",
   next_step: "Tell the existing viewer worker to start no-mistakes on checkpoint 4826e2b4",
 };
+let recordedNextStep = fields.next_step;
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(fields)]);
 if (result.status !== 0) throw new Error(result.stderr);
@@ -6130,8 +6144,12 @@ globalThis.__fmExecuteBranchBash = async (context) => {
   if (executed.status !== 0) {
     return { content: [{ type: "text", text: executed.stderr }], details: undefined, isError: true };
   }
-  if (promptCount < 3) {
-    appendFileSync(`${home}/state/viewer.status`, "working: no-mistakes started by the existing worker\n");
+  if (promptCount === 1) {
+    writeFileSync(`${home}/state/viewer.status`, "done: obsolete pre-validation worker status\n");
+    writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: running\n  head: ${candidateHead}\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,running,1s,"active now",123,1\n`);
+  } else if (promptCount === 2) {
+    writeFileSync(`${home}/state/viewer.status`, "done: obsolete intermediate worker status\n");
+    writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: running\n  head: ${candidateHead}\n  steps[1]{step,status,findings,duration_ms}:\n    review,running,0,0\n  active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n    review,running,1s,"active now",123,2\n`);
   }
   return { content: [{ type: "text", text: executed.stdout || "instruction durably queued" }], details: undefined };
 };
@@ -6142,20 +6160,16 @@ let reportResult;
 let scopedRefusal;
 globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
   promptCount += 1;
-  const expectedStep = [
-    fields.next_step,
-    "Tell the existing viewer worker to continue the same no-mistakes run after its intermediate review",
-    "Arm the PR check for https://github.com/acme/viewer/pull/7",
-    "Arm the future decision recheck for the existing task",
-    "Send the approved handoff to the existing other worker",
-    "Recheck after unrelated target inbox activity",
-    "Confirm oversized unrelated handoff history did not change this task",
-    "Deliver the approved handoff with oversized handoff history",
-    "Confirm settled and rejected handoffs do not create new progress",
-  ][promptCount - 1];
+  const expectedStep = recordedNextStep;
   if (!text.includes("FIRSTMATE TASK CONTINUATION: viewer") || !text.includes(expectedStep) ||
       text.includes("authority_ref") || text.includes('"evidence"')) {
     throw new Error(`compact admission was incomplete or rich: ${text}`);
+  }
+  if (promptCount === 2 && !text.includes("run failed")) {
+    throw new Error(`Branch did not receive the changed executor result: ${text}`);
+  }
+  if (promptCount === 10 && !text.includes("checks green")) {
+    throw new Error(`Branch did not receive the goal-ready executor result: ${text}`);
   }
   const continuation = session.options.customTools.find((tool) => tool.name === "fm_task_continuation");
   const handoff = session.options.customTools.find((tool) => tool.name === "fm_task_handoff");
@@ -6180,7 +6194,7 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     : promptCount === 4
       ? `${realRoot}/bin/fm-procevent-when.sh arm viewer --interval 60 --stable 1 --deadline 86400 --condition /bin/false --action /bin/true`
       : promptCount >= 5 ? "" :
-        `${realRoot}/bin/fm-send.sh viewer '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
+        `${realRoot}/bin/fm-send.sh viewer --idempotent '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
     if (promptCount === 5) {
@@ -6249,8 +6263,9 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
       appendFileSync(`${home}/data/viewer/artifacts/build.log`, "unrelated artifact bytes\n");
     }
   }
-  reportResult = await report.execute("report", { task: "viewer", verdict: "routine", silent: true,
-    summary: promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
+  reportResult = await report.execute("report", { task: "viewer", verdict: promptCount === 10 ? "captain" : "routine",
+    silent: promptCount !== 10,
+    summary: promptCount === 10 ? "The requested acceptance evidence is complete and ready for MAIN's semantic review." : promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
       ? "The future decision recheck was armed while captain approval remains pending."
       : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
@@ -6279,17 +6294,13 @@ const inbox = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.en
 if (inbox.length !== 1 || !readFileSync(`${home}/state/viewer.inbox/${inbox[0]}`, "utf8").includes("start the existing checkpoint")) {
   throw new Error(`same-worker inbox receipt missing: ${JSON.stringify(inbox)}`);
 }
-if (sentToMain.length !== beforeMain + 1 ||
-    !sentToMain.at(-1)?.message?.content?.includes("existing worker received the authorized no-mistakes continuation")) {
-  throw new Error(`material continuation did not reach MAIN: ${JSON.stringify(sentToMain)}`);
-}
+if (sentToMain.length !== beforeMain) throw new Error(`routine start interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 if (!entries.some((entry) => entry.customType === "fm-continuation-branch-delivery")) {
   throw new Error("MAIN session lacks the compact branch delivery receipt");
 }
-if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
-  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
-  throw new Error("material continuation was retained only in the branch session");
-}
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
+  entry.data.change === "material")) throw new Error("routine material continuation did not settle quietly in Branch");
 if (readFileSync(`${home}/data/backlog.md`, "utf8").match(/firstmate-progress:v1/g)?.length !== 1) {
   throw new Error("continuation created a second active progress record");
 }
@@ -6297,39 +6308,54 @@ if (readFileSync(`${home}/data/backlog.md`, "utf8").includes("no-mistakes starte
   throw new Error("branch overwrote MAIN-owned progress");
 }
 
-// A healthy running executor suppresses a second prompt and every-command
-// progress write. The status event is executor-owned evidence, not a task-row
-// progress mutation.
+// A session restart preserves the original-row checkpoint and its unread
+// same-worker instruction. The active run outranks the obsolete done status,
+// so no duplicate instruction or MAIN notification is produced.
+await fire("session_shutdown", {}, defaultSessionCtx);
+await fire("session_start", {}, defaultSessionCtx);
+pi.appendEntry("fixture-restart", {});
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await new Promise((resolve) => setTimeout(resolve, 100));
+await new Promise((resolve) => setTimeout(resolve, 1600));
 if (promptCount !== 1 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 1) throw new Error("healthy execution replayed the continuation");
-if (sentToMain.length !== beforeMain + 1) throw new Error("healthy unchanged execution notified MAIN");
+if (sentToMain.length !== beforeMain) throw new Error("healthy unchanged execution notified MAIN");
 
-// A material intermediate result is recorded once by MAIN. Its new token
-// admits one further same-worker action without reviving the old admission.
-progress = run("fm-task-state.sh", ["progress", "viewer"]);
-record = JSON.parse(progress.stdout);
-const intermediate = { ...fields,
-  current_state: "No-mistakes returned an intermediate review result",
-  remaining_gap: "The same run still has authorized review corrections and later gates",
-  next_step: "Tell the existing viewer worker to continue the same no-mistakes run after its intermediate review",
-};
-result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
-  "--progress", JSON.stringify(intermediate)]);
-if (result.status !== 0) throw new Error(`MAIN intermediate progress update failed: ${result.stderr}`);
-record = JSON.parse(result.stdout);
+// A new executor result changes the bounded admission key even though MAIN has
+// not rewritten the compact task row. Branch inspects that current result and
+// routes the next same-worker step from the original checkpoint admission.
+const intermediate = { ...fields };
 writeFileSync(`${home}/state/viewer.status`, "done: intermediate no-mistakes review result\n");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
+reportResult = undefined;
+const intermediateState = run("fm-task-state.sh", ["--durable-only", "viewer"]);
+if (intermediateState.status !== 0 || !intermediateState.stdout.includes("state: failed") ||
+    !intermediateState.stdout.includes("source: run-step")) {
+  throw new Error(`intermediate executor result was not exposed by its state owner: ${intermediateState.stderr || intermediateState.stdout}`);
+}
+pi.events.emit("firstmate:heartbeat-tick", {});
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 2 &&
-  routed.filter((item) => item.command.includes("fm-send.sh viewer")).length === 2 &&
-  sentToMain.length === beforeMain + 2,
-  "intermediate same-worker continuation");
+try {
+  await settle(() => promptCount === 2 &&
+    routed.filter((item) => item.command.includes("fm-send.sh viewer")).length === 2 &&
+    reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+    sentToMain.length === beforeMain,
+    "intermediate same-worker continuation");
+} catch (error) {
+  const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
+  throw new Error(`${error}; executor=${intermediateState.stdout.trim()} entries=${JSON.stringify(entries)} trace=${trace}`);
+}
+await settle(() => {
+  try { return (readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8").match(/"reason":"reported-continuation"/g) ?? []).length === 2; }
+  catch { return false; }
+}, "intermediate Branch settlement");
+await new Promise((resolve) => setTimeout(resolve, 100));
 const messages = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg"));
 if (messages.length !== 2) throw new Error(`intermediate continuation did not create one new inbox receipt: ${JSON.stringify(messages)}`);
-if (sentToMain.length !== beforeMain + 2) throw new Error("intermediate material continuation did not reach MAIN once");
+if (sentToMain.length !== beforeMain) throw new Error("intermediate routine continuation interrupted MAIN");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
+const intermediateToken = record.record_token;
 const prCheck = { ...intermediate,
   current_state: "The implementation and focused validation are ready for PR monitoring",
   remaining_gap: "The PR check has not been armed",
@@ -6339,13 +6365,28 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(prCheck)]);
 if (result.status !== 0) throw new Error(`MAIN PR-check progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+if (record.record_token === intermediateToken) throw new Error("material MAIN progress update retained its old record token");
+const listedAfterPrUpdate = run("fm-task-state.sh", ["progress-list"]);
+if (listedAfterPrUpdate.status !== 0 || !JSON.parse(listedAfterPrUpdate.stdout).tasks.includes("viewer")) {
+  throw new Error(`updated in-flight task disappeared from compact monitoring: ${listedAfterPrUpdate.stderr || listedAfterPrUpdate.stdout}`);
+}
+recordedNextStep = prCheck.next_step;
 const statusBeforePrCheck = readFileSync(`${home}/state/viewer.status`, "utf8");
 const inboxBeforePrCheck = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort();
+reportResult = undefined;
+pi.events.emit("firstmate:heartbeat-tick", {});
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 3 &&
-  routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length === 1 &&
-  sentToMain.length === beforeMain + 3,
-  "PR-check-only continuation");
+try {
+  await settle(() => promptCount === 3 &&
+    routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length === 1 &&
+    reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+    sentToMain.length === beforeMain,
+    "PR-check-only continuation");
+} catch (error) {
+  const trace = (() => { try { return readFileSync(`${home}/state/.supervision-routing.jsonl`, "utf8"); } catch { return ""; } })();
+  const currentProgress = run("fm-task-state.sh", ["progress", "viewer"]);
+  throw new Error(`${error}; progress=${currentProgress.stdout.trim()} prompts=${promptCount} report=${JSON.stringify(reportResult)} entries=${JSON.stringify(entries)} trace=${trace}`);
+}
 if (readFileSync(`${home}/state/viewer.status`, "utf8") !== statusBeforePrCheck ||
     JSON.stringify(readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort()) !== JSON.stringify(inboxBeforePrCheck)) {
   throw new Error("PR-check fixture unexpectedly changed status or inbox state");
@@ -6356,14 +6397,10 @@ if (!readFileSync(`${home}/state/viewer.meta`, "utf8").includes("pr=https://gith
     !readFileSync(`${home}/state/viewer.check.sh`, "utf8").trim()) {
   throw new Error("PR-check owner did not publish its resumable task state");
 }
-if (sentToMain.length !== beforeMain + 3 ||
-    !sentToMain.at(-1)?.message?.content?.includes("PR check was armed for the ready implementation")) {
-  throw new Error(`metadata-only PR-check continuation did not reach MAIN: ${JSON.stringify(sentToMain)}`);
-}
-if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
-  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
-  throw new Error("metadata-only PR-check continuation was retained only in the branch session");
-}
+if (sentToMain.length !== beforeMain) throw new Error(`routine PR-check interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
+  entry.data.change === "material")) throw new Error("routine PR-check did not settle quietly in Branch");
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
@@ -6376,10 +6413,13 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(futureRecheck)]);
 if (result.status !== 0) throw new Error(`MAIN future-recheck progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+recordedNextStep = futureRecheck.next_step;
+reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 4 &&
   routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length === 1 &&
-  sentToMain.length === beforeMain + 4,
+  reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+  sentToMain.length === beforeMain,
   "future-recheck continuation");
 for (const path of [
   `${home}/state/when/when-viewer.spec`,
@@ -6388,9 +6428,7 @@ for (const path of [
 ]) {
   if (!readFileSync(path, "utf8").trim()) throw new Error(`future-recheck owner did not publish ${path}`);
 }
-if (!sentToMain.at(-1)?.message?.content?.includes("future decision recheck was armed while captain approval remains pending")) {
-  throw new Error(`future-recheck owner state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
-}
+if (sentToMain.length !== beforeMain) throw new Error(`routine future recheck interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 const waitingApproval = run("fm-task-state.sh", ["progress", "viewer"]);
 const waitingApprovalRecord = JSON.parse(waitingApproval.stdout);
 if (waitingApproval.status !== 0 || waitingApprovalRecord.task_state !== "in_flight" ||
@@ -6399,7 +6437,7 @@ if (waitingApproval.status !== 0 || waitingApprovalRecord.task_state !== "in_fli
 }
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 4 || sentToMain.length !== beforeMain + 4 ||
+if (promptCount !== 4 || sentToMain.length !== beforeMain ||
     routed.some((item) => /fm-(?:control|pr-merge|merge-local)\.sh/.test(item.command))) {
   throw new Error("future captain-approval wait repeated coordination or performed unauthorized lifecycle work");
 }
@@ -6415,25 +6453,18 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(handoff)]);
 if (result.status !== 0) throw new Error(`MAIN handoff progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
-writeFileSync(`${home}/state/.lease-other`, `branch\t${process.ppid}\t${Math.floor(Date.now() / 1000)}\n`);
-const preparedHandoff = run("fm-task-handoff.sh", ["send", "viewer", "other", "--id", "viewer-to-other-r1",
-  "Continue the already-approved dependent step."]);
-if (preparedHandoff.status !== 6 ||
-    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=retryable-refusal")) {
-  throw new Error(`handoff fixture did not retain a retryable record: ${preparedHandoff.stderr}`);
-}
-rmSync(`${home}/state/.lease-other`);
+recordedNextStep = handoff.next_step;
+reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 5 && sentToMain.length === beforeMain + 5,
+await settle(() => promptCount === 5 && reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+  sentToMain.length === beforeMain,
   "typed handoff continuation");
 if (!readFileSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`, "utf8").includes("Continue the already-approved dependent step") ||
     !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=delivered") ||
     readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
-  throw new Error("same-id handoff recovery did not retain one durable inbox receipt");
+  throw new Error(`same-id handoff recovery did not retain one durable inbox receipt: status=${readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8")} inbox=${JSON.stringify(existsSync(`${home}/state/other.inbox`) ? readdirSync(`${home}/state/other.inbox`) : [])}`);
 }
-if (!sentToMain.at(-1)?.message?.content?.includes("approved cross-task handoff reached the existing worker")) {
-  throw new Error(`arbitrary-id handoff state did not reach MAIN: ${JSON.stringify(sentToMain)}`);
-}
+if (sentToMain.length !== beforeMain) throw new Error(`routine typed handoff interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
@@ -6446,12 +6477,13 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(unrelatedInbox)]);
 if (result.status !== 0) throw new Error(`MAIN unrelated-inbox progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+recordedNextStep = unrelatedInbox.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 6 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
   "unrelated target inbox isolation");
-if (sentToMain.length !== beforeMain + 5) throw new Error("unrelated target inbox activity interrupted MAIN");
-if (!globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
+if (sentToMain.length !== beforeMain) throw new Error("unrelated target inbox activity interrupted MAIN");
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
   throw new Error("unrelated target inbox activity prevented quiet settlement");
 }
@@ -6479,11 +6511,12 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(overflowQuiet)]);
 if (result.status !== 0) throw new Error(`MAIN overflow quiet progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+recordedNextStep = overflowQuiet.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 7 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
   "oversized unrelated handoff quiet continuation");
-if (sentToMain.length !== beforeMain + 5) throw new Error("oversized unrelated handoff activity interrupted MAIN");
+if (sentToMain.length !== beforeMain) throw new Error("oversized unrelated handoff activity interrupted MAIN");
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
@@ -6496,18 +6529,17 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(quiet)]);
 if (result.status !== 0) throw new Error(`MAIN unchanged-wait progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+recordedNextStep = quiet.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
-await settle(() => promptCount === 8 && sentToMain.length === beforeMain + 6,
+await settle(() => promptCount === 8 && reportResult?.content?.[0]?.text?.includes("retained quietly") &&
+  sentToMain.length === beforeMain,
   "oversized handoff material delivery");
 if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`, "utf8").includes("state=delivered") ||
-    !sentToMain.at(-1)?.message?.content?.includes("second approved handoff reached the existing worker")) {
-  throw new Error(`oversized handoff progress did not reach MAIN: ${JSON.stringify(sentToMain)}`);
-}
-if (globalThis.__fmSessions[0].options.sessionManager.getEntries().some((entry) =>
-  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
-  throw new Error("oversized material handoff was retained only in the branch");
-}
+    sentToMain.length !== beforeMain) throw new Error(`routine oversized handoff interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
+  entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
+  entry.data.change === "material")) throw new Error("routine oversized handoff did not settle quietly in Branch");
 if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
   throw new Error("the earlier handoff effect was replayed after its failing shell result");
 }
@@ -6523,17 +6555,32 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
   "--progress", JSON.stringify(noEffect)]);
 if (result.status !== 0) throw new Error(`MAIN no-effect progress update failed: ${result.stderr}`);
 record = JSON.parse(result.stdout);
+recordedNextStep = noEffect.next_step;
 reportResult = undefined;
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
   "settled and rejected handoff quiet continuation");
-if (sentToMain.length !== beforeMain + 6 ||
+if (sentToMain.length !== beforeMain ||
     readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
   throw new Error("no-effect typed handoff created progress or duplicate delivery");
 }
 
-// Only MAIN performs final semantic acceptance after the fixture's requested
-// outcome is satisfied. Empty gap/next step removes the task from monitoring.
+// A new executor result gets a fresh bounded Branch admission without a MAIN
+// progress rewrite. Goal-ready evidence alone crosses into MAIN, which then
+// performs final semantic acceptance and removes the task from monitoring.
+writeFileSync(`${home}/data/viewer/report.md`, "The requested acceptance checks passed.\n");
+writeFileSync(`${home}/state/viewer.status`, "done: goal-ready evidence is available\n");
+writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: completed\n  head: ${candidateHead}\n  outcome: checks-passed\n  steps[1]{step,status,findings,duration_ms}:\n    ci,completed,0,1\n`);
+reportResult = undefined;
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await settle(() => promptCount === 10 && sentToMain.length === beforeMain + 1,
+  "goal-ready continuation outcome");
+const goalReadyOutcome = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n")
+  .map((line) => JSON.parse(line)).find((entry) => entry.task === "viewer" && entry.verdict === "captain");
+if (!sentToMain.at(-1)?.message?.content?.includes("task=viewer") ||
+    !goalReadyOutcome?.summary?.includes("acceptance evidence is complete")) {
+  throw new Error(`goal-ready evidence did not reach MAIN: ${JSON.stringify(sentToMain)}`);
+}
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const accepted = { ...noEffect, current_state: "All requested checks passed and MAIN reviewed the artifact",
@@ -6543,10 +6590,10 @@ result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token
 if (result.status !== 0) throw new Error(`MAIN final acceptance update failed: ${result.stderr}`);
 await fire("agent_before_settle", {}, defaultSessionCtx);
 await new Promise((resolve) => setTimeout(resolve, 100));
-if (promptCount !== 9 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
+if (promptCount !== 10 || routed.filter((item) => item.command.includes("fm-send.sh viewer")).length !== 2 ||
     routed.filter((item) => item.command.includes("fm-pr-check.sh viewer")).length !== 1 ||
     routed.filter((item) => item.command.includes("fm-procevent-when.sh arm viewer")).length !== 1 ||
-    sentToMain.length !== beforeMain + 6) {
+    sentToMain.length !== beforeMain + 1) {
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
