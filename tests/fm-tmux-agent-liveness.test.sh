@@ -87,6 +87,11 @@ if [ -z "$STANDIN_BIN" ]; then
   exit 0
 fi
 ln -s "$STANDIN_BIN" "$LAB/bin/claude-link"
+# A session started by typing `Claude` on macOS's case-insensitive filesystem
+# runs claude under that process name. Its own directory keeps that name apart
+# from $LAB/bin/claude on such a filesystem.
+mkdir -p "$LAB/titled"
+ln -s "$STANDIN_BIN" "$LAB/titled/Claude"
 ln -s "$STANDIN_BIN" "$LAB/bin/pi"
 ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
 # omp (Oh My Pi) is a single binary whose live process name is the bare word
@@ -202,6 +207,11 @@ new_window agent "$LAB/bin/claude-link" 900
 wait_for_state "$SESSION:agent" alive \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
+
+new_window capitalized "$LAB/titled/Claude" 900
+wait_for_state "$SESSION:capitalized" alive \
+  || fail "a foreground process titled Claude must classify alive"
+pass "tmux liveness: a foreground process titled Claude classifies alive"
 
 # --- muse's version-suffixed binary name ------------------------------------
 # A muse crewmate pane misclassified here reads as a dead endpoint, so a healthy
