@@ -281,22 +281,22 @@ function confirmHandlingDelivery(paths, recovery) {
   }
 }
 
-function confirmHandlingDeliveryWithRetry(paths, recovery) {
-  const snapshot = () => armRecovery.get(child) ?? recovery;
+function confirmHandlingDeliveryWithRetry(paths, recoveryArm, recovery) {
+  const snapshot = () => armRecovery.get(recoveryArm) ?? recovery;
   const first = confirmHandlingDelivery(paths, snapshot());
   if (first.ok) return first;
   return confirmHandlingDelivery(paths, snapshot());
 }
 
-async function deliverActionableWake(paths, client, sessionID, message, recovery) {
+async function deliverActionableWake(paths, client, sessionID, message, recoveryArm, recovery) {
   if (recovery) {
-    const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
+    const confirmed = confirmHandlingDeliveryWithRetry(paths, recoveryArm, recovery);
     if (!confirmed.ok) {
       if (recovery.watcherPid) {
         try {
           process.kill(Number(recovery.watcherPid), 0);
         } catch {
-          await retireArm(child);
+          await retireArm(recoveryArm);
         }
       }
       await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
@@ -353,10 +353,10 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
+    if (status === "armed") return { failure: "", recoveryArm: armChild, recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
+    if (status === "wake") return { failure: "", recoveryArm: armChild, recovery: armRecovery.get(armChild) };
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
@@ -477,7 +477,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       queueDelivery(paths, client, sessionID, async () => {
         const result = await restoration;
         const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-        await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+        await deliverActionableWake(paths, client, sessionID, message, result.recoveryArm, result.recovery);
       });
       return;
     }

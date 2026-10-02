@@ -169,6 +169,102 @@ JS
   pass "OpenCode rearms a failed successor during blocked wake delivery"
 }
 
+test_opencode_stale_recovery_does_not_retire_replacement() {
+  local repo out status
+  repo="$TMP_ROOT/opencode-stale-recovery"
+  mkdir -p "$repo/bin" "$repo/state" "$repo/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$repo/state/crew.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  kill -0 "$4" 2>/dev/null
+  exit $?
+fi
+count=0
+[ ! -f "$FM_HOME/state/arm-count" ] || read -r count < "$FM_HOME/state/arm-count"
+count=$((count + 1))
+printf '%s\n' "$count" > "$FM_HOME/state/arm-count"
+printf '%s\n' "$$" > "$FM_HOME/state/arm-pid-$count"
+if [ "$count" -eq 4 ]; then
+  while [ ! -f "$FM_HOME/state/release-fourth-arm" ]; do sleep 0.02; done
+fi
+printf 'watcher: started pid=%s recovery-generation=generation-%s\n' "$$" "$count"
+case "$count" in
+  1) printf 'check: first-wake\n' ;;
+  2) sleep 0.3; printf 'check: queued-wake\n' ;;
+  *) exec sleep 60 ;;
+esac
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" \
+    FM_ROOT_OVERRIDE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$repo/state" \
+    FM_WATCH_REARM_RETRY_BASE_MS=10 node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const home = process.env.FM_HOME;
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+let releaseFirst;
+const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+const prompts = [];
+const client = { session: { promptAsync: async ({ body }) => {
+  prompts.push(body.parts[0].text);
+  if (prompts.length === 1) await firstBlocked;
+} } };
+const readPid = number => Number(readFileSync(`${home}/state/arm-pid-${number}`, "utf8"));
+const waitForFile = async (path, timeout = 5000) => {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline && !existsSync(path)) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (!existsSync(path)) throw new Error(`timed out waiting for ${path}`);
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN));
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: home, worktree: home });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "fixture" } } });
+let replacementPid;
+try {
+  await waitForFile(`${home}/state/arm-pid-3`);
+  const stalePid = readPid(3);
+  process.kill(stalePid, "SIGHUP");
+  await waitForFile(`${home}/state/arm-pid-4`);
+  replacementPid = readPid(4);
+  process.kill(replacementPid, 0);
+  if (prompts.length !== 1) throw new Error("first wake delivery was not blocked");
+  releaseFirst();
+  const queuedDeadline = Date.now() + 5000;
+  while (Date.now() < queuedDeadline && prompts.length < 2) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (prompts.length !== 2 || !prompts[1].includes("queued-wake")) {
+    throw new Error(`queued wake was not delivered in order: ${JSON.stringify(prompts)}`);
+  }
+  process.kill(replacementPid, 0);
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 4) {
+    throw new Error("stale recovery retired the replacement arm");
+  }
+  writeFileSync(`${home}/state/release-fourth-arm`, "ready\n");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  process.kill(replacementPid, 0);
+  console.log("stale recovery left the exact replacement arm alive");
+} catch (error) {
+  releaseFirst();
+  console.error(error);
+  process.exitCode = 1;
+} finally {
+  if (replacementPid) {
+    try { process.kill(replacementPid, "SIGTERM"); } catch {}
+  }
+  process.exit(process.exitCode ?? 0);
+}
+JS
+  )
+  status=$?
+  expect_code 0 "$status" "OpenCode must not retire a replacement for a stale recovery generation: $out"
+  pass "OpenCode binds recovery retirement to its exact arm"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p \
@@ -384,4 +480,5 @@ test_handling_successor_does_not_go_blind() {
 test_handling_successor_does_not_go_blind
 test_opencode_consecutive_wakes_keep_successor
 test_opencode_failed_successor_during_delivery_rearms
+test_opencode_stale_recovery_does_not_retire_replacement
 test_unacknowledged_recovery_is_announced_once_per_generation
