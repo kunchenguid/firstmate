@@ -296,11 +296,18 @@ SH
 
 # doctor [args...] -> runs the real doctor against the current fixture,
 # capturing merged output in DOCTOR_OUT and its status in DOCTOR_RC.
+# FM_ROOT_OVERRIDE defaults here because fm-on.sh's fixed entrypoint always sets
+# it and the script's usage says that is how it is reached, so a run without it
+# cannot occur in production. The checks that install a LaunchAgent read it to
+# tell a remote account from the captain's own machine, so the fixture has to
+# model it. It is a default rather than an assignment because the entrypoint-link
+# cases below export their own root and assert the link points into it.
 doctor() {
   set +e
   DOCTOR_OUT=$(
     HOME="$CASE_HOME" \
     FM_HOME="$CASE_PROJECT_HOME" \
+    FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-$ROOT}" \
     PATH="$CASE_HOME/.local/bin:$CASE_BIN:$BASE_PATH" \
     FM_FAKE_STATE="$CASE_STATE" \
     FM_FAKE_LAUNCHCTL_LOG="$CASE_LAUNCHCTL_LOG" \

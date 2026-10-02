@@ -290,6 +290,7 @@ The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.
 Its limits:
 
 - It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
+- Run directly rather than through `fm-on.sh`, it skips the remote job worker and launch agent checks instead of installing either agent on the caller's own machine, because the fixed entrypoint is what marks a remote run.
 - The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server.
   It does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
 - It re-derives every check from the host afterwards, so what it prints is the state after the repair rather than the intent of one.
