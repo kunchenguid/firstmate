@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -519,7 +521,7 @@ test_relaunch_keeps_an_armed_merge_poll_valid() {
     printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
     out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" 2>&1); rc=$?
     expect_code 0 "$rc" "the merge poll should arm before the relaunch (trace $trace)"$'\n'"$out"
-    ( . "$ROOT/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" ) \
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
       || fail "the freshly armed merge poll should validate (trace $trace)"
 
     out=$(run_control "$dir" "$id" relaunch --note "relaunch with a recorded PR"); rc=$?
@@ -532,7 +534,7 @@ test_relaunch_keeps_an_armed_merge_poll_valid() {
       fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
         || fail "the replacement should have recorded its trace carrier"
     fi
-    ( . "$ROOT/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" ) \
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
       || fail "a relaunch must leave the armed merge poll valid (trace $trace); record:"$'\n'"$(cat "$dir/home/state/$id.meta")"
   done
   pass "fm-control relaunch: an armed merge poll stays valid across a relaunch, with tracing off and on"
