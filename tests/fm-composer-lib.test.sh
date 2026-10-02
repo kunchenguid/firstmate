@@ -512,12 +512,13 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
 
 test_matrix_omp_status_row_bounds_bare_composer() {
   # omp (Oh My Pi) draws its status line directly BELOW the borderless `❯`
-  # composer. Captured live through Herdr on omp 18.1.11 under the captain's
-  # unicode preset (idle), plus the nerd-preset idle row and the busy spinner
-  # row from the 18.1.2 investigation. Without the status-row rule the bare
-  # wrap region swallows that row and an idle omp pane reads `pending`, which
-  # skipped the doorbell on the first live omp worker.
-  local idle_unicode idle_nerd busy typed wrapped
+  # composer. Existing idle Unicode/nerd and busy-spinner captures were read
+  # live through Herdr on omp 18.1.11/18.1.2.
+  # The new plugin-row fixture reflects the captain-reported idle panes from
+  # 2026-10-02/03; no live pane is available in this isolated worktree.
+  # Without the omp status-row boundary, its wrap region can classify furniture
+  # as typed input and skip the worker's doorbell.
+  local idle_unicode idle_nerd busy typed wrapped plugin_rows styled_plugin_rows unknown unknown_styled non_omp
   idle_unicode=$'transcript line
 
 ❯
@@ -536,6 +537,14 @@ test_matrix_omp_status_row_bounds_bare_composer() {
 
 ❯ fix the flaky test
  π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  plugin_rows=$'transcript line
+
+❯
+LSP Active: typescript
+pi-lens diagnostics: 0 errors
+● 🐴 ponytail: ⚡ FULL
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  styled_plugin_rows=$'transcript line\n\n❯\n'"${ESC}[2mLSP Active: typescript${ESC}[0m"$'\n'"${ESC}[38;2;80;80;80mpi-lens diagnostics: 0 errors${ESC}[0m"$'\n'"${ESC}[38;2;80;80;80m● 🐴 ponytail: ⚡ FULL${ESC}[0m"$'\n'"${ESC}[38;2;129;162;190m π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)${ESC}[0m"
   # Non-vacuousness: each status row is real non-blank content that the wrap
   # region would otherwise take as typed input.
   _fm_composer_row_is_omp_status ' π  · ◔ GPT-6-Astra · 🌳 …-workspace' \
@@ -563,9 +572,22 @@ test_matrix_omp_status_row_bounds_bare_composer() {
   assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
   assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
   assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
+  assert_screen "omp idle with trailing plugin rows (styled)" empty "$CAPS_STYLED" "$styled_plugin_rows"
+  assert_screen "cursor-anchored omp plugin footer is empty" empty "$CAPS_TMUX" "$plugin_rows" 2
+  assert_screen "omp idle with trailing plugin rows (plain)" empty "$CAPS_PLAIN" "$plugin_rows"
+  assert_screen "omp idle with trailing plugin rows (unstyled capture)" empty "$CAPS_STYLED" "$plugin_rows"
+  unknown=$'transcript line\n\n❯\nLSP Active: typescript'
+  assert_screen "omp plugin text without its status-bar proof stays unknown" unknown "$CAPS_PLAIN" "$unknown"
+  unknown_styled=$'transcript line\n\n❯\n'"${ESC}[2mLSP Active: typescript${ESC}[0m"$'\n'"${ESC}[2m● 🐴 ponytail: ⚡ FULL${ESC}[0m"$'\n'"${ESC}[2mUnknown status row${ESC}[0m"
+  assert_screen "styled omp plugin rows without status-bar proof defer" unknown "$CAPS_STYLED" "$unknown_styled"
+  assert_screen "cursor-anchored incomplete styled plugin footer defers" unknown "$CAPS_TMUX" "$unknown_styled" 2
+  non_omp=${styled_plugin_rows/❯/›}
+  assert_screen "omp-shaped footer cannot prove another harness empty" unknown "$CAPS_STYLED" "$non_omp"
+  typed=${plugin_rows/❯/❯ typed after prompt}
+  assert_screen "omp text before trailing plugin rows stays pending" pending "$CAPS_STYLED" "$typed"
   # The boundary must not cut a bare composer's own wrapped input: with the
   # cursor on a continuation row that opens `fix · tests`, the composer is a
-  # proven wrap region and reads pending, exactly as it did before the rule.
+  # proven wrap region and reads pending, exactly as it did before.
   wrapped=$'transcript line\n\n❯ please run the suite and then\nfix · tests before pushing'
   assert_screen "wrapped typed text with a middle dot stays pending" pending "$CAPS_TMUX" "$wrapped" 3
   wrapped=$'transcript line\n\n❯ document the constants in the order\npi · e · phi with one example each'

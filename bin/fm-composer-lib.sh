@@ -1391,6 +1391,37 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_omp_plugin_footer: 0 when known omp plugin rows directly below
+# an otherwise-empty `❯` composer are followed by omp's own status line.
+# Returns 2 when plugin rows are recognized but the complete omp shape is not.
+_fm_composer_omp_plugin_footer() {  # <plain-screen> <first-row>
+  local plain=$1 row=$2 line glyph body found=0 omp_prompt=0
+  line=$(_fm_composer_screen_row "$((row - 1))" "$plain")
+  fm_composer_normalize_trim_var line
+  fm_composer_leading_agent_glyph_var glyph "$line" || return 1
+  body=${line#*"$glyph"}
+  fm_composer_normalize_trim_var body
+  [ -z "$body" ] || return 1
+  [ "$glyph" = '❯' ] && omp_prompt=1
+  while :; do
+    line=$(_fm_composer_screen_row "$row" "$plain")
+    fm_composer_normalize_trim_var line
+    case "$line" in
+      'LSP Active:'*) found=1 ;;
+      'pi-lens diagnostics:'*) found=1 ;;
+      '● 🐴 ponytail:'*) found=1 ;;
+      *)
+        [ "$found" = 1 ] || return 1
+        if _fm_composer_row_is_omp_status "$line" && [ "$omp_prompt" = 1 ]; then
+          return 0
+        fi
+        return 2
+        ;;
+    esac
+    row=$((row + 1))
+  done
+}
+
 # _fm_composer_row_is_pi_status: 0 when the trimmed row is Pi's dollar-first
 # footer stats row (FM_COMPOSER_PI_STATUS_RE_DEFAULT above). Furniture below
 # the separated pair; a `$` cost cell must not count as a dead-shell prompt.
@@ -1446,13 +1477,19 @@ _fm_composer_bare_row_strip_furniture_var() {  # <varname>
 # contiguity proof that those rows are the bare composer's wrapped input
 # rather than unrelated screen content.
 _fm_composer_wrap_region_ok() {  # <plain-screen> <glyph-row> <cursor-row>
-  local plain=$1 g=$2 cy=$3 row line trimmed glyph
+  local plain=$1 g=$2 cy=$3 row line trimmed glyph plugin_result
   row=$((g + 1))
   while [ "$row" -le "$cy" ]; do
     line=$(_fm_composer_screen_row "$row" "$plain")
     trimmed=$line
     fm_composer_normalize_trim_var trimmed
     [ -n "$trimmed" ] || return 1
+    if _fm_composer_omp_plugin_footer "$plain" "$row"; then
+      return 1
+    else
+      plugin_result=$?
+      [ "$plugin_result" -ne 2 ] || return 1
+    fi
     if fm_composer_row_has_edge "$trimmed"; then return 1; fi
     if _fm_composer_row_is_omp_status "$trimmed"; then return 1; fi
     if _fm_composer_row_is_braille_furniture "$trimmed"; then return 1; fi
@@ -1841,7 +1878,8 @@ _fm_composer_bare_rule_sandwich() {  # <plain-screen> <row>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0 plugin_result
+  FM_COMPOSER_OMP_PLUGIN_UNPROVEN=0
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1915,6 +1953,15 @@ _fm_composer_select_cursorless() {
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
       [ -n "$trimmed" ] || break
+      if _fm_composer_omp_plugin_footer "$plain" "$next"; then
+        break
+      else
+        plugin_result=$?
+        if [ "$plugin_result" = 2 ]; then
+          FM_COMPOSER_OMP_PLUGIN_UNPROVEN=1
+          break
+        fi
+      fi
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break
@@ -2111,7 +2158,7 @@ fm_composer_dialog_sink_release() {
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
-  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain
+  local styled=0 cursor=0 has_identity=0 cortex_proven=0 cortex_ask=0 kv plain plugin_result
   # Note the dialog before any early return so a pending picker is still named.
   fm_composer_note_blocking_dialog "$screen" || true
   while IFS= read -r kv; do
@@ -2169,6 +2216,15 @@ EOF
       return 0
     fi
     if [ "$FM_COMPOSER_SCAN_BARE_ROW" -ge 0 ] && [ "$cy" -eq "$FM_COMPOSER_SCAN_BARE_ROW" ]; then
+      if _fm_composer_omp_plugin_footer "$plain" "$((cy + 1))"; then
+        :
+      else
+        plugin_result=$?
+        if [ "$plugin_result" = 2 ]; then
+          printf 'unknown'
+          return 0
+        fi
+      fi
       if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
          && [ "$cy" -gt "$FM_COMPOSER_SCAN_PI_OPEN" ] \
          && [ "$cy" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; then
@@ -2209,6 +2265,10 @@ EOF
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
   if ! _fm_composer_select_cursorless "$plain"; then
+    printf 'unknown'
+    return 0
+  fi
+  if [ "$FM_COMPOSER_OMP_PLUGIN_UNPROVEN" = 1 ]; then
     printf 'unknown'
     return 0
   fi
