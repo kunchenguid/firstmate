@@ -147,7 +147,11 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A ship crew's paused:
+#      line claiming a no-mistakes run (status_pause_claims_nm_run) reads
+#      unknown here, never paused: the run it names was not found.
+#   The run is looked for in the worktree, or in the clone the crew registered
+#   with bin/fm-nm-watch.sh register-clone (nm_clone=) when it validates there.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -224,6 +228,12 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+# Where this crew's no-mistakes run executes: the worktree, or the clone a
+# worker registered because its pipeline validates outside it (nm_clone=,
+# written by bin/fm-nm-watch.sh register-clone). Every run read below uses it.
+NM_WT=$WT
+NM_CLONE=$(meta_value nm_clone)
+[ -n "$NM_CLONE" ] && [ -d "$NM_CLONE" ] && NM_WT=$NM_CLONE
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -348,7 +358,7 @@ crew_busy_verdict() {  # <target>
 trim() { fm_nm_trim "$@"; }
 strip_quotes() { fm_nm_strip_quotes "$@"; }
 nm_run() {  # <args...>
-  fm_nm_run "$WT" "$NM_TIMEOUT" "$@"
+  fm_nm_run "$NM_WT" "$NM_TIMEOUT" "$@"
 }
 
 # Scalar value of a TOON key in the captured run output ($RUN_OUT).
@@ -806,7 +816,7 @@ nm_daemon_answered_down() {
 nm_daemon_probe() {
   local rc=0
   [ -n "$NM_DAEMON_ANSWER" ] && return 0
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+  fm_nm_run_checked "$NM_WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
   case "$rc" in
     0)   NM_DAEMON_ANSWER=up ;;
     124) NM_DAEMON_ANSWER=unanswered ;;
@@ -901,7 +911,7 @@ nm_runs_list() {
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
-CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+CREW_BRANCH=$(git -C "$NM_WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
 # 0 if the active axi-status run's head field matches this worktree's code
 # identity. Branch match is a precondition (caller). Rule owned by
@@ -909,7 +919,7 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 nm_run_head_matches_worktree() {
   local run_head
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
+  fm_nm_head_matches_worktree "$NM_WT" "$run_head"
 }
 
 HAVE_RUN=0
@@ -938,9 +948,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # coarse fallback below, but cannot turn a replacement into a vague live
     # verdict when its identity and gate cannot be read.
     overview_ok=1
-    run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
+    run_overview=$(fm_nm_run_checked "$NM_WT" "$NM_TIMEOUT" axi) || overview_ok=0
     [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
-    run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
+    run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$NM_WT" "$NM_TIMEOUT")
     [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
     case "$run_choice" in
       unknown\|*)
@@ -952,7 +962,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
-        RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
+        RUN_OUT=$(fm_nm_run_checked "$NM_WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
           || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
         if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
           || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
@@ -969,9 +979,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
           HAVE_RUN=1
-        elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
+        elif [ -z "$(fm_nm_resolve_commit "$NM_WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
-            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
+            && [ "$(fm_nm_runs_status_for_worktree "$NM_WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
             # The anchor PROVED code identity; only liveness can still fail, so
             # a dead daemon is reported as such rather than as an identity
             # failure, and a parked run keeps its gate and findings.
@@ -1003,7 +1013,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        ledger_status=$(fm_nm_runs_status_for_worktree "$NM_WT" "$CREW_BRANCH" "$(nm_runs_list)")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -1025,7 +1035,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$NM_WT" "$CREW_BRANCH" "$(nm_runs_list)")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -1312,6 +1322,10 @@ if [ -n "$LOG_VERB" ]; then
     emit_ship_status_done
   fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
+  # A pause that claims a no-mistakes run is not a wait when no run exists.
+  if [ "$LOG_STATE" = paused ] && [ "$KIND" = ship ] && status_pause_claims_nm_run "$LOG_LINE"; then
+    emit unknown status-log "$(status_line_note "$LOG_LINE")${SEP}no no-mistakes run found for $NM_WT"
+  fi
   if [ "$LOG_STATE" != unknown ]; then
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi

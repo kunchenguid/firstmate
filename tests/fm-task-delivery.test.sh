@@ -1239,10 +1239,12 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   plain="$home/data/forge-dod-n1/brief.md"
   awk '/^You drive no-mistakes by responding to its gates/ { emit = 1 }
        emit { print }
-       emit && /hard rule violation\.$/ { exit }' "$brief" > "$TMP_ROOT/forge-dod/gerrit-middle"
+       emit && /hard rule violation\.$/ { exit }' "$brief" \
+    | sed 's/forge-dod-g1/forge-dod-TASK/g' > "$TMP_ROOT/forge-dod/gerrit-middle"
   awk '/^You drive no-mistakes by responding to its gates/ { emit = 1 }
        emit { print }
-       emit && /hard rule violation\.$/ { exit }' "$plain" > "$TMP_ROOT/forge-dod/plain-middle"
+       emit && /hard rule violation\.$/ { exit }' "$plain" \
+    | sed 's/forge-dod-n1/forge-dod-TASK/g' > "$TMP_ROOT/forge-dod/plain-middle"
   [ -s "$TMP_ROOT/forge-dod/gerrit-middle" ] || fail "the gerrit brief carries no pipeline-driving section to compare"
   # Only the two statements about a green PR differ: the ci step is skipped on
   # this forge, so there is no checks-passed return to wait for.
