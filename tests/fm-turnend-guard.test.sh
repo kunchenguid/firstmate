@@ -552,18 +552,20 @@ test_hook_codex_retry_rechecks_after_checkpoint_progress() {
 }
 
 test_hook_codex_exhausted_budget_expires_after_retry_window() {
-  local dir out status
+  local dir out status ledger
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-window")
   : > "$dir/state/task1.meta"
-  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" false turn-window); status=$?
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" false turn-window); status=$?
   expect_code 2 "$status" "the initial Codex stop must be blocked"
-  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-window); status=$?
   expect_code 0 "$status" "an immediate no-progress retry must spend the exhausted budget"
-  sleep 3
-  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  for ledger in "$dir"/state/.turnend-codex-ledger.*; do :; done
+  [ -f "$ledger" ] || fail "the Codex block did not persist its retry ledger"
+  sed "3s/^time=.*/time=$(($(date +%s) - 3600))/" "$ledger" > "$ledger.aged" && mv "$ledger.aged" "$ledger"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-window); status=$?
   expect_code 2 "$status" "a later stop in the same turn after the retry window must be checked and blocked again"
   assert_contains "$out" "TURN WOULD END BLIND" "the re-armed Codex block must include the supervision alarm"
-  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 run_codex_turn_hook "$dir" true turn-window); status=$?
   expect_code 0 "$status" "the re-armed block must start a fresh, still bounded budget"
   pass "fm-turnend-guard: exhausted Codex retry budget expires after the retry window"
 }
