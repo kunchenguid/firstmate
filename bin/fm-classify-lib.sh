@@ -834,6 +834,7 @@ status_line_note() {  # <status-line> [<out-var>] -> text after the first colon,
       # valid slug) is key metadata, not note text: strip it so both stated-key
       # positions yield the same note.
       if ! _fm_key_before_colon "$__fm_note_unstamped" \
+        && ! _fm_key_unbracketed "$__fm_note_unstamped" >/dev/null \
         && _fm_key_at_note_head "$__fm_note_unstamped" __fm_note_key \
         && _fm_decision_slug_ok "$__fm_note_key"; then
         __fm_note_text=${__fm_note_text#"[key=$__fm_note_key]"}
@@ -1224,7 +1225,7 @@ status_key_closing_verb() {  # <status-file> <key>
           *) continue ;;
         esac
         if [ "$want" != default ]; then
-          case "$line" in *"[key=$want]"*|*" key=$want"*) ;; *) continue ;; esac
+          case "$line" in *"[key=$want]"*|*" key=$want"*|*$'\t'"key=$want"*) ;; *) continue ;; esac
         fi
         ;;
     esac
