@@ -121,25 +121,20 @@ In afk mode the composer guard is belt-and-suspenders (no human is typing), but 
 If anything stays buffered past `FM_MAX_DEFER_SECS` (default 300), the daemon
 attempts one normal flush, which still requires an idle pane and an affirmatively empty composer.
 The alarm is defense in depth rather than a substitute for keeping every genuinely idle supported composer injectable.
-If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
-an ERROR in the daemon log, a durable
-`state/.subsuper-inject-wedged` marker (the return brief's health line carries it), and a configurable backend-independent active alert.
+If that flush is still deferred before submission or the native prompt is definitely refused, it raises a loud, rate-limited wedge alarm: an ERROR in the daemon log, a durable `state/.subsuper-inject-wedged` marker (the return brief's health line carries it), and a configurable backend-independent active alert.
+If native prompt acceptance is uncertain, the daemon instead records that uncertainty in the same durable marker and retires the exact buffered payload so it cannot be replayed blindly.
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ### Submit model
 
-The digest is typed **once** (`pane send-text` on Herdr, a literal non-submitting send), then submitted with Enter and
-**verified** through the selected backend's submit primitive.
-Enter is retried (Enter only, never a retype) until the backend confirms the
-submit landed.
-Without that baseline, busy state never converts an `unknown` composer into confirmation.
-For herdr, idle-baseline submits first seek native agent-state showing a real turn started, then use the shared classifier when native state remains idle: a cleared composer confirms delivery, while pending text retries Enter and reaches the shared busy-queue verdict only after the retry budget.
-A bordered-empty or ghost-only composer is recognized as empty where that backend uses composer confirmation, rather than mistaken for a swallowed Enter.
-`fm-send.sh` uses the same primitive only on its typed plane and exits non-zero when that plane's Enter is positively swallowed; ordinary local text steers use the durable inbox and do not treat doorbell submission as delivery proof.
-
-When a busy harness leaves queued text visible, the shared composer classifier owns whether Enter was accepted.
-The daemon still clears its buffer only on the backend's `empty` success verdict; [`docs/herdr-backend.md`](../../../docs/herdr-backend.md) own the backend-specific confirmation signals.
+After the independent busy and composer guards pass, the daemon submits the digest exactly once through Herdr's native agent prompt API.
+It does not type into the terminal, send or retry Enter, or consult native execution state, composer state, or a vendor transcript as a transport receipt.
+The `submitted` verdict means only that Herdr accepted the prompt; it does not prove that Firstmate read, handled, or completed it.
+A definite refusal leaves the buffer eligible for retry and eventual max-defer alarm.
+An uncertain transport outcome is recorded durably and retires the exact payload from replay because the prompt may already have been accepted.
+Direct `fm-send.sh` invocations use the same native primitive, while ordinary local text steers preserve their payload in the durable inbox and submit only its constant doorbell.
+[`docs/herdr-backend.md`](../../../docs/herdr-backend.md) owns the backend-specific transport contract.
 
 ### Classification policy
 
@@ -181,8 +176,8 @@ the operational prefix lets firstmate distinguish it from a real captain message
   separator before injection, so submission is unambiguous regardless of
   harness.
 - **Busy and composer guards on the supervisor pane** - before injecting, the daemon runs the detected-primary-harness rendered busy guard and reads `fm_backend_composer_state` directly.
-  Only `empty` permits injection; `pending` protects half-typed or swallowed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
-  Every other result preserves the buffer for retry, so the daemon never merges its digest into the captain's half-typed line or types it into a shell.
+  Only `empty` permits injection; `pending` protects half-typed input, and `unknown` protects unreadable panes and bare dead-shell prompts.
+  Every other result preserves the buffer for retry, so the daemon never orders an escalation ahead of the captain's draft or submits one to an ambiguous dead-shell pane.
 - The active backend passes its capture plus declarative styled, cursor, identity, and row capabilities to the shared screen classifier; all structural recognition and verdict logic remains in `bin/fm-composer-lib.sh`.
   Styled captures let that owner remove dim/faint and dark-TRUECOLOR ghost or placeholder text while shape detection uses the ANSI-stripped screen, so a dark border is not lost with ghost content.
   A ghost-only or idle bordered composer with proven empty input therefore reads empty without allowing an unbordered shell prompt to do the same.
@@ -192,15 +187,11 @@ the operational prefix lets firstmate distinguish it from a real captain message
 - **Max-defer escape** - the daemon must never silently wedge. If anything stays
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
   normal flush, which still requires an idle pane and an affirmatively empty composer. If that
-  cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
+  remains deferred or receives a definite native-prompt refusal, it raises a loud, rate-limited wedge alarm: ERROR log,
   durable `state/.subsuper-inject-wedged` marker, and a backend-independent active alert. A
   composer false-positive surfaces as a visible stall, never an unbounded silent
   no-op.
-- **Verified type-once submit model** - the digest is typed once (`pane send-text` on Herdr), then submitted with Enter and verified.
-  Enter is retried, Enter only and never a retype, until the backend submit
-  primitive reports `empty` as its caller-facing success verdict.
-  For herdr's idle-baseline path it means native agent-state observed a turn start, the shared classifier proved the composer cleared, or the shared queued-Enter verdict proved delivery while busy.
-  This lets ghost-only or bordered-empty composers count as empty where a composer read is the active confirmation signal.
+- **Native prompt submission** - the [Submit model](#submit-model) owns acceptance, uncertainty, and no-replay behavior.
 - **Marker strip** - `strip_injection_marker` removes the current operational
   prefix or legacy bare marker before classification or relay, so the digest
   text firstmate sees is clean.

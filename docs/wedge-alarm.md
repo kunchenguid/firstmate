@@ -1,7 +1,7 @@
 # Away-mode injection wedge alarm
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
-When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+When an escalation remains buffered past `FM_MAX_DEFER_SECS` because the supervisor guard keeps deferring it or native prompt submission is definitely refused, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
 The active alert is pane-independent because a terminal-pane signal cannot reach an unattended captain reliably.
 The durable marker remains as an additional signal.
 

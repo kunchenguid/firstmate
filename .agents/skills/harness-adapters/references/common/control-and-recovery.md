@@ -2,7 +2,7 @@
 
 Load this with the running or recorded tool reference for trust, skill invocation, interrupt, exit, resume, or recovery.
 
-## Typed data and lifecycle control
+## Data and lifecycle control
 
 The router owns lifecycle-only control and recorded-harness selection.
 Conversation and harness-native skill invocation use `../../../bin/fm-send.sh`.
@@ -22,8 +22,8 @@ TraeX trust behavior belongs to `references/harness/traex.md`.
 Codex shows a directory-trust dialog on the first run for a repository root.
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
-A successful send or key return is not proof of submission; require the tool-specific postcondition.
-Popup, queued-input, and readiness handling belongs to `../../../bin/fm-composer-lib.sh` and the selected backend.
+Native prompt acceptance or a successful key return is not proof that the worker started processing or reached a lifecycle postcondition; require the tool-specific postcondition.
+Composer, queued-input, and readiness handling belongs to `../../../bin/fm-composer-lib.sh` and the selected backend.
 
 ## Interrupt and exit
 

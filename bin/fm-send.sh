@@ -595,8 +595,8 @@ else
     exit 1
     ;;
   esac
-  # Delivery is fully confirmed: close each answered decision in this home's
-  # ledger (answerer-closes; see the header contract).
+  # Native submission was accepted: close each answered decision in this
+  # home's ledger (answerer-closes; see the header contract).
   if [ -n "$RESOLVE_KEYS" ]; then
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1

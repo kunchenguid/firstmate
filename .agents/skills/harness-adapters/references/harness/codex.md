@@ -6,8 +6,8 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 
 | Fact | Value |
 |---|---|
-| Busy state | Managed workers use the task-bound transcript reader owned by `bin/fm-busy-transcript.py`; [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter) owns version-independent admission and unknown-state boundaries, with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
-| Exit command | `/quit`; its slash popup needs about one second between text and Enter, which the shared submit path used by the control plane handles. |
+| Busy state | See the version-independent native-state and exact-process contract in [architecture](../../../../../docs/architecture.md#busy-state-is-semantic-per-adapter), with current evidence in [semantic busy state](../../../../../docs/verification/supervision.md#semantic-busy-state). |
+| Exit command | `/quit`; the control plane preserves its composer ordering guard, submits it once through the native prompt API, and proves exit from agent state as documented in [agent lifecycle control](../../../../../docs/agent-control.md). |
 | Interrupt | Single Escape. |
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; Codex rejects `/<skill>` as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
@@ -21,14 +21,13 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
-## Skill popup
+## Skill invocation
 
 A `$<skill>` invocation opens a `$` autocomplete popup.
-Submitting too fast lets the popup swallow Enter, so the invocation never lands.
-`../../../bin/fm-send.sh` gives a leading `$` a 1.2-second settle before the first Enter only when the exact task metadata records `harness=codex`, with the target backend's submit retry as the safety net.
+`../../../bin/fm-send.sh` treats a leading `$` as a direct harness invocation only when exact task metadata records `harness=codex`.
+The native prompt path bypasses terminal popup timing and sends no separate Enter or retry.
 That scope is load-bearing because a leading `$` commonly starts ordinary text such as `$5/month` or `$HOME`.
-An explicit `session:window` target has no metadata, so its harness is unknown and uses the non-Codex fast path.
-This is why `$no-mistakes` reaches a Codex worker instead of being consumed by the popup.
+An explicit `session:window` target has no task inbox routing and therefore uses the direct native prompt path.
 
 ## Primary integration
 
