@@ -783,6 +783,43 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-10-01 claude titled top composer rule through Herdr
+
+Verified on 2026-10-01 against a live remote secondmate's Claude Code pane in its Herdr `fm-remote` session; the Claude version was not readable from the capture, which showed a pending "Update installed · Restart to update" notice.
+With a session mode active, Claude writes the mode name into the composer's TOP rule (`──…── ultracode ─`) and leaves the bottom rule solid.
+The shared scan reads only solid `─` rules as separators, so the solid bottom rule stood alone below the `❯` row, the cursorless selection refused, and `fm_backend_herdr_composer_content` failed.
+On a Claude pane the herdr submit core's payload proof needs that read before it types, so every doorbell to the pane returned `send-failed` without typing anything, and the sender printed only "doorbell did not reach".
+
+The capture is the remote control's read-only capture, fed to the shared extractor with the plain capability descriptor:
+
+```sh
+FM_HOME=<parent-home> bin/fm-on.sh <mate> fm-remote-secondmate-control.sh capture <mate> 60 > claude-titled-rule.txt
+bash -c '. bin/fm-composer-lib.sh
+  out=$(fm_composer_extract_selected_content "$(printf "styled=0\ncursor=0\nidentity=0")" "$(cat claude-titled-rule.txt)")
+  echo "rc=$? [$out]"'
+```
+
+Observed output before the fix, then after it:
+
+```text
+rc=1 []
+rc=0 []
+```
+
+The same capture with the label replaced by `─` read `rc=0 []` before the fix, which isolates the label as the cause.
+
+The fix is a quarantined Claude reading, not a change to the shared separator contract (VISION.md "The fleet outlives any vendor").
+`FM_COMPOSER_CLAUDE_RULE_TITLES` in `bin/fm-composer-lib.sh` pins the one observed title, and `_fm_composer_claude_untitle_rules` rewrites a rule of exactly the observed shape to a solid rule only when the very next row opens with Claude's `❯`.
+Any other title, or the same title over another harness's prompt glyph, is left as-is and still refuses.
+`test_matrix_claude_titled_top_rule` in `tests/fm-composer-lib.test.sh` pins idle `empty` on every cursorless profile, typed text staying `pending` and extracted whole, and both of those refusals; `test_send_text_submit_claude_titled_top_rule_still_types` in `tests/fm-backend-herdr.test.sh` pins the submit core typing and confirming under that shape.
+Both returned `unknown` and `send-failed` respectively before the fix.
+
+This reading is a standing debt.
+It is pinned to a capture whose Claude version is unknown, and it is expected to break on a Claude release that changes the label or its position.
+Such a break still refuses, but the doorbell notice now names it (`composer unreadable: unrecognised titled rule '<title>'`, from `fm_composer_unreadable_reason`), so it is diagnosable from the sender's side.
+A live render is owed and is not token-free: on 2026-10-01, Claude Code 2.1.286 launched idle in an isolated tmux server drew solid rules, typing `ultracode` without submitting showed only a `Dynamic workflow requested for this turn` banner, and `/config` exposes only an `Ultracode keyword trigger` setting, so the titled rule appears only after a prompt carrying the keyword is submitted, which starts a dynamic workflow.
+No guard in the composer-matrix family exercises it yet.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).

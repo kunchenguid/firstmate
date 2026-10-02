@@ -4817,6 +4817,28 @@ herdr_popup_composer_screen() {  # <typed-text>
   printf '  \xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\n'
 }
 
+# A live Claude pane with a session mode on writes the mode name into its
+# composer's top rule. The payload proof must still read that composer as
+# empty before the send and holding the payload after it, or every send to
+# the pane bails as send-failed without typing (the remote secondmate doorbell
+# that never rang, 2026-10-01).
+test_send_text_submit_claude_titled_top_rule_still_types() {
+  local dir log resp fb out rule
+  dir="$TMP_ROOT/submit-titled-rule"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  rule=$(printf '%0.s\xe2\x94\x80' $(seq 1 60))
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  herdr_submit_claude_prefix "$resp" "ring the bell"
+  printf '  %s ultracode \xe2\x94\x80\n  \xe2\x9d\xaf\xc2\xa0\n  %s\n' "$rule" "$rule" > "$resp/2.out"
+  printf '  %s ultracode \xe2\x94\x80\n  \xe2\x9d\xaf ring the bell\n  %s\n' "$rule" "$rule" > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "ring the bell" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a Claude composer under a titled top rule should confirm delivery, got '$out'"
+  assert_contains "$(cat "$log")" $'\x1f''pane'$'\x1f''send-text'$'\x1f''w1:p2'$'\x1f''ring the bell' "send_text_submit did not type into a Claude composer under a titled top rule"
+  pass "fm_backend_herdr_send_text_submit: a Claude composer whose top rule carries a mode label still receives the send"
+}
+
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte() {
   local dir log resp fb out enter_count text
   dir="$TMP_ROOT/submit-long-exact"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5971,6 +5993,7 @@ test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_send_text_submit_unknown_on_composer_capture_failure
+test_send_text_submit_claude_titled_top_rule_still_types
 test_send_text_submit_long_literal_submits_when_composer_holds_every_byte
 test_send_text_submit_refuses_enter_when_composer_holds_only_the_suffix
 test_send_text_submit_refused_suffix_that_will_not_clear_is_unknown
