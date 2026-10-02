@@ -2597,7 +2597,7 @@ EOF
 }
 
 test_gate_text_carries_the_full_gate_title_and_reason() {
-  local home fakebin json full_json toon long_title blockers
+  local home mate fakebin json full_json toon long_title blockers mate_title mate_reason
   home=$(make_home gate-text)
   : > "$home/data/secondmates.md"
   long_title="Make the Already packed with serial pack-screen warning readable on the smallest handheld scanner"
@@ -2608,6 +2608,21 @@ test_gate_text_carries_the_full_gate_title_and_reason() {
 ## Queued
 - [ ] long-gate - $long_title (repo: firstmate) (kind: ship) (since 2026-07-10)
 - [ ] long-hold - Choose the scanner warning route blocked-by: $blockers (repo: firstmate) (kind: captain) (hold: waiting on the scanner vendor to confirm which firmware ships next quarter) (hold-kind: captain)
+
+## Done
+EOF
+  # A secondmate's queued text crosses its home-summary handoff before the
+  # projection sees it, so it must arrive just as whole as a main-home gate.
+  mate="$TMP_ROOT/gate-text-home"
+  make_valid_secondmate_home text-mate "$mate"
+  append_secondmate_registry "$home" text-mate "$mate"
+  mate_title="Amend the DC app guardrail to permit agent builds and runs inside the isolated simulator lane on every supported handheld scanner model"
+  mate_reason="waiting on the scanner vendor to confirm which firmware ships next quarter and whether the simulator lane image can be redistributed to every agent home before the next release window opens"
+  cat > "$mate/data/backlog.md" <<EOF
+## In flight
+
+## Queued
+- [ ] mate-long-hold - $mate_title (repo: sample) (kind: captain) (hold: $mate_reason) (hold-kind: captain) (hold-until: 2026-08-01) (since 2026-07-09)
 
 ## Done
 EOF
@@ -2631,6 +2646,12 @@ EOF
           + ": waiting on the scanner vendor to confirm which firmware ships next quarter")))
       and (.omitted | any(.reveal == "--fields gate-text") | not)
   ' >/dev/null || fail "--fields gate-text did not carry the full gate title and reason: $full_json"
+  printf '%s' "$full_json" | jq -e --arg title "$mate_title" --arg reason "$mate_reason" '
+    ($title | length) > 120 and ($reason | length) > 160
+      and (.gates | any(.id == "mate-long-hold" and .owner == "text-mate"
+        and .title_full == $title
+        and .reason_full == ("until 2026-08-01: " + $reason)))
+  ' >/dev/null || fail "a secondmate gate lost its full title or reason: $full_json"
   toon=$(run "$home" "$fakebin" --fields gate-text)
   assert_contains "$toon" "$long_title" "TOON did not carry the full gate title"
   pass "--fields gate-text carries each gate's full title and reason while the digest stays bounded"
