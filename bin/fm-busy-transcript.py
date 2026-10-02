@@ -365,7 +365,7 @@ def inspect(path, data, prefix_size=0):
                 continue
             event = payload.get("type")
             if event == "item_completed" and payload.get("item", {}).get("type") == "UserMessage":
-                content = payload["item"].get("content", [])
+                content = payload["item"]["content"]
                 if first_user_turn is None:
                     text = "\n".join(part.get("text", "") for part in content
                                      if part.get("type") == "text")

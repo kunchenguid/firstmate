@@ -660,6 +660,8 @@ fm_backend_send_text_submit herdr lab:w1:p1 next 1 .01 .01
     reset(); log.write_text(log.read_text()+'{"type":'); expect('unknown','partial tail')
     reset(); log.write_text(log.read_text()+'invalid\n'); expect('unknown','corrupt record')
     reset(); log.write_text(log.read_text()+'[]\n'); expect('unknown','wrong JSON record shape')
+    reset(); append({'type':'event_msg','payload':{'type':'item_completed','thread_id':'session-1','turn_id':'turn-1',
+        'item':{'type':'UserMessage','id':'missing-content'}}}); expect('unknown','missing user content')
     reset(); other=logs/'rollout-duplicate.jsonl';other.write_bytes(log.read_bytes()); expect('unknown','ambiguous sessions')
     reset(); child=copy.deepcopy(records);child[0]['payload']['source']={'subagent':'worker'}; write(child)
     expect('unknown','child session excluded even with copied marker')
