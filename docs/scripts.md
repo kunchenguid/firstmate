@@ -7,6 +7,11 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 
 | Script                   | Purpose                                                                              |
 | ------------------------ | ------------------------------------------------------------------------------------ |
+| `firstmate`              | Global launcher: resolve the home, scaffold org and per-project homes, choose the launch mode, and exec the harness in the project's Firstmate view or from the install root |
+| `fm-view.sh`             | Build and run a primary harness inside the per-session Firstmate view of its launch directory, probe host support, and list shadowed entries |
+| `fm-view-lib.sh`         | Refuse worker spawns through a multiplexer server started inside a Firstmate view |
+| `fm-projects.sh`         | Resolve project arguments, list registered or discoverable projects for this home, and print the derived org summary |
+| `fm-projects-lib.sh`     | Shared projects-root precedence, central project resolver, and registered sync candidates |
 | `fm-session-start.sh`    | Compose lock, bootstrap, and wake drain into the single ordered session-start digest |
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-sessionstart-run.sh` | Route a native session-open hook to the full digest, a context re-emit, or the nudge |

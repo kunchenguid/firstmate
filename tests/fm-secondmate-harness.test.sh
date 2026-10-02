@@ -837,6 +837,8 @@ test_spawn_secondmate_harness_model_token() {
   assert_contains "$launch" "claude --dangerously-skip-permissions $(sm_claude_add_dir "$w" sm)--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
     "model-token: launch did not carry --model opus"
   assert_not_contains "$launch" "--effort" "model-token: launch must not carry an --effort flag"
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" \
+    "model-token: a secondmate is a Firstmate session and must launch with Claude auto-memory off"
   pass "C3 spawn: config/secondmate-harness's model token threads --model into the launch and meta"
 }
 

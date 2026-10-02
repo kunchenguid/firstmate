@@ -85,6 +85,10 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
+Or install the `firstmate` launcher on `PATH` (symlink `bin/firstmate` from the clone) and run it from anywhere: it resolves the home from your directory - an explicit `FM_HOME`, the nearest `.firstmate/` ancestor, or the global `~/.firstmate` home - then starts the harness inside your project or org itself, through a per-session Firstmate view that presents the same Firstmate rules to every harness while keeping the project read-only; on a host that cannot build the view (macOS, for example) it starts from the install root instead, with the session-start digest primed with the launch repository's identity and instructions ([launch modes](docs/configuration.md#launch-modes)).
+`firstmate init --org` at an org root scaffolds `.firstmate/` so every sibling repository is a discoverable project, and `firstmate init` inside a standalone repository scaffolds a per-project home; see [docs/configuration.md](docs/configuration.md#project-local-homes-the-launcher-and-the-projects-root).
+New to it? [Project Local](docs/project-local.md) walks through install, a single repository, an org folder, and second mates, with troubleshooting.
+
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 
 **Claude Code**
@@ -213,6 +217,7 @@ Firstmate's skills live in two separate places with different audiences:
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
+- [docs/project-local.md](docs/project-local.md) - the Project Local guide: run `firstmate` from any project or org folder, launch modes, what is read-only, trust prompts, platform support, and troubleshooting.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/remote-secondmates.md](docs/remote-secondmates.md) - current setup, routing, transfer, recovery, and safety behavior for whole-home remote second mates.

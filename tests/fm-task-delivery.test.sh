@@ -1176,6 +1176,18 @@ EOF
   [ "$status" -ne 0 ] || fail "a promotion with --yolo on was accepted for the gerrit-forge project"
   assert_contains "$out" "--yolo on is refused" "the promotion refusal did not name the refused flag"
   grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
+
+  # A path-registered project whose checkout directory is not named after its
+  # alias: promotion must read the forge through the recorded project_name.
+  mkdir -p "$TMP_ROOT/forge-yolo-spawn/elsewhere/checkout-dir"
+  meta="$home/state/forge-yolo-p2.meta"
+  printf 'window=fm-forge-yolo-p2\nkind=scout\nworktree=/tmp/wt\nproject=%s\nproject_name=proj\n' \
+    "$TMP_ROOT/forge-yolo-spawn/elsewhere/checkout-dir" > "$meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" forge-yolo-p2 --mode no-mistakes --yolo on 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a promotion lost the registered forge of an alias that differs from its directory name"
+  assert_contains "$out" "--yolo on is refused" "the alias promotion refusal did not name the refused flag"
+  grep -qx 'kind=scout' "$meta" || fail "the refused alias promotion still flipped the task record"
   pass "forge=gerrit: yolo is refused with its reason, never silently dropped"
 }
 

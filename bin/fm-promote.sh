@@ -187,7 +187,11 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 # from a flag firstmate must remember.
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
 if [ -n "$PROMOTE_PROJECT" ]; then
-  PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
+  # project_name= is the registered alias spawn recorded, which a
+  # path-registered project need not share with its directory; the basename of
+  # project= is the fallback for older records.
+  PROMOTE_PROJECT_NAME=$(sed -n 's/^project_name=//p' "$META" | head -n 1)
+  [ -n "$PROMOTE_PROJECT_NAME" ] || PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
   if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
     echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and promote again" >&2
     exit 1
