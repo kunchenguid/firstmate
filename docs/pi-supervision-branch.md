@@ -54,9 +54,9 @@ Presentation acknowledgement does not establish task acceptance.
 The original in-flight backlog row is the active continuation record.
 Its title is the task goal, and its compact `firstmate-progress:v1` body block records the acceptance method, current state, remaining gap and next step.
 MAIN reads and materially updates those fields with the native tool's `read` and `update` actions.
-The opaque record token binds the task row to the current authenticated brief and the generation from its existing local or remote execution owner, preventing a stale MAIN update or stale continuation admission after a concurrent user correction or worker replacement.
+The opaque record token binds the task row to the current authenticated brief, backlog hold/block flags, and the generation from its existing local or remote execution owner, preventing a stale MAIN update or stale continuation admission after a concurrent user correction, explicit hold, dependency block or worker replacement.
 Together with the exact current MAIN-authored `next_step`, it permits only idempotent same-worker inbox continuation; all other effects remain with their existing authority owners.
-The branch can read only the exact token-bound compact admission while its original task remains `in_flight`; it cannot write progress or make final semantic acceptance.
+The branch can read only the exact token-bound compact admission while its original task remains unheld, unblocked and `in_flight`; it cannot write progress or make final semantic acceptance.
 
 The Pi extension uses the existing heartbeat coordinator's tick and `progress-list` to inspect canonical task ids.
 A healthy working executor, unchanged wait, task with no compact progress, or task with no remaining gap stays quiet.

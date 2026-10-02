@@ -8,6 +8,7 @@ A process exit, worker return, report, pull request, empty inbox or provider suc
 ## Active record and owners
 
 [`fm-task-progress.py`](../bin/fm-task-progress.py) owns the bounded `firstmate-progress:v1` block embedded in the existing task body.
+Its read token also binds the task's current hold and dependency-block flags; a held or blocked row is never eligible for compact continuation, even when its backlog state remains In flight.
 [`fm-task-progress-lib.sh`](../bin/fm-task-progress-lib.sh) reads and updates that block through the configured tasks-axi owner.
 [`fm-task-state.sh`](../bin/fm-task-state.sh) exposes `progress`, `update-progress` and `progress-list` as the public interface.
 No task directory, lifecycle JSON, evidence list, scheduler or mirrored progress store is created for ordinary continuation.

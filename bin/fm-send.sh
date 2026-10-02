@@ -250,7 +250,8 @@ if [ -n "$TARGET_META" ]; then
           echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: task intent, progress, or executor generation changed after branch admission" >&2; exit 6;
         }
         printf '%s' "$branch_current_progress" | jq -e \
-          '.task_state == "in_flight" and .remaining_gap != "" and .next_step != ""' >/dev/null || {
+          '.task_state == "in_flight" and .task_held == "no" and .task_blocked == "no" and
+           .remaining_gap != "" and .next_step != ""' >/dev/null || {
           echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact task progress no longer permits continuation" >&2; exit 6;
         }
         COMPACT_PROGRESS_TOKEN=$branch_progress_token
@@ -619,6 +620,9 @@ else
       fi
     elif [ "$IDEMPOTENT" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
+      case "$INBOX_RECORD" in
+        "$STATE/$INBOX_TASK_ID.inbox/handled/"*) INBOX_ALREADY_HANDLED=1 ;;
+      esac
     else
       INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
     fi
@@ -638,7 +642,9 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    if [ "${INBOX_ALREADY_HANDLED:-0}" != 1 ]; then
+      fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fi
     case "$ring_rc" in
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     3) echo "fm-send: doorbell native submission skipped because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;

@@ -6658,6 +6658,25 @@ if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".ms
   throw new Error("no-effect typed handoff created progress or duplicate delivery");
 }
 
+// tasks-axi preserves the in-flight state while adding a captain hold. The
+// hold bit must still invalidate the compact record and prevent a new Branch
+// admission until MAIN releases it.
+result = run("fm-tasks-axi.sh", ["hold", "viewer", "--reason", "captain decision pending", "--kind", "captain"]);
+if (result.status !== 0) throw new Error(`compact hold failed: ${result.stderr}`);
+const heldProgress = run("fm-task-state.sh", ["progress", "viewer"]);
+const heldRecord = JSON.parse(heldProgress.stdout);
+if (heldProgress.status !== 0 || heldRecord.task_state !== "in_flight" || heldRecord.task_held !== "yes" ||
+    heldRecord.recorded || heldRecord.remaining_gap || heldRecord.next_step) {
+  throw new Error(`held task retained compact progress authority: ${heldProgress.stderr || heldProgress.stdout}`);
+}
+await fire("agent_before_settle", {}, defaultSessionCtx);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (promptCount !== 9 || sentToMain.length !== beforeMain + 3) {
+  throw new Error("held in-flight task received a compact Branch admission");
+}
+result = run("fm-tasks-axi.sh", ["unhold", "viewer"]);
+if (result.status !== 0) throw new Error(`compact hold release failed: ${result.stderr}`);
+
 // A concurrent move back to Queued after admission invalidates every compact authority
 // boundary before any read, handoff, or report can be consumed.
 progress = run("fm-task-state.sh", ["progress", "viewer"]);

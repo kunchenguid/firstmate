@@ -163,6 +163,14 @@ test_branch_compact_progress_routes_exact_next_step() {
     t1 --idempotent "Start the existing no-mistakes run" || fail 'exact compact retry failed'
   count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
   [ "$count" = 1 ] || fail "exact compact retry created $count inbox records"
+  mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
+  run_send "$dir" "$err" \
+    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
+    "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
+    t1 --idempotent "Start the existing no-mistakes run" || fail 'acknowledged compact retry failed'
+  [ ! -s "$dir/send.log" ] || fail "an acknowledged compact retry rang the worker again: $(cat "$dir/send.log")"
+  count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
+  [ "$count" = 1 ] || fail "acknowledged compact retry changed the inbox record count"
 
   run_send "$dir" "$err" \
     "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
@@ -182,7 +190,7 @@ test_branch_compact_progress_routes_exact_next_step() {
   expect_code 6 "$rc" "stale compact executor generation"
   assert_contains "$(cat "$err")" "executor generation changed" \
     'stale compact admission did not preserve executor-generation fencing'
-  pass 'Branch compact progress routes only the exact idempotent next_step'
+  pass 'Branch compact progress routes only the exact idempotent next_step and never re-rings an acknowledged receipt'
 }
 
 test_pending_composer_does_not_gate_native_prompt() {

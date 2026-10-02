@@ -73,20 +73,24 @@ def parse(body: str) -> tuple[dict[str, str] | None, re.Match[str] | None, str |
     return values, match, match.group("context")
 
 
-def projection(task: str, goal: str, state: str, body: str, context: str) -> dict[str, object]:
+def projection(task: str, goal: str, state: str, held: str, blocked: str,
+               body: str, context: str) -> dict[str, object]:
     values, _, stored_context = parse(body)
     active = values is not None and stored_context == digest(context.encode())
     return {
         "task_id": task,
         "goal": goal,
         "task_state": state,
+        "task_held": held,
+        "task_blocked": blocked,
         "recorded": active,
         "acceptance": values["acceptance"] if active else "",
         "current_state": values["current_state"] if active else "",
         "remaining_gap": values["remaining_gap"] if active else "",
         "next_step": values["next_step"] if active else "",
         # Context is an opaque read-time concurrency salt supplied by the
-        # task owner (currently brief bytes plus execution generation). It is
+        # task owner (currently brief bytes, execution generation, and the
+        # backlog hold/block flags). It is
         # neither persisted progress nor an evidence reference.
         "record_token": digest(task.encode() + b"\0" + goal.encode() + b"\0" + body.encode() + b"\0" + context.encode()),
     }
@@ -112,6 +116,8 @@ def main() -> int:
     parser.add_argument("--task", required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--state", required=True)
+    parser.add_argument("--held", required=True, choices=("yes", "no"))
+    parser.add_argument("--blocked", required=True, choices=("yes", "no"))
     parser.add_argument("--context", default="")
     parser.add_argument("--expected-token")
     parser.add_argument("--progress-json")
@@ -120,7 +126,7 @@ def main() -> int:
     try:
         body = raw.decode("utf-8")
         goal = text(args.goal, "goal")
-        current = projection(args.task, goal, args.state, body, args.context)
+        current = projection(args.task, goal, args.state, args.held, args.blocked, body, args.context)
         if args.action == "read":
             print(json.dumps(current, ensure_ascii=False, separators=(",", ":")))
             return 0

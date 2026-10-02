@@ -36,11 +36,13 @@ fm_task_progress_sha256_file() { # <path>
   fi
 }
 
-fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE
+fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD/BLOCKED
   local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status
   FM_TASK_PROGRESS_BODY=
   FM_TASK_PROGRESS_GOAL=
   FM_TASK_PROGRESS_STATE=
+  FM_TASK_PROGRESS_HELD=
+  FM_TASK_PROGRESS_BLOCKED=
   out=$(fm_backlog_row_show "$data" "$1" --full)
   status=$?
   [ "$status" -eq 0 ] || {
@@ -48,6 +50,8 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE
     return "$status"
   }
   FM_TASK_PROGRESS_STATE=$(printf '%s\n' "$out" | sed -n 's/^  state: *//p' | head -1)
+  FM_TASK_PROGRESS_HELD=$(printf '%s\n' "$out" | sed -n 's/^  held: *//p' | head -1)
+  FM_TASK_PROGRESS_BLOCKED=$(printf '%s\n' "$out" | sed -n 's/^  blocked: *//p' | head -1)
   FM_TASK_PROGRESS_GOAL=$(printf '%s\n' "$out" | sed -n 's/^  title: //p' | head -1 \
     | fm_task_progress_decode_scalar) || {
     echo "REFUSED: could not decode task $1 goal" >&2
@@ -66,6 +70,10 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE
     echo "REFUSED: task $1 has no readable goal" >&2
     return 1
   }
+  case "$FM_TASK_PROGRESS_HELD:$FM_TASK_PROGRESS_BLOCKED" in
+    yes:yes|yes:no|no:yes|no:no) ;;
+    *) echo "REFUSED: task $1 has unreadable hold or block state" >&2; return 1 ;;
+  esac
 }
 
 fm_task_progress_read() { # <task>
@@ -73,7 +81,8 @@ fm_task_progress_read() { # <task>
   fm_task_progress_detail "$1" || return $?
   context=$(fm_task_progress_context "$1") || return $?
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
-    read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" --context "$context"
+    read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
+    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
 }
 
 fm_task_progress_execution_generation() { # <task>
@@ -170,7 +179,7 @@ fm_task_progress_context() { # <task>
     brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
   fi
   generation=$(fm_task_progress_execution_generation "$id") || return 1
-  printf '%s:%s' "$brief_digest" "$generation"
+  printf '%s:%s:%s:%s' "$brief_digest" "$generation" "$FM_TASK_PROGRESS_HELD" "$FM_TASK_PROGRESS_BLOCKED"
 }
 
 fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
@@ -198,6 +207,7 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-task-progress.XXXXXX") || exit 1
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
     replace --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
+    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" \
     --context "$context" --expected-token "$expected" --progress-json "$progress" > "$tmp" || exit $?
   current=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-current.XXXXXX") || exit 1
   trap 'rc=$?; rm -f -- "$tmp" "$current"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT

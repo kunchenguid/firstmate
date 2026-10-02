@@ -1609,7 +1609,8 @@ export default function (pi: ExtensionAPI) {
           if (progressToken) {
             const current = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task], { env: scriptEnv });
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
-            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state !== "in_flight") {
+            if (!progress || progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step ||
+                progress.task_state !== "in_flight" || progress.task_held !== "no" || progress.task_blocked !== "no") {
               return { content: [{ type: "text", text: "report refused: newer task intent or progress invalidated this branch result" }], details: undefined, isError: true };
             }
             const before = branchProgressSnapshots[task];
@@ -1745,7 +1746,8 @@ export default function (pi: ExtensionAPI) {
             const current = await run(["progress", task]);
             if (current.status !== 0) throw new Error(current.stderr.trim() || "task progress read refused");
             const progress = JSON.parse(current.stdout);
-            if (progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step || progress.task_state !== "in_flight") {
+            if (progress.record_token !== progressToken || !progress.remaining_gap || !progress.next_step ||
+                progress.task_state !== "in_flight" || progress.task_held !== "no" || progress.task_blocked !== "no") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
             return { content: [{ type: "text", text: JSON.stringify(progress) }], details: undefined };
@@ -1904,7 +1906,8 @@ export default function (pi: ExtensionAPI) {
             );
             const progress = current.status === 0 ? JSON.parse(current.stdout) : null;
             if (!progress || progress.record_token !== progressToken || !progress.remaining_gap ||
-                !progress.next_step || progress.task_state !== "in_flight") {
+                !progress.next_step || progress.task_state !== "in_flight" ||
+                progress.task_held !== "no" || progress.task_blocked !== "no") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
           }
@@ -2375,7 +2378,8 @@ ${context.command}
           if (compact.status === 0) {
             try {
               const progress = JSON.parse(compact.stdout);
-              if (progress.recorded && progress.task_state === "in_flight" && progress.remaining_gap && progress.next_step) {
+              if (progress.recorded && progress.task_state === "in_flight" && progress.task_held === "no" &&
+                  progress.task_blocked === "no" && progress.remaining_gap && progress.next_step) {
                 branchProgressBindings[task] = progress.record_token;
                 branchProgressSnapshots[task] = await compactResumeSnapshot(task);
               }
@@ -2481,7 +2485,8 @@ ${context.command}
       const read = await runCommandAsync("bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", offer.task], { env: scriptEnv });
       const progress = read.status === 0 ? JSON.parse(read.stdout) : null;
       if (!progress || progress.record_token !== offer.progress.record_token || !progress.remaining_gap ||
-          !progress.next_step || progress.task_state !== "in_flight") {
+          !progress.next_step || progress.task_state !== "in_flight" ||
+          progress.task_held !== "no" || progress.task_blocked !== "no") {
         throw new Error("task goal, acceptance, progress, or disposition changed before branch receipt");
       }
       const branchForTask = await ensureBranch(acceptedGeneration);
@@ -2493,6 +2498,7 @@ ${context.command}
         record_token: progress.record_token, goal: progress.goal, acceptance: progress.acceptance,
         current_state: progress.current_state, remaining_gap: progress.remaining_gap,
         next_step: progress.next_step, task_state: progress.task_state,
+        task_held: progress.task_held, task_blocked: progress.task_blocked,
         executor_state: offer.progress.executor_state,
       });
       const sessionFile = sessionManager.getSessionFile();
@@ -2548,6 +2554,7 @@ ${context.command}
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,
             next_step: progress.next_step, task_state: progress.task_state,
+            task_held: progress.task_held, task_blocked: progress.task_blocked,
             executor_state: offer.progress.executor_state,
             record_token: progress.record_token }));
         recordContinuationReceipt();

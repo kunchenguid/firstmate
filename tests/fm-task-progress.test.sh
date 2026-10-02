@@ -115,6 +115,35 @@ printf '%s' "$regenerated" | jq -e '.recorded==true and .next_step=="Run the cor
   || fail "MAIN did not reactivate replacement executor progress"
 token=$(printf '%s' "$regenerated" | jq -r .record_token)
 
+task_cmd hold ordinary --reason "captain decision pending" --kind captain >/dev/null \
+  || fail "compact hold fixture failed"
+held=$(progress progress ordinary) || fail "held progress read failed"
+printf '%s' "$held" | jq -e '
+  .task_state=="in_flight" and .task_held=="yes" and .task_blocked=="no" and
+  .recorded==false and .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "an explicit hold left compact continuation authority active"
+[ "$(printf '%s' "$held" | jq -r .record_token)" != "$token" ] \
+  || fail "an explicit hold retained the old compact authority token"
+task_cmd unhold ordinary >/dev/null || fail "compact hold release failed"
+released=$(progress progress ordinary) || fail "released progress read failed"
+printf '%s' "$released" | jq -e '.task_held=="no" and .task_blocked=="no" and .recorded==true' >/dev/null \
+  || fail "releasing the hold did not restore the current MAIN-authored progress"
+token=$(printf '%s' "$released" | jq -r .record_token)
+
+task_cmd add progress-blocker "Block the compact fixture" --kind task >/dev/null \
+  || fail "compact dependency fixture failed"
+task_cmd block ordinary --by progress-blocker >/dev/null || fail "compact block fixture failed"
+blocked=$(progress progress ordinary) || fail "blocked progress read failed"
+printf '%s' "$blocked" | jq -e '
+  .task_state=="in_flight" and .task_held=="no" and .task_blocked=="yes" and
+  .recorded==false and .remaining_gap=="" and .next_step==""' >/dev/null \
+  || fail "a dependency block left compact continuation authority active"
+[ "$(printf '%s' "$blocked" | jq -r .record_token)" != "$token" ] \
+  || fail "a dependency block retained the old compact authority token"
+task_cmd unblock ordinary --by progress-blocker >/dev/null || fail "compact dependency release failed"
+task_cmd "done" progress-blocker >/dev/null || fail "compact dependency cleanup failed"
+token=$(progress progress ordinary | jq -r .record_token)
+
 task_cmd add remote "Finish the remote result" --kind scout --body "Keep remote progress resumable." --start >/dev/null \
   || fail "remote fixture task add failed"
 mkdir -p "$HOME_DIR/data/remote" "$HOME_DIR/state/remote-tasks/remote"
