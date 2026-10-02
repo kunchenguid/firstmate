@@ -3,7 +3,8 @@
 # Pi Codex usage-limit banner shape (live-harness-optin family; issue #5000).
 #
 # bin/fm-composer-pi-adapter.sh (sourced by bin/fm-composer-lib.sh) admits a Pi separator pair with a stale identity
-# status as `empty` when the last non-blank row above the pair is the fixed# banner Pi draws once a turn ended on Codex's usage limit
+# status as `empty` when the last non-blank row above the pair is the fixed
+# banner Pi draws once a turn ended on Codex's usage limit
 # (FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT). That banner text and the solid
 # rule beneath it are vendor-rendered, so per
 # .agents/skills/firstmate-coding-guidelines the byte fixtures in
@@ -83,7 +84,10 @@ if fm_composer_pi_adapter_version_pinned "$VERSION"; then
 else
   PINNED=0
   note "pi $VERSION is outside the pinned banner-adapter set ($FM_COMPOSER_PI_BANNER_PINNED_VERSIONS); verifying the adapter refuses it. Refresh the pin after this guard passes with FM_COMPOSER_PI_BANNER_PINNED_VERSIONS='$VERSION'"
-fi# The stub Codex endpoint: every SSE request answers with the exact stream# error event Pi's Codex provider turns into `Codex error: <message>`; the
+fi
+
+# The stub Codex endpoint: every SSE request answers with the exact stream
+# error event Pi's Codex provider turns into `Codex error: <message>`; the
 # websocket transport Pi tries first is refused so Pi falls back to SSE.
 cat > "$WORK/stub.mjs" <<'JS'
 import http from "node:http";
@@ -166,7 +170,9 @@ for status in working unknown idle; do
   else
     printf '# pi pane tail at failure:\n' >&2
     printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
-    fail "pi ($VERSION): banner screen classified '$verdict', expected '$expected', on the cursorless styled read with a $status status"  fidone
+    fail "pi ($VERSION): banner screen classified '$verdict', expected '$expected', on the cursorless styled read with a $status status"
+  fi
+done
 verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$styled" '' probe-absent)
 [ "$verdict" = unknown ] \
   || fail "pi ($VERSION): the banner must not prove a pane with no pi identity, got '$verdict'"

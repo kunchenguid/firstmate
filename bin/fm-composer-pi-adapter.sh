@@ -83,14 +83,16 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
 # (cached in globals, no subshell); a checked executable that is unpinned or
 # prints no version keeps the banner unproven.
 fm_composer_pi_adapter_installed_pinned() {
-  local exe found=0 v candidates='pi pi-signed'  if [ -n "${FM_COMPOSER_PI_ADAPTER_VERSION:-}" ]; then
+  local exe found=0 v candidates='pi pi-signed'
+  if [ -n "${FM_COMPOSER_PI_ADAPTER_VERSION:-}" ]; then
     fm_composer_pi_adapter_version_pinned "$FM_COMPOSER_PI_ADAPTER_VERSION"
     return
   fi
   case "${FM_COMPOSER_PI_EXECUTABLE:-}" in
     pi|pi-signed) candidates=$FM_COMPOSER_PI_EXECUTABLE ;;
   esac
-  for exe in $candidates; do    command -v "$exe" >/dev/null 2>&1 || continue
+  for exe in $candidates; do
+    command -v "$exe" >/dev/null 2>&1 || continue
     found=1
     if [ "$exe" = pi ]; then
       if [ -z "${_FM_COMPOSER_PI_VERSION_PI+x}" ]; then
@@ -105,14 +107,19 @@ fm_composer_pi_adapter_installed_pinned() {
     fi
     fm_composer_pi_adapter_version_pinned "$v" || return 1
   done
-  [ "$found" = 1 ]}# 0 when the last non-blank row above the scanned pair's opening separator is
+  [ "$found" = 1 ]
+}
+
+# 0 when the last non-blank row above the scanned pair's opening separator is
 # pi's terminal provider-error banner, tolerating at most one occurrence of
 # pi's fixed bug-report hint row directly beneath it. Rows are read plain.
 # Returns 1 when the adapter version is unpinned or outside the pin set, so an
 # unpinned Pi rendering cannot prove emptiness through this path.
 fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
   local screen=$1 row raw trimmed hint_seen=0
-  fm_composer_pi_adapter_installed_pinned || return 1  # Requires the shared scan context from fm-composer-lib.sh.  [ -n "${FM_COMPOSER_SCAN_PI_OPEN:-}" ] || return 1
+  fm_composer_pi_adapter_installed_pinned || return 1
+  # Requires the shared scan context from fm-composer-lib.sh.
+  [ -n "${FM_COMPOSER_SCAN_PI_OPEN:-}" ] || return 1
   row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
   while [ "$row" -ge 0 ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
