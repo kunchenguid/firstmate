@@ -27,10 +27,10 @@ test_supervision_host_protocol_on_a_claude_home_unless_off() {
   home="$TMP_ROOT/host-home"
   config="$TMP_ROOT/host-config"
   mkdir -p "$home/state" "$config"
-  printf 'off\n' > "$config/supervision-host"
+  : > "$config/supervision-host-off"
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
-  assert_not_contains "$plain" "Supervision host" "a claude home whose config/supervision-host says off rendered the host protocol"
-  rm -f "$config/supervision-host"
+  assert_not_contains "$plain" "Supervision host" "a claude home opted out by config/supervision-host-off rendered the host protocol"
+  rm -f "$config/supervision-host-off"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)
   : > "$config/supervision-host"
   assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness claude)" "$hosted" \
@@ -46,12 +46,12 @@ test_supervision_host_protocol_on_a_claude_home_unless_off() {
   rm -f "$config/supervision-host"
   other=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness pi)
   assert_not_contains "$other" "Supervision host" "a pi primary without config/supervision-host rendered the host protocol"
-  pass "renderer adds the supervision-host protocol on a claude home unless its config/supervision-host says off, leaving the claude block intact"
+  pass "renderer adds the supervision-host protocol on a claude home unless config/supervision-host-off opts it out, leaving the claude block intact"
 }
 
 # Each non-Pi arm owner gets the host protocol in its own terms, and only its
-# own terms; Grok's model-owned arm command becomes the host; a home whose
-# file says off, or a non-Claude home without the file, renders exactly what
+# own terms; Grok's model-owned arm command becomes the host; a home with
+# config/supervision-host-off, or a non-Claude home without the file, renders exactly what
 # it did before, with no tag or placeholder.
 test_supervision_host_protocol_on_every_arm_owner() {
   local home config harness plain hosted body
@@ -59,15 +59,16 @@ test_supervision_host_protocol_on_every_arm_owner() {
   config="$TMP_ROOT/host-owners-config"
   mkdir -p "$home/state" "$config"
   for harness in claude cursor opencode omp grok codex; do
-    printf 'off\n' > "$config/supervision-host"
+    : > "$config/supervision-host-off"
     plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
-    assert_not_contains "$plain" "Supervision host" "$harness: a home whose config/supervision-host says off rendered the host protocol"
+    assert_not_contains "$plain" "Supervision host" "$harness: a home opted out by config/supervision-host-off rendered the host protocol"
     assert_not_contains "$plain" "__FM_" "$harness: a placeholder leaked into the rendered block"
     if [ "$harness" != claude ]; then
-      rm -f "$config/supervision-host"
+      rm -f "$config/supervision-host" "$config/supervision-host-off"
       assert_equals "$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")" "$plain" \
         "$harness: a home without config/supervision-host must render the plain block"
     fi
+    rm -f "$config/supervision-host-off"
     : > "$config/supervision-host"
     hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness "$harness")
     assert_contains "$hosted" "- Supervision host: on; it takes away-posture wakes and, where the dialog mirror is verified, eligible attended wakes itself, and hands the rest to you (protocol at the end of this block)." \
@@ -86,9 +87,10 @@ test_supervision_host_protocol_on_every_arm_owner() {
   rm -f "$config/supervision-host"
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
   assert_contains "$plain" 'exec bin/fm-watch-arm.sh`' "grok without the file must arm the plain watcher"
-  printf 'off\n' > "$config/supervision-host"
+  : > "$config/supervision-host-off"
   plain=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
   assert_contains "$plain" 'exec bin/fm-watch-arm.sh`' "grok with an off file must arm the plain watcher"
+  rm -f "$config/supervision-host-off"
   : > "$config/supervision-host"
   hosted=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness grok)
   assert_contains "$hosted" 'exec bin/fm-supervision-host.sh park`' "grok with the file must arm the supervision host"

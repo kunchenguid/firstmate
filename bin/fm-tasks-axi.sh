@@ -14,6 +14,10 @@
 # stores it verbatim as a link, which lifecycle transitions record relative to
 # that same root.
 #
+# `show` (including `view`) and `list` decode stored captain-hold reasons
+# through bin/fm-hold-reason-lib.sh, which owns the field-only decoding contract.
+# Decoded reasons use quoted strings so embedded line breaks remain intact.
+#
 # Why it exists: a bare `tasks-axi` resolves the tracked `.tasks.toml` paths
 # against its working directory, so from the code root it forks the queue
 # whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
@@ -46,7 +50,8 @@
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
 #     this command exists to prevent. Lifecycle transitions refuse the same file.
-# Otherwise the exit status is tasks-axi's own.
+# Otherwise the exit status is tasks-axi's own, unless decoding a read fails;
+# in that case the decoder's nonzero status is returned.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,6 +62,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-hold-reason-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-hold-reason-lib.sh"
 
 usage() {
   awk '
@@ -137,4 +144,11 @@ else
 fi
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
+case "${1:-}" in
+  show|view|list)
+    set -o pipefail
+    tasks-axi ${ARGS[@]+"${ARGS[@]}"} | fm_hold_reason_decode_stream
+    exit $?
+    ;;
+esac
 exec tasks-axi ${ARGS[@]+"${ARGS[@]}"}

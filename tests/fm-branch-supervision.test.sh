@@ -982,15 +982,15 @@ test_host_home_unmarked_guard_excludes_the_first_claim() {
     ' _ "$ROOT/bin/fm-lease-lib.sh" 2>&1
   }
   for line in - off; do
-    rm -f "$home/config/supervision-host"
-    [ "$line" = - ] || printf '%s\n' "$line" > "$home/config/supervision-host"
+    rm -f "$home/config/supervision-host" "$home/config/supervision-host-off"
+    [ "$line" = - ] || : > "$home/config/supervision-host-off"
     for harness in claude codex; do
       [ "$line:$harness" != -:claude ] || continue
       out=$(probe_lock "$harness")
       [ "$out" = no-lock ] || fail "a $harness home whose config/supervision-host is ${line/-/absent} engaged the lease-command lock: $out"
     done
   done
-  rm -f "$home/config/supervision-host"
+  rm -f "$home/config/supervision-host" "$home/config/supervision-host-off"
   out=$(probe_lock claude)
   [ "$out" = lock-taken ] || fail "a Claude home without config/supervision-host runs the host, so its unmarked guard must take the lease-command lock: $out"
 

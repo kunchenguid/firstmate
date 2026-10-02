@@ -70,6 +70,7 @@ make_lab() {
     echo "harness=$harness"
     echo "home=$home"
     echo "expect_host=yes"
+    echo "host_off=no"
     echo "mate=yes"
     echo "worker=yes"
     echo "nonce=$NONCE"
@@ -252,6 +253,31 @@ run_check "$C"
 assert_contains "$CHECK_OUT" "fail mate: the mate holds no session lock yet" "mate needs its own session lock"
 lab_tmux "$C" display-message -p -t "firstmate:=fm-$MATE_ID" '#{pane_pid}' > "$C/mate/state/.lock"
 pass "mate fails when its window is gone or it never reached its charter"
+
+# Opt-out readiness must observe the mate's inherited material and its real
+# home gate, rather than just the primary's absent host.
+set_record "$C" host_off yes
+set_record "$C" expect_host no
+host_pid=$(awk -F '\t' '{print $2}' "$CH/state/.supervision-host")
+kill "$host_pid" 2>/dev/null
+wait "$host_pid" 2>/dev/null
+mkdir -p "$C/mate/config" "$C/mate/bin"
+cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$C/mate/bin/"
+run_check "$C"
+expect_code 1 "$CHECK_RC" "off readiness refuses a mate without its inherited flag"
+assert_contains "$CHECK_OUT" "fail mate: the inherited supervision-host-off flag is missing" "mate names the missing opt-out"
+: > "$C/mate/config/supervision-host-off"
+run_check "$C"
+expect_code 0 "$CHECK_RC" "off readiness accepts the mate's inherited flag and disabled gate: $CHECK_OUT"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$C/mate/bin/fm-supervision-engine-lib.sh"
+run_check "$C"
+expect_code 1 "$CHECK_RC" "off readiness refuses a mate whose gate reads on"
+assert_contains "$CHECK_OUT" "fail mate: the supervision-host gate did not read off" "mate names the enabled gate"
+cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$C/mate/bin/"
+set_record "$C" host_off no
+set_record "$C" expect_host yes
+printf 'host\t%s\tx\n' "$(start_sleeper)" > "$CH/state/.supervision-host"
+pass "mate off readiness requires inherited material and a disabled home gate"
 
 # The current-state reader, not an old event, establishes the gate wait.
 GATE="$CH/data/$WORKER_ID/gate"
