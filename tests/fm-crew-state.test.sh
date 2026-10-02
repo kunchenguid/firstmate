@@ -2342,6 +2342,93 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+
+# The pilot demonstration of declared mechanical verification, end to end through
+# the orchestrator's own current-state read. The structural gate cannot see a dead
+# live site: a correct-looking diff whose named head is properly pushed satisfies
+# every reachability test while the URL it claims to have fixed is broken. One
+# task, one done: line, one declared check, two outcomes - the live site up and
+# serving the fixed content reads done, and the same claim against the same task
+# with that site down reads blocked, naming what actually happened.
+test_declared_verification_decides_a_pushed_ship_done() {
+  reset_fakes
+  local d out port
+  if ! command -v python3 >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    fail "python3 and curl are required to exercise the declared http check"
+  fi
+  d=$(new_case declared-verify)
+  make_repo_on_branch "$d/wt" fm/declared
+  git -C "$d/wt" commit -q --allow-empty -m 'the fix, properly pushed'
+  git -C "$d/wt" update-ref refs/remotes/origin/fm/declared "$(git -C "$d/wt" rev-parse HEAD)"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/declared.meta" \
+    "window=fm:fm-declared" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: PR https://example.test/o/r/pull/9 checks green\n' \
+    > "$d/state/declared.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" declared
+
+  mkdir -p "$d/site"
+  printf 'the live fix is deployed\n' > "$d/site/index.html"
+  # -u so the port banner flushes immediately; Python 3.14 buffers a piped stdout.
+  python3 -u -m http.server 0 --bind 127.0.0.1 --directory "$d/site" > "$d/serve.log" 2>&1 &
+  local pid=$! i
+  for i in $(seq 1 40); do
+    port=$(sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' "$d/serve.log" | head -1)
+    [ -n "$port" ] && break
+    sleep 0.25
+  done
+  [ -n "$port" ] || { kill "$pid" 2>/dev/null; fail "could not start the local site"; }
+
+  printf 'http: http://127.0.0.1:%s/ 200 the live fix is deployed\n' "$port" \
+    > "$d/state/declared.verify"
+  chmod 600 "$d/state/declared.verify"
+
+  out=$(run_crew_state "$d" declared)
+  assert_contains "$out" "state: done" "a passing declared live check must read done"
+
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  out=$(run_crew_state "$d" declared)
+  assert_contains "$out" "state: blocked" "the same claim with the site down must not read done"
+  assert_contains "$out" "declared verification failed: http: http://127.0.0.1:$port/ could not be fetched" \
+    "the refusal must report what actually happened"
+  assert_not_contains "$out" "state: done" "a failed declared check must not remain done"
+  pass "declared verification decides a structurally perfect ship done: in both directions"
+}
+
+# The run-step ready decision enforces the declaration as well: a terminal
+# attributed run that reads done while the declared check fails must report
+# blocked with the refusal reason, not done.
+test_terminal_run_step_done_refuses_a_failing_declaration() {
+  reset_fakes
+  local d out
+  d=$(new_case declared-verify-run-step)
+  make_repo_on_branch "$d/wt" fm/feat-verify-runstep
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-verify-runstep.meta" \
+    "window=fm:fm-feat-verify-runstep" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-verify-runstep)"
+  printf '%s\n' 'run: test 1 = 1' > "$d/state/feat-verify-runstep.verify"
+  chmod 600 "$d/state/feat-verify-runstep.verify"
+  out=$(run_crew_state "$d" feat-verify-runstep)
+  assert_contains "$out" "state: done" "a terminal attributed run-step with a passing declaration reads done"
+  assert_contains "$out" "source: run-step" "the passing read comes from the run-step path"
+  printf '%s\n' "file: $d/shipped-artifact.txt the live fix is deployed" \
+    > "$d/state/feat-verify-runstep.verify"
+  chmod 600 "$d/state/feat-verify-runstep.verify"
+  out=$(run_crew_state "$d" feat-verify-runstep)
+  assert_contains "$out" "state: blocked" "a terminal attributed run-step with a failing declaration must read blocked"
+  assert_contains "$out" "source: run-step" "the refusal stays on the run-step source"
+  assert_contains "$out" "declared verification failed: file: $d/shipped-artifact.txt is not a file" \
+    "the refusal must carry the declared-verification reason"
+  assert_not_contains "$out" "state: done" "a failing declaration must not leave the run-step done"
+  pass "a terminal attributed run-step done refuses on a failing declared verification"
+}
+
 # A ship done: whose named head lives only in the disposable copy is not
 # current-state done (issue 4768). The worker's claim stays a blocked
 # preservation failure rather than finished-and-safe.
@@ -5575,6 +5662,8 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
+test_declared_verification_decides_a_pushed_ship_done
+test_terminal_run_step_done_refuses_a_failing_declaration
 test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
