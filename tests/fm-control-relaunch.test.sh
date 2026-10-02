@@ -649,6 +649,23 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
 }
 
+# The replacement worker is told to list its inbox first, so the relaunch must
+# leave state/<id>.inbox and handled/ in place even when no steer ever arrived.
+# codex builds no --add-dir grant, so only the launch itself can create them.
+test_relaunch_creates_the_steering_inbox_before_any_message() {
+  local dir out rc inbox
+  dir=$(new_case inbox rl60)
+  add_ship_task "$dir" rl60 claude
+  inbox="$dir/home/state/rl60.inbox"
+  [ ! -e "$inbox" ] || fail "precondition: the inbox must not exist before the relaunch"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl60 relaunch --harness codex --note "resume"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  [ -d "$inbox/handled" ] || fail "the relaunch did not create $inbox/handled"
+  [ -z "$(find "$inbox" -name '*.msg' -print -quit)" ] || fail "the relaunch must leave the inbox empty"
+  pass "fm-control relaunch: the replacement finds an empty steering inbox and handled/ before any message"
+}
+
 test_harness_switch_does_not_carry_the_old_profile_axes() {
   local dir out rc
   dir=$(new_case profile rl5)
@@ -2417,6 +2434,7 @@ test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
+test_relaunch_creates_the_steering_inbox_before_any_message
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement

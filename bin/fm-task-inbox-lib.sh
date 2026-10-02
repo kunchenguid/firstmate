@@ -64,7 +64,7 @@
 #
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
-# and tests. No side effects on source beyond its sourced libraries.
+# bin/fm-spawn.sh, and tests. No side effects on source beyond its sourced libraries.
 #
 # Tunables (env):
 #   FM_TASK_INBOX_GRACE_SECS   default 90; delivery-attempt grace and spacing
@@ -102,6 +102,13 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
 
 fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
+}
+
+# Create the inbox root and handled/ empty, idempotently, so a worker's first
+# list or acknowledging mv succeeds before any steer arrives. bin/fm-spawn.sh
+# calls this on every launch, fresh spawn and relaunch alike.
+fm_task_inbox_ensure() {  # <state-dir> <task-id>
+  mkdir -p "$(fm_task_inbox_handled_dir "$1" "$2")"
 }
 
 # Numeric sequence of one record basename, or fail for a non-record name.
