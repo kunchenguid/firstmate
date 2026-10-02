@@ -788,6 +788,29 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
     [ "$out" = "$want" ] \
       || { rm -rf "$fakebin"; fail "installed pi $installed with no override must read '$want', got '$out'"; }
   done
+  # pi-signed is its own executable: with no pi on PATH it supplies the version.
+  rm -f "$fakebin/pi"
+  printf '#!/bin/sh\nprintf "%%s\\n" 0.99.2\n' > "$fakebin/pi-signed"
+  chmod +x "$fakebin/pi-signed"
+  out=$(
+    unset FM_COMPOSER_PI_ADAPTER_VERSION _FM_COMPOSER_PI_INSTALLED_VERSION
+    PATH="$fakebin:/usr/bin:/bin"
+    fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
+  )
+  [ "$out" = empty ] \
+    || { rm -rf "$fakebin"; fail "pi-signed alone with a pinned version must settle the banner, got '$out'"; }
+  rm -f "$fakebin/pi-signed"
+  # The installed version is read once per process across classifications.
+  printf '#!/bin/sh\necho call >> "%s/count"\nprintf "%%s\\n" 1.0.0\n' "$fakebin" > "$fakebin/pi"
+  chmod +x "$fakebin/pi"
+  (
+    unset FM_COMPOSER_PI_ADAPTER_VERSION _FM_COMPOSER_PI_INSTALLED_VERSION
+    PATH="$fakebin:/usr/bin:/bin"
+    fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
+    fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
+  )
+  [ "$(wc -l < "$fakebin/count" | tr -d ' ')" = 1 ] \
+    || { n=$(cat "$fakebin/count"); rm -rf "$fakebin"; fail "installed pi must be invoked once per process, got: $n"; }
   rm -rf "$fakebin"
   pass 'pi codex banner adapter requires a pinned version, read from the installed pi when no override is set'
 }
