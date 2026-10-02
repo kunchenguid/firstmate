@@ -132,23 +132,26 @@ try {
   pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
   const failedPid = pid;
   process.kill(failedPid, "SIGHUP");
-  await new Promise(resolve => setTimeout(resolve, 100));
-  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 2) {
-    throw new Error("failure recovery ran before blocked delivery completed");
-  }
-  releaseDelivery();
   const retryDeadline = Date.now() + 5000;
   while (Date.now() < retryDeadline) {
     pid = Number(readFileSync(`${home}/state/successor-pid`, "utf8"));
     if (pid !== failedPid) break;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  if (pid === failedPid) throw new Error("failed successor was not replaced after delivery");
+  if (pid === failedPid) throw new Error("failed successor was not replaced during blocked delivery");
   process.kill(pid, 0);
-  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 3 || prompts.length !== 1) {
-    throw new Error("failure retry duplicated delivery or successor launches");
+  if (Number(readFileSync(`${home}/state/arm-count`, "utf8")) !== 3 || prompts.length !== 0) {
+    throw new Error("failure retry waited for delivery or duplicated successor launches");
   }
-  console.log("failed successor rearmed after blocked delivery");
+  releaseDelivery();
+  const deliveryDeadline = Date.now() + 5000;
+  while (Date.now() < deliveryDeadline && prompts.length === 0) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  if (prompts.length !== 1) {
+    throw new Error("wake delivery did not complete after release");
+  }
+  console.log("failed successor rearmed while delivery remained blocked");
 } catch (error) {
   releaseDelivery();
   console.error(error);
@@ -162,8 +165,8 @@ try {
 JS
   )
   status=$?
-  expect_code 0 "$status" "OpenCode must queue failed-successor recovery behind wake delivery: $out"
-  pass "OpenCode rearms a failed successor after blocked wake delivery"
+  expect_code 0 "$status" "OpenCode must rearm a failed successor during blocked wake delivery: $out"
+  pass "OpenCode rearms a failed successor during blocked wake delivery"
 }
 
 install_pi_watch_extension_fixture() {

@@ -33,7 +33,7 @@ let armStatus = "idle";
 let retryTimer = null;
 let retryFailures = 0;
 let launchInFlight = null;
-let continuityInFlight = null;
+let deliveryInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
@@ -395,14 +395,14 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   retryTimer = timer;
 }
 
-function queueContinuity(paths, client, sessionID, operation, failure) {
-  const continuity = Promise.resolve(continuityInFlight).catch(() => {}).then(operation);
-  continuityInFlight = continuity;
-  void continuity.then(() => {
-    if (continuityInFlight === continuity) continuityInFlight = null;
+function queueDelivery(paths, client, sessionID, operation) {
+  const delivery = Promise.resolve(deliveryInFlight).catch(() => {}).then(operation);
+  deliveryInFlight = delivery;
+  void delivery.then(() => {
+    if (deliveryInFlight === delivery) deliveryInFlight = null;
   }).catch((error) => {
-    if (continuityInFlight === continuity) continuityInFlight = null;
-    surfaceFailure(paths, client, sessionID, `${failure}\n${String(error?.message ?? error)}`);
+    if (deliveryInFlight === delivery) deliveryInFlight = null;
+    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`);
   });
 }
 
@@ -472,17 +472,17 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     if (classification.kind === "actionable") {
       retryFailures = 0;
       setArmStatus("wake");
-      queueContinuity(paths, client, sessionID, async () => {
-        const result = await restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      void restoration.catch(() => {});
+      queueDelivery(paths, client, sessionID, async () => {
+        const result = await restoration;
         const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
         await deliverActionableWake(paths, client, sessionID, message, result.recovery);
-      }, "watcher: FAILED - OpenCode could not deliver an actionable wake");
+      });
       return;
     }
     setArmStatus("failed");
-    queueContinuity(paths, client, sessionID, () => (
-      scheduleRetry(paths, sessionID, client, classification.message, predecessor)
-    ), "watcher: FAILED - OpenCode could not schedule continuity recovery");
+    void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
     if (settled) return;
@@ -491,15 +491,13 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     releaseChild();
     settleReadiness("failed");
     setArmStatus("failed");
-    queueContinuity(paths, client, sessionID, () => (
-      scheduleRetry(
-        paths,
-        sessionID,
-        client,
-        `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
-        String(armChild.pid ?? ""),
-      )
-    ), "watcher: FAILED - OpenCode could not schedule continuity recovery");
+    void scheduleRetry(
+      paths,
+      sessionID,
+      client,
+      `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
+      String(armChild.pid ?? ""),
+    );
   });
   return armChild;
 }
