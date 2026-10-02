@@ -142,9 +142,11 @@
 # reassigned slot is therefore never retired here; confirm on the tmux server
 # that hosts this home's fleet that the window is gone, then, with no lifecycle
 # action running for the task, move state/<id>.meta to
-# state/<id>.reassigned-record by hand and never delete it. Under the existing
-# lifecycle/meta locks, move the exact metadata bytes to state/<id>.reassigned-record
-# through the existing atomic record publisher, then exit before all process,
+# state/<id>.reassigned-record by hand, preserving the exact bytes and refusing
+# an existing archive. Retain it until the work is reconciled as described below.
+# For a proven-gone Herdr endpoint, this script instead moves the exact metadata
+# bytes to that archive through the existing atomic record publisher under the
+# lifecycle/meta locks, then exits before all process,
 # endpoint, slot, claim, tasktmp, and backlog mutations. Preserve every other
 # artifact and backlog item for operator reconciliation; this does not declare
 # the work complete. The archive must not already exist and state must resolve
