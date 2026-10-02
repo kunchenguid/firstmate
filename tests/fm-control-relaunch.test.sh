@@ -21,6 +21,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -609,6 +611,25 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep 'do not reject it as another home' "$launch_brief" \
     "the Firstmate-worktree relaunch did not distinguish its inbox from cross-home state"
   pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
+}
+
+test_relaunch_applies_the_worker_sandbox_prefix() {
+  local dir out rc
+  dir=$(new_case sandbox rl5)
+  add_ship_task "$dir" rl5 claude
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/worker-sandbox"
+  printf '%s\n' \
+    '{"filesystem":{"denyRead":[],"allowRead":[],"allowWrite":["."],"denyWrite":[]},"network":{"allowedDomains":[],"deniedDomains":[]}}' \
+    > "$dir/home/config/worker-sandbox-settings.json"
+  fm_test_fake_srt "$dir/fakebin"
+  out=$(run_control "$dir" rl5 relaunch --note "verify the sandbox prefix survives a relaunch"); rc=$?
+  expect_code 0 "$rc" "a relaunch under an enabled worker sandbox should succeed"$'\n'"$out"
+  assert_grep "$dir/fakebin/srt" "$dir/fake/literal" \
+    "the replacement agent must be launched through the pinned sandbox runtime"
+  assert_grep "$dir/home/config/worker-sandbox-settings.json" "$dir/fake/literal" \
+    "the replacement launch must carry the home's sandbox settings"
+  pass "fm-control relaunch: an enabled worker sandbox wraps the replacement launch"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -2394,6 +2415,7 @@ test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
+test_relaunch_applies_the_worker_sandbox_prefix
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes

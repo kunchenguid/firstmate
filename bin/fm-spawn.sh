@@ -312,6 +312,16 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Worker command sandbox (config/worker-sandbox):
+#   Opt-in and off by default. While the flag file is absent every launch is
+#   byte-for-byte unchanged. When present, fm-sandbox.sh validates the pinned
+#   runtime and the home's settings and prefixes the launch command so the
+#   agent - ship, scout, local secondmate, raw command, and relaunch alike -
+#   runs inside the sandbox. A missing runtime, a runtime that is not the pinned
+#   version, an unusable settings file, or a failed capability probe refuses the
+#   spawn before any endpoint, worktree, or record exists, and never falls back
+#   to an unsandboxed launch. bin/fm-sandbox.sh and docs/configuration.md own
+#   the wrapper mechanics and the contract.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -550,6 +560,12 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
+fi
+# config/worker-sandbox (header above): opt-in worker command sandbox. The flag
+# is read once per spawn or relaunch, before any mutation, so an unusable
+# runtime or settings refuses before the pane, worktree, or record exists.
+if ! WORKER_SANDBOX_ENABLED=$(fm_config_source_present "$CONFIG/worker-sandbox"); then
+  exit 1
 fi
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
@@ -5312,6 +5328,22 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+fi
+# Opt-in worker command sandbox (config/worker-sandbox; header and
+# docs/configuration.md own the contract). Off by default: while the flag is
+# absent the launch text is byte-for-byte unchanged. When enabled the wrapper
+# refuses rather than launching unsandboxed, and its refusal surfaces here,
+# before anything is staged into the pane. This is the single launch boundary
+# both a fresh spawn and a relaunch pass through, so the two stay identical.
+if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
+    exit 1
+  fi
+  if [ -z "$SANDBOX_PREFIX" ]; then
+    echo "error: config/worker-sandbox is enabled but no sandbox prefix was produced" >&2
+    exit 1
+  fi
+  LAUNCH="$SANDBOX_PREFIX $(shell_quote "$LAUNCH")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
