@@ -38,6 +38,7 @@ let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
 let armHostMode = new WeakMap();
+let armRestoration = new WeakMap();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -354,9 +355,11 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
     if (status === "armed") return { failure: "", recoveryArm: armChild, recovery: armRecovery.get(armChild) };
-    // An actionable line belongs to this arm's close handler.
-    // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return { failure: "", recoveryArm: armChild, recovery: armRecovery.get(armChild) };
+    if (status === "wake") {
+      await armClose.get(armChild);
+      const successorRestoration = armRestoration.get(armChild);
+      if (successorRestoration) return successorRestoration;
+    }
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
@@ -473,6 +476,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       retryFailures = 0;
       setArmStatus("wake");
       const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      armRestoration.set(armChild, restoration);
       void restoration.catch(() => {});
       queueDelivery(paths, client, sessionID, async () => {
         const result = await restoration;

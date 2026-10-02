@@ -8,25 +8,38 @@ Task-specific chronology, temporary paths, run identifiers, and delivery transcr
 
 ## OpenCode consecutive wakes and native commands
 
-Verified on 2026-10-01 on Linux with OpenCode 1.18.34 and Node 24.21.0:
+Watcher continuity was reverified on 2026-10-02 on Linux with Node 24.21.0:
 
 ```sh
-bin/fm-test-run.sh tests/fm-watch-recovery-loop.test.sh tests/fm-turnend-guard.test.sh tests/fm-opencode-primary-live-e2e.test.sh
+bash tests/fm-watch-recovery-loop.test.sh
 ```
 
 Relevant output:
 
 ```text
-ok - OpenCode delivers consecutive wakes and keeps one live successor, including after HUP
+ok - a resurfacing handling successor stays alive and supervises instead of going blind
+ok - OpenCode restores immediate successors before ordered wake delivery
+ok - OpenCode rearms a failed successor during blocked wake delivery
+ok - OpenCode binds recovery retirement to its exact arm
+```
+
+Native commands and the turn-end guard were verified on 2026-10-01 on Linux with OpenCode 1.18.34:
+
+```sh
+bin/fm-test-run.sh tests/fm-turnend-guard.test.sh tests/fm-opencode-primary-live-e2e.test.sh
+```
+
+Relevant output:
+
+```text
 ok - .opencode primary plugin: guard path is anchored to worktree, not directory
 ok - OpenCode 1.18.34 discovers six native Firstmate commands
 skip: live: opt-in; set FM_OPENCODE_LIVE_E2E=1 to run
 ```
 
-The continuity regression drives the real plugin with executable arm fixtures and delays predecessor prompt delivery while the successor emits another actionable close.
-It asserts both wakes arrive in order and exactly one third arm remains alive.
-It then sends that arm SIGHUP and verifies exactly one replacement remains alive without duplicate wake delivery.
-Reinstating the dropped-close condition makes the same fixture fail with `no live third arm after consecutive wakes`.
+The continuity regressions drive the real plugin with executable arm fixtures.
+They emit immediate consecutive wakes in the same output chunk, hold prompt delivery while a successor fails from SIGHUP, and overlap a stale recovery generation with a delayed replacement arm.
+They assert wake delivery waits for a durable successor, remains ordered, never blocks replacement on a pending prompt, and never retires a newer arm for an older generation.
 The guard regression returns `failed` from its coordinator and verifies the fallback still delivers its diagnostic.
 Native command discovery runs the installed `opencode debug config --pure` without model tokens and checks all six command templates.
 This does not claim a fresh credentialed TUI monitoring pass; the prompt-submitting portion remains opt-in through the same live test.

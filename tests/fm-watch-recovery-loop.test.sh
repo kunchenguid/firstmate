@@ -23,11 +23,10 @@ count=0
 [ ! -f "$FM_HOME/state/arm-count" ] || read -r count < "$FM_HOME/state/arm-count"
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_HOME/state/arm-count"
-printf 'watcher: started pid=%s\n' "$$"
 if [ "$count" -le 2 ]; then
-  sleep 0.1
-  printf 'check: consecutive-%s\n' "$count"
+  printf 'watcher: started pid=%s\ncheck: consecutive-%s\n' "$$" "$count"
 else
+  printf 'watcher: started pid=%s\n' "$$"
   printf '%s\n' "$$" > "$FM_HOME/state/successor-pid"
   exec sleep 60
 fi
@@ -42,9 +41,12 @@ const home = process.env.FM_HOME;
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 const prompts = [];
 const client = { session: { promptAsync: async ({ body }) => {
-  // Hold predecessor delivery open while the successor fires independently.
-  await new Promise(resolve => setTimeout(resolve, 400));
+  if (!existsSync(`${home}/state/successor-pid`)) {
+    throw new Error("wake delivery started before the immediate successor was restored");
+  }
+  process.kill(Number(readFileSync(`${home}/state/successor-pid`, "utf8")), 0);
   prompts.push(body.parts[0].text);
+  await new Promise(resolve => setTimeout(resolve, 200));
 } } };
 const mod = await import(pathToFileURL(process.env.PLUGIN));
 const hooks = await mod.FmPrimaryWatchArm({ client, directory: home, worktree: home });
@@ -78,7 +80,7 @@ JS
   )
   status=$?
   expect_code 0 "$status" "OpenCode must retain overlapping actionable closes: $out"
-  pass "OpenCode delivers consecutive wakes and keeps one live successor"
+  pass "OpenCode restores immediate successors before ordered wake delivery"
 }
 
 test_opencode_failed_successor_during_delivery_rearms() {
