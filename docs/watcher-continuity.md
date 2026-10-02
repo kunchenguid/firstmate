@@ -43,6 +43,7 @@ Each adapter:
 - Applies bounded exponential retry after an unexpected or failed close.
 
 A failed follow-up never cancels continuity restoration.
+OpenCode serializes only wake delivery: every child close restores or retries monitoring independently of an earlier pending `promptAsync` call.
 
 ### Pi session replacement
 
@@ -142,6 +143,12 @@ That line is retained for replacement handoff, but the adapter never treats that
 If the handoff confirmation fails, the adapter retries it once against the current generation and successor.
 A failed confirmation is a restoration failure: the adapter classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
 A failed confirmation is never swallowed.
+
+OpenCode binds each confirmation and retirement to the exact arm and recovery generation that produced it.
+An older queued wake can never retire the current replacement merely because its own successor is dead.
+When that exact recovery is stale, delivery waits for the current arm's bounded restoration and readiness before confirming again.
+If an immediate successor closes actionably while becoming ready, its own successor restoration completes before the earlier queued wake is delivered.
+These readiness waits serialize prompts, not monitoring recovery, so a failed successor is replaced even while an earlier `promptAsync` remains pending.
 
 ### Readiness timeout and retry
 
@@ -453,6 +460,9 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+- Immediate consecutive OpenCode wakes whose successor restoration completes before ordered delivery.
+- A failed OpenCode successor that is replaced while an earlier wake delivery remains blocked.
+- A stale OpenCode recovery generation that awaits the current replacement's readiness without retiring it.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.

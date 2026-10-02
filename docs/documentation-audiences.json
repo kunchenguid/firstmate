@@ -265,6 +265,30 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": ".opencode/commands/afk.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".opencode/commands/ahoy.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".opencode/commands/bearings.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".opencode/commands/quiet.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".opencode/commands/stow.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".opencode/commands/updatefirstmate.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },

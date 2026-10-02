@@ -43,6 +43,7 @@ They assert wake delivery waits for a durable successor, remains ordered, never 
 The guard regression returns `failed` from its coordinator and verifies the fallback still delivers its diagnostic.
 Native command discovery runs the installed `opencode debug config --pure` without model tokens and checks all six command templates.
 This does not claim a fresh credentialed TUI monitoring pass; the prompt-submitting portion remains opt-in through the same live test.
+The focused credentialed entry point is `FM_OPENCODE_LIVE_E2E=1 FM_OPENCODE_LIVE_WATCH_ONLY=1 tests/fm-opencode-primary-live-e2e.test.sh`; it drives blocked ordered delivery, failed-successor replacement, and the next idle wake without requiring the separate Ahoy transcript fixture.
 
 ## Native session-start delivery
 
