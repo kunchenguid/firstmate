@@ -250,7 +250,7 @@ all fm-busy-state tests passed
 The live guard used Codex 0.159.1, TraeX 0.207.1 internal edition and Herdr 0.8.0.
 Both installed TUIs passed task-bound startup, original-generation recovery, actual durable inbox acknowledgement, exact in-turn receipt accounting, interruption and endpoint-death checks.
 The guard's separate final TraeX normal-launch probe did not pass: `fm-spawn` reported that the launch identity did not belong to the isolated task copy.
-That baseline-only failure is outside transcript parsing and is not counted as a long-transcript pass.
+No same-base counterfactual was run, so this remains an unattributed limitation rather than evidence of either a baseline condition or a candidate regression, and it is not counted as a long-transcript pass.
 
 ```sh
 HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh \
