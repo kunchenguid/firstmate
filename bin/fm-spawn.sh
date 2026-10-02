@@ -366,6 +366,11 @@
 #                  omp's cwd-only auto-discovery cannot load it a second time)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __OPENCODEMODEL__ config-default model fragment for OpenCode 2.x, whose
+#                  bare command rejects --model (empty on 1.x and whenever no
+#                  model is resolved)
+#     __OPENCODEAUTO__ --auto for OpenCode 2.x, whose external_directory guard
+#                  would otherwise park an unattended worker (empty on 1.x)
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
 #     __WORKTREE__  absolute path to the task worktree
@@ -1898,6 +1903,32 @@ pi_supports_approve() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'
 }
 
+# OpenCode's interactive surface is version-dependent: 1.x takes --model on
+# the bare command, while 2.x rejects it there (the flag lives on the
+# single-shot `opencode run` only, which is not the persistent TUI the fleet
+# supervises). Probe the bare help for the flag, same shape as the Pi probes.
+# An absent or inconclusive probe keeps the 1.x flag form so older binaries
+# keep launching exactly as before.
+opencode_bare_supports_model_flag() {
+  local executable=$1 help
+  help=$("$executable" --help 2>&1) || return 1
+  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--model([[:space:],=]|$)'
+}
+
+# OpenCode 2.x launch carries the resolved model as the config default
+# instead of a bare-command flag (verified on 2.0.22: the TUI status bar shows
+# the pinned model and answers on it). Returns the single-quoted-safe JSON
+# fragment, leading comma included, or nothing when no model is resolved. The
+# fragment lands inside the launch's single-quoted assignment, so a literal
+# quote in the model id must close and reopen that quoting.
+opencode_config_model_fragment() {
+  local model=${1-} model_json
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  model_json=$(json_escape "$model")
+  model_json=${model_json//\'/\'\\\'\'}
+  printf ',"model":"%s"' "$model_json"
+}
+
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -2048,7 +2079,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode __OPENCODEAUTO____MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -5052,7 +5083,23 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+OPENCODEMODEL=
+OPENCODEAUTO=
+if [ "$HARNESS" = opencode ] && ! opencode_bare_supports_model_flag opencode; then
+  # 2.x form: no --model on the bare command, so the flag is dropped and the
+  # resolved model rides the config default instead. 2.x also gates reads
+  # outside the launch cwd behind external_directory (default ask), which
+  # would park an unattended worker on a permission modal the moment it
+  # touches its brief, inbox, or status paths - so the launch auto-approves
+  # everything the config does not deny, restoring the 1.x allow-all
+  # posture. A failed probe keeps the historical 1.x flag form above.
+  MODELFLAG=
+  OPENCODEAUTO="--auto "
+  OPENCODEMODEL=$(opencode_config_model_fragment "$MODEL")
+fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
+LAUNCH=${LAUNCH//__OPENCODEAUTO__/$OPENCODEAUTO}
+LAUNCH=${LAUNCH//__OPENCODEMODEL__/$OPENCODEMODEL}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`

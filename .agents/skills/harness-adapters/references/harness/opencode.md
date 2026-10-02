@@ -1,6 +1,7 @@
 # OpenCode
 
 Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue behavior re-verified on 2026-07-20 using 1.18.4.
+Interactive launch re-verified on 2026-10-03 using 2.0.22.
 
 ## Operating facts
 
@@ -11,10 +12,11 @@ Verified on 2026-06-11 across versions 1.15.7 through 1.17.6, with busy-queue be
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
-| Model flag | `--model <provider/model>`. |
+| Model flag | 1.x: `--model <provider/model>` on the bare interactive command. 2.x: the bare command rejects `--model` (it lives on the single-shot `opencode run` only, which is not the supervised path); the fleet launch instead pins the resolved model as the `OPENCODE_CONFIG_CONTENT` top-level `model` default, verified on 2.0.22. |
 | Effort flag | None for Firstmate's interactive `opencode --prompt` launch; `opencode run` has `--variant`, but that is not this path. The effort instead rides the launch's `OPENCODE_CONFIG_CONTENT` JSON as the `build` agent's `variant` keyed to the resolved model, the config schema's per-model reasoning-effort field verified on 1.18.32. It is emitted only when the resolved model's provider is known to expose that effort as a variant (`anthropic/*`: high, max; `openai/*`: low, medium, high, xhigh); with no model resolved, another provider, or an effort outside its family's list, the variant is omitted and the permission-only launch is unchanged. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
 | Trust dialog | None. |
+| Unattended approvals | 2.x gates reads outside the launch cwd behind `external_directory` (default ask), which parks a worker that touches its brief, inbox, or status paths; the fleet launch passes `--auto` on 2.x so those approvals resolve the way the 1.x allow-all config did. |
 | Marker | None; OpenCode publishes no identity marker, so `../../../bin/fm-harness.sh` identifies it from process ancestry. |
 
 OpenCode can auto-upgrade in the background, and the running TUI can exit mid-task.

@@ -34,6 +34,24 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+make_spawn_opencode_probe() {
+  local fakebin=$1
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  # Mirror the real bare-command surface: 1.x advertises --model, while 2.x
+  # moved the flag to `opencode run`, so the bare help carries no --model.
+  case "${FM_FAKE_OPENCODE_VERSION:-1.18.32}" in
+  1.*) printf '%s\n' 'OpenCode command line interface' 'FLAGS' '  --model, -m string  Model to use' '  --prompt string     Prompt to use' ;;
+  *) printf '%s\n' 'OpenCode command line interface' 'FLAGS' '  --prompt string     Prompt to use' ;;
+  esac
+fi
+exit 0
+SH
+  chmod +x "$fakebin/opencode"
+}
+
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
@@ -53,6 +71,7 @@ SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
+  make_spawn_opencode_probe "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -112,6 +131,7 @@ run_spawn() {
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_LOG="${FM_TEST_PANE_LOG:-}" \
     FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_OPENCODE_VERSION="${FM_TEST_OPENCODE_VERSION:-1.18.32}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -764,6 +784,7 @@ test_opencode_threads_model_and_effort_variant() {
     "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not write the effort as the build agent's variant in its config"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
+  assert_not_contains "$launch" "--auto" "opencode 1.x launch must not carry the 2.x auto-approve flag"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   pass "opencode receives --model and the effort as its config's agent variant"
@@ -820,6 +841,68 @@ test_opencode_omits_variant_when_model_family_lacks_effort() {
     "opencode must keep the permission-only config when the model family lacks the effort"
   assert_not_contains "$launch" '"variant"' "opencode must omit the variant when the model family lacks the effort"
   pass "opencode omits the variant for an effort outside the model family's list"
+}
+
+test_opencode2_pins_model_in_config_and_drops_bare_flag() {
+  local rec id out status launch
+  id=profile-opencode2-z7e
+  rec=$(make_spawn_case profile-opencode2 opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "opencode 2.x spawn with model and effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  # 2.x rejects --model on the bare command, so the model rides the launch's
+  # OPENCODE_CONFIG_CONTENT JSON as the top-level default while the effort
+  # keeps riding the build agent's variant beside it. 2.x also gates reads
+  # outside the launch cwd behind external_directory, so the launch passes
+  # --auto to keep an unattended worker off the permission modal.
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\",\"agent\":{\"build\":{\"model\":\"anthropic/claude-sonnet-4-5\",\"variant\":\"high\"}}}' opencode --auto --prompt" \
+    "opencode 2.x launch did not pin the model as the config default"
+  assert_not_contains "$launch" "--model" "opencode 2.x launch must not pass the rejected bare --model flag"
+  pass "opencode 2.x pins the model in config and drops the bare --model flag"
+}
+
+test_opencode2_without_effort_still_pins_model() {
+  local rec id out status launch
+  id=profile-opencode2-noeffort-z7f
+  rec=$(make_spawn_case profile-opencode2-noeffort opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
+  status=$?
+  expect_code 0 "$status" "opencode 2.x spawn with model and no effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"},\"model\":\"anthropic/claude-sonnet-4-5\"}' opencode --auto --prompt" \
+    "opencode 2.x launch without effort must still pin the model as the config default"
+  assert_not_contains "$launch" '"variant"' "opencode 2.x launch without effort must not write a variant"
+  assert_not_contains "$launch" "--model" "opencode 2.x launch must not pass the rejected bare --model flag"
+  pass "opencode 2.x pins the model without an effort"
+}
+
+test_opencode2_without_model_keeps_permission_only_config() {
+  local rec id out status launch
+  id=profile-opencode2-nomodel-z7g
+  rec=$(make_spawn_case profile-opencode2-nomodel opencode "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "opencode 2.x spawn without model should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" \
+    "OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto --prompt" \
+    "opencode 2.x launch without model must keep the permission-only config byte-identical"
+  assert_not_contains "$launch" "--model" "opencode 2.x launch without model must not pass any --model flag"
+  pass "opencode 2.x without a model keeps the permission-only launch"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
@@ -1917,6 +2000,9 @@ test_opencode_threads_model_and_effort_variant
 test_opencode_without_effort_keeps_launch_config_unchanged
 test_opencode_emits_variant_for_openai_family_effort
 test_opencode_omits_variant_when_model_family_lacks_effort
+test_opencode2_pins_model_in_config_and_drops_bare_flag
+test_opencode2_without_effort_still_pins_model
+test_opencode2_without_model_keeps_permission_only_config
 test_native_effort_validator_keeps_axes_separate
 test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
