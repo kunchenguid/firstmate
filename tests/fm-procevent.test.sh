@@ -3076,6 +3076,8 @@ printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\n' > "$SIL"
 silent_says yes "an ended session carrying nothing is an empty board close"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]{tag,text}:\n' > "$SIL"
 silent_says no "a declared-empty content block is still present"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts: []\n' > "$SIL"
+silent_says no "an empty-array content block is still present"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[many]{tag,text}:\n' > "$SIL"
 silent_says no "a malformed top-level content header is indeterminate"
 printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' > "$SIL"
@@ -3359,6 +3361,121 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
   "an empty board close invented a session-ending message"
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
+
+# lavish-axi 0.1.79 encodes its poll response as TOON: once any prompt carries a
+# nested field such as `target`, the whole prompts array switches from the
+# tabular form to the list form. These captures are that encoder's exact bytes.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[4]:
+  - uid: e1
+    prompt: "Fix this, please"
+    selector: main > h1
+    tag: h1
+    text: Title
+  - uid: e2
+    prompt: tighten this sentence
+    selector: section#intro > p
+    tag: p
+    text: "Intro copy, first draft"
+    target:
+      type: text-range
+      quote: first draft
+      start: 12
+  - uid: c1
+    prompt: "Pick: go\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-list-call\",\n  \"selection\": \"go\",\n  \"note\": \"\"\n}"
+    selector: form
+    tag: choice
+    text: "Pick: go"
+  - uid: ""
+    prompt: "overall looks good,\nship it"
+    selector: ""
+    tag: message
+    text: ""
+next_step: Apply the feedback.
+dom_snapshot: <main>hi</main>
+EOF
+out=$(read_out) || fail "read failed on a list-form capture"
+assert_contains "$out" "declared_items: 4" "a list-form capture lost its declared count"
+assert_contains "$out" "presented_items: 4" "a list-form capture dropped its prompts"
+assert_contains "$out" "complete: yes" "a fully presented list-form capture was not marked complete"
+assert_contains "$out" "annotation_count: 3" "list-form element annotations were not all presented"
+assert_contains "$out" $'CAPTAIN MESSAGE\n| overall looks good,\n| ship it\nEND CAPTAIN MESSAGE' \
+  "a list-form freeform message was not presented as its own field"
+assert_contains "$out" $'element_uid: e1\nelement_selector: main > h1\ntag: h1\ntext:\n| Title\nprompt:\n| Fix this, please' \
+  "a list-form annotation lost its element identity or typed comment"
+assert_contains "$out" $'| Intro copy, first draft\nprompt:\n| tighten this sentence\nextra_field: target\n| type: text-range\n| quote: first draft\n| start: 12' \
+  "a list-form annotation dropped its target"
+assert_not_contains "$out" "Context data:" "a list-form choice surfaced its context as a comment"
+assert_contains "$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ")" \
+  $'sample-list-call\tgo\tPick: go' "answers dropped a choice from a list-form capture"
+"$ROOT/bin/fm-procevent-lavish.sh" silent "$READ" && fail "a list-form feedback capture was declared silent"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "","overall looks good,\nship it","",message,""
+  "",second,"",message,""
+next_step: Apply the feedback.
+dom_snapshot: <main>hi</main>
+EOF
+out=$(read_out) || fail "read failed on a tabular freeform capture"
+assert_contains "$out" "presented_items: 2" "a tabular freeform capture dropped a message"
+assert_contains "$out" "complete: yes" "a tabular freeform capture was not marked complete"
+assert_contains "$out" $'SESSION-ENDING MESSAGE PART 1 of 2\n| overall looks good,\n| ship it\nSESSION-ENDING MESSAGE PART 2 of 2\n| second' \
+  "a tabular freeform capture lost a message part"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts: []
+artifact_failures[1]{id,message}:
+  render,Artifact failed to load
+next_step: Fix the artifact.
+EOF
+out=$(read_out) || fail "read failed on an empty-array capture"
+assert_contains "$out" "declared_items: 0" "an empty prompts array lost its declared count"
+assert_contains "$out" "complete: yes" "an empty prompts array was not marked complete"
+assert_not_contains "$out" "UNRECOGNIZED CONTENT" "an empty prompts array was reported as unrecognized"
+pass "read presents every prompt in both lavish-axi 0.1.79 prompt forms"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2|]:
+  - uid: e1
+    prompt: typed words
+EOF
+out=$(read_out) || fail "read failed on an unrecognized prompt block"
+assert_contains "$out" "complete: no" "an unrecognized prompt block was certified as complete"
+assert_contains "$out" "declared_items: unknown" "an unrecognized prompt block claimed a declared count"
+assert_contains "$out" $'UNRECOGNIZED CONTENT\n| prompts[2|]:\nEND UNRECOGNIZED CONTENT' \
+  "an unrecognized prompt block was not named"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: e1
+    prompt: kept
+    tag: p
+  - uid: e2
+   prompt: misindented
+EOF
+out=$(read_out) || fail "read failed on a list-form capture with a broken item"
+assert_contains "$out" "presented_items: 1" "a broken list item was certified as presented"
+assert_contains "$out" "malformed_items: 1" "a broken list item was not reported"
+assert_contains "$out" "complete: no" "a list-form capture with a broken item was certified as complete"
+assert_contains "$out" "| kept" "a valid list item beside a broken one was not presented"
+pass "read never certifies prompt content it could not present as complete"
 
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
