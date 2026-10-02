@@ -938,11 +938,11 @@ reset_log
 write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "an unknown rule id is an error outcome"
-assert_contains "$out" '  reason: rule rule_9 is not in the rules file' "unknown rule id is named"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "unknown rule id is named"
 write_response "$RESPONSE" rule_0 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "rule zero is an error outcome"
-assert_contains "$out" '  reason: rule rule_0 is not in the rules file' "rule zero cannot alias the final rule"
+assert_contains "$out" '  reason: response is not a rule Choice answer' "rule zero cannot alias the final rule"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
@@ -993,7 +993,7 @@ assert_contains "$err" "malformed rules file: $RULES - use profiles whose harnes
 [ "$(printf '%s\n' "$err" | wc -l | tr -d ' ')" -eq 1 ] || fail "provider errors must use one diagnostic"
 assert_absent "$LOG/argv" "configuration errors never reach the network"
 cp "$BASE_RULES" "$RULES"
-for removed in --json --rules --quota; do
+for removed in --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
   expect_code 2 "$code" "removed option is rejected: $removed"
   assert_contains "$err" "unknown flag $removed" "removed option has no public path: $removed"
@@ -1004,5 +1004,69 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+# Additive JSON, Fastino margin, offline-default and manual-worker contracts.
+reset_log
+rm -f "$HOME_DIR/.env"
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.01
+FASTINO_API_KEY=$KEY run code out err "$BRIEF" --provider fastino --json
+expect_code 0 "$code" "Fastino exits zero"
+assert_equals clear "$(jq -r .status <<< "$out")" "positive margin is not compared to a calibrated probability floor"
+assert_equals fastino/glide "$(jq -r .model "$LOG/body")" "Fastino model default"
+assert_contains "$(cat "$LOG/argv")" 'https://api.fastino.ai/v1/systemone' "Fastino endpoint"
+assert_not_contains "$(cat "$LOG/argv")" "$KEY" "Fastino key stays off argv"
+jq '.rules[3].min_confidence = 0.99' "$BASE_RULES" > "$RULES"
+jq '.answers.rule.probabilities = {rule_1:0.01,rule_2:0.01,rule_3:0.01,rule_4:0.2,default:0.77}' "$RESPONSE" > "$TMP_ROOT/new-response"
+mv "$TMP_ROOT/new-response" "$RESPONSE"
+FASTINO_API_KEY=$KEY run code out err "$BRIEF" --provider fastino --json
+assert_equals ambiguous "$(jq -r .status <<< "$out")" "picked declared probability floor cannot fall through using Fastino margin"
+assert_contains "$(jq -r .reason <<< "$out")" 'margin' "margin limitation explained"
+FASTINO_API_KEY=$KEY FASTINO_ENDPOINT=https://user:secret@example.test/api run code out err "$BRIEF" --provider fastino --json
+expect_code 2 "$code" "endpoint credentials refused"
+assert_not_contains "$err" secret "endpoint refusal does not expose credentials"
+# Default-only configs may omit rules, and use the canonical quota policy offline.
+printf '%s\n' '{"default":{"harness":"claude","model":"sonnet"}}' > "$RULES"
+reset_log
+run code out err "$BRIEF" --provider fastino --offline-default --json
+expect_code 0 "$code" "offline default valid"
+assert_equals clear "$(jq -r .status <<< "$out")" "default-only without rules resolves"
+assert_absent "$LOG/argv" "offline default no model request"
+# The selected harness is retained even when another array member ranks higher.
+printf '%s\n' '{"rules":[{"when":"work","use":[{"harness":"claude"},{"harness":"codex"}]}]}' > "$RULES"
+run code out err "$BRIEF" --provider fastino --override-harness claude --json
+expect_code 0 "$code" "manual override supported"
+assert_equals claude "$(jq -r .chosen.profile.harness <<< "$out")" "manual array filtering honors harness"
+assert_absent "$LOG/argv" "manual override no model request"
+printf '%s\n' '{"rules":[{"when":"work","floor":{"scope":"model:fable","min_percent":90,"provider":"claude"},"use":{"harness":"claude"}}],"default":{"harness":"codex"}}' > "$RULES"
+run code out err "$BRIEF" --provider fastino --override-harness claude --json
+assert_not_contains "$out" '"status": "clear"' "manual worker cannot switch after floor failure"
+printf '%s\n' '{"rules":[{"when":"work","approval":"captain","use":{"harness":"claude"}}]}' > "$RULES"
+run code out err "$BRIEF" --provider fastino --override-harness claude --json
+assert_equals escalate "$(jq -r .status <<< "$out")" "manual override preserves approval gate"
+reset_log
+run code out err "$BRIEF" --validate-only --json
+assert_equals valid "$(jq -r .status <<< "$out")" "schema-only validation"
+assert_absent "$LOG/argv" "schema check no model request"
+assert_absent "$LOG/quota-axi.calls" "schema check no quota request"
+# Prelaunch availability filtering stays opt-in; no worker executes here.
+AVAILBIN="$TMP_ROOT/availability-bin"
+mkdir -p "$AVAILBIN"
+for name in bash dirname jq cp chmod mktemp rm awk grep head tr tail date cat; do
+  ln -s "$(command -v "$name")" "$AVAILBIN/$name"
+done
+ln -s "$FAKEBIN/quota-axi" "$AVAILBIN/quota-axi"
+printf '#!/usr/bin/env bash\nexit 99\n' > "$AVAILBIN/claude"
+chmod +x "$AVAILBIN/claude"
+printf '%s\n' '{"default":[{"harness":"codex"},{"harness":"claude"}]}' > "$RULES"
+write_quota "$QUOTA" 0.7597
+PATH="$AVAILBIN" FM_HOME="$HOME_DIR" "$TOOL" "$BRIEF" --offline-default --json --require-installed --allowed-harnesses codex,claude > "$TMP_ROOT/availability.json"
+assert_equals claude "$(jq -r .chosen.profile.harness "$TMP_ROOT/availability.json")" "missing higher-priority executable excluded before selection"
+assert_equals false "$(jq -r '.candidates[] | select(.profile.harness == "codex") | .eligible' "$TMP_ROOT/availability.json")" "unavailable candidate evidence preserved"
+# Manual model/effort axes narrow declared profiles before their quota checks.
+printf '%s\n' '{"default":[{"harness":"claude","model":"sonnet","effort":"high"},{"harness":"claude","model":"opus","effort":"low"}]}' > "$RULES"
+run code out err "$BRIEF" --provider fastino --override-harness claude --override-model sonnet --override-effort high --json
+assert_equals sonnet "$(jq -r .chosen.profile.model <<< "$out")" "manual model narrows configured candidates before ranking"
+pass "JSON Fastino default-only and manual-worker contracts"
 
 printf '# all fm-dispatch-resolve tests passed\n'

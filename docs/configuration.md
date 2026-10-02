@@ -1105,6 +1105,50 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Unified router CLI
+
+`bin/fm` is an additive operator entrypoint for routing, launching, inspecting and continuing tasks; its `--help` owns exact commands and flags.
+Install it by adding this checkout's `bin` directory to `PATH`, or by linking `bin/fm` into an existing directory on `PATH`.
+Python 3 and the existing Firstmate tool dependencies are required.
+The executable resolves its actual code checkout through symlinks, while explicit `FM_HOME` selects the operational home and its private configuration and records.
+For a preview checkout, set `FM_HOME` to the established home before using it.
+No arguments lists that home's recorded tasks for the current Git repository; a quoted request is shorthand for the task command.
+
+Routing and dry-run inspect tracked filenames, bounded extension counts, manifest names, Git identity and dirty state without reading file bodies or running project commands.
+Both use the same optional routing request; they create no backlog entry, worktree, endpoint or durable session.
+The finite classifier recognizes reasoning, investigation, refactor, mechanical, bugfix, feature and general work.
+Without dispatch configuration, reasoning and investigation prefer Claude, mechanical work prefers Pi, and other work prefers Codex; a declared static crew harness takes precedence, and only installed supported adapters are recommended.
+These are harness preferences rather than claims about model price or capability; configured profiles or manual overrides select concrete model and effort choices.
+Codex, Claude, OpenCode and Pi are supported by this entrypoint, with their existing launch owners and permission policies.
+The effective permission posture is displayed before any launch or continuation.
+
+`config/crew-dispatch.json` remains authoritative when present, including declared gates and quota evidence.
+A missing or invalid typed match cannot imitate an arbitrary natural-language rule or bypass its approval or quota declarations: the entrypoint reports that a decision is needed.
+Default-only configuration can resolve deterministically through the existing resolver's quota policy.
+The CLI filters unsupported or executable-unavailable candidates before quota ranking, preserving evidence for every candidate; this is eligibility selection before launching rather than retrying a failed launch.
+An explicit worker override must identify one configured rule or default location, preserves its gates, and refuses an ambiguous location or a gate that would change the selected worker.
+Explicit model and effort axes narrow a worker override to declared profiles before quota evaluation; changing them after evaluation is refused.
+Malformed configuration is actionable, including for manual dispatch.
+Original resolver failures remain visible alongside fallback evidence.
+
+For finite classification without dispatch configuration, `FASTINO_API_KEY` in the calling environment enables Fastino.
+The configured dispatch resolver also accepts that key from the home's `.env`, using the existing environment accessor.
+`FASTINO_ENDPOINT` defaults to `https://api.fastino.ai/v1/systemone` and accepts an HTTPS endpoint without embedded credentials, query or fragment.
+`FASTINO_MODEL` defaults to `fastino/glide`; requests use the documented state and Choice-question contract with a five-second timeout.
+Invalid responses, unavailable service and non-positive confidence margins fall back to finite classification only when no natural-language dispatch rules need interpretation.
+Fastino confidence is a margin, so configured probability-based `min_confidence` declarations require a decision rather than being treated as calibrated probabilities.
+Credentials and upstream error bodies are never included in routing evidence, and routing keys are removed from launch-owner environments.
+
+Launching requires a registered project and preserves the canonical registered clone's Git identity when that clone exists.
+The existing project posture, branch and forge parsers select delivery defaults, and backlog, brief and spawn owners create their respective artifacts.
+The task id and `FM_HOME` are the durable session identity; routing evidence lives in private `data/<id>/route.json` without competing with the existing task metadata.
+Launch failures preserve the queued task and evidence, display its identity, and never retry a different worker.
+Omitting the continuation id is accepted only when exactly one recorded current-project task exists; zero or multiple matches require an explicit id.
+Continuing uses the exact recorded task through the existing control plane, with an explicit progress note or saved `data/<id>/progress.md`.
+Native session continuation remains limited to combinations the launch owner already verifies; other combinations use the saved brief, worktree and progress note.
+A durable record alone is reported with unknown process liveness.
+Doctor is read-only: it reports executables, configuration validation, routing key presence, account pins and backend capability limits, keeps unproven authentication unknown, and performs no repairs or installations.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.

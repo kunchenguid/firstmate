@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Additive Firstmate router.
+Usage: fm route|task "request" [--project PATH] [--worker codex|claude|opencode|pi]
+          [--model MODEL] [--effort LEVEL] [--no-route] [--dry-run] [--id ID]
+       fm resume [ID] [--note TEXT|--note-file PATH] [--dry-run]
+       fm sessions | status [ID] | workers | doctor
+FM_HOME selects the operational home; existing launch owners remain authoritative.
+route and --dry-run use the same routing path and never write durable state or launch.
+Fastino receives only task text and a bounded set of repository facts, never file bodies.
+Native continuation is owned by fm-control/fm-spawn; resume otherwise requires progress.
+"""
+import argparse
+import http.client
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+import urllib.error
+import urllib.request
+import urllib.parse
+
+ROOT = Path(__file__).resolve().parent.parent
+HOME = Path(os.environ.get("FM_HOME", str(ROOT))).resolve()
+DATA = Path(os.environ.get("FM_DATA_OVERRIDE", str(HOME / "data")))
+STATE = Path(os.environ.get("FM_STATE_OVERRIDE", str(HOME / "state")))
+CONFIG = Path(os.environ.get("FM_CONFIG_OVERRIDE", str(HOME / "config")))
+WORKERS = ("codex", "claude", "opencode", "pi")
+ENV = dict(os.environ, FM_HOME=str(HOME))
+
+
+class Refusal(Exception):
+    pass
+
+
+def emit(value):
+    print(json.dumps(value, indent=2, allow_nan=False))
+
+
+def owner(name, args, capture=True):
+    child_env = dict(ENV)
+    if name != "fm-dispatch-resolve.sh":
+        child_env.pop("FASTINO_API_KEY", None)
+        child_env.pop("TYPESAFE_API_KEY", None)
+    result = subprocess.run([str(ROOT / "bin" / name), *args], env=child_env,
+                            text=True, capture_output=capture, check=False)
+    if result.returncode:
+        raise Refusal(f"{name} refused (exit {result.returncode}): "
+                      + (result.stderr.strip()[:1000] if capture else "see owner diagnostic"))
+    return result.stdout.strip() if capture else ""
+
+
+def safe_id(value):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value):
+        raise Refusal("session must be an exact task id (letters, digits, '.', '_' or '-')")
+    return value
+
+
+def metadata(task):
+    path = STATE / (safe_id(task) + ".meta")
+    if path.is_symlink() or not path.is_file():
+        raise Refusal(f"no exact session {task} in {HOME}")
+    result = {}
+    for line in path.read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            if key in result:
+                raise Refusal("duplicate session metadata field")
+            result[key] = value
+    if result.get("endpoint_task_id", task) != task:
+        raise Refusal("session identity mismatch")
+    return result
+
+
+def facts(project):
+    path = Path(project).resolve()
+    result = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                            capture_output=True, text=True, check=False)
+    if result.returncode:
+        raise Refusal("project must be an existing Git repository")
+    path = Path(result.stdout.strip()).resolve()
+    names = subprocess.run(["git", "-C", str(path), "ls-files", "-z"],
+                           capture_output=True, check=True).stdout.split(b"\0")
+    # Only bounded filenames and aggregate extension counts; no secrets/file bodies.
+    extensions = {}
+    manifests = []
+    known = {"package.json", "pyproject.toml", "Cargo.toml", "go.mod", "Makefile", ".tasks.toml"}
+    for raw in names[:10000]:
+        name = raw.decode("utf-8", "replace")
+        ext = Path(name).suffix
+        if ext:
+            extensions[ext] = extensions.get(ext, 0) + 1
+        if Path(name).name in known and len(manifests) < 12:
+            manifests.append(name[:160])
+    status = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "-uno"],
+                            capture_output=True, text=True, check=True).stdout
+    def git_fact(*args):
+        value = subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, check=False)
+        return value.stdout.strip() if value.returncode == 0 else None
+    common = git_fact("rev-parse", "--git-common-dir")
+    if common:
+        common = str((path / common).resolve())
+    return path, {"name": path.name, "branch": git_fact("symbolic-ref", "--quiet", "--short", "HEAD"),
+                  "commit": git_fact("rev-parse", "--verify", "HEAD"), "worktree": str(path), "git_common_dir": common, "tracked_files_sampled": min(10000, len(names) - 1),
+                  "manifests": manifests, "extensions": dict(sorted(extensions.items(), key=lambda x: -x[1])[:8]),
+                  "dirty": bool(status), "inspection_truncated": len(names) > 10001}
+
+
+def classify(text):
+    # Fixed ordered vocabulary is advisory; it does not emulate natural-language rules.
+    for kind, pattern in (("reasoning", r"\b(architecture|design|deadlock|race|complex|concurrency)\b"),
+                          ("investigation", r"\b(investigate|diagnose|audit|explain|research|plan)\b"),
+                          ("refactor", r"\b(refactor|restructure|rewrite)\b"),
+                          ("mechanical", r"\b(typo|rename|format|spelling)\b"),
+                          ("bugfix", r"\b(fix|bug|broken|regression|crash)\b"),
+                          ("feature", r"\b(add|implement|build|create|feature)\b")):
+        if re.search(pattern, text, re.I):
+            return kind
+    return "general"
+
+
+
+def typed_class(request, repo_facts):
+    key = os.environ.get("FASTINO_API_KEY", "")
+    if not key:
+        return None, {"status": "off", "reason": "FASTINO_API_KEY absent"}
+    choices = {"reasoning": "Architecture, system design or complex concurrency debugging.",
+               "investigation": "Investigation, diagnosis, audit, research or planning.",
+               "refactor": "Restructure existing code without a new feature.",
+               "mechanical": "Narrow typo, spelling, formatting or rename task.",
+               "bugfix": "Repair incorrect behavior or a regression.",
+               "feature": "Implement a new capability.", "general": "No other category applies."}
+    endpoint = os.environ.get("FASTINO_ENDPOINT", "https://api.fastino.ai/v1/systemone")
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise Refusal("FASTINO_ENDPOINT must be HTTPS without credentials, query or fragment")
+    model = os.environ.get("FASTINO_MODEL", "fastino/glide")
+    if not model.strip() or len(model) > 160:
+        raise Refusal("FASTINO_MODEL must be a non-empty model name of at most 160 characters")
+    body = {"model": model, "state": {"task": request, "repository": repo_facts},
+            "questions": {"task_class": {"type": "choice", "instructions": "Choose the single best task class.", "criteria": choices}}}
+    req = urllib.request.Request(endpoint, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    req.add_unredirected_header("Authorization", "Bearer " + key)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as response:
+            raw = response.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("response too large")
+        value = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite")))
+        answer = value["answers"]["task_class"]
+        confidence = answer["confidence"]
+        probabilities = answer["probabilities"]
+        if (answer["choice"] not in choices or not isinstance(probabilities, dict) or type(confidence) not in (int, float)
+                or not math.isfinite(confidence) or not 0 < confidence <= 1
+                or set(probabilities) != set(choices)
+                or any(type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities.values())
+                or not 0.99 <= sum(probabilities.values()) <= 1.01):
+            raise ValueError("invalid choice answer")
+        return answer["choice"], {"status": "clear", "model": model, "choice": answer["choice"],
+                                  "confidence_margin": confidence, "probabilities": probabilities}
+    except (OSError, ValueError, KeyError, TypeError, urllib.error.URLError, http.client.HTTPException):
+        # Never echo upstream bodies, URLs, headers or exception strings containing secrets.
+        return None, {"status": "error", "reason": "Fastino unavailable or invalid answer; deterministic classifier used"}
+
+def posture(worker):
+    if worker == "claude":
+        path = CONFIG / "claude-permission-mode"
+        mode = path.read_text().strip() if path.exists() else "bypass"
+        if mode not in ("auto", "bypass"):
+            raise Refusal("invalid claude-permission-mode")
+        return "Claude auto permission mode" if mode == "auto" else "Claude bypass permissions"
+    return {"codex": "Codex bypass approvals and sandbox", "opencode": "OpenCode allow all permissions",
+            "pi": "Pi existing tool and extension permission policy"}[worker]
+
+
+def resolver(request, repo_facts, extra):
+    # Temporary request input is not a session or durable home state.
+    with tempfile.TemporaryDirectory(prefix="fm-route-") as tmp:
+        brief = Path(tmp) / "brief.md"
+        brief.write_text("# Task\n\n## Captain's intent\n\n" + request
+                         + "\n\n## Firstmate spec\n\nRepository facts: " + json.dumps(repo_facts) + "\n")
+        raw = owner("fm-dispatch-resolve.sh", [str(brief), "--project", repo_facts["name"],
+                                              "--provider", "fastino", "--json", "--require-installed",
+                                              "--allowed-harnesses", ",".join(WORKERS), *extra])
+        try:
+            return json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite JSON")))
+        except (ValueError, TypeError) as exc:
+            raise Refusal("resolver returned invalid JSON") from exc
+
+
+def route(args):
+    request = args.request.strip()
+    if re.search(r"(?m)^#{1,2} ", request) or "{TASK}" in request or "{FIRSTMATE_SPEC}" in request:
+        raise Refusal("request must not contain scaffold headings or placeholder tokens")
+    if not request or len(request) > 16000:
+        raise Refusal("request must contain 1..16000 characters")
+    project, info = facts(args.project)
+    kind = classify(request)
+    config = CONFIG / "crew-dispatch.json"
+    result = {"status": "clear", "home": str(HOME), "project": str(project),
+              "task_class": kind, "repository": info, "source": "deterministic",
+              "profile": None, "reason": "finite classification advisory"}
+    worker = args.worker
+    if args.no_route and not worker:
+        raise Refusal("--no-route requires --worker")
+    if config.exists() or config.is_symlink():
+        # Validate even manual choices through the canonical owner.
+        override = ["--override-harness", worker] if worker else []
+        if worker:
+            for axis in ("model", "effort"):
+                if getattr(args, axis):
+                    override.extend(["--override-" + axis, getattr(args, axis)])
+        evidence = resolver(request, info, override)
+        if evidence.get("status") in ("off", "error", "escalate") and not worker:
+            # Owner refuses configured language rules on this offline path.
+            result["routing_failure"] = evidence
+            evidence = resolver(request, info, ["--offline-default"])
+        result["evidence"] = evidence
+        if evidence.get("status") != "clear":
+            result.update(status="needs-decision", reason=evidence.get("reason", evidence.get("status")))
+            return result
+        profile = evidence["chosen"]["profile"]
+        result["source"] = "manual" if worker else evidence.get("model", "configured-default")
+    else:
+        if not worker:
+            typed, evidence = typed_class(request, info)
+            result["evidence"] = evidence
+            if typed:
+                kind = typed
+                result["task_class"] = kind
+            pin = CONFIG / "crew-harness"
+            if pin.exists():
+                worker = owner("fm-harness.sh", ["crew"])
+            else:
+                preferred = {"reasoning": "claude", "investigation": "claude", "mechanical": "pi"}.get(kind, "codex")
+                worker = next((name for name in (preferred, *WORKERS) if shutil.which(name)), None)
+        if not worker:
+            result.update(status="needs-decision", reason="no supported worker executable installed")
+            return result
+        profile = {"harness": worker}
+        result["source"] = "manual" if args.worker else (result["evidence"].get("model", "fastino/glide") if result.get("evidence", {}).get("status") == "clear" else "static-or-finite-class")
+    if profile["harness"] not in WORKERS:
+        result.update(status="needs-decision", reason="selected adapter is outside this milestone")
+        return result
+    # Profile floors were evaluated before these axes; forbid changing their scope.
+    if config.exists() and any(getattr(args, axis) and getattr(args, axis) != profile.get(axis) for axis in ("model", "effort")):
+        raise Refusal("configured routing axes cannot be changed after quota gates; edit the configured profile")
+    for axis in ("model", "effort"):
+        if getattr(args, axis):
+            profile[axis] = getattr(args, axis)
+    result["profile"] = profile
+    result["permission_posture"] = posture(profile["harness"])
+    if not shutil.which(profile["harness"]):
+        result.update(status="needs-decision", reason="selected worker executable is absent; no worker retry")
+    return result
+
+
+def launch(args, decision):
+    if decision["status"] != "clear":
+        raise Refusal(decision["reason"])
+    task = safe_id(args.id or ("route-" + uuid.uuid4().hex[:12]))
+    if len(task) > 64:
+        raise Refusal("new task id must be at most 64 characters")
+    if (DATA / task).exists() or (STATE / (task + ".meta")).exists():
+        raise Refusal("task id already exists; use resume with its exact id")
+    name = decision["repository"]["name"]
+    registry = DATA / "projects.md"
+    if not registry.is_file() or not any(line.startswith("- " + name + " - ") or line.startswith("- " + name + " [") for line in registry.read_text().splitlines()):
+        raise Refusal("register this project through Firstmate project management before launching")
+    canonical = HOME / "projects" / name
+    if canonical.exists():
+        _, registered = facts(canonical)
+        if registered["git_common_dir"] != decision["repository"]["git_common_dir"]:
+            raise Refusal("requested repository differs from this home's registered clone; use its canonical path")
+    mode, yolo = owner("fm-project-mode.sh", [name]).split()
+    branch = owner("fm-project-mode.sh", ["--branch-prefix", name])
+    forge = owner("fm-project-mode.sh", ["--forge", name])
+    profile = decision["profile"]
+    print("Task identity: " + task + " in " + str(HOME), file=sys.stderr, flush=True)
+    print("Permission posture: " + decision["permission_posture"], file=sys.stderr, flush=True)
+    owner("fm-tasks-axi.sh", ["add", task, args.request[:160], "--kind", "ship", "--repo", name,
+                               "--body", "Delivery contract: mode=" + mode + " yolo=" + yolo])
+    journal = DATA / task / "route.json"
+    decision.update(session=task, launch_outcome="pending", mode=mode, yolo=yolo)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(json.dumps(decision, indent=2) + "\n")
+    try:
+        owner("fm-brief.sh", [task, name, "--mode", mode, "--branch-prefix", branch, "--forge", forge])
+        brief = DATA / task / "brief.md"
+        content = brief.read_text()
+        if content.count("{TASK}") != 1 or content.count("{FIRSTMATE_SPEC}") != 1:
+            raise Refusal("unexpected brief scaffold; queued task preserved for repair")
+        spec = "Implement the request in this repository. Preserve existing contracts and validate the affected behavior."
+        if (Path(decision["project"]) / ".agents/skills/firstmate-coding-guidelines/SKILL.md").is_file():
+            spec += " Load .agents/skills/firstmate-coding-guidelines/SKILL.md before changing shared Firstmate material."
+        brief.write_text(content.replace("{TASK}", args.request).replace("{FIRSTMATE_SPEC}", spec))
+    except (Refusal, OSError) as exc:
+        decision["launch_outcome"] = "failed"
+        journal.write_text(json.dumps(decision, indent=2) + "\n")
+        raise Refusal(f"task {task} preserved at {journal.parent}: {exc}") from exc
+    command = [task, decision["project"], "--mode", mode, "--yolo", yolo,
+               "--branch-prefix", branch, "--harness", profile["harness"]]
+    for axis in ("model", "effort"):
+        if profile.get(axis):
+            command.extend(["--" + axis, profile[axis]])
+    try:
+        owner("fm-spawn.sh", command, capture=False)
+    except Refusal as exc:
+        decision["launch_outcome"] = "failed"
+        journal.write_text(json.dumps(decision, indent=2) + "\n")
+        raise Refusal(f"task {task} preserved at {DATA / task}: {exc}") from exc
+    decision["launch_outcome"] = "launched"
+    journal.write_text(json.dumps(decision, indent=2) + "\n")
+    emit(decision)
+
+
+def sessions():
+    values = []
+    for path in sorted(STATE.glob("*.meta")):
+        try:
+            record = metadata(path.stem)
+            values.append({"session": path.stem, "home": str(HOME), "record": record,
+                           "liveness": "unknown (durable record is not proof of a running process)"})
+        except Refusal as exc:
+            values.append({"session": path.stem, "error": str(exc)})
+    seen = {value["session"] for value in values}
+    for path in sorted(DATA.glob("*/route.json")):
+        if path.parent.name not in seen:
+            values.append({"session": path.parent.name, "home": str(HOME), "routing": json.loads(path.read_text()),
+                           "liveness": "no launch record; inspect preserved queued task"})
+    return values
+
+
+def resume(args):
+    if not args.session:
+        project, _ = facts(os.getcwd())
+        matches = [value["session"] for value in sessions() if "record" in value
+                   and str(project) in (value["record"].get("project"), value["record"].get("worktree"))]
+        if len(matches) != 1:
+            raise Refusal("resume requires an exact session id unless exactly one current-project task exists")
+        args.session = matches[0]
+    record = metadata(args.session)
+    if record.get("harness") not in WORKERS:
+        raise Refusal("recorded worker is outside this milestone")
+    note = args.note
+    if args.note_file:
+        note = Path(args.note_file).read_text()
+    if not note:
+        # Never infer progress from private harness chats or filesystem recency.
+        path = DATA / args.session / "progress.md"
+        if path.is_file():
+            note = path.read_text()
+    if not note or not note.strip():
+        raise Refusal("durable continuation requires --note, --note-file, or saved data/<id>/progress.md")
+    if len(note) > 32000:
+        raise Refusal("progress note exceeds 32000 characters")
+    result = {"session": args.session, "home": str(HOME), "profile": record.get("harness"),
+              "permission_posture": posture(record["harness"]),
+              "continuation": "existing control relaunch; native session only where its owner verifies support"}
+    if args.dry_run:
+        emit(result)
+        return
+    print("Permission posture: " + result["permission_posture"], file=sys.stderr, flush=True)
+    owner("fm-control.sh", [args.session, "relaunch", "--note", note], capture=False)
+    (DATA / args.session / "progress.md").write_text(note + "\n")
+    result["outcome"] = "relaunched"
+    emit(result)
+
+
+def doctor():
+    configuration = {"dispatch": "absent", "errors": []}
+    path = CONFIG / "crew-dispatch.json"
+    if path.exists() or path.is_symlink():
+        try:
+            # Offline validates the canonical schema without a network request.
+            value = resolver("Inspect routing readiness", {"name": "doctor"}, ["--validate-only"])
+            configuration["dispatch"] = "valid (natural-language matching requires a service or explicit override)" if value.get("reason", "").startswith("natural-language") else "valid"
+        except Refusal as exc:
+            configuration["dispatch"] = "invalid"
+            configuration["errors"].append(str(exc))
+    workers = []
+    for worker in WORKERS:
+        pin = CONFIG / (worker + "-account")
+        item = {"worker": worker, "executable": shutil.which(worker), "authentication": "unknown",
+                "account_pin": pin.read_text().strip() if pin.is_file() else None}
+        try:
+            item["permission_posture"] = posture(worker)
+        except Refusal as exc:
+            item["permission_posture"] = "invalid configuration"
+            configuration["errors"].append(str(exc))
+        workers.append(item)
+    backend = (CONFIG / "backend").read_text().strip() if (CONFIG / "backend").exists() else None
+    if backend and backend not in ("tmux", "herdr", "zellij", "orca", "cmux"):
+        configuration["errors"].append("unsupported configured backend")
+    return {"home": str(HOME), "workers": workers, "configuration": configuration,
+            "routing_credentials": {"FASTINO_API_KEY": "present" if os.environ.get("FASTINO_API_KEY") else "absent",
+                                    "TYPESAFE_API_KEY": "present" if os.environ.get("TYPESAFE_API_KEY") else "absent"},
+            "dependencies": {name: shutil.which(name) for name in ("git", "jq", "curl", "tasks-axi", "treehouse")},
+            "backend": backend or "automatic (existing launch owner)",
+            "backend_tools": {name: shutil.which(name) for name in ("tmux", "herdr", "zellij", "orca", "cmux")},
+            "recovery": "existing control owner verifies tmux/herdr; other backends may refuse", "repairs": "none"}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for verb in ("route", "task"):
+        sub = commands.add_parser(verb)
+        sub.add_argument("request")
+        sub.add_argument("--project", default=os.getcwd())
+        sub.add_argument("--worker", choices=WORKERS)
+        sub.add_argument("--model")
+        sub.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"))
+        sub.add_argument("--no-route", action="store_true")
+        sub.add_argument("--dry-run", action="store_true")
+        sub.add_argument("--id")
+    sub = commands.add_parser("resume")
+    sub.add_argument("session", nargs="?")
+    notes = sub.add_mutually_exclusive_group()
+    notes.add_argument("--note")
+    notes.add_argument("--note-file")
+    sub.add_argument("--dry-run", action="store_true")
+    commands.add_parser("sessions")
+    sub = commands.add_parser("status")
+    sub.add_argument("session", nargs="?")
+    commands.add_parser("workers")
+    commands.add_parser("doctor")
+    argv = sys.argv[1:]
+    if not argv:
+        project, _ = facts(os.getcwd())
+        emit([value for value in sessions() if str(project) in (value.get("record", {}).get("project"), value.get("record", {}).get("worktree")) or value.get("routing", {}).get("project") == str(project)])
+        return 0
+    if argv[0] not in ("route", "task", "resume", "sessions", "status", "workers", "doctor") and not argv[0].startswith("-"):
+        argv.insert(0, "task")
+    args = parser.parse_args(argv)
+    if args.command in ("route", "task"):
+        decision = route(args)
+        if args.command == "route" or args.dry_run:
+            emit(decision)
+            return 0 if decision["status"] == "clear" else 3
+        launch(args, decision)
+    elif args.command == "resume":
+        resume(args)
+    elif args.command == "status" and args.session:
+        emit({"session": args.session, "home": str(HOME), "record": metadata(args.session), "liveness": "unknown"})
+    elif args.command in ("sessions", "status"):
+        emit(sessions())
+    else:
+        value = doctor()
+        emit(value["workers"] if args.command == "workers" else value)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (Refusal, OSError, ValueError, subprocess.SubprocessError) as error:
+        print("fm: " + str(error), file=sys.stderr)
+        sys.exit(2)

@@ -144,6 +144,8 @@ Pi's `/supervision-model` command pins a cheaper model and a shallower reasoning
 
 Setup guides for tmux (the default) and every other supported backend (herdr, zellij, Orca, cmux) are linked in [Documentation](#documentation) below.
 
+For the additive `fm` routing and task CLI, see [Unified router CLI](docs/configuration.md#unified-router-cli).
+
 ## How It Works
 
 ```

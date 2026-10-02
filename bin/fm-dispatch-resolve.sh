@@ -3,7 +3,17 @@
 # profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
 #
 # Usage:
-#   fm-dispatch-resolve.sh <brief-file> [--project <name>]
+#   fm-dispatch-resolve.sh <brief-file> [--project <name>] [--json]
+#                          [--provider typesafe|fastino] [--offline-default]
+#   --require-installed filters candidates by executable presence before ranking.
+#   --allowed-harnesses <comma-separated names> restricts caller capabilities.
+#   --validate-only checks configuration without model or quota calls.
+#   --override-model/--override-effort narrow an explicit worker to a declared profile.
+#   --override-harness <name> selects one unique configured location; gates stay.
+#   --offline-default resolves only a default-only configuration without a model.
+#   Fastino uses FASTINO_API_KEY, fastino/glide and a five-second timeout.
+#   Fastino confidence is a margin: min_confidence is not applied as probability;
+#   declared probability thresholds return ambiguous rather than being bypassed.
 #
 # Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
@@ -73,6 +83,9 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
+FASTINO_API_KEY_PRIVATE=${FASTINO_API_KEY:-}
+export -n FASTINO_API_KEY_PRIVATE 2>/dev/null || true
+unset FASTINO_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -92,12 +105,17 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
+TS_ENDPOINT=https://api.typesafe.ai/v1/systemone
 TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
+JSON_OUTPUT=0 PROVIDER=typesafe OFFLINE_DEFAULT=0 OVERRIDE_HARNESS='' OVERRIDE_MODEL='' OVERRIDE_EFFORT='' VALIDATE_ONLY=0 REQUIRE_INSTALLED=0 ALLOWED_HARNESSES=''
 no_rules() {
+  if [ "$JSON_OUTPUT" = 1 ]; then
+    printf '{"status":"escalate","reason":"no rules to match"}\n'
+    exit 0
+  fi
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   exit 0
 }
@@ -113,6 +131,15 @@ BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
 NEVER_SEND_PATH="$CONFIG/dispatch-never-send"
 while [ $# -gt 0 ]; do
   case "$1" in
+    --require-installed) REQUIRE_INSTALLED=1; shift ;;
+    --allowed-harnesses) [ $# -ge 2 ] || die "--allowed-harnesses needs a comma-separated list"; ALLOWED_HARNESSES=$2; shift 2 ;;
+    --validate-only) VALIDATE_ONLY=1; shift ;;
+    --json) JSON_OUTPUT=1; shift ;;
+    --provider) [ $# -ge 2 ] || die "--provider needs a value"; PROVIDER=$2; shift 2 ;;
+    --override-model) [ $# -ge 2 ] || die "--override-model needs a value"; OVERRIDE_MODEL=$2; shift 2 ;;
+    --override-effort) [ $# -ge 2 ] || die "--override-effort needs a value"; OVERRIDE_EFFORT=$2; shift 2 ;;
+    --override-harness) [ $# -ge 2 ] || die "--override-harness needs a value"; OVERRIDE_HARNESS=$2; shift 2 ;;
+    --offline-default) OFFLINE_DEFAULT=1; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs a value"; PROJECT=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown flag $1" ;;
@@ -121,11 +148,30 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+case "$PROVIDER" in
+  typesafe)
+    [ -n "$TYPESAFE_API_KEY_PRIVATE" ] || TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+    API_KEY_PRIVATE=$TYPESAFE_API_KEY_PRIVATE ;;
+  fastino)
+    [ -n "$FASTINO_API_KEY_PRIVATE" ] || FASTINO_API_KEY_PRIVATE=$(fmx_env_get FASTINO_API_KEY "$FM_HOME/.env")
+    API_KEY_PRIVATE=$FASTINO_API_KEY_PRIVATE
+    TS_MODEL=${FASTINO_MODEL:-fastino/glide}
+    TS_ENDPOINT=${FASTINO_ENDPOINT:-https://api.fastino.ai/v1/systemone}
+    case "$TS_ENDPOINT" in
+      https://?*/*) ;;
+      *) die "FASTINO_ENDPOINT must be an HTTPS endpoint" ;;
+    esac
+    case "$TS_ENDPOINT" in *@*|*\?*|*\#*) die "FASTINO_ENDPOINT must not contain credentials, query or fragment" ;; esac ;;
+  *) die "unknown provider: $PROVIDER" ;;
+esac
+export -n API_KEY_PRIVATE 2>/dev/null || true
+if [ -z "$API_KEY_PRIVATE" ] && [ "$OFFLINE_DEFAULT" = 0 ] && [ -z "$OVERRIDE_HARNESS" ] && [ "$VALIDATE_ONLY" = 0 ]; then
+  if [ "$PROVIDER" = typesafe ]; then
+    echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+  else
+    echo "dispatch-resolve: off (FASTINO_API_KEY absent)" >&2
+  fi
+  [ "$JSON_OUTPUT" = 0 ] || printf '{"status":"off","reason":"API key absent"}\n'
   exit 0
 fi
 
@@ -217,6 +263,11 @@ if [ -n "$missing_provider" ]; then
   die "malformed rules file: $RULES_PATH - $missing_provider_detail"
 fi
 
+if [ "$VALIDATE_ONLY" = 1 ]; then
+  printf '{"status":"valid"}\n'
+  exit 0
+fi
+
 # ---- harness -> provider map, from the single owner in fm-quota-axi-lib.sh -----
 PMAP='{}'
 while IFS= read -r h; do
@@ -233,11 +284,18 @@ RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 emit_error() {
   local reason=$1
   echo "dispatch-resolve: error ($reason)" >&2
-  printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  if [ "$JSON_OUTPUT" = 1 ]; then
+    jq -cn --arg reason "$reason" '{status:"error",reason:$reason}'
+  else
+    printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  fi
   exit 0
 }
 
-if [ "$RULE_COUNT" -eq 0 ]; then
+if [ "$OFFLINE_DEFAULT" = 1 ] && [ "$RULE_COUNT" -ne 0 ]; then
+  emit_error "natural-language rules require a typed match or explicit worker override"
+fi
+if [ "$RULE_COUNT" -eq 0 ] && [ "$OFFLINE_DEFAULT" = 0 ] && [ -z "$OVERRIDE_HARNESS" ]; then
   no_rules
 fi
 
@@ -305,11 +363,30 @@ else
   cp "$BRIEF" "$TASK_TEXT" || die "could not read brief: $BRIEF"
 fi
 LAT_MS=null
+if [ -n "$OVERRIDE_HARNESS" ]; then
+  CHOICES=$(jq -c --arg h "$OVERRIDE_HARNESS" --arg m "$OVERRIDE_MODEL" --arg e "$OVERRIDE_EFFORT" '
+    def profiles: if type == "array" then . else [.] end;
+    def matches: .harness == $h and ($m == "" or .model == $m) and ($e == "" or .effort == $e);
+    [((.rules // [] | to_entries[]) | select(any(.value.use | profiles[]; matches)) | "rule_" + ((.key + 1) | tostring)),
+     (if any(.default // [] | profiles[]; matches) then "default" else empty end)]' "$RULES")
+  [ "$(jq length <<< "$CHOICES")" = 1 ] || emit_error "override must match exactly one configured rule or default"
+  CHOICE=$(jq -r '.[0]' <<< "$CHOICES")
+  jq --arg h "$OVERRIDE_HARNESS" --arg m "$OVERRIDE_MODEL" --arg e "$OVERRIDE_EFFORT" '
+    def matches: .harness == $h and ($m == "" or .model == $m) and ($e == "" or .effort == $e);
+    def keep: if type == "array" then map(select(matches)) elif matches then . else [] end;
+    .rules = ((.rules // []) | map(.use |= keep)) | if has("default") then .default |= keep else . end' "$RULES" > "$RESP_FILE"
+  chmod 600 "$RULES" || die "could not unlock rules snapshot"
+  cp "$RESP_FILE" "$RULES" || die "could not filter rules snapshot"
+  chmod 400 "$RULES" || die "could not protect filtered rules snapshot"
+  jq -n --arg choice "$CHOICE" --argjson count "$RULE_COUNT" '{model:"manual-override",answers:{rule:{choice:$choice,confidence:1,probabilities:(([range(1;$count+1) | "rule_" + tostring] + ["default"]) | map({key:.,value:(if . == $choice then 1 else 0 end)}) | from_entries)}}}' > "$RESP_FILE"
+elif [ "$OFFLINE_DEFAULT" = 1 ]; then
+  printf '{"model":"deterministic-default","answers":{"rule":{"choice":"default","confidence":1,"probabilities":{"default":1}}}}\n' > "$RESP_FILE"
+else
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$TASK_TEXT" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
-    ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+    (($cfg.rules // []) | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
     {
       model: $model,
       state: {task: {project: $project, brief: $brief}},
@@ -324,15 +401,17 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   never_send_check
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
+    -X POST "$TS_ENDPOINT" -H 'Content-Type: application/json' \
+    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$API_KEY_PRIVATE") \
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
-  [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+  [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms"
+fi
 jq -e --slurpfile rules "$RULES" '
-    (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
+    ((($rules[0].rules // []) | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
+    (.answers.rule.choice as $choice | ($choices | index($choice)) != null) and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
     (.answers.rule.probabilities | type) == "object" and
@@ -350,8 +429,18 @@ command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
+INSTALLED='[]'
+if [ "$REQUIRE_INSTALLED" = 1 ]; then
+  while IFS= read -r harness; do
+    if command -v "$harness" >/dev/null 2>&1; then
+      INSTALLED=$(jq -c --arg h "$harness" '. + [$h]' <<< "$INSTALLED")
+    fi
+  done < <(fm_control_harnesses)
+fi
+ALLOWED=$(jq -cn --arg names "$ALLOWED_HARNESSES" '$names | split(",") | map(select(length > 0))')
+
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --argjson require_installed "$REQUIRE_INSTALLED" --argjson installed "$INSTALLED" --argjson allowed "$ALLOWED" --arg provider "$PROVIDER" --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -381,7 +470,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    if ($allowed | length) > 0 and (($allowed | index($c.harness)) == null) then {profile: $c, eligible: false, reason: "harness outside caller capability set"}
+    elif $require_installed == 1 and (($installed | index($c.harness)) == null) then {profile: $c, eligible: false, reason: "worker executable absent"}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
        reason: (if any($q.providers[]; .provider == $p)
@@ -438,7 +529,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   # through to a runner-up, so a file with no declared floors keeps the single
   # global floor on the answer confidence exactly.
   (if declared_confidence($picked) | not then
-     (if $a.confidence >= $picked_floor then {below: false} else {below: true, global: true} end)
+     (if (if $provider == "fastino" then $a.confidence > 0 else $a.confidence >= $picked_floor end) then {below: false} else {below: true, global: true} end)
    elif $a.probabilities[$picked] >= $picked_floor then {below: false}
    else
      ([$a.probabilities | to_entries[] | select(.key != $picked and .value >= confidence_floor(.key))]
@@ -470,9 +561,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   }
   + (if $fb.to then {fallback: "\($choice) (\(when_of($choice))) probability \($fb.p) clears its floor \($fb.to_floor); \($picked) probability \($a.probabilities[$picked]) is below its floor \($picked_floor)"} else {} end)
   as $ev |
-  if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
+  if $provider == "fastino" and $r.model != "manual-override" and $picked != "default" and ((rule_at($picked) | has("min_confidence")) or ($rule != null and ($rule | has("min_confidence")))) then
+    $ev + {status: "ambiguous", reason: "Fastino margin does not implement declared probability min_confidence", candidates: ($answer_use | map(evaluate(.)))}
+  elif $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $fb.below and $fb.global then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "ambiguous", reason: (if $provider == "fastino" then "Fastino confidence margin does not establish a unique match" else "confidence \($a.confidence) below floor \($floor)" end), candidates: ($answer_use | map(evaluate(.)))}
   elif $fb.below and ($fb.to | not) then
     $ev + {status: "ambiguous", reason: "\($picked) probability \($a.probabilities[$picked]) below its floor \($picked_floor); \($fb.why)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
@@ -494,6 +587,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       end
     end
   end') || emit_error "resolution failed"
+
+if [ -n "$OVERRIDE_HARNESS" ] && [ "$(jq -r '.chosen.profile.harness // empty' <<< "$RESULT")" != "$OVERRIDE_HARNESS" ] && [ "$(jq -r .status <<< "$RESULT")" = clear ]; then
+  emit_error "configured gates would change the explicitly selected worker"
+fi
+if [ "$JSON_OUTPUT" = 1 ]; then
+  printf '%s\n' "$RESULT"
+  exit 0
+fi
 
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
