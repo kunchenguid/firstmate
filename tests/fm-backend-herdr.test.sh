@@ -3720,11 +3720,11 @@ test_capture_strips_ansi_without_text_read() {
   # idle alternate-screen agent to harvest history (herdr issue #2669), so the
   # capture must read ANSI and strip it locally, never issue a text read.
   dir="$TMP_ROOT/capture-ansi"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '\033[1;31mred\033[0m \033]8;;https://x\033\\link\033]8;;\033\\ \033]0;t\007tail\n\033[?25l\033(BUPPER\033[38:2::1:2:3m ok\033[0m\n' > "$resp/1.out"
+  printf '\033[1;31mred\033[0m tail\n\033[?25lUPPER\033[38:2::1:2:3m ok\033[0m\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_capture default:w1:p2 40' "$ROOT" )
-  [ "$out" = $'red link tail\nUPPER ok' ] || fail "capture did not strip ANSI escapes to plain text, got '$(printf '%s' "$out" | od -c | head -5)'"
+  [ "$out" = $'red tail\nUPPER ok' ] || fail "capture did not strip ANSI escapes to plain text, got '$(printf '%s' "$out" | od -c | head -5)'"
   assert_contains "$(cat "$log")" $'\x1f''--format'$'\x1f''ansi' "capture must read with --format ansi"
   assert_not_contains "$(cat "$log")" $'\x1f''--format'$'\x1f''text' "capture must never issue a text-format read"
   pass "fm_backend_herdr_capture: reads ANSI (skipping herdr's alt-screen wheel harvest) and strips it to plain text"

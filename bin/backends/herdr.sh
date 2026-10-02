@@ -3139,20 +3139,7 @@ fm_backend_herdr_capture() {  # <target> <lines>
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
   out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
-  printf '%s' "$out" | fm_backend_herdr_strip_escapes | tail -n "$lines"
-}
-
-# fm_backend_herdr_strip_escapes: ANSI capture on stdin -> plain text. Drops
-# OSC (BEL- or ST-terminated, e.g. OSC 8 hyperlinks), CSI, and remaining
-# two-byte ESC sequences, in that order so an OSC's ST is not half-eaten.
-fm_backend_herdr_strip_escapes() {
-  local esc bel
-  esc=$(printf '\033'); bel=$(printf '\007')
-  LC_ALL=C sed -E \
-    -e "s/${esc}\][^${bel}${esc}]*(${bel}|${esc}\\\\)//g" \
-    -e "s#${esc}\[[0-9;:?<=>]*[ -/]*[@-~]##g" \
-    -e "s/${esc}[()][0-9A-Za-z]//g" \
-    -e "s/${esc}[^][]//g"
+  printf '%s' "$out" | fm_composer_strip_ansi | tail -n "$lines"
 }
 
 # fm_backend_herdr_visible_capture: the visible viewport only. `--source
