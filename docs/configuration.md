@@ -1752,7 +1752,7 @@ It is off unless the home's gitignored `.env` contains a non-empty `DISCORD_BOT_
 | `DISCORD_BOT_TOKEN` | yes | Bot token; activation opt-in, sole long-lived secret. |
 | `DISCORD_CLIENT_ID` | setup | Application id for OAuth install URL and slash-command registration. |
 | `DISCORD_CLIENT_SECRET` | setup | Used once per OAuth code exchange; never persisted. |
-| `DISCORD_PUBLIC_KEY` | interactions | Application public key for Ed25519 interaction verification. |
+| `DISCORD_PUBLIC_KEY` | test-only | Application public key retained only for the `verify` test helper; never consulted on the live gateway path. |
 | `DISCORD_GUILD_ID` | inbound | Authorized server; unknown guilds refuse closed. |
 | `DISCORD_OWNER_USER_ID` | inbound | The single authorized user; unknown senders refuse closed. |
 | `DISCORD_REDIRECT_URI` | setup | OAuth redirect URI, must match the Portal entry. |

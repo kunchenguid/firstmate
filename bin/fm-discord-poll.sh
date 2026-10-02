@@ -11,7 +11,11 @@
 # stays silent when the REST fallback is unconfigured; the Gateway in
 # bin/fm-discord-gateway.py is the primary mechanism, not aggressive
 # polling. --event-file maps one Gateway MESSAGE_CREATE event through the
-# same idempotent routing. New messages are stashed at
+# same idempotent routing, and one Gateway INTERACTION_CREATE event
+# through bin/fm-discord-commands.sh handle --gateway (gateway delivery is
+# already session-authenticated, so no signature applies). Plain messages
+# starting with !fm (ask/status) are routed to the command handler as
+# message-based equivalents needing no interaction delivery at all. New messages are stashed at
 # state/discord-inbox/<message-id>.json with guild, channel, user, message
 # id, timestamps, and reply/thread context preserved, then one wake line
 # "discord-message <message-id>" is printed per new message.
@@ -87,6 +91,11 @@ route_message_file() { # <message.json>
     return 0
   fi
   if ! discord_authorize_sender "$author" "$guild" "$ch"; then return 0; fi
+  # Message-based command equivalents (!fm ask/!fm status) need no
+  # interaction delivery at all; the command handler decides what is a
+  # command, and only it claims its own cmd-<id> marker, so a refusal
+  # falls through to the normal message path.
+  if "$SCRIPT_DIR/fm-discord-commands.sh" handle-message --message-file "$f" 2>/dev/null; then return 0; fi
   # Idempotent event processing: duplicates are absorbed silently.
   discord_seen_claim "$mid"
   case "$?" in 0) ;; 1) return 0 ;; *) echo "fm-discord-poll: dedup store failure" >&2; return 0 ;; esac
@@ -104,8 +113,17 @@ if [ -n "$event_file" ]; then
   [ -f "$event_file" ] || { echo "fm-discord-poll: event file missing" >&2; exit 1; }
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-discord-evt.XXXXXX") || exit 1
   trap 'rm -f "$tmp"' EXIT
-  # Gateway MESSAGE_CREATE envelopes carry {t:"MESSAGE_CREATE", d:{...}}.
-  jq -c 'if has("d") and (.t // "") == "MESSAGE_CREATE" then .d else . end' "$event_file" > "$tmp" || exit 1
+  # Gateway MESSAGE_CREATE envelopes carry {t:"MESSAGE_CREATE", d:{...}};
+# INTERACTION_CREATE envelopes carry {t:"INTERACTION_CREATE", d:{...}}.
+  jq -c 'if has("d") and ((.t // "") == "MESSAGE_CREATE") then .d elif has("d") and ((.t // "") == "INTERACTION_CREATE") then {__interaction: .d} else . end' "$event_file" > "$tmp" || exit 1
+  if jq -e 'has("__interaction")' "$tmp" >/dev/null 2>&1; then
+    jq -c '.__interaction' "$tmp" > "$tmp.inter" || exit 1
+    # Gateway-delivered interactions are already session-authenticated;
+    # no signature material exists or is needed on this path.
+    "$SCRIPT_DIR/fm-discord-commands.sh" handle --gateway --interaction-file "$tmp.inter"
+    rm -f "$tmp" "$tmp.inter"; trap - EXIT
+    exit 0
+  fi
   route_message_file "$tmp"
   rm -f "$tmp"; trap - EXIT
   exit 0

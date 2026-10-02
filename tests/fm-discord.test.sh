@@ -315,4 +315,52 @@ FM_HOME="$nobid" FM_ROOT="$ROOT" bash -c '. "$0/bin/fm-discord-lib.sh" && discor
 FM_HOME="$home" FM_ROOT="$ROOT" bash -c '. "$0/bin/fm-discord-lib.sh" && discord_validate_config' "$ROOT" 2>/dev/null || fail "complete config must validate"
 pass "configuration validation"
 
+# 11. Relay-style outbound-only reply path: gateway INTERACTION_CREATE needs
+# no signature and answers via the REST callback; !fm message equivalents
+# need no interaction delivery; nothing listens on a socket.
+unset FAKE_SEND_MODE FAKE_SEND_CODES FAKE_SEND_HEADERS FAKE_MSGS_CODE
+jq -n '{t:"INTERACTION_CREATE", d:{id:"gw-i1", token:"gw-tok-1", type:2, guild_id:"g1", member:{user:{id:"u9"}}, data:{name:"firstmate", options:[{name:"ask", options:[{name:"question", value:"gateway hello"}]}]}}}' > "$TMP_ROOT/gw-inter.json"
+rm -f "$TMP_ROOT/gw-cb.log"
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" FAKE_CURL_LOG="$TMP_ROOT/gw-cb.log" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/gw-inter.json") || fail "gateway interaction routing failed: $out"
+assert_contains "$out" "discord-command gw-i1 ask" "gateway INTERACTION_CREATE wakes without any signature"
+[ -f "$home/state/discord-inbox/gw-i1.json" ] || fail "gateway interaction stashed"
+assert_grep '"firstmate_command": "ask"' "$home/state/discord-inbox/gw-i1.json" "interaction subcommand preserved"
+assert_grep "interactions/gw-i1/gw-tok-1/callback" "$TMP_ROOT/gw-cb.log" "answer goes out through the REST interaction callback"
+assert_grep '"type": 4' "$TMP_ROOT/gw-cb.log" "callback answers with a type-4 channel message"
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/gw-inter.json") || fail "dup interaction poll failed"
+[ -z "$out" ] || fail "duplicate interaction must be silent"
+jq -n '{id:"i-ping", type:1}' > "$TMP_ROOT/gw-ping.json"
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-commands.sh" handle --gateway --interaction-file "$TMP_ROOT/gw-ping.json") || fail "gateway PING failed"
+[ -z "$out" ] || fail "gateway PING needs no callback and no wake"
+FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-commands.sh" handle --interaction-file "$TMP_ROOT/gw-ping.json" 2>/dev/null && fail "non-gateway handle must stay refused"
+jq -n '{t:"INTERACTION_CREATE", d:{id:"gw-evil", token:"t", type:2, guild_id:"evil", member:{user:{id:"u9"}}, data:{name:"firstmate", options:[{name:"status"}]}}}' > "$TMP_ROOT/gw-evil.json"
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-commands.sh" handle --gateway --interaction-file "$TMP_ROOT/gw-evil.json" 2>/dev/null; echo "rc=$?")
+# handle --gateway on a foreign guild must refuse (non-zero) with no wake.
+case "$out" in *"discord-command"*) fail "foreign-guild interaction must be refused" ;; esac
+[ -e "$home/state/discord-inbox/gw-evil.json" ] && fail "foreign-guild interaction must never stash"
+cat > "$TMP_ROOT/fm-ask.json" <<'JSON'
+{"t":"MESSAGE_CREATE","d":{"id":"m-cmd1","guild_id":"g1","channel_id":"c1","author":{"id":"u9","bot":false},"content":"!fm ask what is the status","timestamp":"2026-01-01T00:00:00.000Z"}}
+JSON
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/fm-ask.json") || fail "message command routing failed"
+assert_contains "$out" "discord-command cmd-m-cmd1 ask" "!fm ask wakes as a command without interaction delivery"
+assert_grep '"question": "what is the status"' "$home/state/discord-inbox/cmd-m-cmd1.json" "message-command question preserved"
+[ -e "$home/state/discord-inbox/m-cmd1.json" ] && fail "command message must not also stash as a plain message"
+cat > "$TMP_ROOT/fm-status.json" <<'JSON'
+{"t":"MESSAGE_CREATE","d":{"id":"m-cmd2","guild_id":"g1","channel_id":"c1","author":{"id":"u9","bot":false},"content":"!fm status","timestamp":"2026-01-01T00:00:01.000Z"}}
+JSON
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/fm-status.json") || fail "message status routing failed"
+assert_contains "$out" "discord-command cmd-m-cmd2 status" "!fm status wakes as a command"
+cat > "$TMP_ROOT/fm-intruder.json" <<'JSON'
+{"t":"MESSAGE_CREATE","d":{"id":"m-cmd3","guild_id":"g1","channel_id":"c1","author":{"id":"u666","bot":false},"content":"!fm status","timestamp":"2026-01-01T00:00:02.000Z"}}
+JSON
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/fm-intruder.json" 2>/dev/null) || fail "intruder command poll failed"
+[ -z "$out" ] || fail "non-owner !fm command must be refused silently"
+[ -e "$home/state/discord-inbox/cmd-m-cmd3.json" ] && fail "non-owner command must never stash"
+cat > "$TMP_ROOT/plain.json" <<'JSON'
+{"t":"MESSAGE_CREATE","d":{"id":"m-plain","guild_id":"g1","channel_id":"c1","author":{"id":"u9","bot":false},"content":"just chatting","timestamp":"2026-01-01T00:00:03.000Z"}}
+JSON
+out=$(FM_HOME="$home" PATH="$fakebin:$BASE_PATH" "$ROOT/bin/fm-discord-poll.sh" --event-file "$TMP_ROOT/plain.json") || fail "plain message poll failed"
+assert_contains "$out" "discord-message m-plain" "plain messages still route as messages"
+pass "relay-style outbound-only reply path"
+
 pass "fm-discord"

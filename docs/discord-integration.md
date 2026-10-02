@@ -48,7 +48,8 @@ point where broader policies attach later without rewriting the callers.
 2. Bot tab: create/reset the bot token -> `DISCORD_BOT_TOKEN`.
 3. General Information: copy Application ID -> `DISCORD_CLIENT_ID`, and the
    client secret -> `DISCORD_CLIENT_SECRET`. Copy the public key ->
-   `DISCORD_PUBLIC_KEY` (interaction signature verification).
+   `DISCORD_PUBLIC_KEY` (key schema in `docs/configuration.md`; retained
+   only for the `verify` test helper, never consulted on the live path).
 4. OAuth2 -> Redirects: add the redirect URI (see below), e.g.
    `http://localhost:8787/discord/callback` (local) or
    `https://<host>/discord/callback` (production).
@@ -61,7 +62,9 @@ point where broader policies attach later without rewriting the callers.
 7. Install the bot into the target server (administrator), set
    `DISCORD_OWNER_USER_ID` in `.env`, then run
    `fm-discord-setup.sh callback` + `verify`, then `register` the slash
-   commands.
+   commands. Do NOT set an interactions endpoint URL in the Portal: this
+   integration answers slash commands over the gateway (below), so no
+   public HTTPS endpoint is needed or used.
 
 ## OAuth redirect URL
 
@@ -124,6 +127,40 @@ lives in `config/discord.json` (mode 600, inside a 0700 config dir).
 including whether the owner is set. `disconnect` removes the binding
 (revoke the token in the Portal to fully revoke).
 
+## Reply path is outbound-only (Relay-style)
+
+Everything the bot hears and answers arrives over connections the home
+opens itself, exactly like the hosted Relay: the gateway websocket
+(outbound `wss://` client) plus the bounded REST poll fallback are the
+only inbound mechanisms. Nothing in this integration listens on a socket,
+requires a public URL, or needs extra permission grants beyond the
+minimal scopes/bits above. Chosen shape, and why: slash interactions are
+handled where Discord already delivers them without any endpoint -
+over the gateway as `INTERACTION_CREATE` (already authenticated by the
+gateway session, so no Ed25519 signature check applies there) and
+answered through the REST interaction callback
+(`POST /interactions/{id}/{token}/callback`) — plus message-based
+equivalents (`!fm ask <question>`, `!fm status`, also after a bot
+mention) parsed from plain `MESSAGE_CREATE` content that need no
+interaction delivery at all. Both shapes were kept because each covers
+the other's gap: gateway interactions give native slash UX with zero
+hosting, while `!fm` commands keep ask/status working wherever only
+message content arrives (e.g. REST-fallback polls, or servers where
+slash delivery lags). Either shape alone would satisfy the "plain
+messages plus an ask/status equivalent with zero inbound hosting"
+bar; together they share one `discord_authorize_sender` gate, one
+inbox, and one `discord-command` wake, so there is still only one
+command pipeline, not two.
+
+The old self-hosted HTTPS interaction path (receive an interaction body
+on a public endpoint, pipe it to a handler with `X-Signature-Ed25519` /
+`X-Signature-Timestamp` headers for Ed25519 verification) is explicitly
+unsupported and has no handler: `fm-discord-commands.sh handle`
+requires `--gateway` and refuses anything else, and `DISCORD_PUBLIC_KEY`
+is retained only for the `verify` test helper, never consulted on the
+live path. Slash commands over a self-hosted endpoint are not part of
+this integration.
+
 ## Operations
 
 - Connect: set `DISCORD_OWNER_USER_ID`, then `init` -> open URL ->
@@ -140,20 +177,25 @@ including whether the owner is set. `disconnect` removes the binding
   ` (k/n)` thread suffixes like the Relay splitter; 429s honor
   Retry-After; 401/403/404 are structured failures.
 - Inbound: `bin/fm-discord-gateway.py` (primary; reconnect + resume +
-  dedup + self-filter) routes each MESSAGE_CREATE through
-  `bin/fm-discord-poll.sh --event-file`. Where websockets are unavailable,
+  dedup + self-filter) routes each MESSAGE_CREATE and each
+  INTERACTION_CREATE through `bin/fm-discord-poll.sh --event-file`.
+  Where websockets are unavailable,
   `fm-discord-poll.sh` runs config-gated under the watcher shim as the
   bounded REST fallback. The gateway loop holds
   `state/discord-gateway.lock`; a second loop refuses to start, and
   `fm-discord-gateway.py --stop` ends the running one.
 - Slash commands: `/firstmate ask <question>`, `/firstmate status`
-  (registered by `fm-discord-commands.sh register`; every interaction is
-  signature-verified inside `handle` over the raw body with the Discord
-  headers passed as `--signature`/`--timestamp`, then owner- and
-  guild-checked before mapping). Discord delivers interactions to an HTTPS
-  endpoint you host; piping a received interaction body to `handle` with
-  its headers is the provided handler, while the HTTP server itself is
-  outside this integration's scope.
+  (registered by `fm-discord-commands.sh register`; interactions arrive
+  over the gateway via `handle --gateway`, are owner-, guild-, and
+  channel-checked
+  before mapping, and are answered through the REST interaction
+  callback), plus message equivalents `!fm ask <question>` and
+  `!fm status` (`handle-message`, routed automatically from `!fm`- or
+  mention-prefixed message content by `fm-discord-poll.sh`) that need no
+  interaction delivery at all. Both shapes stash to
+  `state/discord-inbox/` and wake as `discord-command <id> <sub>` (see
+  below); a failed interaction callback only logs, it never drops the
+  wake, because the agent follows up with `fm-discord-send.sh` anyway.
 
 ## Watcher wiring and the wake consumer
 
@@ -171,10 +213,12 @@ mechanism: authorized messages enter Firstmate only as watcher wakes.
   `reply_context` preserved). The on-call agent reads that file, treats
   `content` as untrusted third-party input, and answers through the normal
   lifecycle, replying with `fm-discord-send.sh <channel> --reply-to <id>`.
-- `discord-command <iid> <sub>`: the verified interaction is stashed at
-  `state/discord-inbox/<iid>.json` with `firstmate_command`, `user_id`,
-  and `guild_id`. The `ask` subcommand's question text is the interaction
-  option value; the agent answers the same way.
+- `discord-command <iid> <sub>`: the gateway-authenticated interaction
+  (or `!fm` message equivalent, stashed as `cmd-<msgid>` with `via` set
+  to `"message"`) is stashed at `state/discord-inbox/<iid>.json` with
+  `firstmate_command`, `user_id`, and `guild_id`. The `ask` subcommand's
+  question text is the interaction option value (or the `!fm ask`
+  remainder as `question`); the agent answers the same way.
 - `fm-discord-gateway.py --once` is the health check: it reports the
   gateway session-limit lookup, and reports "not configured" (non-zero)
   instead of succeeding while inert.
@@ -183,8 +227,10 @@ mechanism: authorized messages enter Firstmate only as watcher wakes.
 
 - Tokens are never logged (`discord_redact` covers token shapes plus the
   literal loaded secrets), never enter the agent context, and live only in
-  `.env`/memory; interaction signatures are verified with Ed25519 (PyNaCl)
-  inside `handle` and refused closed when unavailable, unverified, or stale.
+  `.env`/memory; gateway-delivered interactions need no signature check
+  because the gateway session itself is the authentication, while the
+  legacy Ed25519 `verify` helper stays available for tests only and is
+  never consulted on the live path.
 - Guild/user/channel are checked before routing; unknown senders,
   guilds, channels, and missing owner/guild configuration all refuse
   closed. Privileged actions stay behind Firstmate's captain-hold model.
@@ -200,8 +246,10 @@ mechanism: authorized messages enter Firstmate only as watcher wakes.
 
 Mocked in the normal suite: OAuth exchange, Gateway lookup, REST,
 chunking, dedup, rate limits, permissions, authorization gates,
-self-filtering, shim arming/validation, intent bits. A live Discord
-application + server is required to prove: real OAuth install, real
-Gateway delivery and resume, real slash command
-registration/interaction (including a valid Ed25519 signature path, which
-needs PyNaCl), real permission bits, and real 429 shape.
+self-filtering, shim arming/validation, intent bits, gateway
+INTERACTION_CREATE routing without signatures, the REST interaction
+callback, `!fm` message equivalents, and the no-listen static check. A
+live Discord application + server is required to prove: real OAuth
+install, real Gateway delivery (messages and interactions) and resume,
+real slash command registration/interaction, real permission bits, and
+real 429 shape.
