@@ -972,14 +972,19 @@ while [ "$LATE_BURST" -lt 10 ]; do
   kill -TERM "$LOST_TERM_PID" 2>/dev/null || true
   LATE_BURST=$((LATE_BURST + 1))
 done
-kill -CONT "$LOST_TERM_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$LOST_TERM_PID" 2>/dev/null || break
+kill -CONT "$LOST_TERM_PID" 2>/dev/null || true
+# kill -0 still succeeds on a zombie until wait reaps it, so a bare aliveness
+# poll races bash's async job reaping and fails the exited worker as "alive".
+# Accept state Z the way the stall test does, and keep a 30s bound for a slow
+# CONT/trap path on a busy runner.
+OWNER_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = Z ] \
+  || ! kill -0 "$LOST_TERM_PID" 2>/dev/null || [ "$SECONDS" -ge "$OWNER_DEADLINE" ]; do
   sleep 0.05
 done
-if kill -0 "$LOST_TERM_PID" 2>/dev/null; then
-  fail "a burst of TERMs after ownership loss left the old worker alive"
-fi
+[ "$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | cut -c1)" = Z ] \
+  || ! kill -0 "$LOST_TERM_PID" 2>/dev/null \
+  || fail "a burst of TERMs after ownership loss left the old worker alive (state=$(ps -o state= -p "$LOST_TERM_PID" 2>/dev/null | tr -d ' '); err=$(tr '\n' ' ' < "$TMP_ROOT/replacement-lost.err" 2>/dev/null))"
 wait "$LOST_TERM_PID" 2>/dev/null || true
 LOST_DEAD_PID=$LOST_TERM_PID
 LOST_TERM_PID=
@@ -996,13 +1001,14 @@ kill -0 "$OWNER_JOB_SUPERVISOR" 2>/dev/null \
 rm -f -- "$OWNER_STATE/worker.lock/quarantine"
 assert_absent "$OWNER_SIDE_EFFECT" "the replacement command finished during the ownership handoff"
 kill -TERM "$REPLACEMENT_OWNER_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null || break
+OWNER_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$REPLACEMENT_OWNER_PID" 2>/dev/null | cut -c1)" = Z ] \
+  || ! kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null || [ "$SECONDS" -ge "$OWNER_DEADLINE" ]; do
   sleep 0.05
 done
-if kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null; then
-  fail "the replacement owner did not finish its own TERM shutdown"
-fi
+[ "$(ps -o state= -p "$REPLACEMENT_OWNER_PID" 2>/dev/null | cut -c1)" = Z ] \
+  || ! kill -0 "$REPLACEMENT_OWNER_PID" 2>/dev/null \
+  || fail "the replacement owner did not finish its own TERM shutdown"
 wait "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
 REPLACEMENT_OWNER_PID=
 assert_absent "$OWNER_STATE/worker.lock" \
