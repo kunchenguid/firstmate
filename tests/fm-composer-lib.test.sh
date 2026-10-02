@@ -766,7 +766,30 @@ test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
   out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
   [ "$out" = empty ] \
     || fail "pinned adapter version must still settle the banner, got '$out'"
-  pass 'pi codex banner adapter requires a pinned version'
+  # Production callers never set the override: the adapter reads the installed
+  # `pi --version` itself, so a pinned install settles the banner and an
+  # unpinned or absent pi keeps refusing.
+  local fakebin installed want
+  fakebin=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-version.XXXXXX")
+  for installed in 0.87.1 1.0.0 9.9.9 absent; do
+    rm -f "$fakebin/pi"
+    want=empty
+    case "$installed" in
+      absent) want=unknown ;;
+      9.9.9) want=unknown; printf '#!/bin/sh\nprintf "%%s\\n" 9.9.9\n' > "$fakebin/pi" ;;
+      *) printf '#!/bin/sh\nprintf "%%s\\n" %s\n' "$installed" > "$fakebin/pi" ;;
+    esac
+    [ ! -f "$fakebin/pi" ] || chmod +x "$fakebin/pi"
+    out=$(
+      unset FM_COMPOSER_PI_ADAPTER_VERSION _FM_COMPOSER_PI_INSTALLED_VERSION
+      PATH="$fakebin:/usr/bin:/bin"
+      fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
+    )
+    [ "$out" = "$want" ] \
+      || { rm -rf "$fakebin"; fail "installed pi $installed with no override must read '$want', got '$out'"; }
+  done
+  rm -rf "$fakebin"
+  pass 'pi codex banner adapter requires a pinned version, read from the installed pi when no override is set'
 }
 
 test_matrix_opencode_leftbar_signals() {

@@ -175,6 +175,13 @@
 # Re-sourcing is a cheap idempotent redefinition, so this file needs no
 # include guard (matching bin/fm-tmux-lib.sh).
 
+# The named, version-pinned Pi rendered-screen adapter (VISION.md) owns the
+# Pi banner recognition used by the separated-shape classifier below. Every
+# consumer that ships or links this library must ship the adapter beside it.
+# shellcheck source=bin/fm-composer-pi-adapter.sh
+FM_COMPOSER_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd) || return 1
+. "$FM_COMPOSER_LIB_DIR/fm-composer-pi-adapter.sh" || return 1
+
 # fm_composer_strip_ansi: drop every CSI escape sequence, leaving plain text.
 # Used for STRUCTURAL row/shape detection, where ghost text must be KEPT so the
 # composer box border or bare prompt glyph is still visible; content extraction
@@ -182,11 +189,6 @@
 # plain text (stdin-only, matching fm_composer_strip_ghost). The character class
 # includes ':' so an ITU colon-form SGR (38:2::r:g:b) is stripped whole, not left
 # with a dangling tail.
-# Named, version-pinned Pi rendered-screen adapter (VISION.md).
-# shellcheck source=bin/fm-composer-pi-adapter.sh
-FM_COMPOSER_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd) || return 1
-. "$FM_COMPOSER_LIB_DIR/fm-composer-pi-adapter.sh"
-
 fm_composer_strip_ansi() {
   local esc; esc=$(printf '\033')
   LC_ALL=C sed "s/${esc}\\[[0-9;:?]*[[:alpha:]]//g"

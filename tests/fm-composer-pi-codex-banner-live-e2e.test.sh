@@ -73,11 +73,17 @@ PATH="$WORK:$PATH"
 
 VERSION=$(pi --version 2>/dev/null | head -1)
 [ -n "$VERSION" ] || VERSION='version-unknown'
-# The adapter is version-pinned: an unpinned installed pi must fail here by
-# name rather than silently treating any rendering as empty proof.
-FM_COMPOSER_PI_ADAPTER_VERSION=$VERSION
-if ! fm_composer_pi_adapter_version_pinned "$VERSION"; then
-  fail "pi $VERSION is outside the pinned banner-adapter set ($FM_COMPOSER_PI_BANNER_PINNED_VERSIONS); refresh the pin after verifying the live shape"
+# Production callers never set the override, so neither does this guard: the
+# adapter must resolve the installed release itself. A pinned release must read
+# the banner screen empty; an unpinned one must keep the adapter's refusal (a
+# stale status stays unknown) and is named so its pin can be refreshed, rather
+# than turning every newer Pi release into a red build.
+unset FM_COMPOSER_PI_ADAPTER_VERSION
+if fm_composer_pi_adapter_version_pinned "$VERSION"; then
+  PINNED=1
+else
+  PINNED=0
+  note "pi $VERSION is outside the pinned banner-adapter set ($FM_COMPOSER_PI_BANNER_PINNED_VERSIONS); verifying the adapter refuses it. Refresh the pin after this guard passes with FM_COMPOSER_PI_BANNER_PINNED_VERSIONS='$VERSION'"
 fi
 
 # The stub Codex endpoint: every SSE request answers with the exact stream
@@ -154,13 +160,17 @@ printf '%s' "$banner_row" | grep -qE "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT"
 
 for status in working unknown idle; do
   verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$styled" '' "$(printf 'pi\t%s' "$status")")
-  if [ "$verdict" = empty ]; then
+  # idle is the ordinary settled status and reads empty without the adapter;
+  # working and unknown read empty only through the pinned banner adapter.
+  expected=empty
+  [ "$PINNED" = 1 ] || [ "$status" = idle ] || expected=unknown
+  if [ "$verdict" = "$expected" ]; then
     CHECKED=$((CHECKED + 1))
-    pass "pi ($VERSION): banner screen classifies empty on the cursorless styled read with a $status status"
+    pass "pi ($VERSION): banner screen classifies $expected on the cursorless styled read with a $status status"
   else
     printf '# pi pane tail at failure:\n' >&2
     printf '%s\n' "$plain" | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
-    fail "pi ($VERSION): banner screen classified '$verdict' on the cursorless styled read with a $status status"
+    fail "pi ($VERSION): banner screen classified '$verdict', expected '$expected', on the cursorless styled read with a $status status"
   fi
 done
 verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$styled" '' probe-absent)

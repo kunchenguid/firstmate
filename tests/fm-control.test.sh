@@ -874,19 +874,31 @@ test_pi_parked_on_codex_usage_limit_banner_still_exits() {
   alive_as "$dir" pi
   printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
   printf '6' > "$dir/fake/cursor"
-  out=$(run_control "$dir" t1 exit); rc=$?
+  # The modelled screen is pi 0.85.1's, so pin the adapter to that release
+  # rather than to whatever pi this machine happens to have installed.
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1 run_control "$dir" t1 exit); rc=$?
   expect_code 0 "$rc" "exiting a pi parked on the Codex usage-limit banner should succeed"$'\n'"$out"
   [ "$(literals "$dir")" = "/quit" ] || fail "the exit command should be typed over the settled banner, got: $(literals "$dir")"
+  # The same screen under a pi release outside the adapter's pin set is not
+  # proof: the version-pinned adapter refuses and nothing is typed.
+  dir=$(new_case pibanner-unpinned)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
+  printf '6' > "$dir/fake/cursor"
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.0.1 run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "an unpinned pi release must not prove the banner screen empty"$'\n'"$out"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed under an unpinned pi release, got: $(literals "$dir")"
   dir=$(new_case pibanner-other)
   add_task "$dir" t1 pi
   alive_as "$dir" pi
   printf 'Working...\n hello there\n\n Error: Codex error: Something else went wrong\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' > "$dir/fake/pane"
   printf '6' > "$dir/fake/cursor"
-  out=$(run_control "$dir" t1 exit); rc=$?
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1 run_control "$dir" t1 exit); rc=$?
   [ "$rc" -ne 0 ] || fail "a stale working status over an unrecognized error must still refuse"$'\n'"$out"
   assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
   [ -z "$(literals "$dir")" ] || fail "nothing may be typed into an unproven composer, got: $(literals "$dir")"
-  pass "fm-control exit: a pi parked on the Codex usage-limit banner with a stale working status still receives /quit, and any other error text keeps the refusal"
+  pass "fm-control exit: a pi parked on the Codex usage-limit banner with a stale working status still receives /quit on a pinned pi release, while any other error text or an unpinned release keeps the refusal"
 }
 
 test_interrupt_without_acknowledgement_preserves_busy_state() {

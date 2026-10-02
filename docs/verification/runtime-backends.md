@@ -783,6 +783,23 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-10-02 Pi Codex usage-limit banner on pi 0.99.2 and 1.0.0
+
+Verified on 2026-10-02 on macOS arm64 with the same live guard and stub Codex endpoint as the 2026-09-25 entry below, against pi 0.87.1 (installed), and pi 0.99.2 and 1.0.0 installed into isolated npm prefixes from `@earendil-works/pi-coding-agent`.
+All three render the banner as `Error: Codex error: The usage limit has been reached` followed by the fixed bug-report hint row, and each classified the banner screen `empty` on all five live surfaces, so 0.99.2 and 1.0.0 joined the adapter's pin set.
+The guard no longer sets `FM_COMPOSER_PI_ADAPTER_VERSION`, so it exercises the adapter's own `pi --version` read that production callers use.
+On a release outside the pin set it now proves the adapter's refusal instead of failing the build: with the pin set forced to `0.85.1`, pi 1.0.0 read `unknown` with the stale `working` and `unknown` statuses and `empty` only with `idle`.
+
+```text
+# pi (1.0.0): rendered banner row: Error: Codex error: The usage limit has been reached
+ok - pi (1.0.0): banner screen classifies empty on the cursorless styled read with a working status
+ok - pi (1.0.0): banner screen classifies empty on the cursorless styled read with a unknown status
+ok - pi (1.0.0): banner screen classifies empty on the cursorless styled read with a idle status
+ok - pi (1.0.0): the banner over the same screen with the identity probe absent stays unknown
+ok - pi (1.0.0): banner screen classifies empty on the cursor-anchored tmux read
+ok - live pi banner guard verified 5 live surface(s)
+```
+
 ### 2026-09-25 Pi Codex usage-limit banner over an empty separator pair
 
 Verified on 2026-09-25 on macOS arm64 (Darwin 25.5.0) against pi 0.85.1 with Herdr's Pi integration file at version 9, driving the installed Pi TUI in an isolated tmux server against a local stub Codex endpoint whose only answer is the `{"type":"error","message":"The usage limit has been reached"}` stream event, so no provider request leaves the machine and no model tokens are spent.
