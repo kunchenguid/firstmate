@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -38,12 +38,15 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
-#   A ship or scout brief's optional "Base branch: <branch>" line, written by
-#   bin/fm-brief.sh --base-branch, makes a fresh launch reset its pooled copy to
-#   origin/<branch> instead of origin's default branch, refusing when the project
-#   has no origin or origin lacks that branch. The spawn records it as
+#   --base-branch is the optional branch selected at intake for a ship or scout
+#   to start from and target instead of origin's default branch. A fresh launch
+#   resets its pooled copy to origin/<branch>, refusing when the project has no
+#   origin or origin lacks that branch. It must agree with every "Base branch:"
+#   line in the brief (bin/fm-brief.sh --base-branch writes one), and a brief
+#   with such a line refuses a spawn without the flag. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
-#   cleanup read; with no such line nothing changes.
+#   cleanup read; it is refused on secondmates and relaunches, and without it
+#   nothing changes.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -669,6 +672,7 @@ MODE_SET=0
 YOLO_SET=0
 BRANCH_PREFIX_SET=0
 BASE_BRANCH=
+BASE_BRANCH_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 POS=()
@@ -709,6 +713,10 @@ for a in "$@"; do
     branch-prefix)
       BRANCH_PREFIX=$a
       BRANCH_PREFIX_SET=1
+      ;;
+    base-branch)
+      BASE_BRANCH=$a
+      BASE_BRANCH_SET=1
       ;;
     traceparent)
       TRACEPARENT_ARG=$a
@@ -766,6 +774,11 @@ for a in "$@"; do
   --branch-prefix=*)
     BRANCH_PREFIX=${a#--branch-prefix=}
     BRANCH_PREFIX_SET=1
+    ;;
+  --base-branch) want_value="base-branch" ;;
+  --base-branch=*)
+    BASE_BRANCH=${a#--base-branch=}
+    BASE_BRANCH_SET=1
     ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
@@ -853,6 +866,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: --relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" >&2
     exit 1
   }
+  [ "$BASE_BRANCH_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded base branch; --base-branch cannot override it" >&2
+    exit 1
+  }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -896,6 +913,10 @@ else
     }
     [ "$BRANCH_PREFIX_SET" -eq 0 ] || {
       echo "error: --branch-prefix applies only to ship spawns; a scout makes no branch and a secondmate records no ship branch" >&2
+      exit 1
+    }
+    [ "$KIND" != secondmate ] || [ "$BASE_BRANCH_SET" -eq 0 ] || {
+      echo "error: --base-branch applies only to ship and scout spawns; a secondmate charter has no task base" >&2
       exit 1
     }
   fi
@@ -1479,6 +1500,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -3066,9 +3088,19 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     BASE_BRANCH=$(fm_meta_get "$RELAUNCH_META" base_branch)
-  else
-    BASE_BRANCH=$(fm_brief_base_branch "$BRIEF")
-    fm_base_branch_valid "$BASE_BRANCH" "$MODE" none "$BRIEF Base branch" || exit 1
+  elif [ "$BASE_BRANCH_SET" -eq 1 ]; then
+    [ -n "$BASE_BRANCH" ] || {
+      echo "error: --base-branch requires a branch name" >&2
+      exit 1
+    }
+    fm_base_branch_valid "$BASE_BRANCH" "$MODE" none "fm-spawn.sh --base-branch" || exit 1
+    if ! fm_brief_base_branches "$BRIEF" >/dev/null || fm_brief_base_branches "$BRIEF" | grep -vxF -- "$BASE_BRANCH" >/dev/null; then
+      echo "error: $BRIEF must record Base branch: $BASE_BRANCH and no other Base branch line to spawn with --base-branch $BASE_BRANCH; scaffold it with bin/fm-brief.sh --base-branch $BASE_BRANCH" >&2
+      exit 1
+    fi
+  elif fm_brief_base_branches "$BRIEF" >/dev/null; then
+    echo "error: $BRIEF records a Base branch line but the spawn has no --base-branch; pass the brief's base with --base-branch or re-scaffold the brief without one" >&2
+    exit 1
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.

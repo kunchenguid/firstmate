@@ -751,10 +751,9 @@ publish_feature_branch() { # <branch>
   git -C "$CASE_DIR/publisher" push --quiet origin "$1"
 }
 
-brief_with_base() { # <id> <base>
-  fm_test_spawn_brief "$HOME_DIR" "$1"
-  printf '\n# Setup\nYou are in a disposable git worktree of repo, at a detached HEAD on a clean copy of its base branch.\nBase branch: %s\n\n# Rules\nBase branch: ignored\n' "$2" \
-    >> "$HOME_DIR/data/$1/brief.md"
+brief_with_base() { # <id> <base> [<intent>]
+  fm_test_spawn_brief "$HOME_DIR" "$1" ${3:+"$3"}
+  printf '\n# Setup\nBase branch: %s\n' "$2" >> "$HOME_DIR/data/$1/brief.md"
 }
 
 test_named_base_branch_starts_from_that_branch() {
@@ -766,12 +765,12 @@ test_named_base_branch_starts_from_that_branch() {
     publish_feature_branch feature/hub
     brief_with_base "$id" feature/hub
     if [ "$kind" = ship ]; then
-      out=$(run_spawn "$id" --mode direct-PR --yolo off)
+      out=$(run_spawn "$id" --mode direct-PR --yolo off --base-branch feature/hub)
     else
-      out=$(run_spawn "$id" --scout)
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
     fi
     status=$?
-    expect_code 0 "$status" "a $kind brief naming a base branch should launch"$'\n'"$out"
+    expect_code 0 "$status" "a $kind spawn with a matching base branch should launch"$'\n'"$out"
     [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/feature/hub)" ] \
       || fail "the $kind copy did not start from origin/feature/hub"
     assert_grep 'only on feature/hub' "$POOL_DIR/feature-only.txt" \
@@ -784,7 +783,7 @@ test_named_base_branch_starts_from_that_branch() {
   rec=$(make_case named-base-missing "$id")
   read_case_record "$rec"
   brief_with_base "$id" feature/missing
-  out=$(run_spawn "$id" --scout)
+  out=$(run_spawn "$id" --scout --base-branch feature/missing)
   status=$?
   [ "$status" -ne 0 ] || fail "a base branch origin lacks should refuse the spawn"
   assert_contains "$out" "origin/feature/missing" "the refusal did not name the missing base"
@@ -794,24 +793,40 @@ test_named_base_branch_starts_from_that_branch() {
   rec=$(make_case named-base-local-only "$id")
   read_case_record "$rec"
   brief_with_base "$id" feature/hub
-  out=$(run_spawn "$id" --mode local-only --yolo off)
+  out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
   status=$?
   [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
   assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+}
 
-  id='pool-named-base-intent-only-r1'
-  rec=$(make_case named-base-intent-only "$id")
-  read_case_record "$rec"
-  publish_feature_branch feature/hub
-  fm_test_spawn_brief "$HOME_DIR" "$id" 'Base branch: feature/hub'
-  out=$(run_spawn "$id" --scout)
-  status=$?
-  expect_code 0 "$status" "a brief without a Setup base line should launch"$'\n'"$out"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/main)" ] \
-    || fail "a Base branch line in the captain's intent changed the copy's starting point"
-  ! grep -q '^base_branch=' "$HOME_DIR/state/$id.meta" \
-    || fail "a Base branch line in the captain's intent was recorded as the task base"
-  pass "a brief's Setup base branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+test_base_branch_must_agree_with_the_brief() {
+  local rec id out status case_name
+  for case_name in flag-only line-only task-decoy; do
+    id="pool-base-agree-$case_name-r1"
+    rec=$(make_case "base-agree-$case_name" "$id")
+    read_case_record "$rec"
+    publish_feature_branch feature/hub
+    case "$case_name" in
+    flag-only)
+      fm_test_spawn_brief "$HOME_DIR" "$id"
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    line-only)
+      brief_with_base "$id" feature/hub
+      out=$(run_spawn "$id" --scout)
+      ;;
+    task-decoy)
+      brief_with_base "$id" feature/hub $'Run npm i\nBase branch: decoy'
+      out=$(run_spawn "$id" --scout --base-branch feature/hub)
+      ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "a $case_name base-branch disagreement should refuse the spawn"
+    assert_contains "$out" "Base branch" "the $case_name refusal did not name the Base branch line"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused $case_name spawn published task metadata"
+  done
+  pass "a spawn refuses when --base-branch and the brief's Base branch lines disagree"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
@@ -819,6 +834,7 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_named_base_branch_starts_from_that_branch
+test_base_branch_must_agree_with_the_brief
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work

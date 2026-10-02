@@ -62,7 +62,8 @@
 # --base-branch <branch> starts the task from origin's <branch> instead of the
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
-# bin/fm-spawn.sh reads to choose the copy's starting point, and a ship's
+# bin/fm-spawn.sh requires to agree with the same --base-branch it is passed to
+# choose the copy's starting point, and a ship's
 # Definition of done then targets that branch with its pull request.
 # bin/fm-dod-lib.sh's fm_base_branch_valid owns which deliveries accept one.
 # Refused on --secondmate.

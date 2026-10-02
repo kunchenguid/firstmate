@@ -147,8 +147,9 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
 # A task's optional base branch replaces the repository default as the branch
 # its copy starts from and its pull request targets. bin/fm-brief.sh records it
 # as a "Base branch: <name>" line under the brief's `# Setup` heading,
-# bin/fm-spawn.sh reads it back with fm_brief_base_branch and records base_branch=
-# in the task metadata, and every later consumer reads that metadata field. It is
+# bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
+# lines (fm_brief_base_branches) disagree, and records base_branch= in the task
+# metadata, and every later consumer reads that metadata field. It is
 # refused on local-only, whose landing fast-forwards local main, and on a Gerrit
 # forge, whose publish path targets the change's own branch.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
@@ -169,11 +170,12 @@ fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   return 0
 }
 
-fm_brief_base_branch() {  # <brief>
+# Print the value of every "Base branch:" line anywhere in a brief; return 1
+# when there is none.
+fm_brief_base_branches() {  # <brief>
   awk '
-    anchor && sub(/^Base branch: /, "") { base = $0 }
-    { anchor = /^You are in a disposable git worktree of .*, at a detached HEAD on a clean copy of its base branch\.$/ }
-    END { if (base != "") print base }
+    sub(/^Base branch: ?/, "") { print; n++ }
+    END { exit !n }
   ' "$1"
 }
 

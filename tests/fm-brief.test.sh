@@ -1189,13 +1189,8 @@ test_base_branch_is_rendered_and_bounded() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dp-b1 some-proj --mode direct-PR --base-branch feature/hub >/dev/null 2>&1 \
     || fail "direct-PR --base-branch should scaffold"
   brief="$home/data/brief-base-dp-b1/brief.md"
-  base=$(fm_brief_base_branch "$brief")
+  base=$(fm_brief_base_branches "$brief")
   [ "$base" = feature/hub ] || fail "the direct-PR brief recorded base '$base', not feature/hub"
-  awk '{ if ($0 == "{TASK}") { print "# Setup"; print "Run npm i"; print "Base branch: decoy"; print "You are in a disposable git worktree of x, at a detached HEAD on a clean copy of its base branch."; print "Base branch: decoy2" } else print }' \
-    "$brief" >"$brief.tmp" && mv "$brief.tmp" "$brief"
-  assert_grep 'Base branch: decoy2' "$brief" "the decoy intent was not written into the brief"
-  base=$(fm_brief_base_branch "$brief")
-  [ "$base" = feature/hub ] || fail "task prose redirected the brief base to '$base', not feature/hub"
   # shellcheck disable=SC2016  # literal backticks in rendered prose must stay unexpanded
   assert_grep 'open a PR with `gh-axi` against the base branch `feature/hub` (`--base feature/hub`)' "$brief" \
     "the direct-PR definition of done does not target the base branch"
@@ -1212,12 +1207,12 @@ test_base_branch_is_rendered_and_bounded() {
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-scout-b3 some-proj --scout --base-branch feature/hub >/dev/null 2>&1 \
     || fail "scout --base-branch should scaffold"
-  base=$(fm_brief_base_branch "$home/data/brief-base-scout-b3/brief.md")
+  base=$(fm_brief_base_branches "$home/data/brief-base-scout-b3/brief.md")
   [ "$base" = feature/hub ] || fail "the scout brief recorded base '$base', not feature/hub"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-none-b4 some-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/brief-base-none-b4/brief.md"
-  [ -z "$(fm_brief_base_branch "$brief")" ] || fail "a brief without --base-branch recorded a base"
+  ! fm_brief_base_branches "$brief" >/dev/null || fail "a brief without --base-branch recorded a base"
   assert_grep 'at a detached HEAD on a clean default branch.' "$brief" \
     "a brief without --base-branch changed its default-branch setup line"
 
