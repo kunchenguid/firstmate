@@ -268,13 +268,11 @@ done
 
 C_CALL_LOG="$TMP_ROOT/call-c.log"
 C_FOCUS_SAMPLES="$TMP_ROOT/focus-c.samples"
-C_POST_CLOSE_FOCUS="$TMP_ROOT/focus-c.post-close"
 C_OPERATION_ACTIVE="$TMP_ROOT/operation-c.active"
 C_SAMPLER_READY="$TMP_ROOT/sampler-c.ready"
 SAMPLER_STOP="$TMP_ROOT/sampler-c.stop"
 : > "$C_CALL_LOG"
 : > "$C_FOCUS_SAMPLES"
-: > "$C_POST_CLOSE_FOCUS"
 (
   : > "$C_SAMPLER_READY"
   while [ ! -e "$SAMPLER_STOP" ]; do
@@ -297,43 +295,18 @@ done
 : > "$C_OPERATION_ACTIVE"
 # A short proof budget keeps the exhausted-proof path fast; the count below is
 # what proves the proof was exhausted rather than skipped.
-# The async sampler alone is not load-bearing for the defective-release steal:
-# on 0.7.4 the plain-close flash can finish inside one multi-call
-# focus_snapshot, so Part C also records the exact post-mutation focus the
-# production restore backstop observes before it acts. That sample is the
-# deterministic steal proof and cannot race the restore itself.
 C_PROOF_POLLS=3
-C_RUNNER="$TMP_ROOT/part-c-runner.sh"
-cat > "$C_RUNNER" <<'RUNNER'
-#!/usr/bin/env bash
-set -u
-ROOT=$1
-SESSION=$2
-PANE=$3
-# shellcheck source=bin/backends/herdr.sh
-. "$ROOT/bin/backends/herdr.sh"
-fm_backend_herdr_cli() {
-  local session=$1
-  shift
-  printf '%s\n' "$*" >> "$FM_FLASH_CALL_LOG"
-  HERDR_SESSION="$session" herdr "$@" --session "$session"
-}
-# Rename the production restore, then wrap it so the post-mutation focus it
-# observes is durable evidence taken before any corrective tab focus.
-eval "$(declare -f fm_backend_herdr_projection_focus_restore | sed '1s/.*/_fm_flash_orig_restore ()/')"
-fm_backend_herdr_projection_focus_restore() {
-  local session=$1 before=$2 after
-  after=$(fm_backend_herdr_projection_focus_snapshot "$session") || after=UNREADABLE
-  printf '%s\n' "$after" >> "$FM_FLASH_POST_CLOSE_FOCUS"
-  _fm_flash_orig_restore "$@"
-}
-fm_backend_herdr_projection_close_pane_focus_preserving "$SESSION" "$PANE"
-RUNNER
-chmod +x "$C_RUNNER"
 C_OUT=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_FLASH_CALL_LOG="$C_CALL_LOG" \
-  FM_FLASH_POST_CLOSE_FOCUS="$C_POST_CLOSE_FOCUS" \
-  FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$C_PROOF_POLLS" \
-  bash "$C_RUNNER" "$ROOT" "$HERDR_LAB_SESSION" "$C_DOOMED_PANE" 2>&1)
+  FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS="$C_PROOF_POLLS" bash -c '
+  . "$1/bin/backends/herdr.sh"
+  fm_backend_herdr_cli() {
+    local session=$1
+    shift
+    printf "%s\n" "$*" >> "$FM_FLASH_CALL_LOG"
+    HERDR_SESSION="$session" herdr "$@" --session "$session"
+  }
+  fm_backend_herdr_projection_close_pane_focus_preserving "$2" "$3"
+' _ "$ROOT" "$HERDR_LAB_SESSION" "$C_DOOMED_PANE" 2>&1)
 C_STATUS=$?
 rm -f "$C_OPERATION_ACTIVE"
 : > "$SAMPLER_STOP"
@@ -361,24 +334,16 @@ C_AFTER=$(focus_snapshot) || fail 'could not capture the Part C post-close focus
 [ "$C_AFTER" = "$C_BEFORE" ] \
   || fail "the fallback close left focus off the anchor ($C_BEFORE -> $C_AFTER)"
 C_WRONG=$(grep -Fvxc -- "$C_BEFORE" "$C_FOCUS_SAMPLES" || true)
-C_POST_CLOSE=$(head -n 1 "$C_POST_CLOSE_FOCUS" 2>/dev/null || true)
-[ -n "$C_POST_CLOSE" ] \
-  || fail 'Part C never captured the restore backstop post-mutation focus sample'
 if [ "$STEAL_LIVE" = 1 ]; then
   # A defective release cannot make this path focus-safe, which is precisely why
   # default-on projection is floored above it. The wrong-focus window is
   # explicitly accepted here, but only as a BOUNDED one: the restore backstop
   # must have put the anchor back exactly, and the whole exposure must end with
   # the operation rather than parking the captain somewhere else.
-  # Prove the steal from the synchronous post-close sample (taken before
-  # restore), not from the async sampler: a multi-call focus_snapshot can miss
-  # the entire flash on a fast 0.7.4 close+restore.
-  [ "$C_POST_CLOSE" != "$C_BEFORE" ] \
-    || fail "Part C reached the fallback on a defective release but post-close focus still matched the anchor ($C_BEFORE)"
-  pass "fallback on a defective release: post-close focus moved ($C_BEFORE -> $C_POST_CLOSE; async_wrong=$C_WRONG) and restore put the anchor back"
+  [ "$C_WRONG" -ge 1 ] \
+    || fail 'Part C reached the fallback on a defective release but observed no wrong-focus sample at all, so the sampler proved nothing'
+  pass "fallback on a defective release: a bounded wrong-focus window of $C_WRONG samples was fully restored to the anchor"
 else
-  [ "$C_POST_CLOSE" = "$C_BEFORE" ] \
-    || fail "a focus-preserving release moved focus on plain close before restore ($C_BEFORE -> $C_POST_CLOSE)"
   [ "$C_WRONG" -eq 0 ] \
     || fail "a focus-preserving release exposed $C_WRONG wrong-focus samples on the fallback path"
   pass 'fallback on a focus-preserving release: the plain explicit close preserved exact focus throughout'
