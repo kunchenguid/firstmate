@@ -271,6 +271,7 @@ function lifecycleDispositions(codeRoot, dataRoot, environment) {
   const values = new Map();
   let ids = [];
   try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
+  const lifecycleIds = [];
   for (const id of ids) {
     const directory = join(dataRoot, id);
     const lifecycle = join(directory, "lifecycle.json");
@@ -278,16 +279,28 @@ function lifecycleDispositions(codeRoot, dataRoot, environment) {
       const directoryInfo = lstatSync(directory);
       if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || !inside(dataRoot, realpathSync(directory))) continue;
       if (!regularNoSymlink(lifecycle)) continue;
-      const raw = execFileSync(join(codeRoot, "bin", "fm-task-state.sh"), ["lifecycle", id], {
+      if (id.length <= 160) lifecycleIds.push(id);
+      else values.set(id, "unknown");
+    } catch {
+      values.set(id, "unknown");
+    }
+  }
+  for (let offset = 0; offset < lifecycleIds.length; offset += 1000) {
+    const batch = lifecycleIds.slice(offset, offset + 1000);
+    try {
+      const raw = execFileSync(join(codeRoot, "bin", "fm-task-state.sh"), ["modes", JSON.stringify(batch)], {
         encoding: "utf8",
         env: environment,
         timeout: 3000,
         maxBuffer: 2 * 1024 * 1024,
       });
-      const disposition = JSON.parse(raw).disposition;
-      if (["open", "accepted", "archived"].includes(disposition)) values.set(id, disposition);
+      const dispositions = JSON.parse(raw);
+      for (const id of batch) {
+        const disposition = dispositions?.[id];
+        values.set(id, ["open", "accepted", "archived"].includes(disposition) ? disposition : "unknown");
+      }
     } catch {
-      values.set(id, "unknown");
+      for (const id of batch) values.set(id, "unknown");
     }
   }
   return values;

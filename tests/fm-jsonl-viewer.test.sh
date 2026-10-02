@@ -63,6 +63,8 @@ FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" lifecycle cancelled-task \
 chmod 600 "$TMP_ROOT/cancelled-lifecycle.json"
 FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" reconcile cancelled-task --expected-revision 1 --record "$TMP_ROOT/cancelled-lifecycle.json" >/dev/null
 rm "$HOME_FIXTURE/state/cancelled-task.meta"
+mkdir -p "$HOME_FIXTURE/data/invalid-lifecycle-task"
+printf '{"disposition":"archived"}\n' > "$HOME_FIXTURE/data/invalid-lifecycle-task/lifecycle.json"
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
 
@@ -200,12 +202,14 @@ jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
+# Keep a lifecycle-only task visible while the viewer reads lifecycle records without spawning one state reader per data directory.
 jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report"))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null))
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief"))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
     and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled"))
+    and (.tasks | any(.id == "invalid-lifecycle-task" and .category == "held" and .status == "Needs reconciliation"))
     and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 
