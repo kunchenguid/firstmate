@@ -53,16 +53,22 @@
 # a spawn or a readiness check.
 FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
 
-# bin/fm-timeout-lib.sh is the single owner of bounded execution. It declares
-# set -u for its own hygiene; restore the caller's nounset setting so sourcing
-# this file does not impose set -u on consumers that deliberately omit it.
-_FM_CURSOR_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
-case $- in *u*) _fm_cursor_nounset=on ;; *) _fm_cursor_nounset=off ;; esac
-# shellcheck source=bin/fm-timeout-lib.sh
-# shellcheck disable=SC1091
-. "$_FM_CURSOR_LIB_DIR/fm-timeout-lib.sh"
-[ "$_fm_cursor_nounset" = on ] || set +u
-unset _fm_cursor_nounset
+# bin/fm-timeout-lib.sh is the single owner of bounded execution. It is loaded
+# only when a probe actually runs, so the hook and process-scan consumers that
+# source this file never depend on it. It declares set -u for its own hygiene;
+# restore the caller's nounset setting so a probe does not impose it.
+fm_cursor_run_timed() {  # <seconds> <command...>
+  if ! declare -F fm_run_timed >/dev/null; then
+    local dir nounset=off
+    dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
+    case $- in *u*) nounset=on ;; esac
+    # shellcheck source=bin/fm-timeout-lib.sh
+    # shellcheck disable=SC1091
+    . "$dir/fm-timeout-lib.sh" || return 1
+    [ "$nounset" = on ] || set +u
+  fi
+  fm_run_timed "$@"
+}
 
 # Canonical absolute path for $1, or the input unchanged when it cannot be
 # resolved. Symlink resolution is what makes the structural signal work, since
@@ -108,7 +114,7 @@ fm_cursor_bounded_output() {  # <path> <args...>
   local path=$1
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
+  fm_cursor_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
 fm_cursor_help_marks_cursor() {  # <help-text>
@@ -148,7 +154,7 @@ fm_cursor_verify_executable() {  # <path>
   [ -n "$path" ] && [ -x "$path" ] || return 1
   # Keep stderr: the broken IDE shim prints only there. stdout-only capture
   # would hide the refusal text on a future exit-0 variant of the same file.
-  out=$(fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1) || rc=$?
+  out=$(fm_cursor_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     fm_cursor_help_marks_cursor "$out" && return 0
     fm_cursor_help_is_ide_shim_refusal "$out" && return 1
