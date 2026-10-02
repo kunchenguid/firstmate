@@ -333,7 +333,7 @@ def sessions():
     for path in sorted(DATA.glob("*/route.json")):
         if path.parent.name not in seen:
             try:
-                routing = json.loads(path.read_text())
+                routing = json.loads(path.read_text(), parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite JSON")))
                 if not isinstance(routing, dict):
                     raise ValueError("not an object")
             except (OSError, ValueError) as exc:
