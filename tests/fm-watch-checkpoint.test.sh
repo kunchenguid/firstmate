@@ -313,6 +313,7 @@ test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
 
 # A Codex home that runs the supervision host, beside a leftover daemon whose
 # watcher polls every 60s, so its beacon is stale past the 3s grace.
+# shellcheck disable=SC2016 # the fake harness's script expands in its own shell
 test_host_checkpoint_takes_over_a_leftover_away_daemon() {
   local home fakebin old_watcher status
   home=$(make_home host-leftover-daemon)
