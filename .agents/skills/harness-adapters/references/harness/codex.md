@@ -43,7 +43,7 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
 The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard.sh`.
 Codex Stop hooks preserve exit status 2 and stderr to block, and expose `stop_hook_active` plus `session_id` and `turn_id`.
-The default guard tracks turn ids and watcher-beacon progress so a later stop after a checkpoint is checked again, while a configurable retry budget bounds repeated blocks without progress.
+The default guard tracks turn ids and watcher-beacon progress so a later stop after a checkpoint is checked again, while a configurable retry budget bounds immediate repeated blocks without progress.
 Older payloads without `turn_id` retain the legacy one-block allow behavior for `stop_hook_active=true`.
 
 The Stop payload includes `cwd`, but the tracked hook does not use it to choose the guard executable.

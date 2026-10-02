@@ -100,10 +100,12 @@ SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 CODEX_BLOCK_BUDGET=${FM_CODEX_TURNEND_BLOCK_BUDGET:-3}
+CODEX_RETRY_WINDOW=${FM_CODEX_TURNEND_RETRY_WINDOW:-120}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 case "$CODEX_BLOCK_BUDGET" in ''|*[!0-9]*|0) CODEX_BLOCK_BUDGET=3 ;; esac
+case "$CODEX_RETRY_WINDOW" in ''|*[!0-9]*|0) CODEX_RETRY_WINDOW=120 ;; esac
 
 for arg in "$@"; do
   case "$arg" in
@@ -193,10 +195,12 @@ SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/nu
 CODEX_LEDGER="$STATE/.turnend-codex-ledger.$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' -f1)"
 
 # Each Codex session owns its own ledger file, scoped to one turn, so
-# concurrent sessions in one home cannot reset each other's count. A changed watcher beacon proves that
-# a checkpoint ran since the previous block and earns a fresh block budget.
-# The timestamp and beacon value are kept with the counter for diagnosis and
-# to make the persisted state self-describing.
+# concurrent sessions in one home cannot reset each other's count. A changed
+# watcher beacon proves that a checkpoint ran since the previous block and
+# earns a fresh block budget.
+# The budget only bounds immediate retries: a stop more than
+# CODEX_RETRY_WINDOW seconds after the last block also starts a fresh budget,
+# so an exhausted ledger cannot leave the rest of a long turn unguarded.
 codex_ledger_read() {
   CODEX_LEDGER_SESSION=$(sed -n '1s/^session=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   CODEX_LEDGER_TURN=$(sed -n '2s/^turn=//p' "$CODEX_LEDGER" 2>/dev/null || true)
@@ -204,6 +208,14 @@ codex_ledger_read() {
   CODEX_LEDGER_BEACON=$(sed -n '4s/^beacon=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   CODEX_LEDGER_COUNT=$(sed -n '5s/^count=//p' "$CODEX_LEDGER" 2>/dev/null || true)
   case "$CODEX_LEDGER_COUNT" in ''|*[!0-9]*) CODEX_LEDGER_COUNT=0 ;; esac
+  case "$CODEX_LEDGER_TIME" in ''|*[!0-9]*) CODEX_LEDGER_TIME=0 ;; esac
+}
+
+codex_ledger_continues() {
+  [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
+    && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
+    && [ "$CODEX_LEDGER_BEACON" = "$1" ] \
+    && [ $(($(date +%s) - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
 }
 
 codex_beacon_stand() {
@@ -219,12 +231,10 @@ codex_retry_budget_exhausted() {
   fm_lock_try_acquire "$CODEX_LEDGER_LOCK" || return 1
   codex_ledger_read
   fm_lock_release "$CODEX_LEDGER_LOCK"
-  [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
-    && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
-    && [ "$CODEX_LEDGER_BEACON" = "$current_beacon" ] \
+  codex_ledger_continues "$current_beacon" \
     && [ "$CODEX_LEDGER_COUNT" -ge "$CODEX_BLOCK_BUDGET" ] || return 1
-  printf 'TURN-END GUARD: Codex stop retry budget exhausted for turn %s without watcher-beacon progress; allowing this stop to prevent an unending continuation loop.\n' \
-    "$CODEX_TURN_ID" >&2
+  printf 'TURN-END GUARD: Codex stop retry budget exhausted for turn %s without watcher-beacon progress within %ss; allowing this stop to prevent an unending continuation loop.\n' \
+    "$CODEX_TURN_ID" "$CODEX_RETRY_WINDOW" >&2
   return 0
 }
 
@@ -237,9 +247,7 @@ codex_ledger_record_block() {
     return 0
   }
   codex_ledger_read
-  if [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
-    && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
-    && [ "$CODEX_LEDGER_BEACON" = "$current_beacon" ]; then
+  if codex_ledger_continues "$current_beacon"; then
     count=$((CODEX_LEDGER_COUNT + 1))
   else
     count=1

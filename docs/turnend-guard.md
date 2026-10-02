@@ -305,6 +305,7 @@ Both payloads carry `stop_hook_active`.
 In default mode, a Codex payload with `turn_id` uses a per-session state ledger and the watcher beacon to distinguish a retry without progress from a later stop after a checkpoint.
 The guard rechecks the latter and starts a fresh retry budget when the beacon advances.
 `FM_CODEX_TURNEND_BLOCK_BUDGET` (default 3) bounds repeated blocks without beacon progress, then allows the stop with a stderr diagnostic.
+The budget only bounds immediate retries: a stop more than `FM_CODEX_TURNEND_RETRY_WINDOW` seconds (default 120) after the last block is checked again with a fresh budget.
 Payloads without `turn_id` retain the legacy behavior of allowing a true `stop_hook_active` value.
 
 ### Claude cooperative mode

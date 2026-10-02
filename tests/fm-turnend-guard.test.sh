@@ -551,6 +551,23 @@ test_hook_codex_retry_rechecks_after_checkpoint_progress() {
   pass "fm-turnend-guard: Codex stop is rechecked after watcher-beacon progress"
 }
 
+test_hook_codex_exhausted_budget_expires_after_retry_window() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-codex-window")
+  : > "$dir/state/task1.meta"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" false turn-window); status=$?
+  expect_code 2 "$status" "the initial Codex stop must be blocked"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  expect_code 0 "$status" "an immediate no-progress retry must spend the exhausted budget"
+  sleep 3
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  expect_code 2 "$status" "a later stop in the same turn after the retry window must be checked and blocked again"
+  assert_contains "$out" "TURN WOULD END BLIND" "the re-armed Codex block must include the supervision alarm"
+  out=$(FM_CODEX_TURNEND_BLOCK_BUDGET=1 FM_CODEX_TURNEND_RETRY_WINDOW=2 run_codex_turn_hook "$dir" true turn-window); status=$?
+  expect_code 0 "$status" "the re-armed block must start a fresh, still bounded budget"
+  pass "fm-turnend-guard: exhausted Codex retry budget expires after the retry window"
+}
+
 test_hook_codex_retry_budget_is_per_session() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-codex-sessions")
@@ -2311,6 +2328,7 @@ test_hook_codex_loop_guard_rechecks_same_turn_retry
 test_hook_codex_retry_rechecks_after_checkpoint_progress
 test_hook_codex_retry_budget_allows_without_progress
 test_hook_codex_retry_budget_is_per_session
+test_hook_codex_exhausted_budget_expires_after_retry_window
 test_hook_codex_payload_without_turn_id_keeps_legacy_allow
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
