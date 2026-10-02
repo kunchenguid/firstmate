@@ -85,7 +85,9 @@
 # empty or `done` completes the task, `release` lifts the hold so held work
 # resumes; anything else is skipped. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
-# and feeds nothing. A replayed delivery whose answer digest and requested
+# and feeds nothing. A key that resolves to a different task id (a legacy or
+# migrated hold) is first reported as `resolved: <key> <task-id>`, and the lines
+# that follow name that task id. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
 # a mode mismatch is skipped. The command exits nonzero when any key was
 # skipped. `--source` is provenance text recorded in the
@@ -1387,6 +1389,7 @@ command_answers() {
       skipped=$((skipped + 1))
       continue
     fi
+    [ "$id" = "$key" ] || printf 'resolved: %s %s\n' "$key" "$id"
     keyed_decision_text "$source" "$id" "$answer" "$label" > "$tmp" \
       || fail "cannot stage the captain decision for $id"
     digest=$(sha256_text "$(cat "$tmp")")
