@@ -525,7 +525,7 @@ EOF
 }
 
 return_reconcile() {
-  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations uncertainty uncertainty_body lifecycle_ok=1 since contract_since superseded_record retained_record
+  local evidence blockers drain_err drained wake_ack_line wake_ack_through wake_ack_generation wedge escalations uncertainty uncertainty_body uncertainty_status lifecycle_ok=1 since contract_since superseded_record retained_record
   local archived_contract tag kind text retained_live restored_epoch
   evidence=$(mktemp "$STATE/.afk-return-evidence.XXXXXX") || return 1
   blockers=$(mktemp "$STATE/.afk-return-blockers.XXXXXX") || { rm -f "$evidence"; return 1; }
@@ -654,7 +654,13 @@ EOF
   fi
   for uncertainty in "$STATE"/.subsuper-inject-uncertain.*; do
     [ -f "$uncertainty" ] || continue
-    append_evidence wedge 'fm away-mode inject UNCERTAIN: uncertainty marker persistence failed; payload retained and not replayed' "$evidence"
+    case "$uncertainty" in *.status) continue ;; esac
+    uncertainty_status=$(cat "${uncertainty}.status" 2>/dev/null || true)
+    case "$uncertainty_status" in
+      submitted) append_evidence wedge 'fm away-mode inject SUBMITTED: recovery cleanup failed; payload retained and not replayed' "$evidence" ;;
+      unknown) append_evidence wedge 'fm away-mode inject UNCERTAIN: uncertainty marker persistence failed; payload retained and not replayed' "$evidence" ;;
+      *) append_evidence wedge 'fm away-mode inject UNCLASSIFIED: recovery bookkeeping incomplete; payload retained and not replayed' "$evidence" ;;
+    esac
     append_evidence wedge 'Submitted-at-most-once buffered items:' "$evidence"
     uncertainty_body=$(cat "$uncertainty" 2>/dev/null || true)
     append_evidence wedge "$uncertainty_body" "$evidence"

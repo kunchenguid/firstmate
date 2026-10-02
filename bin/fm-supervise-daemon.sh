@@ -673,7 +673,7 @@ escalate_add() {  # <state> <distilled-item>
 # buffer remains eligible for a later attempt, and 2 after an uncertain native
 # submission is recorded and retired from replay.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg rc marker recovery recovery_base suffix
+  local state=$1 buf item n msg rc marker recovery recovery_base recovery_status suffix
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -682,9 +682,29 @@ escalate_flush() {  # <state>
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
+  recovery_base="$state/.subsuper-inject-uncertain.$(date +%s).$$"
+  recovery=$recovery_base
+  suffix=0
+  while [ -e "$recovery" ] || [ -e "${recovery}.status" ]; do
+    suffix=$((suffix + 1))
+    recovery="$recovery_base.$suffix"
+  done
+  if ! mv "$buf" "$recovery"; then
+    log "inject claim failed: escalation buffer remains retryable; native submission was not attempted"
+    return 1
+  fi
+  recovery_status="${recovery}.status"
+  if ! printf 'claimed\n' > "$recovery_status"; then
+    log "inject claim status could not be written; claimed payload remains outside automatic replay"
+  fi
   if inject_msg "$msg" "$state"; then
-    : > "$buf"
+    if ! printf 'submitted\n' > "$recovery_status"; then
+      log "inject submitted: recovery outcome status could not be written"
+    fi
     rm -f "${buf}.since" "$state/.subsuper-inject-wedged"
+    if ! rm -f "$recovery" "$recovery_status"; then
+      log "inject submitted: non-replay recovery state could not be retired"
+    fi
     return 0
   else
     rc=$?
@@ -695,16 +715,8 @@ escalate_flush() {  # <state>
     # exact buffered payload so a later housekeeping cycle cannot submit it a
     # second time.
     marker="$state/.subsuper-inject-wedged"
-    recovery_base="$state/.subsuper-inject-uncertain.$(date +%s).$$"
-    recovery=$recovery_base
-    suffix=0
-    while [ -e "$recovery" ]; do
-      suffix=$((suffix + 1))
-      recovery="$recovery_base.$suffix"
-    done
-    if ! mv "$buf" "$recovery"; then
-      log "inject uncertain: escalation buffer could not be retired from automatic replay"
-      return 1
+    if ! printf 'unknown\n' > "$recovery_status"; then
+      log "inject uncertain: recovery outcome status could not be written"
     fi
     rm -f "${buf}.since"
     {
@@ -715,10 +727,15 @@ escalate_flush() {  # <state>
       log "inject uncertain: uncertainty marker could not be written; payload retained at $recovery and retired from automatic replay"
       return 2
     }
-    if ! rm -f "$recovery"; then
+    if ! rm -f "$recovery" "$recovery_status"; then
       log "inject uncertain: uncertainty marker was written but its fallback recovery record could not be removed"
     fi
     return 2
+  fi
+  if mv "$recovery" "$buf"; then
+    rm -f "$recovery_status"
+  else
+    log "inject refused: claimed payload could not be restored to the retryable escalation buffer"
   fi
   return 1
 }

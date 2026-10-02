@@ -2104,6 +2104,28 @@ test_uncertain_native_prompt_is_recorded_and_never_replayed() {
   pass "uncertain native prompt is recorded durably and retired without blind replay"
 }
 
+test_failed_preclaim_skips_native_submission() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-preclaim-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: remain retryable without submission"
+  printf '%s\n' "$(( $(date +%s) - 600 ))" > "$state/.subsuper-escalations.since"
+  afk_enter "$state"
+  chmod 500 "$state"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 0; }
+    LOG="$dir/daemon.log" FM_ESCALATE_BATCH_SECS=0 FM_MAX_DEFER_SECS=1 housekeeping "$state"
+  )
+  chmod 700 "$state"
+  if [ -f "$dir/inject.calls" ]; then calls=$(wc -l < "$dir/inject.calls" | tr -d ' '); else calls=0; fi
+  [ "$calls" -eq 0 ] || fail "failed preclaim invoked native submission $calls times"
+  grep -Fx 'needs-decision: remain retryable without submission' "$state/.subsuper-escalations" >/dev/null \
+    || fail "failed preclaim changed the retryable payload"
+  assert_contains "$(cat "$dir/daemon.log")" 'native submission was not attempted' \
+    "failed preclaim did not report the no-effect boundary"
+  pass "failed preclaim leaves retryable state without native submission"
+}
+
 test_uncertain_marker_failure_retires_buffer_without_replay() {
   local dir state calls recovery
   dir=$(make_bordered_case native-prompt-marker-failure)
@@ -2120,10 +2142,12 @@ test_uncertain_marker_failure_retires_buffer_without_replay() {
   [ "$calls" -eq 1 ] || fail "marker persistence failure submitted the uncertain payload $calls times"
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "marker persistence failure left the payload eligible for automatic replay"
-  recovery=$(find "$state" -maxdepth 1 -type f -name '.subsuper-inject-uncertain.*' -print)
+  recovery=$(find "$state" -maxdepth 1 -type f -name '.subsuper-inject-uncertain.*' ! -name '*.status' -print)
   [ -n "$recovery" ] || fail "marker persistence failure did not retain fallback recovery state"
   grep -Fx 'needs-decision: retain this exact payload' "$recovery" >/dev/null \
     || fail "marker persistence failure discarded the fallback payload"
+  [ "$(cat "${recovery}.status")" = unknown ] \
+    || fail "marker persistence failure did not retain the unknown outcome"
   assert_contains "$(cat "$dir/daemon.log")" 'uncertainty marker could not be written' \
     "marker persistence failure was not reported"
   pass "uncertain marker failure retires the payload and never replays it"
@@ -2151,6 +2175,71 @@ test_uncertain_readonly_buffer_is_retired_without_replay() {
   grep -F 'needs-decision: retain this payload in the marker' "$state/.subsuper-inject-wedged" >/dev/null \
     || fail "read-only uncertain buffer lost its payload from the uncertainty marker"
   pass "read-only uncertain buffer is retired and never replayed"
+}
+
+test_uncertain_retirement_failure_remains_nonreplayable() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-uncertain-retirement-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: keep uncertain cleanup failure"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 2; }
+    rm() {
+      case "$*" in *subsuper-inject-uncertain*) return 1 ;; *) command rm "$@" ;; esac
+    }
+    LOG="$dir/daemon.log" escalate_flush "$state" || true
+    LOG="$dir/daemon.log" escalate_flush "$state" || true
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "uncertain retirement failure submitted the payload $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "uncertain retirement failure restored automatic replay eligibility"
+  assert_contains "$(cat "$dir/daemon.log")" 'fallback recovery record could not be removed' \
+    "uncertain retirement failure was not reported"
+  pass "uncertain retirement failure remains outside automatic replay"
+}
+
+test_submitted_retirement_failure_remains_nonreplayable() {
+  local dir state calls recovery
+  dir=$(make_bordered_case native-prompt-submitted-retirement-failure)
+  state="$dir/state"
+  escalate_add "$state" "done: retain accepted cleanup failure"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 0; }
+    rm() {
+      case "$*" in *subsuper-inject-uncertain*) return 1 ;; *) command rm "$@" ;; esac
+    }
+    LOG="$dir/daemon.log" escalate_flush "$state"
+    LOG="$dir/daemon.log" escalate_flush "$state"
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 1 ] || fail "submitted retirement failure invoked native submission $calls times"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "submitted retirement failure restored automatic replay eligibility"
+  recovery=$(find "$state" -maxdepth 1 -type f -name '.subsuper-inject-uncertain.*' ! -name '*.status' -print)
+  [ -n "$recovery" ] || fail "submitted retirement failure lost its recovery payload"
+  [ "$(cat "${recovery}.status")" = submitted ] \
+    || fail "submitted retirement failure did not preserve its accepted outcome"
+  assert_contains "$(cat "$dir/daemon.log")" 'non-replay recovery state could not be retired' \
+    "submitted retirement failure was not reported"
+  pass "submitted retirement failure remains outside automatic replay"
+}
+
+test_definite_refusal_restores_retryable_buffer() {
+  local dir state calls
+  dir=$(make_bordered_case native-prompt-definite-refusal)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: retry only after definite refusal"
+  (
+    inject_msg() { printf 'called\n' >> "$dir/inject.calls"; return 1; }
+    escalate_flush "$state" || true
+    escalate_flush "$state" || true
+  )
+  calls=$(wc -l < "$dir/inject.calls" | tr -d ' ')
+  [ "$calls" -eq 2 ] || fail "definite refusal did not restore retry eligibility: $calls attempts"
+  grep -Fx 'needs-decision: retry only after definite refusal' "$state/.subsuper-escalations" >/dev/null \
+    || fail "definite refusal did not restore the exact payload"
+  pass "definite refusal alone restores the retryable escalation buffer"
 }
 
 test_max_defer_flushes_empty_idle_pane() {
@@ -2910,8 +2999,12 @@ test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_native_prompt_success_reports_submitted_once
 test_uncertain_native_prompt_is_recorded_and_never_replayed
+test_failed_preclaim_skips_native_submission
 test_uncertain_marker_failure_retires_buffer_without_replay
 test_uncertain_readonly_buffer_is_retired_without_replay
+test_uncertain_retirement_failure_remains_nonreplayable
+test_submitted_retirement_failure_remains_nonreplayable
+test_definite_refusal_restores_retryable_buffer
 test_max_defer_flushes_empty_idle_pane
 test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
