@@ -755,7 +755,8 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
+  if ! _fm_key_before_colon "$unstamped" && ! _fm_key_unbracketed "$unstamped" >/dev/null \
+    && k=$(_fm_key_at_note_head "$unstamped") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
@@ -1066,7 +1067,7 @@ status_key_closing_verb() {  # <status-file> <key>
           *) continue ;;
         esac
         if [ "$want" != default ]; then
-          case "$line" in *"[key=$want]"*|*" key=$want"*) ;; *) continue ;; esac
+          case "$line" in *"[key=$want]"*|*" key=$want"*|*$'\t'"key=$want"*) ;; *) continue ;; esac
         fi
         ;;
     esac

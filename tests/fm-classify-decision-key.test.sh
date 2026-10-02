@@ -566,6 +566,24 @@ test_unbracketed_key_word_is_the_stated_key() {
   pass "an unbracketed key=<slug> word before the colon is the stated key"
 }
 
+# A tab before the key word and a losing bracketed note-head token are the same
+# spelling family: the closing-verb read must see a tab-separated close, and the
+# note must keep a bracketed token that did not supply the key.
+test_unbracketed_key_tab_and_losing_note_token() {
+  local dir f note
+  dir=$(case_dir unbracketed-key-tab)
+  f="$dir/tab.status"
+  printf 'blocked [key=a]: pick\nresolved\tkey=a: answered\n' > "$f"
+  [ "$(status_key_closing_verb "$f" a)" = resolved ] \
+    || fail "tab-separated unbracketed close was skipped: '$(status_key_closing_verb "$f" a)'"
+
+  note=$(status_line_note 'blocked key=a: [key=b] details')
+  [ "$note" = '[key=b] details' ] || fail "losing note-head token was stripped: '$note'"
+  note=$(status_line_note 'blocked: [key=b] details')
+  [ "$note" = details ] || fail "winning note-head token was kept: '$note'"
+  pass "tab-separated closes are seen and a losing note-head key token stays in the note"
+}
+
 # The supervisors' declared-wait read keeps a pause standing behind answers
 # for other keys even when those answers outrun the bounded tail window, and a
 # resolved line for the pause's own key still retracts it from there.
@@ -589,6 +607,7 @@ test_declared_wait_survives_answers_past_the_event_window() {
 }
 
 test_unbracketed_key_word_is_the_stated_key
+test_unbracketed_key_tab_and_losing_note_token
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
