@@ -889,6 +889,31 @@ test_pi_parked_on_codex_usage_limit_banner_still_exits() {
   out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.0.1 run_control "$dir" t1 exit); rc=$?
   [ "$rc" -ne 0 ] || fail "an unpinned pi release must not prove the banner screen empty"$'\n'"$out"
   [ -z "$(literals "$dir")" ] || fail "nothing may be typed under an unpinned pi release, got: $(literals "$dir")"
+  # With no override, fm-control names the task's recorded Pi executable to the
+  # adapter, so only that executable's release decides. A pi-signed worker on a
+  # pinned pi-signed exits over the banner even beside an unpinned pi, and a pi
+  # worker on that same install keeps the refusal.
+  local exe_harness want_quit
+  for exe_harness in pi-signed pi; do
+    dir=$(new_case "pibanner-recorded-$exe_harness")
+    add_task "$dir" t1 "$exe_harness"
+    alive_as "$dir" pi
+    printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
+    printf '6' > "$dir/fake/cursor"
+    printf '#!/bin/sh\nprintf "%%s\\n" 9.9.9\n' > "$dir/fakebin/pi"
+    printf '#!/bin/sh\nprintf "%%s\\n" 1.0.0\n' > "$dir/fakebin/pi-signed"
+    chmod +x "$dir/fakebin/pi" "$dir/fakebin/pi-signed"
+    out=$(unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE; run_control "$dir" t1 exit); rc=$?
+    want_quit=0
+    [ "$exe_harness" = pi-signed ] && want_quit=1
+    if [ "$want_quit" = 1 ]; then
+      expect_code 0 "$rc" "a recorded pi-signed worker on a pinned pi-signed should exit over the banner"$'\n'"$out"
+      [ "$(literals "$dir")" = "/quit" ] || fail "the pi-signed worker should receive /quit, got: $(literals "$dir")"
+    else
+      [ "$rc" -ne 0 ] || fail "a recorded pi worker on an unpinned pi must keep the refusal"$'\n'"$out"
+      [ -z "$(literals "$dir")" ] || fail "nothing may be typed for the unpinned pi worker, got: $(literals "$dir")"
+    fi
+  done
   dir=$(new_case pibanner-other)
   add_task "$dir" t1 pi
   alive_as "$dir" pi

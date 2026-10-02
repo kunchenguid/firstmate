@@ -343,6 +343,12 @@ BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
+# Tell the composer's Pi banner adapter which Pi executable drew this task's
+# pane; the pane identity alone reports `pi` for both pi and pi-signed.
+unset FM_COMPOSER_PI_EXECUTABLE
+case "$RECORDED_HARNESS" in
+  pi|pi-signed) export FM_COMPOSER_PI_EXECUTABLE="$RECORDED_HARNESS" ;;
+esac
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
 [ -n "$KIND" ] || KIND=ship
