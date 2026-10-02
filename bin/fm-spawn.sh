@@ -3496,6 +3496,27 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fm_treehouse_allocation_begin "$PROJ_ABS" SPAWN_TREEHOUSE_PROJECT_LOCK || exit 1
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+elif [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ] &&
+  fm_treehouse_pool_slot "$PROJ_ABS" "$RELAUNCH_WT"; then
+  SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || exit 1
+  if ! fm_lock_try_acquire "$SPAWN_TREEHOUSE_PROJECT_LOCK"; then
+    echo "error: another Treehouse slot allocation or return is in progress for $PROJ_ABS; refusing to race it" >&2
+    exit 1
+  fi
+  SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  fm_treehouse_require_repository "$PROJ_ABS" "$RELAUNCH_WT" || exit 1
+  fm_treehouse_slot_owner_state "$RELAUNCH_WT" "$ID" "$FM_HOME"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|absent) ;;
+    *)
+      echo "REFUSED: task $ID no longer has exclusive ownership of Treehouse slot $RELAUNCH_WT (claim: $FM_TREEHOUSE_SLOT_OWNER, task: ${FM_TREEHOUSE_SLOT_OWNER_ID:-unknown}, home: ${FM_TREEHOUSE_SLOT_OWNER_HOME:-unknown}); nothing was changed" >&2
+      exit 1
+      ;;
+  esac
+  fm_treehouse_require_exclusive_record "$RELAUNCH_META" "$ID" "$STATE" "$RELAUNCH_WT" || exit 1
+  if [ "$FM_TREEHOUSE_SLOT_OWNER" = absent ]; then
+    fm_treehouse_slot_owner_claim "$RELAUNCH_WT" "$ID" "$FM_HOME" || exit 1
+  fi
 fi
 
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then

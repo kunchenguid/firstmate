@@ -45,6 +45,7 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
+  chmod -R u+w "$TMP_ROOT" 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
@@ -2032,6 +2033,11 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"tabs":[]}}\n'
     exit 0 ;;
   'tab create')
+    if [ -n "${FM_FAKE_PROJECT_LOCK:-}" ]; then
+      bash -c '. "$1"; if fm_lock_try_acquire "$2"; then fm_lock_release "$2"; exit 1; fi' _ \
+        "$FM_FAKE_WAKE_LIB" "$FM_FAKE_PROJECT_LOCK" || exit 1
+      printf 'held\n' > "$D/project-lock-observed"
+    fi
     # The re-created endpoint. Recording it lets a case prove the pane the
     # record ends up naming is the one this call minted.
     printf '%s\n' "$*" >> "$D/herdr-created-tabs"
@@ -2386,6 +2392,107 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_pool_relaunch_requires_exclusive_ownership() {
+  local dir id=pool-relaunch-r1 scenario wt marker other_home other_meta out rc before_head lock
+  command -v jq >/dev/null 2>&1 || fail "pool relaunch regression requires jq"
+  for scenario in successor-claim foreign-home-claim unsafe-claim local-record cross-home-record legacy-record owned owned-adopt legacy; do
+    herdr_case_or_skip "pool-$scenario" "$id" fmlab '%none' || fail "cannot build fake Herdr case"
+    dir=$HERDR_CASE_DIR
+    wt="$dir/pool/1/proj"
+    mkdir -p "$dir/pool/1"
+    git -C "$dir/proj" worktree move "$dir/wt" "$wt" || fail "cannot move fixture into its pool"
+    printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$wt" > "$dir/pool/treehouse-state.json"
+    awk '!/^worktree=/' "$dir/home/state/$id.meta" > "$dir/record.updated"
+    printf 'worktree=%s\n' "$wt" >> "$dir/record.updated"
+    mv "$dir/record.updated" "$dir/home/state/$id.meta"
+    printf '%s' "$wt" > "$dir/fake/cwd"
+    marker="$dir/pool/1/.fm-slot-owner"
+    printf 'task=%s\nhome=%s\n' "$id" "$dir/home" > "$marker"
+    other_home="$dir/secondmate-home"
+    mkdir -p "$other_home/state" "$other_home/data"
+    other_meta=
+    case "$scenario" in
+      successor-claim)
+        printf 'task=successor\nhome=%s\n' "$dir/home" > "$marker"
+        other_meta="$dir/home/state/successor.meta"
+        printf 'worktree=%s\n' "$wt" > "$other_meta"
+        ;;
+      foreign-home-claim)
+        printf 'task=%s\nhome=%s\n' "$id" "$other_home" > "$marker"
+        other_meta="$other_home/state/$id.meta"
+        printf 'worktree=%s\n' "$wt" > "$other_meta"
+        ;;
+      unsafe-claim) printf 'broken\n' > "$marker" ;;
+      local-record|legacy-record)
+        other_meta="$dir/home/state/successor.meta"
+        printf 'worktree=%s\n' "$wt" > "$other_meta"
+        [ "$scenario" != legacy-record ] || rm "$marker"
+        ;;
+      cross-home-record)
+        printf '%s\n' "- mate - fixture (home: $other_home; scope: test; projects: proj; added 2026-01-01)" \
+          > "$dir/home/data/secondmates.md"
+        other_meta="$other_home/state/successor.meta"
+        printf 'home=%s\n' "$wt" > "$other_meta"
+        ;;
+      legacy) rm "$marker" ;;
+      owned-adopt) printf '%%7' > "$dir/fake/herdr-pane" ;;
+    esac
+    mkdir -p "$wt/.claude"
+    printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"successor-hook"}]}]}}\n' \
+      > "$wt/.claude/settings.local.json"
+    printf 'unlanded successor work\n' > "$wt/unlanded.txt"
+    cp "$wt/.claude/settings.local.json" "$dir/hooks.before"
+    cp "$dir/home/state/$id.meta" "$dir/record.before"
+    [ ! -f "$marker" ] || cp "$marker" "$dir/claim.before"
+    [ -z "$other_meta" ] || cp "$other_meta" "$dir/successor.before"
+    before_head=$(git -C "$wt" rev-parse HEAD)
+    lock=$(FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_project_lock_path "$2"' _ \
+      "$ROOT/bin/fm-wake-lib.sh" "$dir/proj") || fail "cannot resolve project lock"
+    rc=0
+    out=$(FM_FAKE_PROJECT_LOCK="$lock" FM_FAKE_WAKE_LIB="$ROOT/bin/fm-wake-lib.sh" \
+      run_spawn "$dir" "$id" --relaunch --harness claude) || rc=$?
+    case "$scenario" in
+      owned|owned-adopt|legacy)
+        expect_code 0 "$rc" "an exclusive slot owner must still relaunch ($scenario)"$'\n'"$out"
+        if [ "$scenario" = owned-adopt ]; then
+          [ "$(meta_field "$dir" "$id" window)" = 'fmlab:%7' ] || fail "owner did not adopt its endpoint"
+          assert_absent "$dir/fake/herdr-created-tabs" "adoption created a competing endpoint"
+        else
+          [ "$(cat "$dir/fake/project-lock-observed")" = held ] || fail "rebind did not hold the project lock"
+          [ "$(meta_field "$dir" "$id" window)" = 'fmlab:%9' ] || fail "owner did not rebind its endpoint"
+        fi
+        FM_HOME="$dir/home" bash -c '. "$1"; fm_treehouse_slot_owner_state "$2" "$3"; [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ]' _ \
+          "$ROOT/bin/fm-wake-lib.sh" "$wt" "$id" || fail "successful relaunch lost its claim"
+        ;;
+      *)
+        expect_code 1 "$rc" "a conflicting slot must refuse relaunch ($scenario)"$'\n'"$out"
+        assert_contains "$out" "REFUSED:" "relaunch did not explain ownership refusal ($scenario)"
+        cmp -s "$dir/hooks.before" "$wt/.claude/settings.local.json" || fail "refusal altered successor hooks ($scenario)"
+        cmp -s "$dir/record.before" "$dir/home/state/$id.meta" || fail "refusal altered old task record ($scenario)"
+        [ -z "$other_meta" ] || cmp -s "$dir/successor.before" "$other_meta" || fail "refusal altered successor record ($scenario)"
+        assert_absent "$dir/fake/herdr-created-tabs" "refusal created a replacement endpoint ($scenario)"
+        assert_absent "$dir/fake/launched-command" "refusal launched a competing agent ($scenario)"
+        assert_not_contains "$(cat "$dir/fake/herdr-log")" "pane send-" "refusal sent input to an endpoint ($scenario)"
+        if [ -f "$dir/claim.before" ]; then
+          cmp -s "$dir/claim.before" "$marker" || fail "refusal changed successor claim ($scenario)"
+        else
+          assert_absent "$marker" "refusal claimed a conflicting legacy slot"
+        fi
+        ;;
+    esac
+    [ "$(git -C "$wt" rev-parse HEAD)" = "$before_head" ] || fail "relaunch moved slot HEAD ($scenario)"
+    [ "$(cat "$wt/unlanded.txt")" = 'unlanded successor work' ] || fail "relaunch changed unlanded work ($scenario)"
+    assert_absent "$lock" "relaunch left the shared project lock held ($scenario)"
+    pass "pool relaunch preserves work and enforces ownership: $scenario"
+  done
+}
+
+if [ "${1:-}" = --pool-ownership ]; then
+  test_pool_relaunch_requires_exclusive_ownership
+  exit 0
+fi
+
+test_pool_relaunch_requires_exclusive_ownership
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
