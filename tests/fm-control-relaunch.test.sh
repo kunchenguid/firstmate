@@ -27,6 +27,8 @@ set -u
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -45,7 +47,7 @@ relaunch_cleanup() {
   for d in "${TASK_TMPS[@]:-}"; do
     [ -n "$d" ] && rm -rf "$d"
   done
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap relaunch_cleanup EXIT
 
@@ -488,6 +490,54 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+make_gh_pr_stub() {  # <case-dir> <head-sha>
+  cat > "$1/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *" --json isDraft "*) printf '%s\n' '{"isDraft":false}' ;;
+  *" headRefOid "*) printf '%s\n' '$2' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$1/fakebin/gh"
+}
+
+# A merge poll authenticates the task record's PR identity, which requires the
+# pr= and pr_head= lines to stay terminal. Every record write the relaunch makes
+# - its own transaction marker and, with tracing on, the replacement's carrier -
+# must keep that true, or the armed poll is refused and a merge goes unnoticed.
+test_relaunch_keeps_an_armed_merge_poll_valid() {
+  local trace dir id out rc url head
+  for trace in off on; do
+    id=rl45$trace
+    dir=$(new_case pr-poll-$trace "$id")
+    add_ship_task "$dir" "$id" claude
+    head=$(git -C "$dir/wt" rev-parse HEAD)
+    make_gh_pr_stub "$dir" "$head"
+    url="https://github.com/example/repo/pull/45"
+    printf '%s\n' "$$" > "$dir/home/state/.lock"
+    printf '%s %s\n' "$$" "$trace" > "$dir/home/state/.trace-context-effective"
+    out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" "$id" "$url" 2>&1); rc=$?
+    expect_code 0 "$rc" "the merge poll should arm before the relaunch (trace $trace)"$'\n'"$out"
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+      || fail "the freshly armed merge poll should validate (trace $trace)"
+
+    out=$(run_control "$dir" "$id" relaunch --note "relaunch with a recorded PR"); rc=$?
+    expect_code 0 "$rc" "a relaunch with a recorded PR should succeed (trace $trace)"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "the PR must survive relaunch (trace $trace)"
+    [ "$(meta_field "$dir" "$id" pr_head)" = "$head" ] || fail "the PR head must survive relaunch (trace $trace)"
+    [ -n "$(meta_field "$dir" "$id" control_relaunch_tx)" ] \
+      || fail "the relaunch should have recorded its transaction marker (trace $trace)"
+    if [ "$trace" = on ]; then
+      fm_trace_context_valid "$(meta_field "$dir" "$id" traceparent)" \
+        || fail "the replacement should have recorded its trace carrier"
+    fi
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$ROOT/bin/fm-pr-poll.sh" \
+      || fail "a relaunch must leave the armed merge poll valid (trace $trace); record:"$'\n'"$(cat "$dir/home/state/$id.meta")"
+  done
+  pass "fm-control relaunch: an armed merge poll stays valid across a relaunch, with tracing off and on"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2125,7 +2175,11 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session() {
     }
     dir=$HERDR_CASE_DIR
     rm -f "$dir/fake/herdr-stopped"
-    sed -i 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta"
+    printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+    chmod +x "$dir/fakebin/pi"
+    sed 's/^harness=claude$/harness=pi/' "$dir/home/state/resume-$registered.meta" \
+      > "$dir/home/state/resume-$registered.meta.tmp"
+    mv "$dir/home/state/resume-$registered.meta.tmp" "$dir/home/state/resume-$registered.meta"
     # Keep the pane's status authority registered to an existing Pi session,
     # while process-info proves that its previous agent has exited.
     printf '{"result":{"agent":{"agent":"%s","agent_status":"idle","agent_session":{"kind":"path","value":"/tmp/pi-bound-session.jsonl"}}}}\n' \
@@ -2391,6 +2445,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_valid
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
