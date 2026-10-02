@@ -83,3 +83,24 @@ log records input token use but not output token use.
 - A successful fixture call verifies the scanner allowed only synthetic
   content. This sample does not establish complete PII detection for arbitrary
   content; sensitive source paths are rejected before content is sent.
+
+## Alternative Jev projects reviewed
+
+Reviewed 2026-10-02 for Firstmate. These candidates do not change the current
+integration set; reconsider a rejected candidate only for a matching workload
+or material new evidence.
+
+| Repository | Decision |
+|---|---|
+| [browser-use/jev-ultrafast](https://github.com/browser-use/jev-ultrafast) | Conditional only for a recurring browser workflow with independent outcome verification; do not install by default. |
+| [awlevin/typesafe-computer-use](https://github.com/awlevin/typesafe-computer-use) | Reject; no Firstmate desktop-control workload requires another computer-use path. |
+| [jaredpalmer/kev](https://github.com/jaredpalmer/kev) | Reject; no measured accuracy, latency, or privacy gap justifies replacing the active Jev service. |
+| [mizorewww/laya-mlx](https://github.com/mizorewww/laya-mlx) | Reject; no local-inference requirement justifies a hardware-specific runtime. |
+| [TheoLeeCJ/SemIf-OpenJev](https://github.com/TheoLeeCJ/SemIf-OpenJev) | Reject; no evaluated workload or compatibility evidence supports adoption. |
+| [contrastive-lm/clm](https://github.com/contrastive-lm/clm) | Reject; no demonstrated benefit over the active Jev integration. |
+| [vinnylarouge/jevlike](https://github.com/vinnylarouge/jevlike) | Reject; Firstmate has no model-training objective or dataset for this toolchain. |
+| [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) | Already adopted and pinned above. |
+| [typesafe-ai/skills](https://github.com/typesafe-ai/skills) | Reference only; no separate installation. |
+| [jarrodwatts/jev-trader](https://github.com/jarrodwatts/jev-trader) | Reject; on-chain trading decisions are outside Firstmate's scope. |
+| [yibie/awesome-jev](https://github.com/yibie/awesome-jev) | Reject as a dependency; use as a discovery catalog only when researching a concrete need. |
+| [Anil-matcha/awesome-jev-by-typesafe](https://github.com/Anil-matcha/awesome-jev-by-typesafe) | Reject as a dependency; use as a discovery catalog only when researching a concrete need. |
