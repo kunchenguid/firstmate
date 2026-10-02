@@ -140,7 +140,7 @@ SH
     result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" FM_TEST_AMBIENT=synthetic /bin/sh -c "$launch") ||
       fail "the emitted sandbox transport launch must execute"
     expected=synthetic
-    [ "$setting" != empty ] || expected=unset
+    [ "$setting" != empty ] || expected='unset'
     assert_equals "$expected" "$(cat "$CASE_DIR/runtime-env")" "filtering must happen before entering the runtime"
     assert_equals "$(printf '%s\n' http://sandbox-proxy.invalid:8888 http://sandbox-proxy.invalid:8888 socks5://sandbox-proxy.invalid:8889 "$expected")" \
       "$result" "runtime transport must survive while ambient values follow the allowlist"
@@ -175,6 +175,120 @@ test_cleanup_never_routes_through_the_sandbox() {
   pass "cleanup with the sandbox enabled: identical result, and no runtime invocation"
 }
 
+assert_inherited_sandbox() {  # <primary> <secondmate> <srt>
+  local primary=$1 second=$2 srt=$3 out
+  cmp -s "$primary/config/worker-sandbox" "$second/config/worker-sandbox" ||
+    fail "secondmate did not inherit the sandbox flag bytes"
+  cmp -s "$primary/config/worker-sandbox-settings.json" "$second/config/worker-sandbox-settings.json" ||
+    fail "secondmate did not inherit the sandbox settings bytes"
+  out=$(FM_CONFIG_OVERRIDE='' FM_SANDBOX_SETTINGS='' FM_HOME="$second" \
+    FM_SANDBOX_SRT_BIN="$srt" "$ROOT/bin/fm-sandbox.sh" prefix) ||
+    fail "secondmate could not resolve its inherited sandbox: $out"
+  assert_contains "$out" "$second/config/worker-sandbox-settings.json" \
+    "secondmate must resolve settings from its own home"
+}
+
+test_secondmate_sandbox_inheritance() {
+  local rec second out
+  rec=$(make_case inheritance sp-inherit)
+  read_case "$rec"
+  second="$CASE_DIR/second"
+  # Provision a project-less home, then exercise the launch convergence that
+  # publishes inherited local material into the newly provisioned home.
+  fm_git_init_commit "$second"
+  printf 'config/\ndata/\nstate/\nprojects/\n.fm-secondmate-*\n' > "$second/.gitignore"
+  mkdir -p "$second/bin"
+  cp "$ROOT/AGENTS.md" "$second/AGENTS.md"
+  rm "$HOME_DIR/data/sp-inherit/brief.md"
+  enable_sandbox "$HOME_DIR"
+  fm_test_fake_srt "$FAKEBIN_DIR"
+  out=$(FM_HOME="$HOME_DIR" FM_SECONDMATE_CHARTER='Sandbox inheritance fixture.' \
+    "$ROOT/bin/fm-home-seed.sh" sp-inherit "$second" --no-projects 2>&1) ||
+    fail "secondmate provisioning failed: $out"
+  out=$(run_spawn sp-inherit "$second" --secondmate --backend tmux) ||
+    fail "provisioned secondmate launch failed: $out"
+  assert_inherited_sandbox "$HOME_DIR" "$second" "$FAKEBIN_DIR/srt"
+
+  # A normal primary edit replaces an untouched inherited generation. The
+  # same config-push also replaces a locally edited destination, by contract.
+  printf 'enabled-v2\n' > "$HOME_DIR/config/worker-sandbox"
+  printf '\n' >> "$HOME_DIR/config/worker-sandbox-settings.json"
+  printf 'local edit\n' > "$second/config/worker-sandbox"
+  out=$(FM_HOME="$HOME_DIR" FM_BACKEND=tmux PATH="$FAKEBIN_DIR:$PATH" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-config-push.sh" 2>&1) ||
+    fail "mid-session sandbox propagation failed: $out"
+  assert_inherited_sandbox "$HOME_DIR" "$second" "$FAKEBIN_DIR/srt"
+  assert_contains "$out" 'worker-sandbox-settings.json: pushed' "settings update must be reported"
+  out=$(FM_HOME="$HOME_DIR" FM_BACKEND=tmux PATH="$FAKEBIN_DIR:$PATH" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-config-push.sh" 2>&1) || fail "repeat propagation failed: $out"
+  assert_contains "$out" 'worker-sandbox: unchanged' "repeat push must be idempotent"
+  printf 'enabled-v3\n' > "$HOME_DIR/config/worker-sandbox"
+  printf '\n' >> "$HOME_DIR/config/worker-sandbox-settings.json"
+  fm_fake_exit0 "$FAKEBIN_DIR" gh
+  out=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJ_DIR" FM_BACKEND=tmux \
+    FM_BOOTSTRAP_NETWORK=only PATH="$FAKEBIN_DIR:$PATH" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) || fail "bootstrap sync failed: $out"
+  assert_inherited_sandbox "$HOME_DIR" "$second" "$FAKEBIN_DIR/srt"
+  rm "$HOME_DIR/config/worker-sandbox" "$HOME_DIR/config/worker-sandbox-settings.json"
+  out=$(FM_HOME="$HOME_DIR" FM_BACKEND=tmux PATH="$FAKEBIN_DIR:$PATH" \
+    FM_SEND_SETTLE=0 "$ROOT/bin/fm-config-push.sh" 2>&1) || fail "absent-file propagation failed: $out"
+  assert_absent "$second/config/worker-sandbox" "primary absence must remove the inherited flag"
+  assert_absent "$second/config/worker-sandbox-settings.json" "primary absence must remove inherited settings"
+  out=$(FM_HOME="$second" FM_CONFIG_OVERRIDE='' "$ROOT/bin/fm-sandbox.sh" prefix) || fail "disabled secondmate prefix failed"
+  assert_equals '' "$out" "secondmate must resolve absent sandbox as disabled"
+  pass "provisioned secondmate inherits sandbox on launch, bootstrap sync and config-push, including updates and absence"
+}
+
+test_remote_secondmate_sandbox_inheritance() {
+  local rec second generation out
+  rec=$(make_case remote-inheritance sp-remote)
+  read_case "$rec"
+  second="$CASE_DIR/remote-second"
+  mkdir -p "$second/config" "$second/state"
+  printf -- '- sandbox-mate - fixture (host: sandbox-host; root: %s; home: %s; scope: fixture; projects: ; added 2026-10-02)\n' \
+    "$ROOT" "$second" > "$HOME_DIR/data/secondmates.md"
+  # Replace SSH transport only: decode the real sender's protocol and execute
+  # the real receiver with an empty environment, as the remote worker does.
+  cat > "$FAKEBIN_DIR/inherit-ssh" <<'SH'
+#!/usr/bin/env python3
+import base64
+import os
+import sys
+args = sys.argv[1:]
+while args[0] == '-o':
+    args = args[2:]
+assert args[:4] == ['--', 'sandbox-host', 'fm-remote-entrypoint.sh', '1']
+root, home = [base64.b64decode(x).decode() for x in args[4:6]]
+command = [x.decode() for x in base64.b64decode(args[6]).split(b'\0')[:-1]]
+assert command[0] == 'fm-remote-inherit.sh'
+os.execve(root + '/bin/' + command[0], command,
+          {'PATH': os.environ['PATH'], 'FM_HOME': home, 'FM_STATE_OVERRIDE': home + '/state'})
+SH
+  chmod +x "$FAKEBIN_DIR/inherit-ssh"
+  fm_test_fake_srt "$FAKEBIN_DIR"
+  for generation in 1 2 3 4; do
+    case "$generation" in
+      1) enable_sandbox "$HOME_DIR" ;;
+      2) printf 'enabled-v2\n' > "$HOME_DIR/config/worker-sandbox"
+         printf '\n' >> "$HOME_DIR/config/worker-sandbox-settings.json" ;;
+      4) rm "$HOME_DIR/config/worker-sandbox" "$HOME_DIR/config/worker-sandbox-settings.json" ;;
+    esac
+    out=$(FM_HOME="$HOME_DIR" FM_CONFIG_INHERIT_LIVE=1 \
+      FM_SSH_BIN="$FAKEBIN_DIR/inherit-ssh" "$ROOT/bin/fm-remote-inherit-push.sh" sandbox-mate "$generation" 2>&1) ||
+      fail "remote inheritance generation $generation failed: $out"
+    if [ "$generation" -lt 4 ]; then
+      assert_inherited_sandbox "$HOME_DIR" "$second" "$FAKEBIN_DIR/srt"
+    else
+      assert_absent "$second/config/worker-sandbox" "remote primary absence must remove flag"
+      assert_absent "$second/config/worker-sandbox-settings.json" "remote primary absence must remove settings"
+    fi
+    [ "$generation" != 3 ] || assert_contains "$out" 'unchanged: config/worker-sandbox-settings.json' "remote repeat must be idempotent"
+  done
+  pass "remote sender and receiver propagate sandbox files, updates and absence using the shared declaration"
+}
+
+test_secondmate_sandbox_inheritance
+test_remote_secondmate_sandbox_inheritance
 test_absent_flag_leaves_the_launch_unchanged
 test_enabled_flag_wraps_the_launch_in_the_pinned_runtime
 test_unusable_runtime_refuses_before_launching
