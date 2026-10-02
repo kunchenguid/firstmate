@@ -25,6 +25,17 @@ fm_task_progress_decode_scalar() {
   '
 }
 
+fm_task_progress_sha256_file() { # <path>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    echo 'REFUSED: shasum or sha256sum is required for task progress' >&2
+    return 1
+  fi
+}
+
 fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE
   local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status
   FM_TASK_PROGRESS_BODY=
@@ -76,7 +87,7 @@ fm_task_progress_context() { # <task>
   brief="$data/$id/brief.md"
   meta="$state/$id.meta"
   if [ -f "$brief" ] && [ ! -L "$brief" ]; then
-    brief_digest=$(sha256sum "$brief" | awk '{print $1}') || return 1
+    brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
   fi
   if [ -f "$meta" ] && [ ! -L "$meta" ]; then
     generation=$(sed -n 's/^spawn_gen=//p' "$meta" | head -1)

@@ -1893,7 +1893,8 @@ export default function (pi: ExtensionAPI) {
             throw new Error("supervision session was replaced or lost lock ownership");
           }
           const progressToken = branchProgressBindings[task];
-          if (progressToken) {
+          const binding = branchTaskBindings[task];
+          if (progressToken && !binding) {
             const current = await runCommandAsync(
               "bash", [join(fmRoot, "bin/fm-task-state.sh"), "progress", task],
               { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
@@ -1903,13 +1904,13 @@ export default function (pi: ExtensionAPI) {
                 !progress.next_step || progress.task_state === "done") {
               throw new Error("task goal, acceptance, progress, or disposition changed after branch admission");
             }
+            throw new Error("compact task progress does not authorize an exact cross-task handoff; report the required effect to MAIN");
           } else {
             const current = await runCommandAsync(
               "bash", [join(fmRoot, "bin/fm-task-state.sh"), "lifecycle", task],
               { cwd: fmRoot, env: handoffEnv(), maxBuffer: 1024 * 1024 },
             );
             const record = current.status === 0 ? JSON.parse(current.stdout) : null;
-            const binding = branchTaskBindings[task];
             if (!record || record.disposition !== "open" || JSON.stringify(taskBinding(record)) !== JSON.stringify(binding) ||
                 record.delegation?.revoked || Date.parse(record.delegation?.expires_at || "") <= Date.now()) {
               throw new Error("task intent, execution, or delegation changed after branch admission");
@@ -2499,12 +2500,11 @@ ${context.command}
       try {
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
-          `Compare the goal and acceptance method with actual task artifacts and current executor state. Perform or route the next already-authorized routine step without asking MAIN to rewrite progress first. ` +
-          `For an implementation checkpoint, inspect the same worker and active no-mistakes state; if validation has not started, use bin/fm-send.sh --idempotent for this canonical task id to instruct that worker to load crewmate-no-mistakes and start it with the exact Captain intent authorized for --intent from its brief. ` +
-          `For an already-authorized cross-task instruction, use fm_task_handoff with this admitted task as source, the exact target, a stable id, and the exact instruction; reuse that id for readback or recovery. ` +
-          `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text. Route bounded ordinary gate continuations back to that same worker; do not run or respond to no-mistakes yourself. ` +
+          `Compare the goal and acceptance method with actual task artifacts and current executor state. Continue through an existing exact effect owner when one is already present; the compact token itself does not authorize a same-task steer or cross-task handoff. ` +
+          `For an implementation checkpoint, inspect the same worker and active no-mistakes state. If an exact continuation is required but no prepared effect owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
+          `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text; do not run or respond to no-mistakes yourself. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
-          `Use silent routine reporting after verified ordinary advancement as well as unchanged healthy observation; the next executor result receives another bounded admission without a MAIN progress rewrite. Report captain only when actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
+          `Use silent routine reporting after verified ordinary advancement as well as unchanged healthy observation; the next executor result receives another bounded admission without a MAIN progress rewrite. Report captain when an exact effect must be prepared by MAIN, actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
           `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,

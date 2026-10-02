@@ -6207,7 +6207,11 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
         `${realRoot}/bin/fm-send.sh viewer --idempotent '${promptCount === 1 ? "Load crewmate-no-mistakes and start the existing checkpoint." : "Continue the same no-mistakes run after its intermediate review."}'`;
   if (command) {
     const sent = await bash.execute("continue", { command });
-    if (promptCount === 5) {
+    if (promptCount <= 2) {
+      if (!sent.isError || !sent.content[0].text.includes("does not authorize an exact steer")) {
+        throw new Error(`compact progress authorized arbitrary same-worker text: ${JSON.stringify(sent)}`);
+      }
+    } else if (promptCount === 5) {
       if (!sent.isError) throw new Error("post-handoff failure fixture unexpectedly succeeded");
     } else if (sent.isError) throw new Error(`same-worker route failed: ${JSON.stringify(sent)}`);
   } else {
@@ -6219,16 +6223,11 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     if (!failed.isError) throw new Error("unchanged failure fixture unexpectedly succeeded");
     if (promptCount === 5) {
       const params = { task: "viewer", target: "other", id: "viewer-to-other-r1",
-        instruction: "Continue the already-approved dependent step." };
-      const partial = await handoff.execute("partial-handoff", params);
-      const partialState = JSON.parse(partial.content[0].text);
-      if (!partial.isError || partialState.change !== "uncertain" || partialState.receipt !== "present") {
-        throw new Error(`partial handoff was not reported as uncertain: ${JSON.stringify(partial)}`);
-      }
-      const recovered = await handoff.execute("recover-handoff", params);
-      const recoveredState = JSON.parse(recovered.content[0].text);
-      if (recovered.isError || recoveredState.change !== "material" || recoveredState.state !== "delivered") {
-        throw new Error(`same-id handoff recovery failed: ${JSON.stringify(recovered)}`);
+        instruction: "Continue the already-approved dependent step.", action_id: "invented.g1.a1" };
+      const refused = await handoff.execute("compact-handoff", params);
+      if (!refused.isError || !refused.content[0].text.includes("does not authorize an exact cross-task handoff") ||
+          existsSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`)) {
+        throw new Error(`compact progress authorized an unbound handoff: ${JSON.stringify(refused)}`);
       }
     } else if (promptCount === 6) {
       const unrelated = run("fm-send.sh", ["other", "Unrelated sender message."]);
@@ -6238,30 +6237,26 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
         "Advance an unrelated archived task."]);
       if (unrelated.status !== 0) throw new Error(`unrelated handoff activity failed: ${unrelated.stderr}`);
     } else if (promptCount === 8) {
-      const delivered = await handoff.execute("overflow-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
+      const refused = await handoff.execute("overflow-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
         instruction: "Continue the second approved dependent step." });
-      const deliveredState = JSON.parse(delivered.content[0].text);
-      if (delivered.isError || deliveredState.change !== "material" || deliveredState.state !== "delivered") {
-        throw new Error(`typed overflow handoff failed: ${JSON.stringify(delivered)}`);
+      if (!refused.isError || !refused.content[0].text.includes("does not authorize an exact cross-task handoff")) {
+        throw new Error(`oversized history bypassed compact handoff authority: ${JSON.stringify(refused)}`);
       }
     } else if (promptCount === 9) {
       const replay = await handoff.execute("settled-handoff", { task: "viewer", target: "other", id: "viewer-to-other-r2",
         instruction: "Continue the second approved dependent step." });
-      const replayState = JSON.parse(replay.content[0].text);
-      if (replay.isError || replayState.change !== "none" || replayState.state !== "delivered") {
-        throw new Error(`settled handoff was misclassified: ${JSON.stringify(replay)}`);
+      if (!replay.isError || !replay.content[0].text.includes("does not authorize an exact cross-task handoff")) {
+        throw new Error(`compact handoff replay gained authority: ${JSON.stringify(replay)}`);
       }
       const collision = await handoff.execute("handoff-collision", { task: "viewer", target: "other", id: "viewer-to-other-r2",
         instruction: "A different instruction must not reuse this id." });
-      const collisionState = JSON.parse(collision.content[0].text);
-      if (!collision.isError || collisionState.change !== "none" || collisionState.state !== "delivered") {
-        throw new Error(`payload collision changed the original handoff: ${JSON.stringify(collision)}`);
+      if (!collision.isError || !collision.content[0].text.includes("does not authorize an exact cross-task handoff")) {
+        throw new Error(`changed compact payload gained authority: ${JSON.stringify(collision)}`);
       }
       const rejected = await handoff.execute("rejected-handoff", { task: "viewer", target: "missing", id: "viewer-to-missing-r1",
         instruction: "This target does not exist." });
-      const rejectedState = JSON.parse(rejected.content[0].text);
-      if (!rejected.isError || rejectedState.change !== "none" || rejectedState.state !== "rejected") {
-        throw new Error(`definitive no-effect handoff was misclassified: ${JSON.stringify(rejected)}`);
+      if (!rejected.isError || !rejected.content[0].text.includes("does not authorize an exact cross-task handoff")) {
+        throw new Error(`missing target changed compact handoff authority: ${JSON.stringify(rejected)}`);
       }
       const spoofed = await handoff.execute("spoofed-source", { task: "other", target: "viewer", id: "spoofed-r1",
         instruction: "Spoof the admitted source." });
@@ -6277,12 +6272,12 @@ globalThis.__fmOnBranchPrompt = async ({ session, text }) => {
     silent: promptCount !== 10,
     summary: promptCount === 10 ? "The requested acceptance evidence is complete and ready for MAIN's semantic review." : promptCount === 3 ? "The PR check was armed for the ready implementation." : promptCount === 4
       ? "The future decision recheck was armed while captain approval remains pending."
-      : promptCount === 5 ? "The approved cross-task handoff reached the existing worker."
+      : promptCount === 5 ? "The compact record did not authorize the requested cross-task handoff."
       : promptCount === 6 ? "The handoff stayed unchanged while its target received unrelated work."
       : promptCount === 7 ? "Oversized unrelated handoff history left this task unchanged."
-      : promptCount === 8 ? "The second approved handoff reached the existing worker despite oversized history."
-      : promptCount === 9 ? "Settled and rejected handoffs created no new task progress."
-      : "The existing worker received the authorized no-mistakes continuation." });
+      : promptCount === 8 ? "Oversized history did not authorize a compact cross-task handoff."
+      : promptCount === 9 ? "Repeated compact handoff requests remained unauthorized."
+      : "The compact record did not authorize arbitrary same-task text." });
   if (reportResult.isError) throw new Error(`continuation report failed: ${JSON.stringify(reportResult)}`);
 };
 
@@ -6298,11 +6293,12 @@ catch (error) {
 }
 const viewerRoutes = routed.filter((item) => item.command.includes("fm-send.sh viewer"));
 if (viewerRoutes.length !== 1 || viewerRoutes[0].actor !== "branch") {
-  throw new Error(`next step did not use the existing same-worker owner: ${JSON.stringify(routed)}`);
+  throw new Error(`compact same-worker authority check did not run as Branch: ${JSON.stringify(routed)}`);
 }
-const inbox = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg"));
-if (inbox.length !== 1 || !readFileSync(`${home}/state/viewer.inbox/${inbox[0]}`, "utf8").includes("start the existing checkpoint")) {
-  throw new Error(`same-worker inbox receipt missing: ${JSON.stringify(inbox)}`);
+const inbox = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")) : [];
+if (inbox.length !== 0) {
+  throw new Error(`compact same-worker refusal created an inbox receipt: ${JSON.stringify(inbox)}`);
 }
 if (sentToMain.length !== beforeMain) throw new Error(`routine start interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 if (!entries.some((entry) => entry.customType === "fm-continuation-branch-delivery")) {
@@ -6310,7 +6306,7 @@ if (!entries.some((entry) => entry.customType === "fm-continuation-branch-delive
 }
 if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
-  entry.data.change === "material")) throw new Error("routine material continuation did not settle quietly in Branch");
+  entry.data.change === "none")) throw new Error("same-worker authority refusal was misclassified as task progress");
 if (readFileSync(`${home}/data/backlog.md`, "utf8").match(/firstmate-progress:v1/g)?.length !== 1) {
   throw new Error("continuation created a second active progress record");
 }
@@ -6318,9 +6314,8 @@ if (readFileSync(`${home}/data/backlog.md`, "utf8").includes("no-mistakes starte
   throw new Error("branch overwrote MAIN-owned progress");
 }
 
-// A session restart preserves the original-row checkpoint and its unread
-// same-worker instruction. The active run outranks the obsolete done status,
-// so no duplicate instruction or MAIN notification is produced.
+// A session restart preserves the original-row checkpoint and its settled
+// authority refusal, so no duplicate attempt or MAIN notification is produced.
 await fire("session_shutdown", {}, defaultSessionCtx);
 await fire("session_start", {}, defaultSessionCtx);
 pi.appendEntry("fixture-restart", {});
@@ -6330,8 +6325,8 @@ if (promptCount !== 1 || routed.filter((item) => item.command.includes("fm-send.
 if (sentToMain.length !== beforeMain) throw new Error("healthy unchanged execution notified MAIN");
 
 // A new executor result changes the bounded admission key even though MAIN has
-// not rewritten the compact task row. Branch inspects that current result and
-// routes the next same-worker step from the original checkpoint admission.
+// not rewritten the compact task row. Branch inspects that current result but
+// still cannot turn the compact token into same-worker message authority.
 const intermediate = { ...fields };
 writeFileSync(`${home}/state/viewer.status`, "done: intermediate no-mistakes review result\n");
 writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
@@ -6358,8 +6353,9 @@ await settle(() => {
   catch { return false; }
 }, "intermediate Branch settlement");
 await new Promise((resolve) => setTimeout(resolve, 100));
-const messages = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg"));
-if (messages.length !== 2) throw new Error(`intermediate continuation did not create one new inbox receipt: ${JSON.stringify(messages)}`);
+const messages = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")) : [];
+if (messages.length !== 0) throw new Error(`intermediate authority refusal created an inbox receipt: ${JSON.stringify(messages)}`);
 if (sentToMain.length !== beforeMain) throw new Error("intermediate routine continuation interrupted MAIN");
 writeFileSync(`${home}/nm-status`, `run:\n  id: "fixture-run"\n  branch: ${candidateBranch}\n  status: failed\n  head: ${candidateHead}\n  outcome: failed\n  steps[1]{step,status,findings,duration_ms}:\n    review,failed,1,1\n`);
 
@@ -6382,7 +6378,8 @@ if (listedAfterPrUpdate.status !== 0 || !JSON.parse(listedAfterPrUpdate.stdout).
 }
 recordedNextStep = prCheck.next_step;
 const statusBeforePrCheck = readFileSync(`${home}/state/viewer.status`, "utf8");
-const inboxBeforePrCheck = readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort();
+const inboxBeforePrCheck = existsSync(`${home}/state/viewer.inbox`)
+  ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort() : [];
 reportResult = undefined;
 pi.events.emit("firstmate:heartbeat-tick", {});
 await fire("agent_before_settle", {}, defaultSessionCtx);
@@ -6398,7 +6395,8 @@ try {
   throw new Error(`${error}; progress=${currentProgress.stdout.trim()} prompts=${promptCount} report=${JSON.stringify(reportResult)} entries=${JSON.stringify(entries)} trace=${trace}`);
 }
 if (readFileSync(`${home}/state/viewer.status`, "utf8") !== statusBeforePrCheck ||
-    JSON.stringify(readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort()) !== JSON.stringify(inboxBeforePrCheck)) {
+    JSON.stringify(existsSync(`${home}/state/viewer.inbox`)
+      ? readdirSync(`${home}/state/viewer.inbox`).filter((name) => name.endsWith(".msg")).sort() : []) !== JSON.stringify(inboxBeforePrCheck)) {
   throw new Error("PR-check fixture unexpectedly changed status or inbox state");
 }
 if (!readFileSync(`${home}/state/viewer.meta`, "utf8").includes("pr=https://github.com/acme/viewer/pull/7") ||
@@ -6469,19 +6467,18 @@ await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 5 && reportResult?.content?.[0]?.text?.includes("retained quietly") &&
   sentToMain.length === beforeMain,
   "typed handoff continuation");
-if (!readFileSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`, "utf8").includes("Continue the already-approved dependent step") ||
-    !readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8").includes("state=delivered") ||
-    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
-  throw new Error(`same-id handoff recovery did not retain one durable inbox receipt: status=${readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r1.state`, "utf8")} inbox=${JSON.stringify(existsSync(`${home}/state/other.inbox`) ? readdirSync(`${home}/state/other.inbox`) : [])}`);
+if (existsSync(`${home}/state/task-handoffs/records/viewer-to-other-r1.msg`) ||
+    (existsSync(`${home}/state/other.inbox`) && readdirSync(`${home}/state/other.inbox`).some((name) => name.endsWith(".msg")))) {
+  throw new Error("compact handoff refusal created durable target state");
 }
 if (sentToMain.length !== beforeMain) throw new Error(`routine typed handoff interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const unrelatedInbox = { ...handoff,
-  current_state: "The handoff is delivered and the target may receive other work",
-  remaining_gap: "The next scheduled readback is not due",
-  next_step: "Recheck after unrelated target inbox activity",
+  current_state: "The compact handoff was refused and the target may receive unrelated work",
+  remaining_gap: "Exact effect authorization remains with MAIN",
+  next_step: "Confirm unrelated target inbox activity cannot create handoff authority",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(unrelatedInbox)]);
@@ -6497,7 +6494,7 @@ if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((en
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token)) {
   throw new Error("unrelated target inbox activity prevented quiet settlement");
 }
-if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 2) {
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
   throw new Error("unrelated target inbox fixture did not create exactly one independent message");
 }
 
@@ -6505,6 +6502,7 @@ writeFileSync(`${home}/state/viewer.child.meta`, "spawn_gen=child-g1\nkind=ship\
 writeFileSync(`${home}/state/viewer.child.status`, "working: unrelated dotted task started\n");
 mkdirSync(`${home}/data/viewer/artifacts`, { recursive: true });
 writeFileSync(`${home}/data/viewer/artifacts/build.log`, "initial artifact bytes\n");
+mkdirSync(`${home}/state/task-handoffs/records`, { recursive: true });
 for (let index = 0; index < 257; index += 1) {
   const id = `historical-${String(index).padStart(3, "0")}`;
   writeFileSync(`${home}/state/task-handoffs/records/${id}.msg`,
@@ -6531,9 +6529,9 @@ if (sentToMain.length !== beforeMain) throw new Error("oversized unrelated hando
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const quiet = { ...overflowQuiet,
-  current_state: "The second approved handoff is ready despite oversized history",
-  remaining_gap: "The second dependent worker instruction has not been delivered",
-  next_step: "Deliver the approved handoff with oversized handoff history",
+  current_state: "The second compact handoff request lacks exact authority despite oversized history",
+  remaining_gap: "The dependent instruction remains MAIN-owned",
+  next_step: "Confirm oversized history cannot create handoff authority",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(quiet)]);
@@ -6545,21 +6543,21 @@ await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 8 && reportResult?.content?.[0]?.text?.includes("retained quietly") &&
   sentToMain.length === beforeMain,
   "oversized handoff material delivery");
-if (!readFileSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`, "utf8").includes("state=delivered") ||
-    sentToMain.length !== beforeMain) throw new Error(`routine oversized handoff interrupted MAIN: ${JSON.stringify(sentToMain)}`);
+if (existsSync(`${home}/state/task-handoffs/status/viewer-to-other-r2.state`) ||
+    sentToMain.length !== beforeMain) throw new Error(`compact oversized handoff created state or interrupted MAIN: ${JSON.stringify(sentToMain)}`);
 if (!globalThis.__fmSessions.at(-1).options.sessionManager.getEntries().some((entry) =>
   entry.customType === "fm-task-continuation-settlement" && entry.data.record_token === record.record_token &&
-  entry.data.change === "material")) throw new Error("routine oversized handoff did not settle quietly in Branch");
-if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
-  throw new Error("the earlier handoff effect was replayed after its failing shell result");
+  entry.data.change === "none")) throw new Error("compact oversized handoff refusal was misclassified as progress");
+if (readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
+  throw new Error("compact handoff refusal changed unrelated target inbox state");
 }
 
 progress = run("fm-task-state.sh", ["progress", "viewer"]);
 record = JSON.parse(progress.stdout);
 const noEffect = { ...quiet,
-  current_state: "The second handoff is delivered and exact readback is available",
-  remaining_gap: "No new handoff effect is authorized",
-  next_step: "Confirm settled and rejected handoffs do not create new progress",
+  current_state: "No compact handoff effect was created",
+  remaining_gap: "No exact handoff effect is authorized",
+  next_step: "Confirm repeated compact requests do not create progress",
 };
 result = run("fm-task-state.sh", ["update-progress", "viewer", "--expected-token", record.record_token,
   "--progress", JSON.stringify(noEffect)]);
@@ -6571,7 +6569,7 @@ await fire("agent_before_settle", {}, defaultSessionCtx);
 await settle(() => promptCount === 9 && reportResult?.content?.[0]?.text?.includes("retained quietly"),
   "settled and rejected handoff quiet continuation");
 if (sentToMain.length !== beforeMain ||
-    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 3) {
+    readdirSync(`${home}/state/other.inbox`).filter((name) => name.endsWith(".msg")).length !== 1) {
   throw new Error("no-effect typed handoff created progress or duplicate delivery");
 }
 
@@ -6607,7 +6605,7 @@ if (promptCount !== 10 || routed.filter((item) => item.command.includes("fm-send
   throw new Error("accepted goal remained active or interrupted MAIN");
 }
 
-console.log("compact continuation used exact typed handoffs while oversized unrelated history stayed quiet");
+console.log("compact continuation refused unbound sends and handoffs while unrelated history stayed quiet");
 process.exit(0);
 EOF
   status=$?

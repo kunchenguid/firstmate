@@ -243,6 +243,8 @@ if [ -n "$TARGET_META" ]; then
           '.task_state == "in_flight" and .remaining_gap != "" and .next_step != ""' >/dev/null || {
           echo 'REFUSED: compact task progress no longer permits continuation' >&2; exit 6;
         }
+        echo 'REFUSED: compact task progress does not authorize an exact steer; report the required effect to MAIN' >&2
+        exit 6
       fi
       if [ "$(fm_lease_actor)" = branch ] && [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
         fm_task_lifecycle read "$LEASE_GUARD_TASK" | jq -e '.schema != "fm-task-lifecycle.v2"' >/dev/null || {

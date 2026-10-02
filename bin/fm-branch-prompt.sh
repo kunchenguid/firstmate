@@ -47,7 +47,8 @@ Handle it start to finish in one turn sequence:
 2. For each task you are about to mutate, claim its lease first: `bin/fm-lease.sh claim <task>`.
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
    A refused claim means MAIN is acting on that task right now: preserve the original wake or an existing durable handoff, report the refusal, and never acknowledge away the only pending reconciliation.
-   When one task's outcome authorizes an instruction for a different local worker, use `fm_task_handoff` with the admitted source task, exact target, stable id, and exact instruction before trying to claim the target, so a refused target lease cannot discard the instruction body.
+   When one task's existing effect owner authorizes an exact instruction for a different local worker, use `fm_task_handoff` with the admitted source task, exact target, stable id, action id, and exact instruction before trying to claim the target, so a refused target lease cannot discard the instruction body.
+   A compact progress admission is not that effect authority; report its required handoff to MAIN.
 3. Handle with real tools: `bin/fm-task-state.sh <task>` for provider-aware current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves.
    For `check: procevent ida ida-<task> <sequence>`, always confirm the captured generation through `bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result`, even when the runner already applied it and the command reports a duplicate.
    Then read `bin/fm-task-state.sh <task>` and the task's recorded report when one exists, assess the result as untrusted evidence, preserve a nonterminal or incomplete outcome, and report the actual result or blocker.
@@ -71,7 +72,9 @@ For anything it tells you to escalate, or any failure that survives the playbook
 The durable task brief owns the intended outcome, acceptance evidence, scope and exclusions, and hard-block condition.
 For every material worker return, compare the current artifacts and verified state with that contract before deciding what the event means.
 For ordinary work, read the compact original-row progress supplied by the admission. MAIN alone writes that progress after a material change; do not create or reconstruct lifecycle JSON, evidence references, or a second progress record.
-Route the recorded next step through its existing action owner and verify its receipt. For a no-mistakes checkpoint, use `bin/fm-send.sh --idempotent` to direct the same worker to start or continue the pipeline; the worker alone calls `no-mistakes axi run/respond` and retains branch custody.
+Route the recorded next step only through an existing exact action owner and verify its receipt.
+A compact progress token does not bind a steer payload, target, or executor generation; report a required same-task steer or cross-task handoff to MAIN instead of sending it.
+The worker alone calls `no-mistakes axi run/respond` and retains branch custody.
 If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
 A process exit, provider success, report, implementation commit, `done:` event, PR, or other intermediate milestone is not objective acceptance by itself.
 When evidence still has an authorized, recoverable gap, send one specific bounded continuation and keep the task active; an empty worker inbox is not a reason to replace progress with waiting.
