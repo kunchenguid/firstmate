@@ -151,6 +151,7 @@ test_spawn_get_uses_per_home_treehouse_root() {
   read_settle_record "$rec"
   mkdir -p "$HOME_DIR/user-home"
   printf 'https://user:secret@example.invalid\n' > "$HOME_DIR/user-home/.git-credentials"
+  printf 'machine example.invalid login user password secret\n' > "$HOME_DIR/user-home/.netrc"
 
   out=$(run_settle_spawn "$id")
   status=$?
@@ -165,6 +166,9 @@ test_spawn_get_uses_per_home_treehouse_root() {
   [ -L "$expected_root/.git-credentials" ] || fail "spawn did not bridge the launching HOME's Git credential store"
   assert_grep "https://user:secret@example.invalid" "$expected_root/.git-credentials" \
     "prepared pool root cannot read the launching HOME's Git credential store"
+  [ -L "$expected_root/.netrc" ] || fail "spawn did not bridge the launching HOME's netrc credential store"
+  assert_grep "machine example.invalid login user password secret" "$expected_root/.netrc" \
+    "prepared pool root cannot read the launching HOME's netrc credential store"
   assert_grep "cd $PROJ_DIR && HOME=$expected_root treehouse get Enter" "$HOME_DIR/launch.log" \
     "treehouse get did not receive the per-home root"
   assert_grep "export HOME=$expected_home Enter" "$HOME_DIR/launch.log" \
@@ -224,15 +228,15 @@ test_pool_root_refuses_relative_override() {
   pass "Treehouse pool roots refuse caller-relative overrides"
 }
 
-test_pool_root_recovery_uses_nearest_treehouse_marker() {
+test_pool_root_recovery_uses_fixed_treehouse_layout() {
   local pool_root worktree recovered
   pool_root="$HOME_DIR/user-home/.treehouse/firstmate/0123456789ab"
-  worktree="$pool_root/.treehouse/project/slot"
+  worktree="$pool_root/.treehouse/.treehouse-deadbeef/slot/.treehouse"
   recovered=$(fm_treehouse_root_for_worktree "$HOME_DIR" "$worktree") || \
-    fail "pool-root recovery failed for a base containing a .treehouse component"
+    fail "pool-root recovery failed for a .treehouse repository in the fixed Treehouse layout"
   [ "$recovered" = "$pool_root" ] || \
-    fail "pool-root recovery used an outer .treehouse component: '$recovered' != '$pool_root'"
-  pass "Treehouse return recovers the pool root from the nearest .treehouse marker"
+    fail "pool-root recovery did not use the fixed Treehouse layout: '$recovered' != '$pool_root'"
+  pass "Treehouse return recovers the pool root for a .treehouse repository"
 }
 
 # A pane that reports the real worktree from the very first read costs exactly
@@ -327,7 +331,7 @@ test_spawn_get_uses_per_home_treehouse_root
 test_spawn_refuses_project_treehouse_config
 test_pool_root_keeps_sha1_key_with_sha1sum_fallback
 test_pool_root_refuses_relative_override
-test_pool_root_recovery_uses_nearest_treehouse_marker
+test_pool_root_recovery_uses_fixed_treehouse_layout
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
