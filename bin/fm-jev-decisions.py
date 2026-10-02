@@ -2,11 +2,9 @@
 """fm-jev-decisions.py - classify and triage open Firstmate decisions using Jev System One.
 
 Usage:
-  fm-jev-decisions.py [--task <task>] [--status-file <path>] [--all]
-                      [--input <tsv-path> | --input -] [--state-dir <dir>]
-                      [--key <key> [--verb <verb>] --note <note>]
+  fm-jev-decisions.py [--task <task>] [--status-file <path>] [--all] [--state-dir <dir>]
                       [--json] [--resolve-cmds] [--category <cat>]
-                      [--min-noul <float>] [--max-workers <int>] [--limit <int>]
+                      [--min-noul <float>] [--limit <int>]
 """
 from __future__ import annotations
 
@@ -28,6 +26,7 @@ from pathlib import Path
 TS_BASE = os.environ.get("FM_JEV_TS_BASE", "https://api.typesafe.ai")
 TS_MODEL = os.environ.get("FM_JEV_TS_MODEL", "jev-latest")
 TS_TIMEOUT = float(os.environ.get("FM_JEV_TS_TIMEOUT", "5.0"))
+MAX_WORKERS = 8
 CANONICAL_HOME = Path("/opt/ra/firstmate")
 
 DECISION_CRITERIA = {
@@ -149,6 +148,16 @@ def withhold(text: str, never_send: list[str]) -> str:
     for start, end in reversed(merged):
         text = text[:start] + "[withheld]" + text[end:]
     return text
+
+
+def shown(text: str, never_send: list[str] | None) -> str:
+    """text for local output: never_send None means the list is unreadable, so all text is withheld."""
+    if not text:
+        return text
+    if never_send is None:
+        return "[withheld]"
+    hidden = withhold(text, never_send)
+    return text if hidden == " ".join(text.split()) else hidden
 
 
 def parse_decision_lines(content: str, task: str | None) -> list[DecisionItem]:
@@ -331,20 +340,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Triage open Firstmate decisions using Jev System One")
     parser.add_argument("--task", type=str, help="Specific task ID to triage (e.g. websites, verifier)")
     parser.add_argument("--status-file", type=Path, help="Specific status file to inspect")
-    parser.add_argument("--input", type=str, help="Path to TSV file or '-' for stdin")
     parser.add_argument("--all", action="store_true", help="Scan all status files in state dir")
     parser.add_argument("--state-dir", type=Path, help="State directory override")
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
     parser.add_argument("--resolve-cmds", action="store_true", help="Emit copy-pasteable resolve commands for stale items")
     parser.add_argument("--category", type=str, help="Filter output by category (e.g. stale_historical)")
     parser.add_argument("--min-noul", type=float, default=0.0, help="Filter by minimum actionable noul score")
-    parser.add_argument("--max-workers", type=int, default=8, help="Max concurrent Jev API requests")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of items triaged (0 = unlimited)")
-
-    # Single item direct evaluation mode
-    parser.add_argument("--key", type=str, help="Single decision key")
-    parser.add_argument("--verb", type=str, default="needs-decision", help="Single decision verb")
-    parser.add_argument("--note", type=str, help="Single decision note text")
 
     args = parser.parse_args()
 
@@ -356,42 +358,21 @@ def main() -> None:
 
     items: list[DecisionItem] = []
 
-    # 1. Direct single item mode
-    if args.key and args.note:
-        items.append(
-            DecisionItem(
-                task=args.task or "adhoc",
-                key=args.key,
-                verb=args.verb,
-                note=args.note,
-            )
-        )
-    # 2. Input from TSV or stdin
-    elif args.input:
-        if args.input == "-":
-            content = sys.stdin.read()
-        else:
-            p = Path(args.input)
-            if not p.exists():
-                print(f"error: input file {p} does not exist", file=sys.stderr)
-                sys.exit(1)
-            content = p.read_text(encoding="utf-8", errors="replace")
-        items = parse_decision_lines(content, args.task)
-    # 3. Specific status file
-    elif args.status_file:
+    # 1. Specific status file
+    if args.status_file:
         sf = args.status_file
         if not sf.exists():
             print(f"error: status file {sf} does not exist", file=sys.stderr)
             sys.exit(1)
         items = extract_decisions_from_bash("status_open_decisions", classify_lib, sf, args.task or sf.stem)
-    # 4. Specific task name
+    # 2. Specific task name
     elif args.task:
         sf = state_dir / f"{args.task}.status"
         if not sf.exists():
             print(f"error: status file {sf} does not exist", file=sys.stderr)
             sys.exit(1)
         items = extract_decisions_from_bash("status_open_decisions", classify_lib, sf, args.task)
-    # 5. All status files across state
+    # 3. All status files across state
     elif args.all:
         items = extract_decisions_from_bash("scan_open_decisions", classify_lib, state_dir, None)
     else:
@@ -428,11 +409,10 @@ def main() -> None:
             item.error = withheld_reason
         classified_items = items
     else:
-        max_workers = min(args.max_workers, len(items))
+        max_workers = min(MAX_WORKERS, len(items))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(classify_decision, item, api_key, never_send, send_prefix) for item in items]
             classified_items = [f.result() for f in futures]
-        ledger_open: dict[Path, set[tuple[str, str, str]]] = {}
         for item in classified_items:
             if not item.resolve_cmd:
                 continue
@@ -444,17 +424,6 @@ def main() -> None:
             elif ledger.resolve() != origin.resolve():
                 item.resolve_cmd = ""
                 item.suggested_action += f" (fm-send would close {ledger}, not {origin}; close it by hand)"
-            else:
-                # A TSV or --key row carries no origin: it is proven to come from this
-                # ledger only when the ledger itself holds exactly this decision open.
-                if ledger not in ledger_open:
-                    ledger_open[ledger] = {
-                        (d.key, d.verb, d.note)
-                        for d in extract_decisions_from_bash("status_open_decisions", classify_lib, ledger, item.task)
-                    }
-                if (item.key, item.verb, item.note) not in ledger_open[ledger]:
-                    item.resolve_cmd = ""
-                    item.suggested_action += f" (not an open decision in {ledger}; close it by hand)"
 
     # Filters
     filtered_items = classified_items
@@ -462,6 +431,17 @@ def main() -> None:
         filtered_items = [it for it in filtered_items if it.category == args.category]
     if args.min_noul > 0.0:
         filtered_items = [it for it in filtered_items if it.actionable_noul >= args.min_noul]
+
+    # Local output carries the request's redaction; a row whose resolve command would print a
+    # never-send value gets none.
+    shown_list = None if withheld_reason else never_send
+    for it in filtered_items:
+        if shown(it.resolve_cmd, shown_list) != it.resolve_cmd:
+            it.resolve_cmd = ""
+        for field in ("task", "key", "verb", "note", "suggested_action", "error"):
+            value = getattr(it, field)
+            if value is not None:
+                setattr(it, field, shown(value, shown_list))
 
     # Output
     if args.resolve_cmds:
@@ -473,12 +453,7 @@ def main() -> None:
         sys.exit(0)
 
     if args.json:
-        # The note gets the request's redaction; an unreadable never-send list withholds it whole.
-        payload = [
-            dataclasses.asdict(it) | {"note": "[withheld]" if withheld_reason else withhold(it.note, never_send)}
-            for it in filtered_items
-        ]
-        print(json.dumps(payload, indent=2))
+        print(json.dumps([dataclasses.asdict(it) for it in filtered_items], indent=2))
         sys.exit(0)
 
     print(format_table(filtered_items))

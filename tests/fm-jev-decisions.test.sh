@@ -74,23 +74,47 @@ export TYPESAFE_API_KEY=test-dummy-key
 FM_CONFIG_OVERRIDE="$TDIR/no-config"
 export FM_CONFIG_OVERRIDE
 
-# 1. Empty input exits cleanly without calling Jev.
-out=$("$DECISION_SH" --input /dev/null)
-assert_contains "$out" "No open decisions found" "empty input emits no decisions message"
-[ "$("$DECISION_SH" --input /dev/null --json)" = "[]" ] || fail "empty input must emit an empty json array"
+# ledger <state-dir> <task> <key> <verb> <note>... writes an open-decision status file with metadata.
+ledger() {
+  local dir=$1 task=$2
+  shift 2
+  mkdir -p "$dir"
+  : > "$dir/$task.meta"
+  : > "$dir/$task.status"
+  while [ "$#" -ge 3 ]; do
+    printf '%s [key=%s]: %s\n' "$2" "$1" "$3" >> "$dir/$task.status"
+    shift 3
+  done
+}
 
-# 2. TSV classification maps categories to suggestions and resolve commands.
-TSV="$TDIR/decisions.tsv"
-printf '%s\t%s\t%s\t%s\n' \
-  test-task pending-reply-abc123 blocked "pending-reply-missed: task=test-task request=CONFIG_REREAD" \
-  test-task quota-exceeded needs-decision "Need captain approval to upgrade API tier" \
-  test-task net-down blocked "upstream host unreachable" \
-  test-task active-fix needs-decision "choose the fix now" \
-  test-task bogus-choice needs-decision "server returns an unknown category" \
-  test-task missing-answer needs-decision "server returns no category" \
-  > "$TSV"
+# 0. Only the status-record selectors exist.
+help=$("$DECISION_SH" --help)
+for opt in --task --status-file --all --state-dir --json --resolve-cmds --category --min-noul --limit; do
+  assert_contains "$help" "$opt" "help lists $opt"
+done
+for opt in --input --key --verb --note --max-workers; do
+  if printf '%s' "$help" | grep -q -- "$opt\b"; then fail "help must not list $opt: $help"; fi
+  if "$DECISION_SH" --all "$opt" x >/dev/null 2>&1; then fail "$opt must be rejected"; fi
+done
 
-json=$("$DECISION_SH" --input "$TSV" --json)
+# 1. A status file with no open decisions exits cleanly without calling Jev.
+EMPTY="$TDIR/empty-state"; mkdir -p "$EMPTY"; : > "$EMPTY/none.status"
+out=$(FM_STATE_OVERRIDE="$EMPTY" "$DECISION_SH" --task none)
+assert_contains "$out" "No open decisions found" "empty ledger emits no decisions message"
+[ "$(FM_STATE_OVERRIDE="$EMPTY" "$DECISION_SH" --task none --json)" = "[]" ] || fail "empty ledger must emit an empty json array"
+
+# 2. Classification maps categories to suggestions.
+MAIN="$TDIR/main-state"
+ledger "$MAIN" test-task \
+  pending-reply-abc123 blocked "pending-reply-missed: task=test-task request=CONFIG_REREAD" \
+  quota-exceeded needs-decision "Need captain approval to upgrade API tier" \
+  net-down blocked "upstream host unreachable" \
+  active-fix needs-decision "choose the fix now" \
+  bogus-choice needs-decision "server returns an unknown category" \
+  missing-answer needs-decision "server returns no category"
+run_main() { FM_STATE_OVERRIDE="$MAIN" "$DECISION_SH" --task test-task "$@"; }
+
+json=$(run_main --json)
 cat_of() { printf '%s' "$json" | python3 -c 'import json,sys; print({i["key"]: i["category"] for i in json.load(sys.stdin)}[sys.argv[1]])' "$1"; }
 [ "$(cat_of pending-reply-abc123)" = stale_historical ] || fail "pending-reply key should be stale_historical"
 [ "$(cat_of quota-exceeded)" = policy_spend ] || fail "quota key should be policy_spend"
@@ -99,24 +123,23 @@ cat_of() { printf '%s' "$json" | python3 -c 'import json,sys; print({i["key"]: i
 [ "$(cat_of bogus-choice)" = unavailable ] || fail "unknown category choice must be unavailable"
 [ "$(cat_of missing-answer)" = unavailable ] || fail "missing category choice must be unavailable"
 
-table=$("$DECISION_SH" --input "$TSV")
+table=$(run_main)
 assert_contains "$table" "Escalate to Captain" "policy_spend suggestion rendered"
 assert_contains "$table" "Active blocker" "actionable_now suggestion rendered"
 assert_contains "$table" "unavailable: 2" "summary counts invalid answers as unavailable"
 
 # 3. Filters.
-active=$("$DECISION_SH" --input "$TSV" --category actionable_now --json)
+active=$(run_main --category actionable_now --json)
 [ "$(printf '%s' "$active" | python3 -c 'import json,sys; print(",".join(i["key"] for i in json.load(sys.stdin)))')" = active-fix ] ||
   fail "--category actionable_now must select only the active key: $active"
-urgent=$("$DECISION_SH" --input "$TSV" --min-noul 0.35 --json)
+urgent=$(run_main --min-noul 0.35 --json)
 [ "$(printf '%s' "$urgent" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin))))')" = active-fix,net-down ] ||
   fail "--min-noul must keep only items at or above the threshold: $urgent"
 
 # 4. Resolve commands are shell-safe for a hostile task name.
 EVIL_TASK='t;touch pwned-task'
-EVIL_STATE="$TDIR/evil-state"; mkdir -p "$EVIL_STATE"
-: > "$EVIL_STATE/$EVIL_TASK.meta"
-printf 'blocked [key=old-dep]: superseded\n' > "$EVIL_STATE/$EVIL_TASK.status"
+EVIL_STATE="$TDIR/evil-state"
+ledger "$EVIL_STATE" "$EVIL_TASK" old-dep blocked superseded
 FAKE="$TDIR/fakeroot"; mkdir -p "$FAKE/bin"
 cp -R "$ROOT/bin/." "$FAKE/bin/"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > %q\n' "$TDIR/argv" > "$FAKE/bin/fm-send.sh"; chmod +x "$FAKE/bin/fm-send.sh"
@@ -128,35 +151,15 @@ assert_contains "$cmds" "$FAKE/bin/fm-send.sh" "resolve cmd names the home's own
 [ "$(sed -n 1p "$TDIR/argv")" = "$EVIL_TASK" ] || fail "resolve cmd must pass the task verbatim"
 [ "$(sed -n 3p "$TDIR/argv")" = old-dep ] || fail "resolve cmd must pass the key verbatim"
 
-# 4b. A TSV row gets a resolve cmd only when the selected ledger holds that exact decision open.
-printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" old-dep blocked "superseded" > "$TDIR/same.tsv"
-same=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/same.tsv" --resolve-cmds)
-assert_contains "$same" "--resolve-key old-dep" "a TSV row open in the selected ledger keeps its resolve cmd"
-printf '%s\t%s\t%s\t%s\n' "$EVIL_TASK" old-dep blocked "a stale decision from another home" > "$TDIR/foreign.tsv"
-foreign=$(FM_HOME="$FAKE" FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/foreign.tsv" --resolve-cmds)
-[ "$foreign" = "# No actionable resolve commands generated." ] ||
-  fail "a foreign TSV row whose task and key are open locally must not get a resolve cmd: $foreign"
-adhoc=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --task "$EVIL_TASK" --key old-dep --verb blocked --note "not in the ledger" --resolve-cmds)
-[ "$adhoc" = "# No actionable resolve commands generated." ] || fail "a --key row not open in the ledger must not get a resolve cmd: $adhoc"
-assert_contains "$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$TDIR/foreign.tsv")" "close it by hand" \
-  "an unproven TSV row is flagged for manual close"
-
 # 5. Pending replies may still be owed: stale ones get no auto-resolve command.
-WORDING="$TDIR/wording.tsv"
-printf '%s\t%s\t%s\t%s\n' \
-  w pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
-  w pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
-  w active-now needs-decision "choose now" \
-  w quota-up needs-decision "approve spend" \
-  w missing-answer needs-decision "jev gives no category" \
-  w old-dep blocked "superseded dependency" \
-  > "$WORDING"
-: > "$EVIL_STATE/w.meta"
-printf '%s\n' \
-  "blocked [key=pending-reply-cfg]: pending-reply-missed: task=w request=CONFIG_REREAD" \
-  "blocked [key=pending-reply-other]: pending-reply-missed: task=w request=STATUS_PING" \
-  "blocked [key=old-dep]: superseded dependency" > "$EVIL_STATE/w.status"
-wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --input "$WORDING" --json)
+ledger "$EVIL_STATE" w \
+  pending-reply-cfg blocked "pending-reply-missed: task=w request=CONFIG_REREAD" \
+  pending-reply-other blocked "pending-reply-missed: task=w request=STATUS_PING" \
+  active-now needs-decision "choose now" \
+  quota-up needs-decision "approve spend" \
+  missing-answer needs-decision "jev gives no category" \
+  old-dep blocked "superseded dependency"
+wording=$(FM_STATE_OVERRIDE="$EVIL_STATE" "$DECISION_SH" --task w --json)
 [ "$(printf '%s' "$wording" | python3 -c 'import json,sys; print(",".join(sorted(i["key"] for i in json.load(sys.stdin) if i["resolve_cmd"])))')" = "old-dep" ] ||
   fail "only non-pending stale items may get a resolve command: $wording"
 assert_contains "$wording" "no longer owed" "pending reply suggestion asks to confirm the reply is not owed"
@@ -212,8 +215,8 @@ rm -f "$TDIR/argv"
 [ "$(sed -n 3p "$TDIR/argv")" = fm-delta ] || fail "fm-delta.meta makes fm-delta.status resolvable"
 
 # 7d. An endpoint that rejects or drops the noul question leaves the batch unavailable.
-printf '%s\t%s\t%s\t%s\n' n noul-rejected needs-decision "x" n noul-dropped needs-decision "y" > "$TDIR/noul.tsv"
-noul=$("$DECISION_SH" --input "$TDIR/noul.tsv" --json)
+ledger "$TDIR/noul-state" n noul-rejected needs-decision x noul-dropped needs-decision y
+noul=$(FM_STATE_OVERRIDE="$TDIR/noul-state" "$DECISION_SH" --task n --json)
 [ "$(printf '%s' "$noul" | python3 -c 'import json,sys; print(",".join(i["category"] for i in json.load(sys.stdin)))')" = unavailable,unavailable ] ||
   fail "a rejected noul answer must report unavailable: $noul"
 
@@ -233,10 +236,10 @@ RANGE_PID=$!
 trap 'kill "$STUB_PID" "$RANGE_PID" 2>/dev/null || true; fm_test_cleanup' EXIT
 for _ in $(seq 50); do [ -s "$TDIR/port-range" ] && break; sleep 0.1; done
 [ -s "$TDIR/port-range" ] || fail "range stub Jev server did not start"
-for v in NaN Infinity -Infinity -0.5 1.5 0 0.5 1; do
-  printf '%s\t%s\t%s\t%s\n' r "noul-raw-$v" needs-decision "$v"
-done > "$TDIR/range.tsv"
-range_run() { FM_JEV_TS_BASE="http://127.0.0.1:$(cat "$TDIR/port-range")" "$DECISION_SH" --input "$TDIR/range.tsv" --json "$@"; }
+range_args=()
+for v in NaN Infinity -Infinity -0.5 1.5 0 0.5 1; do range_args+=("noul-raw-$v" needs-decision "$v"); done
+ledger "$TDIR/range-state" r "${range_args[@]}"
+range_run() { FM_JEV_TS_BASE="http://127.0.0.1:$(cat "$TDIR/port-range")" FM_STATE_OVERRIDE="$TDIR/range-state" "$DECISION_SH" --task r --json "$@"; }
 range_keys() { python3 -c 'import json,sys; print(",".join(i["key"] + "=" + i["category"] for i in json.load(sys.stdin)))'; }
 [ "$(range_run | range_keys)" = "noul-raw-NaN=unavailable,noul-raw-Infinity=unavailable,noul-raw--Infinity=unavailable,noul-raw--0.5=unavailable,noul-raw-1.5=unavailable,noul-raw-0=actionable_now,noul-raw-0.5=actionable_now,noul-raw-1=actionable_now" ] ||
   fail "only finite noul within 0..1 may be valid: $(range_run)"
@@ -244,37 +247,57 @@ range_keys() { python3 -c 'import json,sys; print(",".join(i["key"] + "=" + i["c
   fail "--min-noul must see only valid scores: $(range_run --min-noul 0.01)"
 
 # 8. A key configured only in the home's .env is used.
-ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"
+ENVHOME="$TDIR/envhome"; mkdir -p "$ENVHOME"; ln -s "$ROOT/bin" "$ENVHOME/bin"
 printf 'TYPESAFE_API_KEY="env-file-key"\n' > "$ENVHOME/.env"
-envkey=$(env -u TYPESAFE_API_KEY FM_HOME="$ENVHOME" "$DECISION_SH" --input "$TSV" --category actionable_now --json)
+envkey=$(env -u TYPESAFE_API_KEY FM_HOME="$ENVHOME" FM_STATE_OVERRIDE="$MAIN" "$DECISION_SH" --task test-task --category actionable_now --json)
 assert_contains "$envkey" '"key": "active-fix"' ".env TYPESAFE_API_KEY classifies decisions"
 
-# 9. Never-send values are withheld from every Jev request.
+# 9. Never-send values are withheld from every Jev request and from all local output.
 mkdir -p "$TDIR/ns-config"
-printf '# client names\n  Example   Client  \n' > "$TDIR/ns-config/dispatch-never-send"
-printf '%s\t%s\t%s\t%s\n' ns active-ns needs-decision "decide for EXAMPLE    client Ltd now" > "$TDIR/ns.tsv"
+printf '# client names\n  Example   Client  \nGlobex\n' > "$TDIR/ns-config/dispatch-never-send"
+NS="$TDIR/ns-state"
+ledger "$NS" ns active-ns needs-decision "decide for EXAMPLE    client Ltd now"
+ledger "$NS" globex-ops old-ns blocked "superseded"
+ledger "$NS" plain old-plain blocked "superseded"
+run_ns() { FM_HOME="$FAKE" FM_CONFIG_OVERRIDE="$TDIR/ns-config" "$DECISION_SH" --all --state-dir "$NS" "$@"; }
 : > "$TDIR/requests.log"
-ns=$(FM_CONFIG_OVERRIDE="$TDIR/ns-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json)
+ns=$(run_ns --json)
 assert_contains "$ns" '"category": "actionable_now"' "withheld note is still classified"
-if grep -qi "example client" "$TDIR/requests.log"; then
+if grep -qiE "example|globex" "$TDIR/requests.log"; then
   fail "never-send value reached the Jev request"
 fi
 assert_contains "$(cat "$TDIR/requests.log")" "[withheld]" "never-send value is replaced in the request"
-if printf '%s' "$ns" | grep -qi "example"; then
-  fail "never-send value printed in --json output: $ns"
-fi
+ns_table=$(run_ns)
+ns_cmds=$(run_ns --resolve-cmds)
+for out in "$ns" "$ns_table" "$ns_cmds"; do
+  if printf '%s' "$out" | grep -qiE "example|globex"; then fail "never-send value printed locally: $out"; fi
+done
 assert_contains "$ns" '"note": "decide for [withheld] Ltd now"' "--json note carries the request's redaction"
+assert_contains "$ns" '"task": "[withheld]-ops"' "--json task carries the redaction"
+assert_contains "$ns_table" "[withheld]-ops" "table task carries the redaction"
+printf '%s' "$ns" | python3 -c '
+import json, sys
+rows = {i["key"]: i for i in json.load(sys.stdin)}
+assert rows["old-ns"]["category"] == "stale_historical", rows
+assert rows["old-ns"]["resolve_cmd"] == "", rows["old-ns"]
+assert rows["old-plain"]["task"] == "plain" and rows["old-plain"]["resolve_cmd"], rows["old-plain"]
+' || fail "a never-send row must lose its resolve cmd while an ordinary row keeps it: $ns"
+rm -f "$TDIR/argv"
+(cd "$RUNDIR" && bash -c "$ns_cmds")
+[ "$(sed -n 3p "$TDIR/argv")" = plain ] && [ "$(sed -n 5p "$TDIR/argv")" = old-plain ] ||
+  fail "the ordinary row's resolve cmd must still work: $ns_cmds"
 printf 'Acme\nAcme Health Partners\nHealth Partners Group\n' > "$TDIR/ns-config/dispatch-never-send"
-printf '%s\t%s\t%s\t%s\n' ns active-overlap needs-decision "acme health partners group owes X" > "$TDIR/ns.tsv"
+ledger "$TDIR/overlap-state" ns active-overlap needs-decision "acme health partners group owes X"
 : > "$TDIR/requests.log"
-FM_CONFIG_OVERRIDE="$TDIR/ns-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json >/dev/null
+FM_CONFIG_OVERRIDE="$TDIR/ns-config" FM_STATE_OVERRIDE="$TDIR/overlap-state" "$DECISION_SH" --task ns --json >/dev/null
 sent_note=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["state"]["note"])' "$TDIR/requests.log")
 [ "$sent_note" = "[withheld] owes X" ] || fail "overlapping never-send values must leave no fragment: $sent_note"
 mkdir -p "$TDIR/bad-config/dispatch-never-send"
 : > "$TDIR/requests.log"
-bad=$(FM_CONFIG_OVERRIDE="$TDIR/bad-config" "$DECISION_SH" --input "$TDIR/ns.tsv" --json 2>/dev/null)
+bad=$(FM_CONFIG_OVERRIDE="$TDIR/bad-config" FM_STATE_OVERRIDE="$TDIR/overlap-state" "$DECISION_SH" --task ns --json 2>/dev/null)
 assert_contains "$bad" '"category": "unavailable"' "unreadable never-send list sends nothing"
 assert_contains "$bad" '"note": "[withheld]"' "unreadable never-send list withholds the --json note"
+if printf '%s' "$bad" | grep -qi "acme"; then fail "unreadable never-send list must withhold all local text: $bad"; fi
 [ ! -s "$TDIR/requests.log" ] || fail "unreadable never-send list must not reach Jev"
 
 # 10. A missing classify lib is an error, not an empty triage.
@@ -282,12 +305,10 @@ if FM_HOME="$TDIR/nohome" "$DECISION_SH" --all --state-dir "$STATE" >/dev/null 2
   fail "missing fm-classify-lib.sh must exit non-zero"
 fi
 
-# 11. A mistyped --input path is an error, and malformed lines are reported.
-if "$DECISION_SH" --input "$TDIR/no-such.tsv" >/dev/null 2>&1; then
-  fail "missing --input file must exit non-zero"
+# 11. A missing --task ledger is an error.
+if FM_STATE_OVERRIDE="$EMPTY" "$DECISION_SH" --task no-such-task >/dev/null 2>&1; then
+  fail "missing --task ledger must exit non-zero"
 fi
-warn=$(printf 'k\tneeds-decision\tnote\n' | "$DECISION_SH" --input - 2>&1 >/dev/null)
-assert_contains "$warn" "skipped 1 malformed line" "3-column stdin without --task warns about skipped lines"
 
 # 12. No selector and non-TTY stdin prints usage instead of scanning.
 if printf '' | "$DECISION_SH" >/dev/null 2>&1; then

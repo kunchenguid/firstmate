@@ -5,7 +5,6 @@
 #   fm-jev-decisions.sh --task <task-id>
 #   fm-jev-decisions.sh --status-file <path>
 #   fm-jev-decisions.sh --all
-#   fm-jev-decisions.sh --input <tsv-path|->   (stdin is read only with --input -)
 #   fm-jev-decisions.sh --resolve-cmds [--task <task-id> | --all]
 #   fm-jev-decisions.sh --state-dir <dir> ...  (carried into generated resolve commands)
 #   fm-jev-decisions.sh --json ...
