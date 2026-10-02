@@ -228,7 +228,7 @@ Stored OAuth and API-key credentials retain their native credential type because
 ### Model file format and default
 
 The model file holds one `<provider>/<model-id>` line followed by one newline.
-Parsing splits at the first `/`, so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-5` survives intact.
+Parsing splits at the first `/`, so a provider-qualified model id such as `openrouter/anthropic/claude-sonnet-4-6` survives intact.
 An absent, unreadable, or unparseable file means no pin.
 The branch then follows main's current model, applied explicitly and live whenever main changes models mid-session.
 
