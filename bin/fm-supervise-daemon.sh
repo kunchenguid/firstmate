@@ -1417,7 +1417,7 @@ window_for_task() {  # <task-key> [state]
 #     line, or a previous injection's unsent text), defer entirely - injecting
 #     would merge with the human's text.
 inject_msg() {  # <message> [state]
-  local msg=$1 state target backend retries sleep_s verdict composer encoded bytes errf err='' body
+  local msg=$1 state target backend retries sleep_s verdict composer reason encoded bytes errf err='' body
   state="${2:-$(_state_root)}"
   # (1) Presence-gate: inject ONLY when afk is active. When afk is off, the
   # daemon self-handles and stays quiet; firstmate drives the normal always-on
@@ -1453,14 +1453,22 @@ inject_msg() {  # <message> [state]
   #      composer. The shared classifier (fm_backend_composer_state ->
   #      fm_composer_classify_content, bin/fm-composer-lib.sh) reports 'pending'
   #      for real unsubmitted text (a human's half-typed line, or a swallowed
-  #      prior injection) and 'unknown' for a bare dead-shell prompt (the agent
-  #      exited to its login shell) or an unreadable pane. Neither is a safe
-  #      target - typing the escalation into a shell could execute it - so defer
-  #      on anything that is not affirmatively 'empty'. A deferred escalation
+  #      prior injection) and 'unknown' when it could not prove the composer
+  #      empty or pending: a bare dead-shell prompt (the agent exited to its
+  #      login shell), an unreadable pane, a harness screen the classifier
+  #      does not know, or a recognized composer whose harness is not idle.
+  #      Neither is a safe target - typing the escalation into a
+  #      shell could execute it - so defer on anything that is not
+  #      affirmatively 'empty', and name which of the two it was so a wedge
+  #      that never clears points at the right owner. A deferred escalation
   #      stays buffered for the next cycle or the catch-up flush.
   composer=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null)
   if [ "$composer" != empty ]; then
-    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: pending input, dead-shell prompt, or unreadable pane)"
+    case "$composer" in
+      pending|pending-unproven) reason='unsubmitted text in the composer' ;;
+      *) reason='composer not proven empty or pending (unrecognized screen, or harness not idle)' ;;
+    esac
+    INJECT_LAST_FAILURE="deferred: supervisor composer not confirmed-empty (state=${composer:-unknown}: $reason)"
     log "inject $INJECT_LAST_FAILURE"
     return 1
   fi
