@@ -549,6 +549,38 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/captures/claude-2.1.286-agent-selector/list-main-herdr.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/list-main-viewed-herdr.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/list-main-viewed-tmux.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/list-other-herdr.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/list-other-tmux.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/main-tmux.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/subagent-herdr.txt",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/captures/claude-2.1.286-agent-selector/subagent-tmux.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },

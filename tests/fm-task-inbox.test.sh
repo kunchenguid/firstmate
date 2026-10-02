@@ -33,6 +33,8 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# shellcheck source=bin/fm-marker-lib.sh
+. "$ROOT/bin/fm-marker-lib.sh"
 
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-inbox)
@@ -392,6 +394,269 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
   pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
+}
+
+make_selector_stub() {  # <dir>
+  mkdir -p "$1/fakebin"
+  cat > "$1/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+caps="$FM_FAKE_CAPTURES"
+view=$(cat "$FM_FAKE_VIEW")
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    if [ "$literal" = 1 ]; then
+      if [ "$view" = main ] || [ "$view" = none ]; then
+        printf '%s' "$1" >> "$FM_FAKE_COMPOSER"
+      else
+        printf 'TO-SUBAGENT: %s\n' "$1" >> "$FM_SEND_LOG"
+      fi
+      exit 0
+    fi
+    printf 'KEY %s\n' "$1" >> "$FM_SEND_LOG"
+    case "$view:$1" in
+      main:Enter|none:Enter)
+        if [ -s "$FM_FAKE_COMPOSER" ]; then
+          printf 'SUBMIT: %s\n' "$(cat "$FM_FAKE_COMPOSER")" >> "$FM_SEND_LOG"
+          : > "$FM_FAKE_COMPOSER"
+        fi
+        ;;
+    esac
+    exit 0 ;;
+  display-message)
+    case "$*" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    if [ -f "${FM_FAKE_CAPTURE_FAILURE:-}" ] && [ "$(cat "$FM_FAKE_CAPTURE_FAILURE")" = "$view" ]; then
+      rm -f "$FM_FAKE_CAPTURE_FAILURE"
+      [ "${FM_FAKE_CAPTURE_EMPTY:-0}" = 1 ] && exit 0
+      exit 1
+    fi
+    case "$view" in
+      main) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } { print }' "$caps/main-tmux.txt" ;;
+      none) awk -v typed="$(cat "$FM_FAKE_COMPOSER")" 'NR == 2 { print "❯ " typed; next } NR <= 3 { print }' "$caps/main-tmux.txt" ;;
+      subagent) cat "$caps/subagent-tmux.txt" ;;
+      list-main) cat "$caps/list-main-herdr.txt" ;;
+      list-main-viewed) cat "$caps/list-main-viewed-tmux.txt" ;;
+      list-other) cat "$caps/list-other-tmux.txt" ;;
+    esac
+    exit 0 ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/fakebin/tmux"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$1/fakebin/sleep"
+  chmod +x "$1/fakebin/sleep"
+}
+
+test_ring_refuses_claude_selector() {
+  local dir state rec doorbell log composer viewf start rc first second first_rc second_rc harness
+  dir="$TMP_ROOT/ring-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"
+  ring() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$harness"
+  }
+
+  for harness in claude ''; do
+    for start in list-main-viewed subagent list-other list-main; do
+      : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+      rc=0; ring || rc=$?
+      expect_code 4 "$rc" "a ${harness:-unidentified} ring from $start should report undelivered"
+      [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a refused ring sent input: $(cat "$log")"
+      [ "$(cat "$viewf")" = "$start" ] || fail "a refused ring changed the selector"
+      [ -f "$rec" ] || fail "a refused ring lost the durable steer"
+    done
+
+  done
+  harness=claude
+  : > "$log"; : > "$composer"; printf 'list-main-viewed\n' > "$viewf"
+  ring & first=$!
+  ring & second=$!
+  first_rc=0; wait "$first" || first_rc=$?
+  second_rc=0; wait "$second" || second_rc=$?
+  expect_code 4 "$first_rc" "the first concurrent ring should report undelivered"
+  expect_code 4 "$second_rc" "the second concurrent ring should report undelivered"
+  [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "concurrent rings sent input: $(cat "$log")"
+  [ "$(cat "$viewf")" = list-main-viewed ] || fail "concurrent rings changed the selector"
+
+  for start in main none; do
+    : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+    ring || fail "a ring from $start should reach the main composer"
+    [ "$(cat "$log")" = "KEY Enter"$'\n'"SUBMIT: $doorbell" ] \
+      || fail "a ring from $start sent unexpected input: $(cat "$log")"
+    [ ! -s "$composer" ] || fail "a successful ring left pending text"
+  done
+  pass "inbox: active Claude selectors refuse rings without input, including concurrent rings"
+}
+
+test_selector_capture_failure_leaves_ring_undelivered() {
+  local dir state rec log composer viewf failure rc start empty
+  dir="$TMP_ROOT/ring-selector-capture-failure"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"; failure="$dir/capture-failure"
+  ring_capture_failure() {
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+      FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURE_FAILURE="$failure" FM_FAKE_CAPTURE_EMPTY="$empty" \
+      FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 claude
+  }
+  for empty in 1 0; do
+    for start in main subagent; do
+      : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+      printf '%s\n' "$start" > "$failure"
+      rc=0; ring_capture_failure || rc=$?
+      expect_code 4 "$rc" "an unreadable $start capture should report an undelivered ring"
+      [ ! -e "$failure" ] || fail "the $start capture failure was not exercised"
+      [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a capture failure allowed input: $(cat "$log")"
+      [ -f "$rec" ] || fail "a capture failure lost the durable steer"
+      if [ "$start" = subagent ]; then
+        rc=0; ring_capture_failure || rc=$?
+        expect_code 4 "$rc" "a readable subagent view should still refuse the retry"
+        [ ! -s "$log" ] || fail "a retry sent input to an active selector"
+      fi
+      printf 'main\n' > "$viewf"
+      ring_capture_failure || fail "a later ring should succeed once the main composer is readable"
+      grep -q '^SUBMIT: ' "$log" || fail "the retry did not submit the doorbell"
+    done
+  done
+  pass "inbox: failed or empty capture refuses input and a readable main composer permits retry"
+}
+
+test_typed_send_refuses_claude_selector() {
+  local dir state log composer viewf err target message start rc submitted corr pending
+  dir="$TMP_ROOT/typed-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=claude"
+  fm_write_secondmate_meta "$state/domain.meta" "$dir" sess:fm-domain alpha claude
+  fm_write_meta "$state/t2.meta" "window=sess:fm-t2" "kind=ship"
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"; err="$dir/send.err"
+  typed_send() {
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+      FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" FM_FAKE_VIEW="$viewf" \
+      FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" FM_SEND_SETTLE=0 \
+      bash "$ROOT/bin/fm-send.sh" "$target" "$message" > "$dir/send.out" 2> "$err"
+  }
+  for target in sess:unrecorded t2 sess:fm-t1 t1 domain; do
+    case "$target" in
+      *:*) message='please continue' ;;
+      *) message='/help' ;;
+    esac
+    for start in main none; do
+      : > "$log"; : > "$composer"; printf '%s\n' "$start" > "$viewf"
+      typed_send || fail "typed send to $target from $start failed: $(cat "$err")"
+      [ "$(cat "$viewf")" = "$start" ] || fail "typed send to $target changed the view"
+      [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "typed send should submit exactly once: $(cat "$log")"
+      submitted=$(sed -n 's/^SUBMIT: //p' "$log")
+      if [ "$target" = domain ]; then
+        corr=$(printf '%s\n' "$submitted" | sed -n 's/.*corr=\([a-f0-9]\{16\}\).*/\1/p')
+        [ -n "$corr" ] || fail "a secondmate slash send lost its correlation"
+        [ "$submitted" = "${FM_FROMFIRST_MARK}corr=$corr $message" ] || fail "a secondmate slash send changed its marker or message"
+        grep -q '^delivered_epoch=[0-9]' "$state/pending-replies/$corr" || fail "a confirmed typed send was not marked delivered"
+        rm -f "$state/pending-replies/$corr"
+      else
+        [ "$submitted" = "$message" ] || fail "typed send to $target changed the message: $submitted"
+      fi
+      [ ! -s "$composer" ] || fail "typed send left pending composer text"
+      [ "$(cat "$log")" = "KEY Enter"$'\n'"SUBMIT: $submitted" ] || fail "typed send emitted unexpected input"
+    done
+    for start in subagent list-other list-main list-main-viewed unreadable empty; do
+      case "$target:$start" in sess:unrecorded:unreadable|sess:unrecorded:empty|t2:unreadable|t2:empty) continue ;; esac
+      : > "$log"; : > "$composer"
+      rc=0
+      if [ "$start" = unreadable ] || [ "$start" = empty ]; then
+        printf 'main\n' > "$viewf"; printf 'main\n' > "$dir/capture-failure"
+        FM_FAKE_CAPTURE_FAILURE="$dir/capture-failure" FM_FAKE_CAPTURE_EMPTY="$([ "$start" = empty ] && echo 1)" typed_send || rc=$?
+        [ ! -e "$dir/capture-failure" ] || fail "the capture failure was not exercised"
+      else
+        printf '%s\n' "$start" > "$viewf"
+        typed_send || rc=$?
+        [ "$(cat "$viewf")" = "$start" ] || fail "a refused typed send changed the selector"
+      fi
+      expect_code 1 "$rc" "a $start preflight should refuse typed delivery to $target"
+      assert_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "typed refusal should identify the failed preflight"
+      [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a refused typed send emitted input: $(cat "$log")"
+      for pending in "$state/pending-replies/"[a-f0-9]*; do
+        [ ! -f "$pending" ] || fail "a refused typed send left a pending-reply expectation"
+      done
+    done
+  done
+  [ ! -d "$state/t1.inbox" ] && [ ! -d "$state/domain.inbox" ] || fail "typed delivery was rerouted to an inbox"
+  pass "fm-send: explicit targets and local slash invocations refuse active Claude selectors without input"
+}
+
+test_non_claude_delivery_ignores_selector_capture_failure() {
+  local dir state log composer viewf failure err harness route target message rec expected rc empty
+  dir="$TMP_ROOT/non-claude-selector"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_selector_stub "$dir"
+  log="$dir/send.log"; composer="$dir/composer"; viewf="$dir/view"
+  failure="$dir/capture-failure"; err="$dir/send.err"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  for empty in 0 1; do
+    for harness in codex pi ''; do
+      fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=$harness"
+      for route in slash explicit unrecorded inbox ring; do
+        : > "$log"; : > "$composer"; printf 'main\n' > "$viewf"; printf 'main\n' > "$failure"
+        target=t1
+        message='please continue'
+        case "$route" in
+          slash) message=/help ;;
+          explicit) target=sess:fm-t1 ;;
+          unrecorded) target=sess:unrecorded ;;
+        esac
+        expected=$message
+        case "$route" in
+          inbox|ring) expected=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec") ;;
+        esac
+        rc=0
+        if [ "$route" = ring ]; then
+          PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" \
+            FM_FAKE_VIEW="$viewf" FM_FAKE_CAPTURE_FAILURE="$failure" FM_FAKE_CAPTURE_EMPTY="$empty" \
+            FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+            inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$harness" \
+            > "$dir/send.out" 2> "$err" || rc=$?
+        else
+          PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+            FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" FM_FAKE_VIEW="$viewf" \
+            FM_FAKE_CAPTURE_FAILURE="$failure" FM_FAKE_CAPTURE_EMPTY="$empty" FM_SEND_SETTLE=0 \
+            FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+            bash "$ROOT/bin/fm-send.sh" "$target" "$message" > "$dir/send.out" 2> "$err" || rc=$?
+        fi
+        expect_code 0 "$rc" "${harness:-unidentified} $route delivery should survive the first capture failure: $(cat "$err")"
+        [ ! -e "$failure" ] || fail "the $route capture failure was not exercised"
+        [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "the $route delivery did not submit exactly once: $(cat "$log")"
+        grep -qxF "SUBMIT: $expected" "$log" || fail "the $route delivery changed the submitted text: $(cat "$log")"
+        [ ! -s "$composer" ] || fail "the $route delivery left pending text"
+        ! grep -qE '^TO-SUBAGENT|^KEY (Up|Down|Left|Escape)' "$log" \
+          || fail "the $route delivery navigated a non-Claude target: $(cat "$log")"
+        assert_not_contains "$(cat "$err")" 'Claude agent-selector preflight failed' "non-Claude delivery should not run the preflight"
+      done
+    done
+  done
+  pass "fm-send and inbox: non-Claude and unidentified targets retain delivery after a failed or empty capture"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -854,6 +1119,48 @@ test_watcher_holds_retry_while_the_worker_decides() {
   pass "watcher: a fire-and-forget retry waits out the worker's own decision, then rings once"
 }
 
+test_watcher_holds_retry_while_selector_blocks() {
+  local dir state log fire viewf composer start harness
+  dir=$(setup_watch_case faf-retry-selector)
+  state="$dir/state"; log="$dir/send.log"
+  viewf="$dir/view"; composer="$dir/composer"
+  mkdir -p "$dir/config"
+  : > "$dir/config/wait-no-turns"
+  make_selector_stub "$dir"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  selector_check_once() {
+    PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+      FM_SEND_LOG="$log" FM_FAKE_COMPOSER="$composer" FM_FAKE_VIEW="$viewf" \
+      FM_FAKE_CAPTURES="$ROOT/tests/captures/claude-2.1.286-agent-selector" \
+      FM_TASK_INBOX_GRACE_SECS=1 \
+      bash -c '. "$1" && inbox_steer_check sess:fm-t1 t1' _ "$WATCH"
+  }
+  for harness in claude ''; do
+    fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=$harness"
+    inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+    age_path "$state/t1.inbox/.retry-ring"
+    : > "$log"; : > "$composer"
+    for start in subagent list-other list-main list-main-viewed; do
+      printf '%s\n' "$start" > "$viewf"
+      selector_check_once
+      selector_check_once
+      [ ! -s "$log" ] && [ ! -s "$composer" ] || fail "a blocked retry sent terminal input"
+      [ "$(cat "$state/t1.inbox/.retry-ring" 2>/dev/null)" = "${fire##*/}" ] \
+        || fail "a selector refusal spent the fire-and-forget retry"
+      [ "$(cat "$viewf")" = "$start" ] || fail "a blocked retry changed the selector"
+    done
+    printf 'main\n' > "$viewf"
+    selector_check_once
+    selector_check_once
+    [ "$(grep -c '^SUBMIT: ' "$log")" = 1 ] || fail "a cleared selector must allow exactly one retry"
+    [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "the successful retry retained its mark"
+    [ ! -e "$state/t1.inbox/.ring-state" ] || fail "the retry entered the ordinary ladder"
+    [ ! -s "$state/.wake-queue" ] || fail "the retry escalated"
+    [ -f "$fire" ] || fail "the retry removed the durable steer"
+  done
+  pass "watcher: selector refusal retains the fire-and-forget retry until main is readable"
+}
+
 test_watcher_retry_keeps_a_newer_mark() {
   local dir state log fire newer rings
   dir=$(setup_watch_case faf-retry-newer)
@@ -960,6 +1267,10 @@ test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
 test_ring_submits_its_own_stuck_doorbell
+test_ring_refuses_claude_selector
+test_selector_capture_failure_leaves_ring_undelivered
+test_typed_send_refuses_claude_selector
+test_non_claude_delivery_ignores_selector_capture_failure
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -977,6 +1288,7 @@ test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
 test_watcher_pays_fire_and_forget_retry_once
 test_watcher_holds_retry_while_the_worker_decides
+test_watcher_holds_retry_while_selector_blocks
 test_watcher_retry_keeps_a_newer_mark
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing

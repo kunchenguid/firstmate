@@ -169,7 +169,7 @@ check_harness_doorbell() {  # <name>
     # message so a doorbell swallowed by a startup or update modal recovers
     # exactly as the production re-ring ladder recovers it.
     if [ "$i" -eq $((TIMEOUT / 2)) ] && [ -f "$rec" ]; then
-      fm_task_inbox_ring tmux "$SESSION:$win" "$rec" || true
+      fm_task_inbox_ring tmux "$SESSION:$win" "$rec" "" "$name" || true
       note "$name ($version): re-rang the doorbell once (watcher's role) at ${i}s"
     fi
     sleep 1

@@ -55,7 +55,9 @@
 # is present and its ring here was skipped or failed, the watcher rings it
 # exactly once more.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
+# re-ring ladder and the shared fm_task_inbox_selector_preflight used
+# before rings and local typed sends. After that preflight, the pending-text
+# composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
 # the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
@@ -65,7 +67,8 @@
 # the harness's own parser, and an explicit backend target names an endpoint,
 # not a task, so it stays typed even when local metadata happens to match it
 # (the same boundary that keeps it unmarked and outside --resolve-key). These
-# type the literal
+# first pass the shared selector preflight; a refusal exits 1 before typing.
+# Otherwise they type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
 # an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
@@ -748,10 +751,9 @@ fm_send_feed_resolved_holds() { # <answer-text>
   fi
 }
 
-# Resolve the target's harness from its meta (recorded by fm-spawn), used only to
-# scope the codex `$<skill>` popup-settle below. A task selector carries
-# meta; an explicit backend-target escape hatch has none, so its harness is
-# unknown and treated as non-codex (the safe default that keeps the fast path).
+# Harness-specific delivery uses recorded metadata, including when an explicit
+# backend target matches it. An unmatched explicit target stays unidentified;
+# never guess its harness from the message or apply another harness's policy.
 # The target's BACKEND comes from selector meta, from matching an explicit target
 # back to recorded meta, or from strict explicit-target shape validation.
 # Do not add a separate passive liveness preflight here. Active send paths own
@@ -1086,12 +1088,12 @@ else
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" "$TARGET_HARNESS" || ring_rc=$?
     ring_retry="the watcher will re-ring"
     if [ -n "$FIRE_AND_FORGET_ID" ] \
       && [ -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wait-no-turns" ]; then
       case "$ring_rc" in
-      1|2)
+      1|2|4)
         if fm_task_inbox_mark_retry "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
           ring_retry="the watcher will ring it once more"
         else
@@ -1102,7 +1104,7 @@ else
     fi
     case "$ring_rc" in
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
-    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
+    2|4) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
@@ -1142,6 +1144,12 @@ else
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
+  if ! fm_task_inbox_selector_preflight "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "$TARGET_HARNESS"; then
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T (Claude agent-selector preflight failed; tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
   send_rc=0
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :

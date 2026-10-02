@@ -1,0 +1,9 @@
+────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────
+  ⚠ Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker · restart with …
+
+  ↑/↓ to select
+
+❯ ⏺ main
+  ◯ general-purpose  Run sleep 600                                 3m 20s · ↓ 48.8k tokens

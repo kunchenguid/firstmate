@@ -55,6 +55,11 @@ As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 
+## Agent selector
+
+[`fm_task_inbox_selector_preflight`](../../../../../bin/fm-task-inbox-lib.sh) owns selector refusal for inbox rings and local typed sends; [`fm_composer_claude_agent_view`](../../../../../bin/fm-composer-lib.sh) owns the screen shapes.
+Never send Left to recover this view: it can open a dialog whose default stops every background task; [selector verification](../../../../../docs/verification/runtime-backends.md#claude-agent-selector) owns the observed key behavior and live guard.
+
 ## Feedback drafts
 
 The spawn disables Claude's `/bug` and `/feedback` model-drafted feedback flow for every Claude worker and secondmate, preventing a fleet-launched agent from queuing or submitting a bug report on the captain's behalf.

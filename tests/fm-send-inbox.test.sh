@@ -71,7 +71,9 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+    if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
+      cat "$FM_FAKE_TMUX_CAPTURE"
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -265,6 +267,15 @@ test_fire_and_forget_unlanded_ring_owes_one_retry() {
   expect_code 0 "$rc" "a rung fire-and-forget steer should succeed"
   [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
     || fail "a ring that landed must not owe a retry for its own record"
+
+  run_send "$dir" "$err" \
+    FM_FAKE_TMUX_CAPTURE="$ROOT/tests/captures/claude-2.1.286-agent-selector/list-main-viewed-tmux.txt" -- \
+    fm-domain --fire-and-forget 2123456789abcdef "reconcile after the selector closes"; rc=$?
+  expect_code 0 "$rc" "a selector refusal must retain the durably sent steer"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 003.msg ] \
+    || fail "a selector-refused initial ring did not owe its retry"
+  [ ! -s "$dir/send.log" ] || fail "a selector-refused initial ring typed input"
+  assert_contains "$(cat "$err")" "doorbell did not reach" "a selector refusal must be reported"
 
   dir=$(setup_case ordinary-no-retry)
   err="$dir/send.err"
