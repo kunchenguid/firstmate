@@ -1147,6 +1147,7 @@ Omitting the continuation id is accepted only when exactly one recorded current-
 Continuing uses the exact recorded task through the existing control plane, with an explicit progress note or saved `data/<id>/progress.md`.
 Native session continuation remains limited to combinations the launch owner already verifies; other combinations use the saved brief, worktree and progress note.
 A durable record alone is reported with unknown process liveness.
+A damaged or non-finite `route.json` is reported as an error on that session entry only; it is left untouched and other sessions remain listable.
 Doctor is read-only: it reports executables, configuration validation, routing key presence, account pins and backend capability limits, keeps unproven authentication unknown, and performs no repairs or installations.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
