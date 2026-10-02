@@ -359,6 +359,10 @@ SH
 # inheritance every crew window gets.
 birthed_window_env() {  # <socket> -> prints that window's environment
   local sock=$1 out="$EXTRA_DIR/env-$1.txt" i=0
+  # Drop any previous probe's output for this socket first: otherwise a second
+  # probe can read the stale file before the new window truncates it and prove
+  # nothing about the window it just created.
+  rm -f "$out"
   "$REAL_TMUX" -L "$sock" new-window -d -t firstmate: "env > '$out'" \
     || fail "could not create the environment probe window on socket $sock"
   while [ "$i" -lt 100 ]; do
@@ -408,6 +412,14 @@ case "$fixed_env" in
 esac
 pass "real tmux: fm_backend_tmux_container_ensure scrubs color control from the server it births, leaving unrelated launch environment intact"
 
+# Reuse is only reuse if it is the SAME server under the SAME scrubbed
+# environment: a restart (defeating this PR's scrub state) or a color variable
+# leaking into the windows the server hands out afterwards would still echo
+# 'firstmate'. Record the server pid before the second call so a restart is
+# visible, then probe a fresh window's environment exactly like the first-birth
+# loop above.
+server_pid_before=$("$REAL_TMUX" -L "$FIXED_SOCKET" display-message -p '#{pid}') \
+  || fail "could not read the tmux server pid on socket $FIXED_SOCKET before the reuse call"
 reused=$(
   pollute_color_env
   # shellcheck disable=SC2030,SC2031  # scoping the shim to this subshell is the point
@@ -415,7 +427,19 @@ reused=$(
   fm_backend_tmux_container_ensure
 ) || fail "a second container_ensure against the existing session failed"
 [ "$reused" = firstmate ] || fail "the reuse path should echo 'firstmate', got '$reused'"
+server_pid_after=$("$REAL_TMUX" -L "$FIXED_SOCKET" display-message -p '#{pid}') \
+  || fail "could not read the tmux server pid on socket $FIXED_SOCKET after the reuse call"
+[ "$server_pid_after" = "$server_pid_before" ] \
+  || fail "the reuse call restarted the tmux server (pid $server_pid_before -> $server_pid_after)"
 pass "real tmux: a second container_ensure reuses the existing session instead of birthing another server"
+
+reused_env=$(birthed_window_env "$FIXED_SOCKET")
+for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
+  case "$reused_env" in
+    *"$name"=*) fail "the reuse path let $name into the environment inherited by later windows" ;;
+  esac
+done
+pass "real tmux: the reuse path leaves the scrubbed server environment clean for windows born after it"
 
 cleanup_all
 for sock in "$CONTROL_SOCKET" "$FIXED_SOCKET"; do
