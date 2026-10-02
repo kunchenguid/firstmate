@@ -3131,15 +3131,21 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # (alt_screen_read_spec, herdr src/server/headless.rs; herdr issue #2669). The
 # >=200 fetch above always exceeds the viewport, so every watcher poll scrolled
 # the captain's idle worker pane to the top and back. ANSI reads skip that
-# harvest and still return the retained main-screen scrollback.
+# harvest and still return the retained main-screen scrollback. A build that
+# rejects `--format ansi` falls back to a text `visible` read (viewport-bounded,
+# never harvests), never to a text `recent` read.
 fm_backend_herdr_capture() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out
   case "$lines" in ''|*[!0-9]*) lines=200 ;; esac
   fetch=$lines
   case "$fetch" in ''|*[!0-9]*) fetch=200 ;; *) [ "$fetch" -ge 200 ] || fetch=200 ;; esac
-  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null) || return 1
-  printf '%s' "$out" | fm_composer_strip_ansi | tail -n "$lines"
+  if out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source recent --lines "$fetch" --format ansi 2>/dev/null); then
+    printf '%s' "$out" | fm_composer_strip_ansi | tail -n "$lines"
+    return 0
+  fi
+  out=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null) || return 1
+  printf '%s' "$out" | tail -n "$lines"
 }
 
 # fm_backend_herdr_visible_capture: the visible viewport only. `--source
