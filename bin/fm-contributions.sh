@@ -38,11 +38,12 @@
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
 # seconds. A read a bound stopped answered nothing and is unmeasured, never a
-# forge failure: that covers the per-read cap, the deadline, and a termination
-# signal aimed at the read alone, which every bounding mechanism leaves
-# possible by running the read in its own process group. Only the forge's own
-# nonzero exit status is unavailable evidence; a read a signal killed,
-# including a kill, is unmeasured. A pull observation has three
+# forge failure: that is the statuses fm-timeout-lib.sh reports as its own
+# bound, 124 and the kill's 137, plus TERM's 143, INT's 130 and HUP's 129,
+# which reach the poll when the signal hit the read alone - possible because
+# every bounding mechanism runs the read in its own process group. Every other
+# status is unavailable evidence, including a client death by some other
+# signal such as SIGSEGV's 139. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -215,13 +216,13 @@ unmeasured() {
 }
 
 # fm-timeout-lib.sh owns which statuses report its bound, so ask it rather than
-# re-deriving one of them here. TERM, INT and HUP reach forge() when the signal
-# hit the read and not the poll, which stays possible because every mechanism
-# runs the read in its own process group; a signal to the whole group ends the
-# poll at its own trap instead, with nothing left to classify. A read any of
-# those stopped answered nothing either. A client death the library reports as
-# its own bound, such as a kill, is unmeasured for the same reason; only a
-# nonzero exit status the forge itself produced is unavailable evidence.
+# re-deriving one of them here. TERM's 143, INT's 130 and HUP's 129 reach
+# forge() when the signal hit the read and not the poll, which stays possible
+# because every mechanism runs the read in its own process group; a signal to
+# the whole group ends the poll at its own trap instead, with nothing left to
+# classify. A read any of those stopped answered nothing either. Every status
+# outside this set is unavailable evidence, including a client death by some
+# other signal such as SIGSEGV's 139.
 read_cut_short() { # exit-status
   if fm_timed_out "$1"; then return 0; fi
   case $1 in 129|130|143) return 0 ;; esac
@@ -236,8 +237,8 @@ forge() {
   [ "$remaining" -le 5 ] || remaining=5
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read stopped at its own bound, at the deadline, or by a signal aimed at
-  # it is unmeasured; only the forge's own nonzero exit is unavailable
+  # A read stopped at its own bound, at the deadline, or by TERM, INT or HUP
+  # aimed at it is unmeasured; every other nonzero status is unavailable
   # evidence.
   if read_cut_short "$rc"; then
     unmeasured
