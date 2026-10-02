@@ -382,7 +382,8 @@ control_shim=$(make_socket_shim "$CONTROL_SOCKET")
   export PATH="$control_shim:$PATH"
   tmux new-session -d -s firstmate
 ) || fail "control: could not birth a tmux server under the polluted environment"
-control_env=$(birthed_window_env "$CONTROL_SOCKET")
+control_env=$(birthed_window_env "$CONTROL_SOCKET") \
+  || fail "control: the environment probe on socket $CONTROL_SOCKET failed"
 case "$control_env" in
   *NO_COLOR=1*) : ;;
   *) fail "control: this tmux does not propagate NO_COLOR from the birth environment, so the assertions below prove nothing" ;;
@@ -400,7 +401,8 @@ ensured=$(
 ) || fail "fm_backend_tmux_container_ensure failed under a color-polluted launcher environment"
 [ "$ensured" = firstmate ] || fail "container_ensure should echo 'firstmate', got '$ensured'"
 
-fixed_env=$(birthed_window_env "$FIXED_SOCKET")
+fixed_env=$(birthed_window_env "$FIXED_SOCKET") \
+  || fail "container_ensure: the environment probe on socket $FIXED_SOCKET failed"
 for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
   case "$fixed_env" in
     *"$name"=*) fail "container_ensure leaked $name into the long-lived tmux server it birthed" ;;
@@ -433,7 +435,10 @@ server_pid_after=$("$REAL_TMUX" -L "$FIXED_SOCKET" display-message -p '#{pid}') 
   || fail "the reuse call restarted the tmux server (pid $server_pid_before -> $server_pid_after)"
 pass "real tmux: a second container_ensure reuses the existing session instead of birthing another server"
 
-reused_env=$(birthed_window_env "$FIXED_SOCKET")
+reused_env=$(birthed_window_env "$FIXED_SOCKET") \
+  || fail "the reuse path's environment probe on socket $FIXED_SOCKET failed"
+[ -n "$reused_env" ] \
+  || fail "the reuse path's environment probe on socket $FIXED_SOCKET reported no environment"
 for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
   case "$reused_env" in
     *"$name"=*) fail "the reuse path let $name into the environment inherited by later windows" ;;

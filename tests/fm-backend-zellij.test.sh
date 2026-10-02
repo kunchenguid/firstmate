@@ -472,7 +472,7 @@ test_server_ensure_scrubs_color_control_at_session_birth() {
   expect_code 0 $? "server_ensure should bring the session up under a color-polluted launcher environment"
   out=$(cat "$dir/birth-env" 2>/dev/null)
   for name in NO_COLOR FORCE_COLOR CLICOLOR CLICOLOR_FORCE; do
-    assert_contains "$out" "$name=<unset>" "server_ensure leaked $name into the zellij session it birthed"
+    assert_line "$out" "$name=<unset>" "server_ensure leaked $name into the zellij session it birthed"
   done
   assert_contains "$out" "FM_ZELLIJ_LAUNCH_SENTINEL=kept" "server_ensure removed an unrelated launch environment variable"
   pass "fm_backend_zellij_server_ensure: drops the launcher's color control from the session it births, leaving unrelated launch environment intact"
