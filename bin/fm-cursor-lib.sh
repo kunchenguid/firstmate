@@ -31,9 +31,10 @@
 # Launch resolution is stricter than process identity (see
 # fm_cursor_verify_executable): a probe alone may accept a candidate, but a
 # name or install-tree match alone is not enough when a bounded runner is
-# available, because a right-looking path can hold a broken file. Without a
-# bounded runner neither launch check can run, so structural evidence alone
-# still stands there, as it always has.
+# available, because a right-looking path can hold a broken file (including the
+# IDE shim that prints "No Cursor IDE installation found" on stderr). Without a
+# bounded runner the launch probe cannot run, so structural evidence alone still
+# stands there, as it always has.
 #
 # Process detection deliberately uses the structural signal only. Probing an
 # arbitrary pid's executable during an ancestry walk or a liveness poll would
@@ -115,11 +116,14 @@ fm_cursor_help_marks_cursor() {  # <help-text>
   return 1
 }
 
-fm_cursor_probe_is_cursor() {  # <path>
-  local path=$1 out
-  out=$(fm_cursor_bounded_output "$path" --help) || return 1
-  [ -n "$out" ] || return 1
-  fm_cursor_help_marks_cursor "$out"
+# True when probe text is the Cursor IDE shim's "no installation" refusal.
+# That message is the measured failure mode of the broken cursor-agent the
+# installer can leave behind; it is never Cursor Agent CLI identity.
+fm_cursor_help_is_ide_shim_refusal() {  # <help-text>
+  case "$1" in
+    *"No Cursor IDE installation found"*) return 0 ;;
+  esac
+  return 1
 }
 
 # True when executable $1 may be launched as Cursor.
@@ -128,24 +132,29 @@ fm_cursor_probe_is_cursor() {  # <path>
 # installer writes its `cursor` IDE shim through the ~/.local/bin/cursor ->
 # cursor-agent symlink, which can replace a versioned
 # cursor-agent/versions/<version>/cursor-agent with a script that only prints
-# "No Cursor IDE installation found" and exits non-zero. Every candidate,
-# whatever its name, must therefore either print Cursor's CLI identity under one
-# bounded --help probe, or carry the structural evidence AND have that same
-# probe exit successfully. The probe runs at most once: its exit status is kept
-# so a successful run without markers does not pay a second launch just to re-
-# check exit status, and a failed run is refused without retrying. A host with
-# no bounded runner cannot run the probe, so there the structural verdict stands
-# on its own, as it always has.
+# "No Cursor IDE installation found" (on stderr) and exits non-zero. Every
+# candidate, whatever its name, must therefore either print Cursor's CLI
+# identity under one bounded --help probe, or carry the structural evidence AND
+# have that same probe exit successfully with non-empty output that is not the
+# IDE-shim refusal. The probe runs at most once and keeps both streams so a
+# stderr-only refusal is visible; a failed run is refused without retrying. A
+# host with no bounded runner cannot run the probe, so there the structural
+# verdict stands on its own, as it always has.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1 out
+  local path=$1 out runner
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  if ! fm_cursor_timeout_runner >/dev/null; then
+  if ! runner=$(fm_cursor_timeout_runner); then
     fm_cursor_path_is_cursor "$path"
     return $?
   fi
-  if out=$(fm_cursor_bounded_output "$path" --help); then
+  # Keep stderr: the broken IDE shim prints only there. stdout-only capture
+  # would hide the refusal text on a future exit-0 variant of the same file.
+  if out=$("$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1); then
     fm_cursor_help_marks_cursor "$out" && return 0
-    # --help succeeded without a marker; structural evidence alone is enough.
+    fm_cursor_help_is_ide_shim_refusal "$out" && return 1
+    # Successful --help without a Cursor marker still needs real output plus
+    # structural evidence; empty success is not enough to launch.
+    [ -n "$out" ] || return 1
     fm_cursor_path_is_cursor "$path"
     return $?
   fi

@@ -195,6 +195,29 @@ test_verify_executable_single_successful_probe() {
   pass "fm_cursor_verify_executable: structural success reuses one probe exit"
 }
 
+test_verify_executable_refuses_ide_shim_refusal_text() {
+  # Measured broken file prints the IDE-missing line on stderr. Even if a
+  # future variant exits 0, that text is never Cursor Agent identity and must
+  # not verify through the structural fallback.
+  local base ver launches
+  base="$TMP_ROOT/ide-shim-refusal"
+  ver="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  mkdir -p "$ver" "$base/bin"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Error: No Cursor IDE installation found. Use '\''cursor agent'\'' or '\''agent'\'' to run the agent." >&2\necho "Or, install Cursor at https://cursor.com/download" >&2\nexit 0\n' \
+    "$base.launches" > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$base/bin/cursor-agent"
+  : > "$base.launches"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep structural evidence"
+  ! fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "IDE-shim refusal text must not verify even on exit 0"
+  launches=$(wc -c < "$base.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "refusal path must still probe once, got $launches launches"
+  pass "fm_cursor_verify_executable: IDE-shim refusal text is never launchable"
+}
+
 test_resolve_binary_prefers_stable_path() {
   # The canonical path carries a version cursor replaces on its own auto-update,
   # so resolution must print the STABLE launcher even though identity is proven
@@ -478,6 +501,7 @@ test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_skips_broken_cursor_agent
 test_verify_executable_single_successful_probe
+test_verify_executable_refuses_ide_shim_refusal_text
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
