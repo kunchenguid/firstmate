@@ -13,7 +13,7 @@
 #   - pi 0.99.2, 1.0.0: same banner plus hint-row shape as 0.87.1
 #
 # The adapter reads the installed release from the first line of
-# `pi --version` once per process; FM_COMPOSER_PI_ADAPTER_VERSION overrides it
+# `pi --version` (or `pi-signed --version`) once per process; FM_COMPOSER_PI_ADAPTER_VERSION overrides it
 # (test fixtures pin it explicitly). Outside the pin set, or when no version can
 # be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
 # rendering cannot become a shared empty proof and the classifier keeps its
@@ -68,23 +68,32 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   return 1
 }
 
-# Resolve the adapter version: the explicit override, else the installed
-# `pi --version` first line, read once and cached for the process. Empty when
-# neither is available, which the pin check treats as unpinned.
-fm_composer_pi_adapter_resolved_version() {
-  local v=${FM_COMPOSER_PI_ADAPTER_VERSION:-}
+# Resolve the adapter version into _FM_COMPOSER_PI_ADAPTER_VERSION_RESOLVED (a
+# global, assigned in the current shell so the installed-release cache survives
+# the call): the explicit override, else the first line of `pi --version`, else
+# of `pi-signed --version` when no `pi` is on PATH (fm-spawn launches pi-signed
+# by name and never falls back to pi). The executable runs at most once per
+# process. Empty when nothing is available, which the pin check treats as unpinned.
+fm_composer_pi_adapter_resolve_version() {
+  local v=${FM_COMPOSER_PI_ADAPTER_VERSION:-} exe
   if [ -z "$v" ]; then
     if [ -z "${_FM_COMPOSER_PI_INSTALLED_VERSION+x}" ]; then
       _FM_COMPOSER_PI_INSTALLED_VERSION=
+      exe=
       if command -v pi >/dev/null 2>&1; then
-        _FM_COMPOSER_PI_INSTALLED_VERSION=$(pi --version 2>/dev/null | head -1) || _FM_COMPOSER_PI_INSTALLED_VERSION=
+        exe=pi
+      elif command -v pi-signed >/dev/null 2>&1; then
+        exe=pi-signed
+      fi
+      if [ -n "$exe" ]; then
+        _FM_COMPOSER_PI_INSTALLED_VERSION=$("$exe" --version 2>/dev/null | head -1) || _FM_COMPOSER_PI_INSTALLED_VERSION=
       fi
     fi
     v=$_FM_COMPOSER_PI_INSTALLED_VERSION
   fi
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
-  printf '%s' "$v"
+  _FM_COMPOSER_PI_ADAPTER_VERSION_RESOLVED=$v
 }
 
 # 0 when the last non-blank row above the scanned pair's opening separator is
@@ -93,9 +102,9 @@ fm_composer_pi_adapter_resolved_version() {
 # Returns 1 when the adapter version is unpinned or outside the pin set, so an
 # unpinned Pi rendering cannot prove emptiness through this path.
 fm_composer_pi_adapter_terminal_banner_above() {  # <screen>
-  local screen=$1 row raw trimmed hint_seen=0 version
-  version=$(fm_composer_pi_adapter_resolved_version)
-  fm_composer_pi_adapter_version_pinned "$version" || return 1
+  local screen=$1 row raw trimmed hint_seen=0
+  fm_composer_pi_adapter_resolve_version
+  fm_composer_pi_adapter_version_pinned "$_FM_COMPOSER_PI_ADAPTER_VERSION_RESOLVED" || return 1
   # Requires the shared scan context from fm-composer-lib.sh.
   [ -n "${FM_COMPOSER_SCAN_PI_OPEN:-}" ] || return 1
   row=$((FM_COMPOSER_SCAN_PI_OPEN - 1))
