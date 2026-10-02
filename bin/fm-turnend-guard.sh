@@ -151,7 +151,6 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
 CODEX_TURNEND_TRACKED=0
 CODEX_STOP_RETRY=0
 CODEX_TURN_ID=
-CODEX_LEDGER="$STATE/.turnend-codex-ledger"
 CODEX_LEDGER_LOCK="$STATE/.turnend-codex-ledger.lock"
 if [ "$CLAUDE_MODE" -eq 0 ]; then
   CODEX_TURN_ID=$(printf '%s' "$PAYLOAD" | jq -r 'if (.turn_id | type) == "string" then .turn_id else "" end' 2>/dev/null || true)
@@ -191,8 +190,10 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+CODEX_LEDGER="$STATE/.turnend-codex-ledger.$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' -f1)"
 
-# The ledger is scoped to one Codex turn. A changed watcher beacon proves that
+# Each Codex session owns its own ledger file, scoped to one turn, so
+# concurrent sessions in one home cannot reset each other's count. A changed watcher beacon proves that
 # a checkpoint ran since the previous block and earns a fresh block budget.
 # The timestamp and beacon value are kept with the counter for diagnosis and
 # to make the persisted state self-describing.
