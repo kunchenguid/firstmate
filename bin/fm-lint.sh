@@ -73,7 +73,9 @@
 # own ShellCheck process with identical diagnostics, just unbounded.
 #
 # If a source-following root exits with a memory failure, it is retried once
-# without --external-sources under the same bounds. A clean retry passes
+# without --external-sources under the same memory limit and only the time
+# left in that root's original deadline; with under a second left, the
+# memory failure stands without a retry. A clean retry passes
 # with an explicit memory-fallback reason and warning; only the same
 # cross-file-dependent codes omitted in local no-source lint are excluded.
 # Other findings and failed retries still fail lint. The retry's diagnostics
@@ -232,11 +234,11 @@ fm_lint_classify_root() {  # <rc> <root-stderr-file>
   esac
 }
 
-# Run one ShellCheck invocation with the same per-root timeout and address-space
-# limit, returning its exit status in FM_LINT_LAST_RC.
-fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <args...>
-  local path=$1 root_out=$2 root_err=$3 rss_file=$4 invocation_rc=0
-  shift 4
+# Run one ShellCheck invocation under the given deadline and the per-root
+# address-space limit, returning its exit status in FM_LINT_LAST_RC.
+fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <seconds> <args...>
+  local path=$1 root_out=$2 root_err=$3 rss_file=$4 seconds=$5 invocation_rc=0
+  shift 5
   if [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ]; then
     # The watchdog runs in a process group of its own (the same setpgrp hop the
     # workers use), so the owner's TERM-then-KILL group sweep cannot kill it
@@ -247,7 +249,7 @@ fm_lint_exec_root() {  # <path> <stdout-file> <stderr-file> <rss-file> <args...>
     # the watchdog is still starting is detected too.
     ( FM_EXEC_TIMED_OWNER_PID=$$ exec "${FM_LINT_PERL_BIN:-perl}" -e 'setpgrp(0, 0) or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' \
         "${BASH:-bash}" "$SELF" --internal-timed \
-        "$FM_LINT_INTERNAL_ROOT_SECS" "$FM_LINT_INTERNAL_GRACE" \
+        "$seconds" "$FM_LINT_INTERNAL_GRACE" \
         "${BASH:-bash}" "$SELF" --internal-root "$rss_file" "$FM_LINT_INTERNAL_MEMORY_KIB" \
         "$FM_LINT_SHELLCHECK" "$@" -- "$path" ) > "$root_out" 2> "$root_err" &
     FM_LINT_WORKER_RUN_PID=$!
@@ -273,6 +275,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
   local fallback_err="$output_dir/root.$shard_index.$index.fallback.err"
   local fallback_rss="$output_dir/root.$shard_index.$index.fallback.rss"
   local start_ms end_ms duration_ms invocation_rc=0 reason rss_kib initial_rc initial_reason
+  local fallback_secs
   local final_follow_sources=${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}
   local -a fallback_args
   start_ms=$(fm_lint_now_ms)
@@ -286,12 +289,24 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
       "$path" "$shard_index" "${FM_LINT_INTERNAL_MODE:-unknown}" >&2
   fi
   fm_lint_exec_root "$path" "$root_out" "$root_err" "$rss_file" \
-    "${FM_LINT_WORKER_ARGS[@]}"
+    "$FM_LINT_INTERNAL_ROOT_SECS" "${FM_LINT_WORKER_ARGS[@]}"
   invocation_rc=$FM_LINT_LAST_RC
   reason=$(fm_lint_classify_root "$invocation_rc" "$root_err")
   initial_rc=$invocation_rc
   initial_reason=$reason
+  # The retry spends what is left of this root's one deadline rather than a
+  # fresh one, so both attempts together still fit the budget CI sized its job
+  # timeout around.
+  fallback_secs=$(( (start_ms + FM_LINT_INTERNAL_ROOT_SECS * 1000 - $(fm_lint_now_ms)) / 1000 ))
   if [ "$reason" = memory ] \
+    && [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ] \
+    && [ "${FM_LINT_INTERNAL_BOUNDED:-none}" != none ] \
+    && [ "$fallback_secs" -lt 1 ]; then
+    printf 'fm-lint: %s hit the memory ceiling with --external-sources (reason=%s rc=%s); no time left in its %ss deadline to retry without it\n' \
+      "$path" "$initial_reason" "$initial_rc" "$FM_LINT_INTERNAL_ROOT_SECS" >> "$output_dir/shard.$shard_index.out"
+    rss_kib=$(fm_lint_root_rss "$rss_file")
+    cat "$root_out" "$root_err" >> "$output_dir/shard.$shard_index.out"
+  elif [ "$reason" = memory ] \
     && [ "${FM_LINT_INTERNAL_FOLLOW_SOURCES:-1}" -eq 1 ]; then
     fallback_args=()
     for arg in "${FM_LINT_WORKER_ARGS[@]}"; do
@@ -299,7 +314,7 @@ fm_lint_run_root() {  # <index> <path> <output-dir> <shard-index>
     done
     [ -z "$LOCAL_NOX_EXCLUDE" ] || fallback_args+=("--exclude=$LOCAL_NOX_EXCLUDE")
     fm_lint_exec_root "$path" "$fallback_out" "$fallback_err" "$fallback_rss" \
-      "${fallback_args[@]}"
+      "$fallback_secs" "${fallback_args[@]}"
     final_follow_sources=0
     invocation_rc=$FM_LINT_LAST_RC
     reason=$(fm_lint_classify_root "$invocation_rc" "$fallback_err")

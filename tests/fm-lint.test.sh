@@ -1632,6 +1632,71 @@ SH
   pass "memory failures retry without source following, exclude cross-file codes, and preserve a real fallback finding"
 }
 
+test_memory_fallback_spends_only_the_remaining_root_deadline() {
+  if ! fm_lint_bounds_supported; then
+    pass "SKIP (host cannot enforce the bounded envelope): fallback deadline check"
+    return
+  fi
+  local tmp fakebin fixture log out rc duration_ms
+  tmp=$(fm_test_tmproot fm-lint-fallback-deadline)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/teardown.sh"
+  log="$tmp/attempts.log"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fixture"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = --external-sources ]; then
+    printf 'follow\n' >> "$FM_TEST_ATTEMPT_LOG"
+    sleep "$FM_TEST_FIRST_SECS"
+    printf 'shellcheck: Heap exhausted;\n' >&2
+    exit 251
+  fi
+done
+printf 'fallback\n' >> "$FM_TEST_ATTEMPT_LOG"
+sleep 60
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+
+  # A 3s first attempt leaves about 3s of the 6s deadline, so the retry is
+  # killed there; a fresh deadline would let the root run for about 9s.
+  : > "$log"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+    FM_LINT_ROOT_SECONDS=6 FM_LINT_ROOT_GRACE=1 \
+    FM_TEST_ATTEMPT_LOG="$log" FM_TEST_FIRST_SECS=3 \
+    "$LINT" --telemetry "$tmp/partial.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a fallback cut off by the root deadline unexpectedly passed"
+  [ "$(cat "$log")" = "$(printf 'follow\nfallback')" ] \
+    || fail "the root did not retry once with its remaining time"$'\n'"$(cat "$log")"
+  assert_contains "$out" "fallback reason=timeout" \
+    "the fallback was not stopped by the root's remaining deadline"$'\n'"$out"
+  duration_ms=$(awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ { print $8 }' "$tmp/partial.roots.tsv")
+  [ "$duration_ms" -lt 7000 ] \
+    || fail "the first attempt and fallback together exceeded the root deadline plus grace: ${duration_ms}ms"
+
+  # With under a second of the deadline left, no retry starts.
+  : > "$log"
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_LINT_REQUIRE_BOUNDS=1 \
+    FM_LINT_ROOT_SECONDS=6 FM_LINT_ROOT_GRACE=1 \
+    FM_TEST_ATTEMPT_LOG="$log" FM_TEST_FIRST_SECS=5.2 \
+    "$LINT" --telemetry "$tmp/spent.tsv" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a memory failure with no deadline left unexpectedly passed"
+  [ "$(cat "$log")" = follow ] \
+    || fail "a fallback started with no time left in the root deadline"$'\n'"$(cat "$log")"
+  assert_contains "$out" "no time left in its 6s deadline to retry without it" \
+    "the skipped fallback was not explained"$'\n'"$out"
+  awk -F '\t' '$1 == "end" && $3 ~ /teardown\.sh$/ && $10 == "memory" && $12 == 1 { found=1 } END { exit !found }' \
+    "$tmp/spent.roots.tsv" || fail "the unretried memory failure was not recorded as a source-following memory failure"
+  pass "a memory fallback runs only within the time left in its root's original deadline"
+}
+
 test_memory_evidence_outranks_findings_and_signal_reasons() {
   local tmp fakebin roots_log out rc name reason bounded
   local -a roots modes
@@ -1987,6 +2052,7 @@ test_worker_trees_stop_on_signal
 test_root_deadline_names_the_root_and_reaps_the_tree
 test_root_memory_limit_reports_a_named_death
 test_memory_failure_retries_without_external_sources
+test_memory_fallback_spends_only_the_remaining_root_deadline
 test_memory_evidence_outranks_findings_and_signal_reasons
 test_source_excerpt_with_oom_text_stays_findings
 test_require_bounds_refuses_when_enforcement_is_missing
