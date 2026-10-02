@@ -222,12 +222,12 @@ Herdr passes its server startup environment to every later pane, so retaining th
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 
-All text submission uses Herdr's native `agent prompt <pane> <text>` API against the explicitly selected session.
+All text submission uses the explicitly selected session's native Herdr prompt API: `agent send <pane> <text>` on clients that expose the legacy command and `agent prompt <pane> <text>` on clients that expose the renamed command.
 Ordinary local steers first preserve the exact text in the durable steering inbox, then submit only its constant doorbell through that API.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Text submission does not read the pane, composer, native execution state, or vendor transcript and does not send or retry Enter.
-A zero exit from `agent prompt` means only that Herdr accepted the submission; it does not prove that the worker read, handled, or completed it.
+A zero exit from the selected native prompt command means only that Herdr accepted the submission; it does not prove that the worker read, handled, or completed it.
 A timeout-like result remains uncertain and must not be replayed blindly, while a definite API or transport refusal remains a failure.
 The durable inbox record remains queued until the worker moves it to `handled/`; that move is observation of handling, not proof of semantic task completion.
 Transcript readers remain available only to recovery/lifecycle operations that independently require their provenance; they are not an ordinary Codex or TraeX state source.

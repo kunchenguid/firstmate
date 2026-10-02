@@ -3298,8 +3298,26 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   printf '%s' "$verdict"
 }
 
+fm_backend_herdr_agent_submit_capability() {  # <session>
+  local session=$1 bin help command rest legacy=0
+  fm_backend_herdr_client_select "$session"
+  bin=$(fm_backend_herdr_bin)
+  help=$(HERDR_SESSION="$session" "$bin" agent --help --session "$session" 2>/dev/null) || return 1
+  while read -r command rest; do
+    case "$command" in
+      prompt)
+        FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND=prompt
+        return 0
+        ;;
+      send) legacy=1 ;;
+    esac
+  done <<< "$help"
+  [ "$legacy" -eq 1 ] || return 1
+  FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND=send
+}
+
 # fm_backend_herdr_send_text_submit: submit <text> exactly once through Herdr's
-# native `agent prompt` API. This bypasses terminal composer rendering, manual
+# native agent prompt API. This bypasses terminal composer rendering, manual
 # Enter retries and vendor-transcript proof. A zero exit means only that Herdr
 # accepted the prompt for the exact named-session pane; it does not prove that
 # the worker read, handled or completed it. A timeout-like refusal is unknown
@@ -3308,7 +3326,12 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 output rc=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  output=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent prompt \
+  if ! fm_backend_herdr_agent_submit_capability "$FM_BACKEND_HERDR_SESSION"; then
+    echo "error: selected herdr client exposes neither agent prompt nor agent send" >&2
+    printf 'send-failed'
+    return 0
+  fi
+  output=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent "$FM_BACKEND_HERDR_AGENT_SUBMIT_COMMAND" \
     "$FM_BACKEND_HERDR_PANE" "$text" 2>&1) || rc=$?
   if [ "$rc" -eq 0 ]; then
     printf 'submitted'
@@ -3320,7 +3343,7 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     return 0
   fi
   case "$output" in
-    *timeout*|*timed\ out*|*deadline*|*agent_prompt_stalled*) printf 'unknown' ;;
+    *timeout*|*timed\ out*|*deadline*|*agent_prompt_stalled*|*agent_send_stalled*) printf 'unknown' ;;
     *) printf 'send-failed' ;;
   esac
 }

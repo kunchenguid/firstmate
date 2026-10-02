@@ -168,7 +168,7 @@ ok - codex (codex-cli 0.159.1): coalesced input submitted once without re-ring o
 ```
 
 That dated result describes the retired terminal insertion path. Ordinary
-doorbells now use one native `herdr agent prompt` call after exact home, task,
+doorbells now use one native `herdr agent send` or `herdr agent prompt` call after exact home, task,
 backend, session, pane, authority and reservation resolution. They do not read
 the pane composer, agent execution state or vendor transcript before or after
 submission. A zero API result means `submitted`, not read, handled or complete;

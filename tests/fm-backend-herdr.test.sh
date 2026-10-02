@@ -53,7 +53,16 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   printf '\n'
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
-  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  printf '{"client":{"version":"%s","protocol":%s},"server":{"running":true}}\n' \
+    "${FM_FAKE_HERDR_VERSION:-0.7.1}" "${FM_FAKE_HERDR_PROTOCOL:-14}"
+  exit 0
+fi
+if [ "${1:-}" = agent ] && [ "${2:-}" = --help ]; then
+  case "${FM_FAKE_HERDR_AGENT_SUBMIT_COMMAND:-prompt}" in
+    prompt) printf 'Commands:\n  prompt  Submit a prompt to an agent\n' ;;
+    send) printf 'Commands:\n  send  Send a message to an agent\n' ;;
+    *) exit 1 ;;
+  esac
   exit 0
 fi
 if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
@@ -4661,22 +4670,32 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
-# Native prompt submission is one API call with exact target and text. It does
-# not inspect agent state, composer output, or send terminal keys.
-test_send_text_submit_uses_native_prompt_once() {
-  local dir log resp fb out expected
-  dir="$TMP_ROOT/native-prompt"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 "$1" 9 9 9' "$ROOT" $'first line\nsecond line')
-  [ "$out" = submitted ] || fail "native prompt success should report submitted, got '$out'"
-  expected=$'HERDR_SESSION=lab\x1fagent\x1fprompt\x1fw1:p2\x1ffirst line\nsecond line\x1f--session\x1flab'
-  [ "$(cat "$log")" = "$expected" ] || fail "native prompt target or multiline text changed:"$'\n'"$(cat "$log")"
-  pass "fm_backend_herdr_send_text_submit: one native prompt preserves session, pane, and multiline text"
+# Native prompt submission selects the command exposed by the Herdr client,
+# then makes one submission with exact target and text. It does not inspect
+# agent state, composer output, or send terminal keys.
+test_send_text_submit_uses_supported_native_command_once() {
+  local shape version protocol dir log resp fb out expected submissions
+  for shape in prompt send; do
+    case "$shape" in
+      prompt) version=0.7.5; protocol=17 ;;
+      send) version=0.7.1; protocol=14 ;;
+    esac
+    dir="$TMP_ROOT/native-$shape"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      FM_FAKE_HERDR_AGENT_SUBMIT_COMMAND="$shape" FM_FAKE_HERDR_VERSION="$version" FM_FAKE_HERDR_PROTOCOL="$protocol" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 "$1" 9 9 9' "$ROOT" $'first line\nsecond line')
+    [ "$out" = submitted ] || fail "native $shape success should report submitted, got '$out'"
+    expected=$'HERDR_SESSION=lab\x1fagent\x1f'"$shape"$'\x1fw1:p2\x1ffirst line\nsecond line\x1f--session\x1flab'
+    [ "$(tail -2 "$log")" = "$expected" ] || fail "native $shape target or multiline text changed:"$'\n'"$(cat "$log")"
+    submissions=$(awk -F $'\x1f' '$2 == "agent" && ($3 == "prompt" || $3 == "send") { count++ } END { print count + 0 }' "$log")
+    [ "$submissions" -eq 1 ] || fail "$shape capability made $submissions native submissions"
+  done
+  pass "fm_backend_herdr_send_text_submit: current and legacy native commands preserve exact submission"
 }
 
 test_send_text_submit_reports_failure_and_timeout_uncertainty() {
-  local kind dir log resp fb out
+  local kind dir log resp fb out submissions
   for kind in failure timeout timeout-exit; do
     dir="$TMP_ROOT/native-prompt-$kind"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
     case "$kind" in
@@ -4689,7 +4708,8 @@ test_send_text_submit_reports_failure_and_timeout_uncertainty() {
       bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit lab:w1:p2 message 3 .1 .1' "$ROOT" 2>/dev/null)
     if [ "$kind" = timeout ] || [ "$kind" = timeout-exit ]; then [ "$out" = unknown ] || fail "timeout must remain uncertain, got '$out'";
     else [ "$out" = send-failed ] || fail "backend rejection must remain visible, got '$out'"; fi
-    [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "$kind path repeated native submission"
+    submissions=$(awk -F $'\x1f' '$2 == "agent" && ($3 == "prompt" || $3 == "send") { count++ } END { print count + 0 }' "$log")
+    [ "$submissions" -eq 1 ] || fail "$kind path repeated native submission"
   done
   pass "fm_backend_herdr_send_text_submit: backend failure is visible and timeout is uncertain without replay"
 }
@@ -4851,7 +4871,7 @@ test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
 test_composer_state_codex_faint_suggestion_is_empty
 test_composer_state_codex_non_faint_same_text_is_pending
-test_send_text_submit_uses_native_prompt_once
+test_send_text_submit_uses_supported_native_command_once
 test_send_text_submit_reports_failure_and_timeout_uncertainty
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
