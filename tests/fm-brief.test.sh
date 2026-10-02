@@ -353,6 +353,42 @@ test_pr_based_dod_requires_non_draft() {
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
+test_no_mistakes_changed_behavior_coverage_audit() {
+  local home brief mode other_brief audit_line done_line count
+  home="$TMP_ROOT/changed-behavior-coverage-audit"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" coverage-audit some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/coverage-audit/brief.md"
+  count=$(grep -cF 'perform exactly one changed-behavior coverage audit' "$brief")
+  [ "$count" = 1 ] || fail "no-mistakes brief must carry exactly one changed-behavior coverage audit, found $count"
+  # shellcheck disable=SC2016 # Literal backticks must reach the generated-brief matcher.
+  assert_grep 'Before the first `done:` report' "$brief" \
+    "no-mistakes brief must place the audit before implementation completion and PR publication"
+  assert_grep 'changed success path, rejection or denial path, boundary, fallback or error path, stale or inconsistent state, concurrency behavior where applicable, and preserved existing behavior' "$brief" \
+    "no-mistakes coverage audit lost a required changed-behavior class"
+  assert_grep 'to an executable test or an explicit reason it does not apply' "$brief" \
+    "no-mistakes coverage audit must map every behavior class to a test or non-applicability reason"
+  assert_grep 'source-text, AST, and prompt-string assertions are never substitutes for behavior tests' "$brief" \
+    "no-mistakes coverage audit lost the executable-behavior test-quality rule"
+  audit_line=$(grep -nF 'perform exactly one changed-behavior coverage audit' "$brief" | cut -d: -f1)
+  # shellcheck disable=SC2016 # Literal backticks must reach the generated-brief matcher.
+  done_line=$(grep -nF 'When you believe it is complete, append `done [at=<epoch>]: {summary}`' "$brief" | cut -d: -f1)
+  [ "$audit_line" -lt "$done_line" ] \
+    || fail "no-mistakes coverage audit must precede the first done report"
+
+  for mode in direct-PR local-only; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "coverage-audit-$mode" some-proj --mode "$mode" >/dev/null 2>&1
+    other_brief="$home/data/coverage-audit-$mode/brief.md"
+    assert_no_grep 'changed-behavior coverage audit' "$other_brief" \
+      "$mode brief accidentally received the no-mistakes-only coverage audit"
+  done
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" coverage-audit-scout some-proj --scout >/dev/null 2>&1
+  assert_no_grep 'changed-behavior coverage audit' "$home/data/coverage-audit-scout/brief.md" \
+    "scout brief accidentally received the no-mistakes-only coverage audit"
+  pass "fm-brief.sh: no-mistakes ships audit changed behavior exactly once before completion without broadening faster or scout paths"
+}
+
 test_no_mistakes_dod_wording() {
   local home id brief spelling
   home="$TMP_ROOT/wording-home"
@@ -1403,6 +1439,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
+test_no_mistakes_changed_behavior_coverage_audit
 test_no_mistakes_dod_wording
 test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
