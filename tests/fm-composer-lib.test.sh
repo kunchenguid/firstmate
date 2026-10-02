@@ -737,7 +737,7 @@ test_matrix_grok_status_line_error_footer() {
   # status-line failure sits flush under the box, above the shortcuts bar.
   # Neither row is typed input. A script's own stdout and any other unclaimed
   # row in that slot stay a refusal.
-  local idle typed activity script dialog timed shortcuts prefix_script dot_only
+  local idle typed activity script dialog timed killed nostart shortcuts ctrlx prefix_script dot_only
   idle=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
   assert_screen "grok status-line exit footer on herdr" empty "$CAPS_STYLED" "$idle"
   assert_screen "grok status-line exit footer on zellij" empty "$CAPS_STYLED_NOID" "$idle"
@@ -754,8 +754,21 @@ test_matrix_grok_status_line_error_footer() {
   assert_screen "grok dialog under a status-line error" unknown "$CAPS_STYLED" "$dialog"
   timed=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: timed out]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
   assert_screen "grok status-line timeout footer" empty "$CAPS_STYLED" "$timed"
+  # The other Grok-rendered status-line failures named by
+  # FM_COMPOSER_GROK_STATUS_ERROR_RE_DEFAULT must clear the same exit/relaunch
+  # gate: a killed or unstartable script is still furniture, not activity.
+  killed=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: killed by signal]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line killed-by-signal footer" empty "$CAPS_STYLED" "$killed"
+  nostart=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: could not start the script: missing binary]\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
+  assert_screen "grok status-line could-not-start footer" empty "$CAPS_STYLED" "$nostart"
   shortcuts=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+.:shortcuts'
   assert_screen "grok shortcuts bar flush under the box" empty "$CAPS_STYLED" "$shortcuts"
+  # Grok's alternate shortcuts key chord (Ctrl+x) is the same complete bar
+  # under the middle-dot title path that blocked relaunch; both chords empty.
+  ctrlx=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  [status line: exit 127]\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  assert_screen "grok status-line exit footer with Ctrl+x shortcuts" empty "$CAPS_STYLED" "$ctrlx"
+  ctrlx=$'  ╭────────────────────────────────────────╮\n  │ ❯                                      │\n  ╰───── Grok 4.7 (high) · always-approve ─╯\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  assert_screen "grok Ctrl+x shortcuts bar flush under the box" empty "$CAPS_STYLED" "$ctrlx"
   # A status-line script that only starts like the shortcuts bar is still its
   # own stdout: the furniture pattern is the complete bar, not a prefix, so
   # this row cannot authorize exit/relaunch on an unproven pane.
