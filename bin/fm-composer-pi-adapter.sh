@@ -12,11 +12,15 @@
 #   - pi 0.87.1: banner plus one fixed "/bug sends a report" hint row
 #   - pi 0.99.2, 1.0.0: same banner plus hint-row shape as 0.87.1
 #
-# The adapter reads the installed release from the first line of `--version`
-# of every Pi executable on PATH (`pi` and `pi-signed`), once per process each;
-# at least one must exist and all found must be pinned.
-# FM_COMPOSER_PI_ADAPTER_VERSION overrides it (test fixtures pin it
-# explicitly). Outside the pin set, or when no version can
+# The adapter reads the installed release from the first line of `--version`,
+# once per process per executable. A caller that knows the task names the Pi
+# executable that drew the pane in FM_COMPOSER_PI_EXECUTABLE (`pi` or
+# `pi-signed`, from the task's recorded harness); the adapter then checks only
+# that executable. Unset (or any other value), the pane's executable is unknown
+# because the identity probe reports `pi` for both, so the adapter checks every
+# Pi executable on PATH and requires at least one to exist and all found to be
+# pinned. FM_COMPOSER_PI_ADAPTER_VERSION overrides the lookup (test fixtures pin
+# it explicitly). Outside the pin set, or when no version can
 # be read, the adapter refuses the banner-as-empty verdict so an unpinned Pi
 # rendering cannot become a shared empty proof and the classifier keeps its
 # ordinary unknown answer. The live guard proves the pinned shape on a pinned
@@ -70,20 +74,24 @@ fm_composer_pi_adapter_version_pinned() {  # <version>
   return 1
 }
 
-# 0 when the Pi release(s) behind the pane are pinned. The classifier cannot
-# tell which executable drew a pane (the identity probe reports `pi` for both
-# `pi` and `pi-signed`), so the adapter never picks one: with no override it
-# reads the first `--version` line of EVERY Pi executable found on PATH, each at
-# most once per process (cached in globals, no subshell), and requires at least
-# one to be found and every one found to be pinned. A found executable that is
-# unpinned or prints no version keeps the banner unproven.
+# 0 when the Pi release(s) behind the pane are pinned. The identity probe
+# reports `pi` for both `pi` and `pi-signed`, so only a caller that knows the
+# task can say which executable drew the pane. With FM_COMPOSER_PI_EXECUTABLE
+# naming `pi` or `pi-signed`, only that executable is checked and it must be on
+# PATH. Otherwise every Pi executable found on PATH is checked and at least one
+# must be found. Each `--version` first line is read at most once per process
+# (cached in globals, no subshell); a checked executable that is unpinned or
+# prints no version keeps the banner unproven.
 fm_composer_pi_adapter_installed_pinned() {
-  local exe found=0 v
+  local exe found=0 v candidates='pi pi-signed'
   if [ -n "${FM_COMPOSER_PI_ADAPTER_VERSION:-}" ]; then
     fm_composer_pi_adapter_version_pinned "$FM_COMPOSER_PI_ADAPTER_VERSION"
     return
   fi
-  for exe in pi pi-signed; do
+  case "${FM_COMPOSER_PI_EXECUTABLE:-}" in
+    pi|pi-signed) candidates=$FM_COMPOSER_PI_EXECUTABLE ;;
+  esac
+  for exe in $candidates; do
     command -v "$exe" >/dev/null 2>&1 || continue
     found=1
     if [ "$exe" = pi ]; then
