@@ -222,7 +222,8 @@ wait_for_watchdog_exit() {  # <dir> <failure-message>
 #
 # Which owner that is turns on whether the call sits in a subshell, and Bash
 # 3.2 (stock macOS) has no BASHPID to tell: each case also runs with BASHPID
-# unset, which takes the same path on a newer Bash.
+# unset, which takes the same path on a Bash that lets it go (4.x keeps it
+# readonly and simply repeats the first case).
 test_an_owner_that_dies_during_startup_ends_the_command() {
   local dir mode
   for mode in with-bashpid without-bashpid; do
@@ -230,7 +231,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
     mkdir -p "$dir"
     # shellcheck disable=SC2016
     PATH=$PERL_ONLY bash -c '
-      [ "$3" = with-bashpid ] || unset BASHPID
+      [ "$3" = with-bashpid ] || unset BASHPID 2>/dev/null || :
       . "$1/bin/fm-timeout-lib.sh"
       (
         /bin/sh -c "echo \"\$PPID\"" > "$2/watchdog"
@@ -257,7 +258,7 @@ test_a_parent_that_dies_before_an_unsubshelled_call_ends_the_command() {
     # shellcheck disable=SC2016
     PATH=$PERL_ONLY bash -c '
       bash -c '\''
-        [ "$3" = with-bashpid ] || unset BASHPID
+        [ "$3" = with-bashpid ] || unset BASHPID 2>/dev/null || :
         . "$1/bin/fm-timeout-lib.sh"
         echo "$$" > "$2/watchdog"
         while kill -0 "$PPID" 2>/dev/null; do sleep 0.05; done
@@ -283,7 +284,7 @@ test_bounds_a_command_on_a_shell_without_bashpid() {
   local out rc=0
   # shellcheck disable=SC2016
   out=$(PATH=$PERL_ONLY bash -c '
-    unset BASHPID
+    unset BASHPID 2>/dev/null || :
     . "$1/bin/fm-timeout-lib.sh"
     ( fm_exec_timed 5 1 bash -c "echo ran; exit 7" )
   ' _ "$ROOT" 2>&1) || rc=$?
