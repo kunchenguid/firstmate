@@ -68,7 +68,13 @@
 # default (the firstmate repo root - never a secondmate home, so
 # fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
 # pre-P3 behavior when a test does not care about home-specific labeling).
-FM_BACKEND_HERDR_ROOT="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}/../.." && pwd)"
+FM_BACKEND_HERDR_ROOT=${BASH_SOURCE[0]:-$0}
+if [ "${FM_BACKEND_HERDR_ROOT%/*}" != "$FM_BACKEND_HERDR_ROOT" ]; then
+  FM_BACKEND_HERDR_ROOT=${FM_BACKEND_HERDR_ROOT%/*}
+else
+  FM_BACKEND_HERDR_ROOT=.
+fi
+FM_BACKEND_HERDR_ROOT="$(cd "${FM_BACKEND_HERDR_ROOT:-/}/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 

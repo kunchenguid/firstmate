@@ -503,6 +503,18 @@ jobs:
             exit 1
           }
 
+          # macOS ships /bin/zsh, so besides the /bin/bash leg this also runs
+          # both zsh legs (adapter sourcing and PATH-intact) for real.
+          portable_output=$(FM_TEST_ONLY=test_backend_source_shell_portable \
+            FM_TEST_BASH=/bin/bash \
+            /bin/bash tests/fm-backend.test.sh)
+          printf '%s\n' "$portable_output"
+          portable_count=$(printf '%s\n' "$portable_output" | grep -c '^ok - ')
+          [ "$portable_count" -eq 3 ] || {
+            echo "::error::expected 3 backend shell-portable sourcing regressions (zsh, bash 3.2, zsh PATH), got $portable_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest

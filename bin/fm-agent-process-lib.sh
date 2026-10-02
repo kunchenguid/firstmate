@@ -13,8 +13,8 @@
 # names below, and tests/fm-tmux-agent-liveness.test.sh plus
 # tests/fm-harness-liveness-drift-live-e2e.test.sh keep them honest.
 
-_FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]%/*}
-[ "$_FM_AGENT_PROCESS_LIB_DIR" != "${BASH_SOURCE[0]}" ] || _FM_AGENT_PROCESS_LIB_DIR=.
+_FM_AGENT_PROCESS_LIB_DIR=${BASH_SOURCE[0]:-$0}
+case $_FM_AGENT_PROCESS_LIB_DIR in */*) _FM_AGENT_PROCESS_LIB_DIR=${_FM_AGENT_PROCESS_LIB_DIR%/*} ;; *) _FM_AGENT_PROCESS_LIB_DIR=. ;; esac
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "${_FM_AGENT_PROCESS_LIB_DIR:-/}/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
