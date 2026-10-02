@@ -523,11 +523,8 @@ fm_afk_contract_cmd_enter() {
     fm_afk_contract_render_readback "$record"
     return
   fi
-  # One clock sample: entered/confirmed ISO and their epoch twins must name
-  # the same second. Two separate date calls can straddle a boundary and make
-  # epoch_to_iso(entered_epoch) disagree with the entered field on return.
   now=$(fm_afk_contract_now_iso)
-  now_epoch=$(fm_utc_iso_to_epoch "$now") || now_epoch=$(date +%s)
+  now_epoch=$(date +%s)
   session_entered=$now
   session_entered_epoch=$now_epoch
   # A replacement carries the session entry forward; quiet mode becoming the
