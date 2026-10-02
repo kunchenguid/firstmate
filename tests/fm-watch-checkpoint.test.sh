@@ -274,18 +274,21 @@ test_checkpoint_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
   start_leftover_daemon "$home"
   old_watcher=$(cat "$home/state/.watch.lock/pid")
 
-  # The fresh watcher may announce the gap the takeover left; the attended
-  # firstmate drains that wake and runs the checkpoint again.
+  # The stopped watcher recorded its downtime, so the fresh watcher always
+  # announces that gap; the attended firstmate drains that wake and runs the
+  # checkpoint again. The bound is headroom over a loaded takeover, not a
+  # deadline: the run returns as soon as the gap wake arrives.
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$CHECKPOINT" --seconds 5 >"$out" 2>"$home/checkpoint.err" || status=$?
-  case "$status" in 0|124) ;; *) fail "the takeover checkpoint failed ($status): $(cat "$out" "$home/checkpoint.err")" ;; esac
+    "$CHECKPOINT" --seconds 30 >"$out" 2>"$home/checkpoint.err" || status=$?
+  expect_code 0 "$status" "the takeover checkpoint: $(cat "$out" "$home/checkpoint.err")"
+  assert_contains "$(cat "$out")" "check: rearm-resurface" "the checkpoint did not announce the gap the takeover left"
   wait_until_gone "$LEFTOVER_PID" 50 || { kill -TERM "$LEFTOVER_PID" 2>/dev/null; fail "the leftover away daemon is still running after the checkpoint"; }
   ! pid_running "$old_watcher" || fail "the leftover daemon's watcher is still running after the checkpoint"
   ack_wakes "$home" || fail "the attended drain could not acknowledge the takeover wake"
 
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$CHECKPOINT" --seconds 20 >"$out" 2>"$home/checkpoint.err" &
+    "$CHECKPOINT" --seconds 30 >"$out" 2>"$home/checkpoint.err" &
   checkpoint=$!
   i=0
   while [ "$i" -lt 100 ]; do

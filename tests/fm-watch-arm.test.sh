@@ -1554,16 +1554,16 @@ test_arm_takes_over_a_watcher_owned_by_a_leftover_away_daemon() {
   grep -q "reason=leftover-daemon-stopped" "$state/.watch-cycle-exits.log" \
     || fail "the takeover was not recorded in the lifecycle ledger"
 
-  # The fresh watcher may announce the gap the takeover left at once; the
-  # attended firstmate then drains that wake and arms again.
-  if grep -Eq '^(signal:|check:)' "$armout" || ! is_live_non_zombie "$ARM_PID"; then
-    wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
-    ack_wakes "$state" || fail "the attended drain could not acknowledge the takeover wake"
-    armout="$dir/arm-next.out"
-    start_attended_arm "$state" "$fakebin" "$armout"
-    wait_for_arm_line "$armout" '^watcher: started pid=' \
-      || fail "the next attended arm did not start its own watcher: $(cat "$armout")"
-  fi
+  # The stopped watcher recorded its downtime, so the arm's fresh watcher always
+  # announces that gap; the attended firstmate drains that wake and arms again.
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" >/dev/null 2>&1 || true
+  grep -qxF 'check: rearm-resurface' "$armout" \
+    || fail "the arm did not announce the gap the takeover left: $(cat "$armout")"
+  ack_wakes "$state" || fail "the attended drain could not acknowledge the takeover wake"
+  armout="$dir/arm-next.out"
+  start_attended_arm "$state" "$fakebin" "$armout"
+  wait_for_arm_line "$armout" '^watcher: started pid=' \
+    || fail "the next attended arm did not start its own watcher: $(cat "$armout")"
   new_watcher=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
   [ "$(ps -o ppid= -p "$new_watcher" 2>/dev/null | tr -d ' ')" = "$ARM_PID" ] \
     || fail "the home watcher is not the attended arm's own child after the takeover"
