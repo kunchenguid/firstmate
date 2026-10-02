@@ -1470,6 +1470,293 @@ test_reaper_stops_a_tracked_watcher() {
   pass "watch-arm: the test reaper stops a watcher armed for a tracked temporary home"
 }
 
+# A prior episode that was announced but never explicitly acknowledged - no
+# re-arm loop and no live session ever ran the drain's printed --ack-through
+# command - must not reopen into a fresh generation and resurface forever on
+# every plain restart. Past FM_RECOVERY_REOPEN_LIMIT reopens, the episode must
+# settle on its own so the watcher can finally hold the lock and stay live.
+# With queued rows still unacknowledged, settling must not re-announce them on
+# a watcher start either: the rows stay durable for the next session's drain.
+check_stuck_unacked_recovery_settles() {  # <case-name> <queued:0|1>
+  local dir home state fakebin queued=$2 i settled_pid settled_token
+  local FM_RECOVERY_REOPEN_LIMIT=2
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case "$1")
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  if [ "$queued" = 1 ]; then
+    printf '%s\t1\tcheck\tstuck-queued\tcheck: stuck queued row\n' "$(date +%s)" > "$state/.wake-queue"
+    printf '1\n' > "$state/.wake-queue.seq"
+  fi
+
+  i=0
+  while [ "$i" -lt "$FM_RECOVERY_REOPEN_LIMIT" ]; do
+    i=$((i + 1))
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/reopen-$i-arm.out"
+    wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+      || fail "$1: reopen attempt $i did not resolve to an exit: $(cat "$dir/reopen-$i-arm.out")"
+    grep -F 'check: rearm-resurface' "$dir/reopen-$i-arm.out" >/dev/null \
+      || fail "$1: reopen attempt $i did not resurface the stuck episode: $(cat "$dir/reopen-$i-arm.out")"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      announced:*) ;;
+      *) fail "$1: reopen attempt $i left an unexpected recovery marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+    esac
+  done
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/settled-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "$1: watcher did not survive once the reopen bound settled the stuck episode: $(cat "$dir/settled-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/settled-arm.out" >/dev/null \
+    || fail "$1: watcher spuriously resurfaced an already-bounded episode: $(cat "$dir/settled-arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    acked:*) ;;
+    *) fail "$1: stuck episode did not settle to acked: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  [ ! -e "$state/.watcher-down.reopen-count" ] \
+    || fail "$1: reopen counter was not cleared once the episode settled"
+  settled_pid=$ARM_PID
+  settled_token=$(cat "$state/.watcher-down" 2>/dev/null || true)
+
+  # Restarting the healthy settled watcher retires it; that close must keep the
+  # settled episode rather than reopen it into another resurface-and-exit cycle.
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/restart-after-settle-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "$1: restarting a bound-settled watcher did not keep supervision up: $(cat "$dir/restart-after-settle-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/restart-after-settle-arm.out" >/dev/null \
+    || fail "$1: restarting a bound-settled watcher resurfaced the settled episode: $(cat "$dir/restart-after-settle-arm.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = "$settled_token" ] \
+    || fail "$1: restarting a bound-settled watcher changed its settled marker: $(cat "$state/.watcher-down" 2>/dev/null)"
+  kill "$ARM_PID" "$settled_pid" 2>/dev/null || true
+  wait "$ARM_PID" "$settled_pid" 2>/dev/null || true
+
+  if [ "$queued" = 1 ]; then
+    grep "$(printf '\tcheck\tstuck-queued\t')" "$state/.wake-queue" >/dev/null \
+      || fail "$1: settling the stuck episode dropped its queued row"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>/dev/null \
+      || fail "$1: next session drain failed after the episode settled"
+    grep "$(printf '\tcheck\tstuck-queued\t')" "$dir/drain.out" >/dev/null \
+      || fail "$1: next session drain did not present the settled episode's queued row"
+  fi
+}
+
+# Only the reopen bound's own settle suppresses the acked-plus-queue
+# re-announce. A genuinely acknowledged episode that still has a queued row
+# must keep resurfacing it on the next arm, so a lost delivery is not buried.
+test_genuinely_acked_recovery_with_queued_row_still_resurfaces() {
+  local dir home state fakebin
+  dir=$(make_case acked-queued-resurface)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:ackedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '%s\t1\tcheck\tacked-queued\tcheck: acked queued row\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "a genuinely acked episode with a queued row did not resurface: $(cat "$dir/arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a genuinely acked episode with a queued row was not re-announced: $(cat "$dir/arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:downtime:*) ;;
+    *) fail "a genuinely acked episode with a queued row left marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: a genuinely acknowledged episode with a queued row still resurfaces on re-arm"
+}
+
+# A genuine session ack that lands after the reopen bound already settled the
+# same generation, while a newer row is still queued, retires the bound-settle
+# distinction, so the next arm re-announces that newer row (#2065 path).
+test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row() {
+  local dir home state fakebin now
+  dir=$(make_case late-ack-after-settle)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:settledgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf 'settledgen1\n' > "$state/.watcher-down.reopen-settled"
+  now=$(date +%s)
+  {
+    printf '%s\t1\tcheck\tlate-ack-one\tcheck: late ack row one\n' "$now"
+    printf '%s\t2\tcheck\tlate-ack-two\tcheck: late ack row two\n' "$now"
+  } > "$state/.wake-queue"
+  printf '2\n' > "$state/.wake-queue.seq"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 1 --recovery-generation settledgen1 \
+    > "$dir/ack.out" 2>&1 \
+    || fail "late genuine ack after a bound settle failed: $(cat "$dir/ack.out")"
+  grep "$(printf '\tcheck\tlate-ack-two\t')" "$state/.wake-queue" >/dev/null \
+    || fail "late genuine ack dropped the newer queued row"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "a late genuine ack after a bound settle left the newer queued row unresurfaced: $(cat "$dir/arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a late genuine ack after a bound settle did not re-announce the newer queued row: $(cat "$dir/arm.out")"
+  pass "watch-arm: a genuine ack after a bound settle still resurfaces a newer queued row on re-arm"
+}
+
+# A retried stale ack for a bound-settled generation consumes no row, so it is
+# not a genuine acknowledgement: the settle distinction must survive and the
+# next arm must keep the watcher up instead of re-announcing the newer row.
+test_stale_zero_row_ack_keeps_bound_settle() {
+  local dir home state fakebin
+  dir=$(make_case stale-ack-after-settle)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'acked:downtime:settledgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf 'settledgen1\n' > "$state/.watcher-down.reopen-settled"
+  printf '%s\t2\tcheck\tstale-ack-two\tcheck: stale ack row two\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '2\n' > "$state/.wake-queue.seq"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through 1 --recovery-generation settledgen1 \
+    > "$dir/ack.out" 2>&1 \
+    || fail "stale zero-row ack after a bound settle failed: $(cat "$dir/ack.out")"
+  [ "$(cat "$state/.watcher-down.reopen-settled" 2>/dev/null || true)" = settledgen1 ] \
+    || fail "a stale zero-row ack cleared the bound-settle distinction"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "a stale zero-row ack after a bound settle made the next watcher exit: $(cat "$dir/arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/arm.out" >/dev/null \
+    || fail "a stale zero-row ack after a bound settle re-announced the settled episode: $(cat "$dir/arm.out")"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a stale zero-row ack keeps a bound-settled episode settled and the watcher up"
+}
+
+# A non-numeric FM_RECOVERY_REOPEN_LIMIT falls back to the default bound, so a
+# configuration typo cannot make a stuck episode reopen on every restart.
+test_invalid_reopen_limit_falls_back_to_default() {
+  local dir home state fakebin
+  local FM_RECOVERY_REOPEN_LIMIT=three
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case invalid-reopen-limit)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
+  printf '%s\t1\tcheck\tinvalid-limit\tcheck: invalid limit row\n' "$(date +%s)" > "$state/.wake-queue"
+  printf '1\n' > "$state/.wake-queue.seq"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "a non-numeric reopen limit defeated the bound; the watcher exited: $(cat "$dir/arm.out")"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'acked:downtime:seedgen1' ] \
+    || fail "a non-numeric reopen limit did not settle past the default bound: $(cat "$state/.watcher-down" 2>/dev/null)"
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a non-numeric FM_RECOVERY_REOPEN_LIMIT falls back to the default bound"
+}
+
+# With an empty queue an announced-but-unacknowledged episode is never
+# reopened: every plain restart leaves that generation announced, starts no
+# resurface, and keeps the watcher up without spending the reopen bound.
+test_stuck_unacked_recovery_settles_after_bounded_reopen() {
+  local dir home state fakebin i
+  local FM_RECOVERY_REOPEN_LIMIT=2
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case bounded-reopen)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+
+  i=0
+  while [ "$i" -le "$FM_RECOVERY_REOPEN_LIMIT" ]; do
+    i=$((i + 1))
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/arm-$i.out"
+    is_live_non_zombie "$ARM_PID" \
+      || fail "empty-queue restart $i did not keep the watcher up: $(cat "$dir/arm-$i.out")"
+    ! grep -F 'check: rearm-resurface' "$dir/arm-$i.out" >/dev/null \
+      || fail "empty-queue restart $i resurfaced an episode with nothing queued: $(cat "$dir/arm-$i.out")"
+    [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:seedgen1' ] \
+      || fail "empty-queue restart $i changed the announced generation: $(cat "$state/.watcher-down" 2>/dev/null)"
+    [ ! -e "$state/.watcher-down.reopen-count" ] \
+      || fail "empty-queue restart $i spent the reopen bound"
+    kill "$ARM_PID" 2>/dev/null || true
+    wait "$ARM_PID" 2>/dev/null || true
+  done
+  pass "watch-arm: a stuck unacknowledged recovery episode with an empty queue keeps the watcher up on every restart"
+}
+
+test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling() {
+  check_stuck_unacked_recovery_settles bounded-reopen-queued 1
+  pass "watch-arm: a settled recovery episode with queued rows keeps the watcher up and leaves the rows for the next drain"
+}
+
+# A durable append that mints a fresh episode from an announced one starts that
+# episode with the full reopen budget instead of inheriting the old count.
+test_append_fresh_episode_resets_reopen_budget() {
+  local dir home state fakebin
+  local FM_RECOVERY_REOPEN_LIMIT=1
+  export FM_RECOVERY_REOPEN_LIMIT
+  dir=$(make_case append-resets-reopen-budget)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
+
+  append_wake "$state" check fresh-episode 'check: fresh episode row' \
+    || fail "the producer could not append its wake"
+  [ ! -e "$state/.watcher-down.reopen-count" ] \
+    || fail "an append that minted a fresh episode kept the old reopen count"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/announce-arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "the fresh episode was not announced: $(cat "$dir/announce-arm.out")"
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/reopen-arm.out"
+  wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+    || fail "the fresh episode settled without its own reopen: $(cat "$dir/reopen-arm.out")"
+  grep -F 'check: rearm-resurface' "$dir/reopen-arm.out" >/dev/null \
+    || fail "the fresh episode's first reopen did not resurface: $(cat "$dir/reopen-arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    announced:*) ;;
+    *) fail "the fresh episode's first reopen left an unexpected marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  pass "watch-arm: an append that mints a fresh episode resets the reopen budget"
+}
+
+# A failed append restores the announced episode, so it must keep that
+# episode's reopen count rather than grant it a fresh budget.
+test_failed_append_keeps_reopen_count() {
+  local dir state
+  dir=$(make_case failed-append-keeps-reopen-count)
+  state="$dir/state"
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+  printf '1\n' > "$state/.watcher-down.reopen-count"
+  mkdir -p "$state/.wake-queue.seq"
+
+  ! append_wake "$state" check failed-append 'check: failed append row' 2>/dev/null \
+    || fail "an append whose sequence write failed reported success"
+  [ "$(cat "$state/.watcher-down" 2>/dev/null || true)" = 'announced:downtime:seedgen1' ] \
+    || fail "a failed append did not restore the announced episode: $(cat "$state/.watcher-down" 2>/dev/null)"
+  [ "$(cat "$state/.watcher-down.reopen-count" 2>/dev/null || true)" = 1 ] \
+    || fail "a failed append cleared the restored episode's reopen count"
+  pass "watch-arm: a failed append keeps the restored episode's reopen count"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1477,6 +1764,14 @@ test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
+test_stuck_unacked_recovery_settles_after_bounded_reopen
+test_stuck_unacked_recovery_with_queued_rows_stays_up_after_settling
+test_genuinely_acked_recovery_with_queued_row_still_resurfaces
+test_late_genuine_ack_after_bound_settle_still_resurfaces_queued_row
+test_stale_zero_row_ack_keeps_bound_settle
+test_invalid_reopen_limit_falls_back_to_default
+test_append_fresh_episode_resets_reopen_budget
+test_failed_append_keeps_reopen_count
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_attached_arm_follows_a_slow_live_holder
 test_attached_arm_hands_a_stalled_holder_to_its_replacement
