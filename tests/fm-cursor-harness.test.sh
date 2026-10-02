@@ -143,26 +143,56 @@ test_resolve_binary_skips_broken_cursor_agent() {
   # cursor-agent, leaving a file with Cursor's own name and install-tree path
   # that only prints this error and exits non-zero. Both structural signals
   # match, so only running it can tell it apart.
-  local base broken good out
+  local base broken good out launches
   base="$TMP_ROOT/broken"
   broken="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
   good="$base/share/cursor-agent/versions/2026.10.01-e373342"
   mkdir -p "$broken" "$good" "$base/bin"
-  printf '#!/bin/sh\necho "Error: No Cursor IDE installation found. Use '"'"'cursor agent'"'"' or '"'"'agent'"'"' to run the agent." >&2\nexit 1\n' \
-    > "$broken/cursor-agent"
-  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$good/cursor-agent"
+  # Versioned targets stay on the real install-tree path (via symlink) and
+  # count launches so a failed probe cannot silently pay a second --help.
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Error: No Cursor IDE installation found. Use '"'"'cursor agent'"'"' or '"'"'agent'"'"' to run the agent." >&2\nexit 1\n' \
+    "$base/broken.launches" > "$broken/cursor-agent"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "Start the Cursor Agent"\n' \
+    "$base/good.launches" > "$good/cursor-agent"
   chmod +x "$broken/cursor-agent" "$good/cursor-agent"
   ln -sf "$broken/cursor-agent" "$base/bin/cursor-agent"
   ln -sf "$good/cursor-agent" "$base/bin/agent"
+  : > "$base/broken.launches"
+  : > "$base/good.launches"
   fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
     || fail "fixture must keep cursor's structural evidence on the broken file"
   ! fm_cursor_verify_executable "$base/bin/cursor-agent" \
     || fail "a cursor-agent that fails to run must NOT verify"
+  launches=$(wc -c < "$base/broken.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "a failed probe must not re-launch --help, got $launches launches"
   out=$(PATH="$base/bin:$PATH" fm_cursor_resolve_binary) \
     || fail "resolve must fall through to the working agent alias"
   [ "$out" = "$base/bin/agent" ] \
     || fail "resolve must pick the working agent, got '$out'"
   pass "fm_cursor_resolve_binary: a broken cursor-agent is skipped for a working agent"
+}
+
+test_verify_executable_single_successful_probe() {
+  # Structural evidence plus a successful --help without a Cursor marker must
+  # accept the candidate from that one launch - never a second bounded run.
+  local base ver launches
+  base="$TMP_ROOT/single-probe"
+  ver="$base/share/cursor-agent/versions/2026.10.01-ok"
+  mkdir -p "$ver" "$base/bin"
+  printf '#!/bin/sh\nprintf x >> "%s"\necho "some other help text"\nexit 0\n' \
+    "$base.launches" > "$ver/cursor-agent"
+  chmod +x "$ver/cursor-agent"
+  ln -sf "$ver/cursor-agent" "$base/bin/cursor-agent"
+  : > "$base.launches"
+  fm_cursor_path_is_cursor "$base/bin/cursor-agent" \
+    || fail "fixture must keep structural evidence"
+  fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "structural candidate whose --help exits 0 must verify"
+  launches=$(wc -c < "$base.launches" | tr -d '[:space:]')
+  [ "$launches" = 1 ] \
+    || fail "verify must launch --help once on the structural success path, got $launches"
+  pass "fm_cursor_verify_executable: structural success reuses one probe exit"
 }
 
 test_resolve_binary_prefers_stable_path() {
@@ -447,6 +477,7 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_skips_broken_cursor_agent
+test_verify_executable_single_successful_probe
 test_resolve_binary_prefers_stable_path
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode

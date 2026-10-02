@@ -106,16 +106,20 @@ fm_cursor_bounded_output() {  # <path> <args...>
   "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
-fm_cursor_probe_is_cursor() {  # <path>
-  local path=$1 out
-  out=$(fm_cursor_bounded_output "$path" --help) || return 1
-  [ -n "$out" ] || return 1
-  case "$out" in
+fm_cursor_help_marks_cursor() {  # <help-text>
+  case "$1" in
     *"Start the Cursor Agent"*) return 0 ;;
     *CURSOR_API_ENDPOINT*) return 0 ;;
     *api2.cursor.sh*) return 0 ;;
   esac
   return 1
+}
+
+fm_cursor_probe_is_cursor() {  # <path>
+  local path=$1 out
+  out=$(fm_cursor_bounded_output "$path" --help) || return 1
+  [ -n "$out" ] || return 1
+  fm_cursor_help_marks_cursor "$out"
 }
 
 # True when executable $1 may be launched as Cursor.
@@ -125,17 +129,28 @@ fm_cursor_probe_is_cursor() {  # <path>
 # cursor-agent symlink, which can replace a versioned
 # cursor-agent/versions/<version>/cursor-agent with a script that only prints
 # "No Cursor IDE installation found" and exits non-zero. Every candidate,
-# whatever its name, must therefore either print Cursor's CLI identity under the
-# bounded probe, or carry the structural evidence AND run its --help
-# successfully. A host with no bounded runner cannot run either check, so there
-# the structural verdict stands on its own, as it always has.
+# whatever its name, must therefore either print Cursor's CLI identity under one
+# bounded --help probe, or carry the structural evidence AND have that same
+# probe exit successfully. The probe runs at most once: its exit status is kept
+# so a successful run without markers does not pay a second launch just to re-
+# check exit status, and a failed run is refused without retrying. A host with
+# no bounded runner cannot run the probe, so there the structural verdict stands
+# on its own, as it always has.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1
+  local path=$1 out
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  fm_cursor_probe_is_cursor "$path" && return 0
-  fm_cursor_path_is_cursor "$path" || return 1
-  fm_cursor_timeout_runner >/dev/null || return 0
-  fm_cursor_bounded_output "$path" --help >/dev/null
+  if ! fm_cursor_timeout_runner >/dev/null; then
+    fm_cursor_path_is_cursor "$path"
+    return $?
+  fi
+  if out=$(fm_cursor_bounded_output "$path" --help); then
+    fm_cursor_help_marks_cursor "$out" && return 0
+    # --help succeeded without a marker; structural evidence alone is enough.
+    fm_cursor_path_is_cursor "$path"
+    return $?
+  fi
+  # Bounded launch failed (timeout or non-zero). Refuse even with structure.
+  return 1
 }
 
 fm_cursor_list_models() {  # <path>

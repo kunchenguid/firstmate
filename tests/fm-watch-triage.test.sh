@@ -28,15 +28,23 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
 ack_stopped_cycle() {  # <state>
-  local state=$1 err sequence generation
+  local state=$1 err sequence generation rc=0
   err="$state/.test-cycle-drain.err"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  # Drain may exit non-zero for an unrelated presentation section while still
+  # printing WAKE_ACK_REQUIRED. Prefer the printed command whenever present so
+  # an intentional stop's recovery episode is still retired. A clean drain with
+  # no acknowledgement command means nothing was pending (for example a TERM'd
+  # absorb whose cleanup could not publish downtime under load).
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || rc=$?
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
   rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
-  FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
-    --recovery-generation "$generation"
+  if [ -n "$sequence" ] && [ -n "$generation" ]; then
+    FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+      --recovery-generation "$generation"
+    return $?
+  fi
+  [ "$rc" -eq 0 ]
 }
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
