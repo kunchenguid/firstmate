@@ -323,11 +323,7 @@ if [ "$TAKEOVER" -eq 0 ] && { [ -e "$LOCK" ] || [ -L "$LOCK" ]; }; then
     exit 1
   }
   if ! fm_session_lock_owned_by_self "$STATE" && fm_harness_pid_alive "$old"; then
-    fm_session_lock_owned_by_self "$STATE" && confirm_own_lock "$old"
-    old=$(cat "$LOCK" 2>/dev/null || true)
-    if ! fm_session_lock_owned_by_self "$STATE" && fm_harness_pid_alive "$old"; then
-      refuse_live_owner "$old"
-    fi
+    refuse_live_owner "$old"
   fi
 fi
 # The sidecar goes first: a fresh pid beside a previous session's id would let

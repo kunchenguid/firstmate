@@ -277,6 +277,8 @@ cmd_source() {
   [ -d "$CURSOR_DIR" ] && [ ! -L "$CURSOR_DIR" ] || return 1
   marker="$CURSOR_DIR/$id.source-failed"
   [ ! -e "$marker" ] || { [ -f "$marker" ] && [ ! -L "$marker" ]; } || return 1
+  SOURCE_ATTEMPT=$(umask 077; mktemp "$CURSOR_DIR/.source.XXXXXX") || return 1
+  trap 'rm -f -- "$SOURCE_ATTEMPT"' EXIT
   # The runner retains its claim during brief transport/read failures. Three
   # consecutive failures open one durable failure episode and exit the runner,
   # leaving recovery to reconcile's launch floor.
@@ -285,9 +287,10 @@ cmd_source() {
     started=$(fm_pending_reply_now)
     rc=0
     "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-delta-read.sh \
-      "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null || rc=$?
+      "$REMOTE_LOG" "$CURSOR_OFFSET" "$CURSOR_HASH" "$WAIT_SECONDS" < /dev/null > "$SOURCE_ATTEMPT" || rc=$?
     case "$rc" in
       0|"$WINDOW_CLOSED_EMPTY"|"$JOB_PREEMPTED")
+        cat -- "$SOURCE_ATTEMPT" || return 1
         rm -f -- "$marker"
         if [ "$rc" -eq "$WINDOW_CLOSED_EMPTY" ]; then
           fm_pending_reply_note_remote_channel_caught_up "$STATE" "$id" "$started" || true

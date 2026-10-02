@@ -54,6 +54,12 @@ if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
 fi
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
 [ ! -e "${FM_REMOTE_REPLY_FAIL_FLAG:-/nonexistent}" ] || exit 255
+if [ -e "${FM_REMOTE_REPLY_FAIL_DELTA_FLAG:-/nonexistent}" ]; then
+  if ! printf '%s' "${@: -1}" | base64 -d 2>/dev/null | tr '\0' '\n' | grep -qx size; then
+    printf 'x\n' >> "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
+    exit 255
+  fi
+fi
 host=$1
 entry=$2
 shift 2
@@ -1064,27 +1070,47 @@ assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
 pass "remote reply retirement quiesces and refuses unhandled captured results"
 
 # A watcher compares the remote log size with the committed cursor. One lag
-# episode re-ensures the listener and wakes only after the bound, then cursor
-# progress clears its marker.
+# episode re-ensures the listener and wakes only after the bound. While delta
+# reads keep failing the cursor stays behind, and a later probe in the same
+# episode neither repairs nor wakes again. Cursor progress clears its marker.
+lag_failures() { wc -l < "$TMP_ROOT/fail-delta-read" | tr -d ' '; }
+export FM_REMOTE_REPLY_FAIL_DELTA_FLAG="$TMP_ROOT/fail-delta-read"
+: > "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
 remote_env "$ADAPTER" arm ios >/dev/null
 FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-first.out"
 [ ! -s "$TMP_ROOT/lag-first.out" ] || fail "lag woke before its bound"
+[ "$(lag_failures)" -eq 0 ] || fail "lag repaired its listener before its bound"
 sleep 1.1
 FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-second.out"
 assert_grep 'remote reply channel stalled: mate=ios' "$TMP_ROOT/lag-second.out" \
   "an aged remote log ahead of its cursor did not wake"
+for _ in $(seq 1 100); do
+  [ "$(lag_failures)" -ge 3 ] && [ "$(reply_owner)" = none ] && break
+  sleep 0.1
+done
+[ "$(lag_failures)" -eq 3 ] || fail "a stalled-channel episode did not re-ensure its listener"
+[ "$(reply_owner)" = none ] || fail "the re-ensured listener outlived its failed-read budget"
 sleep 1.1
 FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-third.out"
 [ ! -s "$TMP_ROOT/lag-third.out" ] || fail "one lag episode woke repeatedly"
+sleep 0.5
+[ "$(lag_failures)" -eq 3 ] || fail "one lag episode re-ensured its listener repeatedly"
+read -r _ _ lag_alerted < "$PARENT/state/remote-replies/ios.lag"
+[ "$lag_alerted" = 1 ] || fail "the still-behind lag episode lost its alerted state"
+[ "$(grep -c 'remote reply channel stalled: mate=ios' "$PARENT/state/.wake-queue")" -eq 1 ] \
+  || fail "one lag episode queued duplicate wakes"
+rm -f "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
+unset FM_REMOTE_REPLY_FAIL_DELTA_FLAG
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/lag-catchup.out" 2>&1 &
 for _ in $(seq 1 100); do
   grep -q 'source was replaced' "$PARENT/state/ios.status" && break
   sleep 0.1
 done
 assert_grep 'source was replaced' "$PARENT/state/ios.status" \
-  "a stalled-channel episode did not re-ensure its listener and ingest the backlog"
+  "lagged reply was not ingested after the listener restarted"
 stop_reply_listener || fail "lag catchup listener did not stop"
 for _ in $(seq 1 100); do
   [ "$(reply_owner)" = none ] && break
@@ -1095,7 +1121,7 @@ FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-caught-up.out"
 [ ! -s "$TMP_ROOT/lag-caught-up.out" ] || fail "a caught-up channel still woke"
 assert_absent "$PARENT/state/remote-replies/ios.lag" "catchup did not clear the lag episode"
-pass "an aged remote reply lag re-ensures its listener, wakes once, and catchup resets its episode"
+pass "an aged remote reply lag re-ensures its listener and wakes once per episode, and catchup resets it"
 
 # The live failure mode is a detached reconcile launch that never proves a
 # claim, followed by an attached start that can read and apply the same reply.
