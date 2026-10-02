@@ -1038,6 +1038,39 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+test_parent_does_not_relay_superseded_terminal_status() {
+  local verb id
+  for verb in done failed; do
+    make_world "historical-ledger-$verb"; bind_secondmate local
+    id="old-$verb"
+    write_child "$MATE" "$id" "$verb [at=99]: historical outcome" s90.42.7
+    run_report "$MATE" "$id" || fail 'original incarnation could not relay its outcome'
+    [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'original outcome missing receipt'
+    : > "$MAIN/state/mate.status"
+    # A retained task keeps its ledger while relaunch replaces spawn_gen.
+    printf 'spawn_gen=s100.42.7\n' >> "$MATE/state/$id.meta"
+    FM_FAKE_CREW_STATE=working run_reconcile "$MATE" --startup
+    run_report "$MATE" "$id" || fail 'report rejected a superseded outcome instead of ignoring it'
+    [ ! -s "$MAIN/state/mate.status" ] || fail "parent relayed a superseded $verb: $(cat "$MAIN/state/mate.status")"
+    [ "$(outcome_count "$MATE" reported)" = 1 ] || fail 'historical outcome gained a current-incarnation receipt'
+    printf '%s [at=100]: current outcome\n' "$verb" >> "$MATE/state/$id.status"
+    run_report "$MATE" "$id" || fail "current $verb could not be relayed"
+    grep -Fq "child $id $verb: current outcome" "$MAIN/state/mate.status" \
+      || fail "parent did not relay current $verb"
+    if grep -Fq 'historical outcome' "$MAIN/state/mate.status"; then
+      fail 'superseded terminal prose reached the parent'
+    fi
+    [ "$(outcome_count "$MATE" reported)" = 2 ] || fail 'current outcome missing its own receipt'
+  done
+  make_world legacy-ledger; bind_secondmate local
+  write_child "$MATE" legacy 'done: legacy outcome' s100.42.7
+  run_report "$MATE" legacy || fail 'legacy outcome could not be relayed'
+  grep -Fq 'child legacy done: legacy outcome' "$MAIN/state/mate.status" \
+    || fail 'legacy terminal behavior changed'
+  pass "parent delivery excludes superseded done/failed and retains current and legacy terminals"
+}
+
+test_parent_does_not_relay_superseded_terminal_status
 test_main_direct_terminal_presentation_receipt
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published

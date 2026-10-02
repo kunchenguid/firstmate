@@ -2400,6 +2400,44 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
+test_terminal_status_belongs_to_spawn_incarnation() {
+  reset_fakes
+  local d out verb time expected generation
+  d=$(new_case terminal-incarnation)
+  make_repo_on_branch "$d/wt" fm/incarnation
+  make_fakebin "$d" >/dev/null
+  arm_idle_record "$d/state" incarnation
+  for verb in done failed; do
+    for time in 99 100 101 legacy malformed; do
+      for generation in s100.42.7 legacy malformed ''; do
+        fm_write_meta "$d/state/incarnation.meta" \
+          'window=fm:fm-incarnation' "worktree=$d/wt" \
+          'kind=ship' 'mode=no-mistakes' 'harness=claude' "spawn_gen=$generation"
+        case "$time" in
+          legacy) printf '%s: implementation outcome\n' "$verb" ;;
+          malformed) printf '%s [at=<epoch>]: implementation outcome\n' "$verb" ;;
+          *) printf '%s [at=%s]: implementation outcome\n' "$verb" "$time" ;;
+        esac > "$d/state/incarnation.status"
+        expected=$verb
+        if [ "$time:$generation" = '99:s100.42.7' ]; then expected=unknown; fi
+        out=$(run_crew_state "$d" incarnation)
+        assert_contains "$out" "state: $expected" "$verb/$time/$generation: only pre-spawn terminal evidence is excluded"
+        if [ "$expected" = unknown ]; then
+          assert_not_contains "$out" 'implementation outcome' 'historical validation must not become current detail'
+        fi
+      done
+    done
+  done
+  # Snapshot consumers must use the metadata they selected, not the live file.
+  mkdir -p "$d/captured"
+  cp "$d/state/incarnation.meta" "$d/captured/incarnation.meta"
+  printf 'spawn_gen=s100.42.7\n' >> "$d/captured/incarnation.meta"
+  printf 'done [at=99]: implementation outcome\n' > "$d/state/incarnation.status"
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/captured/incarnation.meta" run_crew_state "$d" incarnation)
+  assert_contains "$out" 'state: unknown' 'captured spawn generation governs the snapshot read'
+  pass "terminal status excludes older incarnations and preserves current and legacy outcomes"
+}
+
 test_no_mistakes_prevalidation_done_stays_done() {
   reset_fakes
   local d out
@@ -5576,6 +5614,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
+test_terminal_status_belongs_to_spawn_incarnation
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
