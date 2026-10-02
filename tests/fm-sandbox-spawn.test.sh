@@ -93,15 +93,21 @@ test_enabled_flag_wraps_the_launch_in_the_pinned_runtime() {
 }
 
 test_unusable_runtime_refuses_before_launching() {
-  local rec out status
+  local rec out status before after
   rec=$(make_case failclosed sp-fc)
   read_case "$rec"
   enable_sandbox "$HOME_DIR"
-  out=$(FM_SANDBOX_SRT_BIN="$CASE_DIR/no-such-srt" run_spawn sp-fc "$PROJ_DIR" --mode no-mistakes --yolo off)
+  before=$(git -C "$PROJ_DIR" worktree list --porcelain)
+  out=$(FM_FAKE_TMUX_LOG="$CASE_DIR/tmux.log" FM_SANDBOX_SRT_BIN="$CASE_DIR/no-such-srt" run_spawn sp-fc "$PROJ_DIR" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "a spawn under an enabled sandbox with no runtime must refuse, got: $out"
   assert_contains "$out" "not an executable file" "the refusal must name the unusable runtime"
   [ ! -s "$LAUNCH_LOG" ] || fail "a refused sandboxed spawn must not stage or send a launch command"
+  after=$(git -C "$PROJ_DIR" worktree list --porcelain)
+  assert_equals "$before" "$after" "sandbox refusal must not create a worktree"
+  assert_absent "$HOME_DIR/state/sp-fc.meta" "sandbox refusal must not publish a task record"
+  assert_absent "$HOME_DIR/state/sp-fc.inbox" "sandbox refusal must not arm task wiring"
+  assert_absent "$CASE_DIR/tmux.log" "sandbox refusal must precede endpoint operations"
   pass "spawn with config/worker-sandbox and no runtime: refused before any launch"
 }
 

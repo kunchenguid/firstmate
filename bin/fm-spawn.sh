@@ -567,6 +567,16 @@ fi
 if ! WORKER_SANDBOX_ENABLED=$(fm_config_source_present "$CONFIG/worker-sandbox"); then
   exit 1
 fi
+SANDBOX_PREFIX=
+if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
+  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
+    exit 1
+  fi
+  if [ -z "$SANDBOX_PREFIX" ]; then
+    echo "error: config/worker-sandbox is enabled but no sandbox prefix was produced" >&2
+    exit 1
+  fi
+fi
 # config/claude-permission-mode (header above): resolved once per spawn or
 # relaunch, before any mutation, so a malformed file refuses instead of
 # launching a worker on a permission posture the captain did not choose.
@@ -5336,13 +5346,6 @@ fi
 # before anything is staged into the pane. This is the single launch boundary
 # both a fresh spawn and a relaunch pass through, so the two stay identical.
 if [ "$WORKER_SANDBOX_ENABLED" = 1 ]; then
-  if ! SANDBOX_PREFIX=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-sandbox.sh" prefix); then
-    exit 1
-  fi
-  if [ -z "$SANDBOX_PREFIX" ]; then
-    echo "error: config/worker-sandbox is enabled but no sandbox prefix was produced" >&2
-    exit 1
-  fi
   LAUNCH="$SANDBOX_PREFIX $(shell_quote "$LAUNCH")"
 fi
 # Implement the launch-delivery contract in this script's header. The full

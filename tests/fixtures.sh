@@ -107,6 +107,7 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_TMUX_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -291,6 +292,14 @@ while [ \$# -gt 0 ]; do
   shift
 done
 if [ -n "\$settings" ] && [ -n "\$cmd" ] && [ -f "\$settings" ] && command -v jq >/dev/null 2>&1; then
+  jq -e '
+    (.network.allowedDomains | type == "array") and
+    (.network.deniedDomains | type == "array") and
+    (.filesystem.denyRead | type == "array") and
+    (.filesystem.allowWrite | type == "array") and
+    (.filesystem.denyWrite | type == "array") and
+    (.network.allowLocalBinding == null or (.network.allowLocalBinding | type == "boolean"))
+  ' "\$settings" >/dev/null || exit 1
   while IFS= read -r deny; do
     [ -n "\$deny" ] || continue
     case "\$cmd" in

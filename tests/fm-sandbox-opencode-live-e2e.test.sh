@@ -63,7 +63,7 @@ isolated "$ROOT/bin/fm-sandbox.sh" probe
 run_case() {
   local label=$1 command=$2 expected_exit=$3 transcript
   transcript="$lab/$label.jsonl"
-  isolated "$ROOT/bin/fm-sandbox.sh" exec -- env OPENCODE_DISABLE_MODELS_FETCH=1 "$opencode_bin" run --pure \
+  isolated "$ROOT/bin/fm-sandbox.sh" exec -- env NO_PROXY= no_proxy= OPENCODE_DISABLE_MODELS_FETCH=1 "$opencode_bin" run --pure \
     --format json --model "$model" \
     "Use the bash tool exactly once to execute this exact command: $command . Do not use any other tool or change the command. Then report the result briefly." \
     > "$transcript"

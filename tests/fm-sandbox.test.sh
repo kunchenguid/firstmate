@@ -185,6 +185,29 @@ test_enabled_probe_reports_ready_and_prefix_is_exact() {
   pass "sandbox flag on with a capable runtime: probe reports ready and prefix is exact"
 }
 
+test_runtime_rejects_supplied_settings_for_every_consumer() {
+  local home srt config command out status marker
+  home=$(new_home runtime-invalid-settings)
+  enable_sandbox "$home"
+  srt=$(install_srt "$home")
+  marker="$home/ran-marker"
+  for config in '{}' '{"network":{"allowedDomains":[],"deniedDomains":[],"allowLocalBinding":"invalid"},"filesystem":{"denyRead":[],"allowWrite":[],"denyWrite":[]}}'; do
+    printf '%s\n' "$config" > "$(settings_file "$home")"
+    for command in probe prefix exec; do
+      if [ "$command" = exec ]; then
+        out=$(run_sandbox "$home" "$srt" exec -- touch "$marker" 2>&1)
+      else
+        out=$(run_sandbox "$home" "$srt" "$command" 2>&1)
+      fi
+      status=$?
+      expect_code 1 "$status" "$command must reject settings the runtime rejects: $out"
+      assert_contains "$out" "did not accept the supplied settings" "the runtime must validate the supplied configuration"
+      assert_absent "$marker" "invalid settings must never execute the worker"
+    done
+  done
+  pass "runtime configuration rejection propagates through probe, prefix, and exec"
+}
+
 test_enabled_exec_runs_the_command_through_the_runtime() {
   local home srt log out status
   home=$(new_home enabled-exec)
@@ -226,6 +249,7 @@ test_enabled_wrong_version_refuses
 test_enabled_missing_settings_refuses
 test_enabled_empty_settings_refuses
 test_enabled_invalid_settings_refuses
+test_runtime_rejects_supplied_settings_for_every_consumer
 test_enabled_probe_reports_ready_and_prefix_is_exact
 test_enabled_exec_runs_the_command_through_the_runtime
 test_enabled_unenforced_isolation_refuses

@@ -166,6 +166,7 @@ sandbox_require() {
   sandbox_resolve_srt
   sandbox_check_version
   sandbox_check_settings
+  sandbox_probe_must_pass "$SANDBOX_SETTINGS" "true" "the runtime did not accept the supplied settings"
   sandbox_live_probe
 }
 

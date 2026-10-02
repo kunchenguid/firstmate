@@ -632,6 +632,31 @@ test_relaunch_applies_the_worker_sandbox_prefix() {
   pass "fm-control relaunch: an enabled worker sandbox wraps the replacement launch"
 }
 
+test_sandbox_refusal_preserves_the_prior_worker_and_wiring() {
+  local dir out rc before brief
+  dir=$(new_case sandbox-refusal rl-sandbox)
+  add_ship_task "$dir" rl-sandbox claude
+  mkdir -p "$dir/home/config"
+  : > "$dir/home/config/worker-sandbox"
+  printf '{}' > "$dir/home/config/worker-sandbox-settings.json"
+  mkdir -p "$dir/wt/.claude"
+  printf '{}' > "$dir/wt/.claude/settings.local.json"
+  before=$(cat "$dir/home/state/rl-sandbox.meta")
+  brief=$(cat "$dir/home/data/rl-sandbox/brief.md")
+  out=$(FM_SANDBOX_SRT_BIN="$dir/missing-srt" run_control "$dir" rl-sandbox relaunch --note "must not be appended"); rc=$?
+  expect_code 1 "$rc" "sandbox refusal must precede stopping the prior worker: $out"
+  assert_equals claude "$(cat "$dir/fake/command")" "the prior worker must remain alive"
+  [ ! -s "$dir/fake/literal" ] || fail "sandbox refusal must not send an exit or launch command"
+  assert_equals "$before" "$(cat "$dir/home/state/rl-sandbox.meta")" "sandbox refusal must preserve metadata"
+  assert_equals "$brief" "$(cat "$dir/home/data/rl-sandbox/brief.md")" "sandbox refusal must preserve the brief"
+  printf zsh > "$dir/fake/command"
+  out=$(FM_SANDBOX_SRT_BIN="$dir/missing-srt" run_spawn "$dir" rl-sandbox --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "direct relaunch must also refuse before publishing replacement state: $out"
+  assert_equals "$before" "$(cat "$dir/home/state/rl-sandbox.meta")" "direct refusal must preserve metadata"
+  assert_equals '{}' "$(cat "$dir/wt/.claude/settings.local.json")" "direct refusal must preserve prior wiring"
+  pass "sandbox refusal preserves the worker, instructions, metadata, and wiring before relaunch"
+}
+
 test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
@@ -2416,6 +2441,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_applies_the_worker_sandbox_prefix
+test_sandbox_refusal_preserves_the_prior_worker_and_wiring
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
