@@ -1546,6 +1546,55 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The Windows lock is a real directory instead of a symlink to its owner, and
+# fm-procevent's extension lifecycle requires FM_LOCK_OWNER_DIR. Assert the
+# owner identity is created beside the lock, readable, and reaped with it.
+test_windows_lock_keeps_owner_identity() {
+  local dir fakebin out rc
+  dir="$TMP_ROOT/windows-lock-owner"; mkdir -p "$dir"
+  fakebin="$dir/fakebin"; mkdir -p "$fakebin"
+  printf '#!/bin/sh\necho MINGW64_NT-test\n' > "$fakebin/uname"
+  chmod +x "$fakebin/uname"
+  out=$(PATH="$fakebin:$PATH" bash -c '
+    set -u
+    . "$0"
+    lock="$1/lock"
+    fm_lock_try_create "$lock" || exit 11
+    [ -n "${FM_LOCK_OWNER_DIR:-}" ] || exit 12
+    case "$(basename -- "$FM_LOCK_OWNER_DIR")" in lock.owner.*) ;; *) exit 13 ;; esac
+    fm_current_pid me
+    [ "$(cat "$FM_LOCK_OWNER_DIR/pid" 2>/dev/null)" = "$me" ] || exit 14
+    [ "$(cat "$lock/pid" 2>/dev/null)" = "$me" ] || exit 15
+    fm_lock_remove_path "$lock" || exit 16
+    [ ! -e "$lock" ] || exit 17
+    for d in "$lock".owner.*; do [ -e "$d" ] && exit 18; done
+    fm_lock_try_create "$lock" || exit 21
+    fm_lock_release "$lock" || true
+    [ ! -e "$lock" ] || exit 22
+    for d in "$lock".owner.*; do [ -e "$d" ] && exit 23; done
+    # A release must not sweep a contender's owner directory while it is live:
+    # a live foreign owner survives the sweep and a dead one is reaped.
+    live_owner="$lock.owner.live"
+    mkdir -p "$live_owner"
+    sleep 30 & live_pid=$!
+    printf "%s\n" "$live_pid" > "$live_owner/pid"
+    dead_owner="$lock.owner.dead"
+    mkdir -p "$dead_owner"
+    printf "999999\n" > "$dead_owner/pid"
+    mkdir "$lock"
+    printf "%s\n" "$live_pid" > "$lock/pid"
+    fm_lock_discard_owner_siblings "$lock"
+    [ -d "$live_owner" ] || exit 31
+    [ ! -e "$dead_owner" ] || exit 32
+    kill "$live_pid" 2>/dev/null || true
+    rm -rf "$lock" "$live_owner"
+    printf ok
+  ' "$LIB" "$dir" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] || fail "Windows lock owner identity case failed (rc=$rc): $out"
+  [ "$out" = ok ] || fail "Windows lock owner identity case printed '$out'"
+  pass "wake-lock: the Windows lock keeps FM_LOCK_OWNER_DIR and reaps its owner directory"
+}
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1585,3 +1634,4 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_windows_lock_keeps_owner_identity

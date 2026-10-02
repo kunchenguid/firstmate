@@ -9,7 +9,7 @@
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmTextIsSubstantive } from "./fm-calm-preservation.ts";
+import { calmTextIsSubstantive } from "../../../.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];

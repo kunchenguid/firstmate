@@ -27,10 +27,44 @@ CLAUDE_VERSION_DIR="$TMP_ROOT/claude-install/share/claude/versions"
 mkdir -p "$CLAUDE_VERSION_DIR"
 ln -s /bin/bash "$CLAUDE_VERSION_DIR/2.1.220"
 VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220"
+[ -f "$CLAUDE_VERSION_DIR/2.1.220.exe" ] && VERSIONED_CLAUDE="$CLAUDE_VERSION_DIR/2.1.220.exe"
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/harness-bin")
 ln -s /bin/bash "$FAKEBIN/claude"
 NAMED_CLAUDE="$FAKEBIN/claude"
+[ -f "$FAKEBIN/claude.exe" ] && NAMED_CLAUDE="$FAKEBIN/claude.exe"
+
+is_pid_alive() {  # <pid>
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local wpid=$1
+      [ -f "/proc/$1/winpid" ] && wpid=$(cat "/proc/$1/winpid" 2>/dev/null || echo "$1")
+      type fm_windows_process_record >/dev/null 2>&1 || . "$LIB"
+      [ -n "$(fm_windows_process_record "$wpid" 2>/dev/null)" ]
+      ;;
+    *) kill -0 "$1" 2>/dev/null ;;
+  esac
+}
+
+terminate_pid() {  # <pid>
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local wpid=$1 msys_pid
+      [ -f "/proc/$1/winpid" ] && wpid=$(cat "/proc/$1/winpid" 2>/dev/null || echo "$1")
+      taskkill //F //PID "$wpid" >/dev/null 2>&1 || true
+      # taskkill can be denied inside a sandbox while the suite's own children
+      # stay killable through MSYS, so map the Windows pid back to its MSYS pid
+      # and signal that too; a Windows pid must never be passed to kill as if
+      # it were an MSYS pid.
+      msys_pid=$(ps -W 2>/dev/null | awk -v w="$wpid" '$4 == w { print $1; exit }')
+      if [ -n "$msys_pid" ]; then
+        kill -TERM "$msys_pid" 2>/dev/null || true
+      fi
+      kill -TERM "$1" 2>/dev/null || true
+      ;;
+    *) kill -TERM "$1" 2>/dev/null || true ;;
+  esac
+}
 
 # --- unit layer: identity behind a deterministic process table ---------------
 
@@ -42,6 +76,13 @@ NAMED_CLAUDE="$FAKEBIN/claude"
 lib_eval() {  # <fakebin> <expression>
   local fakebin=$1 expr=$2
   local -a session_env=()
+  if [ ! -x "$fakebin/uname" ]; then
+    cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' Linux
+SH
+    chmod +x "$fakebin/uname"
+  fi
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
@@ -185,6 +226,254 @@ SH
     fi
   done
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
+}
+
+test_windows_pi_node_entrypoint_is_identified_precisely() {
+  local dir fakebin state
+  dir="$TMP_ROOT/windows-pi-node"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_PI_NODE_SHAPE:-pi}" in
+  700:comm=:*) printf '%s\n' node.exe ;;
+  700:args=:pi) printf '%s\n' '"C:\Users\u\AppData\Local\pi-node\current\node.exe" E:\home\u\.npm-global\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js' ;;
+  700:args=:other) printf '%s\n' 'node.exe C:\tools\unrelated\cli.js' ;;
+  700:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-session-start.sh' ;;
+  *:ppid=:*) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$state/.lock"
+
+  lib_eval "$fakebin" 'fm_harness_ancestry_pid' | grep -qx 700 \
+    || fail "the exact Windows Pi Node entry point was not identified as the harness"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$state'" \
+    || fail "the Windows Pi process did not recognize its own session lock"
+  if FM_TEST_PI_NODE_SHAPE=other lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "an unrelated Node CLI was treated as the Pi harness"
+  fi
+  pass "session-lock: the Windows Pi package entry point is recognized without trusting arbitrary Node CLIs"
+}
+
+test_windows_native_process_ancestry_is_read_without_procps_ps() {
+  local dir fakebin state
+  dir="$TMP_ROOT/windows-native-ancestry"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-test
+SH
+cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '  500  1  500  1500  ?  197609  12:00:00 /usr/bin/bash'
+SH
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '100|0|node.exe|%s\n' 'Ik5vZGUgL3JlcG8vbm9kZV9tb2R1bGVzL0BlYXJlbmRpbC13b3Jrcy9waS1jb2RpbmctYWdlbnQvZGlzdC9idW5kbGUvY2xpLmpzIg=='
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps" "$fakebin/powershell.exe"
+  printf '100\n' > "$state/.lock"
+
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "native Windows Pi ancestry was not discovered"
+  [ "$got" = 100 ] || fail "native Windows ancestry returned '$got', expected Pi PID 100"
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" "fm_session_lock_inspect '$state'; printf '%s|%s' \"\$FM_LOCK_INSPECT_STATE\" \"\$FM_LOCK_INSPECT_LIVE_HARNESS\"") \
+    || fail "native Windows lock inspection did not complete"
+  [ "$got" = 'held|true' ] || fail "native Windows lock inspection returned '$got'"
+  pass "session-lock: native Windows ancestry and live lock inspection use Windows process ids"
+}
+
+test_windows_codex_app_helpers_are_not_harness_anchors() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-codex-helpers"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-test
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '  500  1  500  1500  ?  197609  12:00:00 /usr/bin/bash'
+SH
+  # The Codex desktop app spawns a per-command helper below the app process;
+  # anchoring on the helper would record a pid that dies with the tool call.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '100|50|codex-command-runner-0.159.2|%s\n' 'QzpcVXNlcnNcdGVzdFxPcGVuQUlcQ29kZXhcYmluXGNvZGV4LWNvbW1hbmQtcnVubmVyLTAuMTU5LjIuZXhl'
+printf '50|0|codex|%s\n' 'QzpcVXNlcnNcdGVzdFxPcGVuQUlcQ29kZXhcYmluXGNvZGV4LmV4ZQ=='
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps" "$fakebin/powershell.exe"
+
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the codex app ancestry walk found no harness"
+  [ "$got" = 50 ] || fail "the ancestry anchored on '$got', expected the codex app pid 50"
+
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '100|0|codex-command-runner-0.159.2|%s\n' 'QzpcVXNlcnNcdGVzdFxPcGVuQUlcQ29kZXhcYmluXGNvZGV4LWNvbW1hbmQtcnVubmVyLTAuMTU5LjIuZXhl'
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+    fail "a bare codex-command-runner was accepted as a harness anchor"
+  fi
+  pass "session-lock: the Codex desktop app's helpers are skipped so the lock anchors on the app"
+}
+
+test_windows_commandcode_app_process_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-commandcode-app"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-test
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '  500  1  500  1500  ?  197609  12:00:00 /usr/bin/bash'
+SH
+  # The desktop app is the session owner; its tool-call shell sits below it. The
+  # app name carries a literal space, so argv[0] evidence splits on that space
+  # and only the command name can identify the process.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|50|cmd.exe|%s\n' "$(enc 'C:\WINDOWS\system32\cmd.exe /d /s /c "powershell.exe -NoProfile"')"
+printf '50|0|Command Code.exe|%s\n' "$(enc '"E:\commandcode\Command Code\Command Code.exe"')"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps" "$fakebin/powershell.exe"
+
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the Command Code app ancestry walk found no harness"
+  [ "$got" = 50 ] || fail "the ancestry anchored on '$got', expected the Command Code app pid 50"
+
+  # The same identity from the Get-Process fallback's name-only evidence, where
+  # the process name carries no .exe suffix.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|50|cmd.exe|%s\n' "$(enc 'C:\WINDOWS\system32\cmd.exe')"
+printf '50|0|Command Code|%s\n' "$(enc 'E:\commandcode\Command Code\Command Code.exe')"
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the Command Code app was not identified from its name-only evidence"
+  [ "$got" = 50 ] || fail "the name-only ancestry anchored on '$got', expected the Command Code app pid 50"
+
+  # Anchoring matters: a generic shell whose command text merely mentions the
+  # app, and a helper whose name extends the app name, are not harnesses.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|0|bash.exe|%s\n' "$(enc 'bash -c echo hello from Command Code 1.72.4')"
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+    fail "a shell mentioning the app name was accepted as a harness anchor ($got)"
+  fi
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|0|Command Code Helper.exe|%s\n' "$(enc 'C:\tools\Command Code Helper.exe')"
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+    fail "a helper whose name merely extends the app name was accepted as a harness anchor ($got)"
+  fi
+  pass "session-lock: the Command Code desktop app anchors its own session, and only its exact name does"
+}
+
+test_windows_pi_bundled_runtime_survives_the_pwsh_fallback() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-pi-fallback"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-test
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '  500  1  500  1500  ?  197609  12:00:00 /usr/bin/bash'
+SH
+  # The Get-Process fallback (CIM denied) carries only each process's
+  # executable path, and Pi's native Windows engine is its own bundled runtime
+  # under %LOCALAPPDATA%\pi-node, so that path component is the evidence.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|50|bash.exe|%s\n' "$(enc 'bash /c/firstmate/bin/fm-session-start.sh')"
+printf '50|0|node.exe|%s\n' "$(enc 'C:\Users\u\AppData\Local\pi-node\current\node.exe')"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps" "$fakebin/powershell.exe"
+
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the path-only fallback walk found no harness for Pi's bundled runtime"
+  [ "$got" = 50 ] || fail "the fallback anchored on '$got', expected the Pi engine pid 50"
+
+  # Any other node path stays unidentified: the component match is exact.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+enc() { printf '%s' "$1" | base64 | tr -d '\n'; }
+printf '100|50|bash.exe|%s\n' "$(enc 'bash /c/tools/run.sh')"
+printf '50|0|node.exe|%s\n' "$(enc 'C:\tools\mypi-node\current\node.exe')"
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+    fail "an unrelated node path was accepted as Pi ($got)"
+  fi
+  pass "session-lock: Pi's bundled Windows runtime is identified from path-only evidence, and only its exact component"
+}
+
+test_windows_ancestry_falls_back_to_pwsh_when_cim_is_denied() {
+  local dir fakebin got
+  dir="$TMP_ROOT/windows-pwsh-fallback"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-test
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '  500  1  500  1500  ?  197609  12:00:00 /usr/bin/bash'
+SH
+  # A sandboxed host: the CIM query runs but is denied and yields nothing.
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  # PowerShell 7 Get-Process still reports the table and its parent links.
+  cat > "$fakebin/pwsh" <<'SH'
+#!/usr/bin/env bash
+printf '100|0|node.exe|%s\n' 'Ik5vZGUgL3JlcG8vbm9kZV9tb2R1bGVzL0BlYXJlbmRpbC13b3Jrcy9waS1jb2RpbmctYWdlbnQvZGlzdC9idW5kbGUvY2xpLmpzIg=='
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps" "$fakebin/powershell.exe" "$fakebin/pwsh"
+  got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids') \
+    || fail "the PowerShell 7 fallback found no harness when CIM was denied"
+  [ "$got" = 100 ] || fail "the fallback anchored on '$got', expected Pi PID 100"
+
+  cat > "$fakebin/pwsh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/pwsh"
+  if got=$(PATH="$fakebin:$PATH" lib_eval "$fakebin" 'fm_harness_ancestry_pids'); then
+    fail "the fallback accepted a harness when neither reader returned records"
+  fi
+  pass "session-lock: a denied CIM query falls back to PowerShell 7 Get-Process ancestry"
 }
 
 test_harness_beyond_a_gap_never_owns_the_lock() {
@@ -392,9 +681,11 @@ test_same_session_id_owns_a_recycled_background_chain() {
     fail "a lock with no recorded session id was owned through the environment id"
   fi
   printf 'S1\n' > "$dir/elsewhere"
-  ln -s "$dir/elsewhere" "$state/.lock-session"
-  if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
-    fail "a symlinked sidecar was trusted"
+  ln -s "$dir/elsewhere" "$state/.lock-session" 2>/dev/null || true
+  if [ -L "$state/.lock-session" ]; then
+    if FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=710 owned "$fakebin" "$state"; then
+      fail "a symlinked sidecar was trusted"
+    fi
   fi
   rm -f "$state/.lock-session"
   printf 'S1\n' > "$state/.lock-session"
@@ -474,25 +765,39 @@ make_primary_home() {  # <dir>
   cat > "$dir/session.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${FM_FIXTURE_ORPHAN_HERE:-0}" = 1 ]; then
-  i=0
-  while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
-    sleep 0.05
-    i=$((i + 1))
-  done
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *)
+      i=0
+      while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+        sleep 0.05
+        i=$((i + 1))
+      done
+      ;;
+  esac
 fi
-printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
-printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/session-pid"
+printf '%s\n' "$pid" > "$FM_HOME/state/.lock"
 "$FM_HOME/bin/fm-claude-stop-autoarm.sh" </dev/null > "$FM_HOME/state/hook.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/hook.rc"
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
-i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
-  sleep 0.05
-  i=$((i + 1))
-done
-printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) ;;
+  *)
+    i=0
+    while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    ;;
+esac
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/daemon-pid"
 "$FM_SESSION_BIN" "$FM_HOME/session.sh"
 exit 0
 SH
@@ -590,7 +895,7 @@ BG_FIXTURE_PIDS=()
 reap_background_fixture() {
   local pid
   for pid in ${BG_FIXTURE_PIDS[@]+"${BG_FIXTURE_PIDS[@]}"}; do
-    kill -TERM "$pid" 2>/dev/null || true
+    terminate_pid "$pid"
   done
 }
 trap 'reap_background_fixture; fm_test_cleanup' EXIT
@@ -611,13 +916,20 @@ make_background_session_home() {  # <dir>
   # chain the assertions depend on.
   cat > "$dir/frontend.sh" <<'SH'
 #!/usr/bin/env bash
-i=0
-while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
-  sleep 0.05
-  i=$((i + 1))
-done
-printf '%s\n' "$$" > "$FM_HOME/state/frontend-pid"
-CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/frontend-lock.out" 2>&1
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) ;;
+  *)
+    i=0
+    while [ "$i" -lt 200 ] && [ "$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')" != 1 ]; do
+      sleep 0.05
+      i=$((i + 1))
+    done
+    ;;
+esac
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/frontend-pid"
+CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$pid "$FM_HOME/bin/fm-lock.sh" > "$FM_HOME/state/frontend-lock.out" 2>&1
 printf '%s\n' "$?" > "$FM_HOME/state/frontend-lock.rc"
 "$FM_FIXTURE_CLAUDE" "$FM_HOME/daemon.sh" &
 disown
@@ -626,21 +938,27 @@ exit 0
 SH
   cat > "$dir/daemon.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$FM_HOME/state/daemon-pid"
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/daemon-pid"
 exec -a 'claude bg-pty-host' "$FM_FIXTURE_CLAUDE" "$FM_HOME/ptyhost.sh" &
 while :; do sleep 0.1; done
 exit 0
 SH
   cat > "$dir/ptyhost.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$FM_HOME/state/ptyhost-pid"
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/ptyhost-pid"
 exec -a 'claude bg-spare' "$FM_FIXTURE_CLAUDE" "$FM_HOME/spare.sh" &
 while [ ! -e "$FM_HOME/state/stop-spare" ]; do sleep 0.1; done
 exit 0
 SH
   cat > "$dir/spare.sh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$$" > "$FM_HOME/state/spare-pid"
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/spare-pid"
 n=1
 while [ ! -e "$FM_HOME/state/stop-spare" ]; do
   req="$FM_HOME/state/fire-$n"
@@ -650,6 +968,7 @@ while [ ! -e "$FM_HOME/state/stop-spare" ]; do
     unset CLAUDE_CODE_SESSION_ID CLAUDE_PID
     # shellcheck disable=SC1090
     . "$req"
+    [ -f "/proc/$$/winpid" ] && [ -n "${CLAUDE_PID:-}" ] && [ "$CLAUDE_PID" = "$$" ] && CLAUDE_PID=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
     ( . "$FM_HOME/bin/fm-session-lock-lib.sh" && fm_harness_ancestry_pids ) > "$out/ancestry" 2>/dev/null
     printf '%s\n' '{"session_id":"fixture","stop_hook_active":true}' \
       | "$FM_HOME/bin/fm-claude-stop-autoarm.sh" > "$out/hook.out" 2>&1
@@ -767,14 +1086,20 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
 
   # Recycle the bridge: the daemon ends, the pty-host is reparented to init, and
   # the front-end that holds the lock stays alive.
-  kill -TERM "$daemon"
+  terminate_pid "$daemon"
   i=0
-  while [ "$i" -lt 200 ] && { kill -0 "$daemon" 2>/dev/null || [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" != 1 ]; }; do
+  while [ "$i" -lt 200 ] && is_pid_alive "$daemon"; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
-  kill -0 "$frontend" 2>/dev/null || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
+  is_pid_alive "$daemon" && fail "the daemon did not terminate"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *)
+      [ "$(ps -o ppid= -p "$ptyhost" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the pty-host was not reparented to init after the daemon ended"
+      ;;
+  esac
+  is_pid_alive "$frontend" || fail "the front-end died with the daemon, so the recycled case cannot be exercised"
 
   # Phase 2: the same session id over the broken chain - the reported drift.
   fire_phase "$dir" 2 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
@@ -797,11 +1122,11 @@ test_e2e_background_session_keeps_its_lock_across_a_recycled_chain() {
   # onto the spare - the model-loop process - not onto the outermost pty-host.
   : > "$dir/state/stop-frontend"
   i=0
-  while [ "$i" -lt 200 ] && kill -0 "$frontend" 2>/dev/null; do
+  while [ "$i" -lt 200 ] && is_pid_alive "$frontend"; do
     sleep 0.05
     i=$((i + 1))
   done
-  kill -0 "$frontend" 2>/dev/null && fail "the front-end did not exit"
+  is_pid_alive "$frontend" && fail "the front-end did not exit"
   fire_phase "$dir" 6 'export CLAUDE_CODE_SESSION_ID=S1; export CLAUDE_PID=$$'
   expect_phase_owned "$dir" 6 6 "$spare" "dead front-end, same session"
   [ "$spare" != "$ptyhost" ] || fail "fixture collapsed the spare into the pty-host"
@@ -821,8 +1146,10 @@ test_same_session_confirmation_refreshes_rekeyed_id_under_claim_lock() {
   cat > "$dir/run.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
-CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/session-pid"
+CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
 acquire_rc=$?
 if [ "$acquire_rc" != 0 ]; then
   printf '%s\n' "$acquire_rc" > "$FM_HOME/state/acquire.rc"
@@ -854,7 +1181,7 @@ if [ ! -e "$FM_HOME/state/holder-ready" ]; then
   exit 2
 fi
 
-CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/confirm.out" 2>&1 &
+CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/confirm.out" 2>&1 &
 printf '%s\n' "$!" > "$FM_HOME/state/confirm-pid"
 
 i=0
@@ -908,8 +1235,10 @@ test_same_session_confirmation_does_not_steal_after_wait() {
   cat > "$dir/run.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$$" > "$FM_HOME/state/session-pid"
-CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
+pid=$$
+[ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+printf '%s\n' "$pid" > "$FM_HOME/state/session-pid"
+CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
 acquire_rc=$?
 if [ "$acquire_rc" != 0 ]; then
   printf '%s\n' "$acquire_rc" > "$FM_HOME/state/acquire.rc"
@@ -920,7 +1249,9 @@ cp "$FM_HOME/state/.lock-session" "$FM_HOME/state/sidecar-after-acquire"
 printf '%s\n' 0 > "$FM_HOME/state/acquire.rc"
 
 "$FM_CLAUDE" -c '
-  printf "%s\n" "$$" > "$FM_HOME/state/other-pid"
+  other_pid=$$
+  [ -f "/proc/$$/winpid" ] && other_pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+  printf "%s\n" "$other_pid" > "$FM_HOME/state/other-pid"
   while [ ! -e "$FM_HOME/state/stop-other" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do
     sleep 0.05
   done
@@ -958,7 +1289,7 @@ if [ ! -e "$FM_HOME/state/holder-ready" ]; then
   exit 2
 fi
 
-CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/confirm.out" 2>&1 &
+CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/confirm.out" 2>&1 &
 printf '%s\n' "$!" > "$FM_HOME/state/confirm-pid"
 
 i=0
@@ -1018,9 +1349,11 @@ test_failed_lock_write_restores_previous_sidecar() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
+      pid=$$
+      [ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/acquire.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/acquire.rc"
-      printf "%s\n" "$$" > "$FM_HOME/state/stale-pid"
+      printf "%s\n" "$pid" > "$FM_HOME/state/stale-pid"
     '
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/acquire.rc")" \
     "the first session could not acquire its lock: $(cat "$dir/state/acquire.out")"
@@ -1032,7 +1365,9 @@ test_failed_lock_write_restores_previous_sidecar() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
+      pid=$$
+      [ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/reclaim.rc"
     '
   chmod u+w "$dir/state/.lock" 2>/dev/null || true
@@ -1060,7 +1395,9 @@ test_failed_lock_write_removes_new_sidecar_when_none_existed() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
+      pid=$$
+      [ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/reclaim.rc"
     '
   chmod u+w "$dir/state/.lock" 2>/dev/null || true
@@ -1086,9 +1423,11 @@ test_verified_reclaim_keeps_new_sidecar() {
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
     FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
     "$NAMED_CLAUDE" -c '
-      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
+      pid=$$
+      [ -f "/proc/$$/winpid" ] && pid=$(cat "/proc/$$/winpid" 2>/dev/null || echo "$$")
+      CLAUDE_CODE_SESSION_ID=S2 CLAUDE_PID=$pid "$FM_LOCK" > "$FM_HOME/state/reclaim.out" 2>&1
       printf "%s\n" "$?" > "$FM_HOME/state/reclaim.rc"
-      printf "%s\n" "$$" > "$FM_HOME/state/new-pid"
+      printf "%s\n" "$pid" > "$FM_HOME/state/new-pid"
     '
   expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reclaim.rc")" \
     "the reclaim failed: $(cat "$dir/state/reclaim.out")"
@@ -1102,6 +1441,12 @@ test_verified_reclaim_keeps_new_sidecar() {
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
+test_windows_pi_node_entrypoint_is_identified_precisely
+test_windows_native_process_ancestry_is_read_without_procps_ps
+test_windows_codex_app_helpers_are_not_harness_anchors
+test_windows_commandcode_app_process_is_identified
+test_windows_pi_bundled_runtime_survives_the_pwsh_fallback
+test_windows_ancestry_falls_back_to_pwsh_when_cim_is_denied
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain

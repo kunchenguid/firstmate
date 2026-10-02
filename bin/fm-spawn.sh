@@ -2070,7 +2070,7 @@ launch_template() {
   # naming them with -e as well loads each twice (verified), doubling every
   # session_stop continuation.
   omp)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u COMMANDCODE_SCRATCHPAD FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -2121,7 +2121,7 @@ launch_template() {
   # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
   # only reads the environment. Cursor exposes no effort flag, so the shared
   # effort axis is deliberately omitted and stays in task metadata only.
-  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS -u COMMANDCODE_SCRATCHPAD __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # gemini (Google Gemini CLI): a positional query starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
@@ -2248,6 +2248,10 @@ case "$ARG3" in
   # kinds: a harness with no template aborts the spawn.
   if [ "$KIND" = secondmate ]; then
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" secondmate)
+    # The EXPLICIT config choice, empty when the chain only mirrors the
+    # primary's own harness. Only that mirrored default may fall back below: a
+    # harness the operator named is their authority and always stands.
+    configured_harness=$("$FM_ROOT/bin/fm-harness.sh" secondmate-configured)
     harness_src='config/secondmate-harness (falling back to config/crew-harness)'
   else
     if [ -f "$CONFIG/crew-dispatch.json" ]; then
@@ -2255,11 +2259,41 @@ case "$ARG3" in
       exit 1
     fi
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
+    configured_harness=$("$FM_ROOT/bin/fm-harness.sh" crew-configured)
     harness_src='config/crew-harness'
   fi
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-    echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
-    exit 1
+    # A harness with no template cannot launch a worker, and an EXPLICITLY
+    # named harness always refuses - that is the operator's choice. The
+    # fallback is only for the mirrored-own default: nothing was configured, so
+    # resolution copied the primary's own harness, and a harness firstmate
+    # itself runs on (such as a desktop app with no worker launch path) would
+    # otherwise stand every default spawn down. Report it and fall back only to
+    # a verified adapter whose CLI is actually present.
+    fallback_harness=
+    if [ -z "$configured_harness" ]; then
+      for candidate in claude codex pi opencode grok cursor omp; do
+        case "$candidate" in
+          cursor) candidate_bin=cursor-agent ;;
+          *) candidate_bin=$candidate ;;
+        esac
+        command -v "$candidate_bin" >/dev/null 2>&1 || continue
+        launch_template "$candidate" "$KIND" >/dev/null 2>&1 || continue
+        fallback_harness=$candidate
+        break
+      done
+    fi
+    if [ -n "$fallback_harness" ]; then
+      echo "NOTICE: harness '$HARNESS' (from $harness_src or detection) has no worker launch template; falling back to verified worker adapter '$fallback_harness' for this spawn. Set config/crew-harness to choose explicitly." >&2
+      HARNESS=$fallback_harness
+      LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+        echo "error: no launch template for harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
+        exit 1
+      }
+    else
+      echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
+      exit 1
+    fi
   }
   ;;
 *)
@@ -4333,6 +4367,11 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+# The former Windows Calm materialization is gone with the imports it served:
+# both shared modules are imported from .claude/mods/firstmate-calm/lib
+# directly, so the tracked symlinks under .pi/extensions/lib are never loaded
+# here and no spawn rewrites tracked files (which used to dirty the worker
+# worktree and trip the refresh and teardown safeguards).
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
 # adoption. This also updates Herdr's restored pane shell before any harness is
@@ -5121,7 +5160,7 @@ case "$LAUNCH" in
 esac
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
-  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u COMMANDCODE_SCRATCHPAD $LAUNCH"
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

@@ -30,7 +30,19 @@ set -u
 # This suite states the markers it means to test in every case. Drop the ambient
 # ones so a verdict never depends on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS
+  FM_SUPERVISION_ACTOR FM_SUPERVISION_PRIMARY_HARNESS COMMANDCODE_SCRATCHPAD
+
+# This suite's ancestry half drives ps through a copied binary that carries the
+# harness name, and MSYS ps reports the real executable instead, so the premise
+# cannot exist on that host. CI's Linux/macOS lanes cover the boundary in full;
+# the Windows-native detection paths have their own suite
+# (tests/fm-session-lock-ancestry.test.sh), which runs green on Windows.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    pass "harness precedence skipped (MSYS ps cannot report a copied binary's own name)"
+    exit 0
+    ;;
+esac
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"

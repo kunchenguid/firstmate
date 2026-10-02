@@ -627,6 +627,24 @@ test_spawn_unverified_secondmate_harness_refused() {
   assert_contains "$(cat "$err")" "config/secondmate-harness" \
     "unverified: error names the secondmate-harness source"
   [ -e "$w/home/state/sm.meta" ] && fail "unverified: a meta was written despite the abort"
+
+  # An EXPLICIT choice of a harness with no worker template (Command Code is a
+  # primary-only desktop harness) must refuse exactly like any other unverified
+  # adapter: only an absent or "default" resolution mirrors the primary and may
+  # fall back to a verified worker adapter, so a named choice is never
+  # overridden.
+  printf 'commandcode\n' > "$w/home/config/secondmate-harness"
+  rc=0
+  PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>"$err" || rc=$?
+  [ "$rc" -ne 0 ] || fail "explicit commandcode: spawn should have refused instead of falling back"
+  assert_contains "$(cat "$err")" "no launch template for harness 'commandcode'" \
+    "explicit commandcode: error names the rejected harness"
+  [ -e "$w/home/state/sm.meta" ] && fail "explicit commandcode: a meta was written despite the abort"
   pass "B6 spawn: an unverified resolved secondmate harness is refused (guard intact)"
 }
 

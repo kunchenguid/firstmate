@@ -42,7 +42,7 @@ set -u
 # ancestry the detection cases set up. Drop the ambient markers so the asserted
 # verdict does not depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
-  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS
+  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS COMMANDCODE_SCRATCHPAD
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
@@ -116,6 +116,30 @@ SH
   [ "$out" != agy ] \
     || fail "a later shell argument naming agy must not detect agy, got '$out'"
   pass "fm-harness.sh: ancestry rejects unrelated agy mentions"
+}
+
+test_agy_language_server_ancestry_reads_its_arguments() {
+  local fakebin out err
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-language-server")
+  err="$TMP_ROOT/anc-language-server.err"
+  # The Antigravity desktop IDE's own language_server process is agy evidence
+  # through its args alone, so the arm must read them itself: expanding the
+  # interpreter branch's later assignment instead aborted under set -u and the
+  # evidence could never match.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' language_server.exe; exit 0 ;;
+  *"args="*) printf '%s\n' 'language_server.exe --override_ide_name antigravity --standalone'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" "$HARNESS" 2>"$err")
+  [ "$out" = agy ] \
+    || fail "an Antigravity language_server ancestor must detect agy, got '$out' $(cat "$err" 2>/dev/null)"
+  [ -s "$err" ] && fail "language_server ancestry must not report an error: $(cat "$err")"
+  pass "fm-harness.sh: an Antigravity language_server ancestor detects agy from its arguments"
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
@@ -272,6 +296,15 @@ test_herdr_done_with_live_registry_stays_live() {
 
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live() {
   local dir out shell_pid
+  # The shared proof reads this host's real process table for the canned pane
+  # shell pid, and MSYS ps cannot resolve those pids, so the premise this case
+  # needs cannot exist there.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      pass "herdr exit detection: shell-only-pane staleness skipped (MSYS process table cannot prove canned pane pids)"
+      return 0
+      ;;
+  esac
   dir="$TMP_ROOT/herdr-stale"; mkdir -p "$dir"
   # The descendant walk reads the REAL process table, so the canned pane shell
   # must be a process this test owns and can prove alive: a short-lived sleep.
@@ -917,3 +950,4 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_agy_language_server_ancestry_reads_its_arguments
