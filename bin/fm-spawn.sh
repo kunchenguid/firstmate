@@ -639,6 +639,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-secondmate-liveness-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-liveness-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -896,7 +898,8 @@ fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
-  local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
+  local remote_backend remote_target remote_harness remote_model remote_herdr_session registry_lock remote_lock remote_generation
+  local requested_model model_mismatch=0
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
   local -a launch_args
   id=${POS[0]:-}
@@ -1081,11 +1084,89 @@ spawn_remote_secondmate() {
   fi
   launch_args=("$id" "$harness" "$model" "$effort" "$backend")
   [ -z "$remote_traceparent" ] || launch_args+=("$remote_traceparent")
+  # The remote supervisor's seat is parent-owned (bin/fm-fleet-seats.sh
+  # "REMOTE SUPERVISORS"): reserve this generation before the host launch
+  # operation, dispatch it with the host operation token, and let the host's
+  # token-scoped disposition - never a bare marker or exit status - decide
+  # whether the candidate is released, confirmed, or stays counted.
+  local seat_out seat_prev seat_ledger_gen seat_tracked=0 seat_disposition seat_response seat_rc accounting_gen remote_spawn_gen
+  # The seat ledger, not this record, names the running generation: after a
+  # failed publication the record can be missing or stale, and a retry must
+  # replace the confirmed generation rather than refuse beside it.
+  seat_prev=-
+  if [ -f "$meta" ]; then
+    seat_prev=$(fm_meta_get "$meta" fleet_seat_generation)
+    [ -n "$seat_prev" ] || seat_prev=-
+  fi
+  seat_ledger_gen=$(spawn_seats show "$id" 2>/dev/null |
+    jq -r '[.incarnations[] | select(.lifecycle == "reserved" or .lifecycle == "confirmed")] | ((map(select(.lifecycle == "confirmed")) | last) // last) | .generation // empty' 2>/dev/null || true)
+  if [ -n "$seat_ledger_gen" ]; then
+    seat_prev=$seat_ledger_gen
+    if ! spawn_seats reclaim "$id" --generation "$seat_ledger_gen"; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id's ledger predecessor is unresolved; no replacement was reserved" >&2
+      return 1
+    fi
+  fi
+  if ! seat_out=$(spawn_seats reserve "$id" --generation "$SPAWN_GEN" --previous-generation "$seat_prev" \
+    --kind secondmate --harness "$harness" --model "${model#-}" --holder-pid "$$"); then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: spawn refused - remote secondmate $id has no fleet seat for model ${model#-} (see the fleet-seats line above)" >&2
+    return 1
+  fi
+  [ -z "$seat_out" ] || printf '%s\n' "$seat_out"
+  case "$seat_out" in 'fleet-seats: reserved '* | 'fleet-seats: recorded '*) seat_tracked=1 ;; esac
+  if [ "$seat_tracked" -eq 1 ]; then
+    if ! { SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$id.XXXXXX") &&
+      jq -cn --arg host "$host" --arg root "$root" --arg home "$home" --arg op "$SPAWN_GEN" \
+        '{placement: "remote", backend: "herdr", target: null, home: $home, host: $host,
+          remote_root: $root, spawn_gen: null, operation: $op}' >"$SPAWN_SEAT_ROUTE_FILE" &&
+      spawn_seats dispatch "$id" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null; }; then
+      spawn_seats release "$id" --generation "$SPAWN_GEN" --reason prelaunch >/dev/null || true
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id launch was not dispatched: its fleet seat could not record the host operation" >&2
+      return 1
+    fi
+    launch_args+=(--operation "$SPAWN_GEN" --previous "$seat_prev")
+  fi
   if out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh launch \
     "${launch_args[@]}" </dev/null 2>&1); then
     rc=0
   else
     rc=$?
+  fi
+  seat_disposition=
+  accounting_gen=
+  remote_spawn_gen=$(printf '%s\n' "$out" | sed -n 's/^spawn_gen=//p' | tail -1)
+  if [ "$seat_tracked" -eq 1 ]; then
+    seat_response=$(printf '%s\n' "$out" | sed -n 's/^seat_disposition=//p' | tail -1)
+    if [ -n "$seat_response" ] && printf '%s\n' "$seat_response" >"$SPAWN_SEAT_ROUTE_FILE"; then
+      seat_rc=0
+      spawn_seats reconcile-remote "$id" --generation "$SPAWN_GEN" --response-file "$SPAWN_SEAT_ROUTE_FILE" || seat_rc=$?
+      [ "$seat_rc" -eq 0 ] && seat_disposition=$(printf '%s\n' "$seat_response" | jq -r '.disposition // empty' 2>/dev/null || true)
+      case "$seat_disposition" in
+      started) accounting_gen=$SPAWN_GEN ;;
+      existing) accounting_gen=$(printf '%s\n' "$seat_response" | jq -r '.actual_generation') ;;
+      esac
+    fi
+    if [ -z "$accounting_gen" ]; then
+      fm_lock_release "$remote_lock" || true
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      case "$seat_disposition" in
+      prelaunch | cancelled) echo "error: remote secondmate $id was not launched; its fleet seat candidate was released" >&2 ;;
+      *) echo "error: remote secondmate $id launch completion is unknown; its fleet seat stays counted for reconciliation and route $host:$home is preserved" >&2 ;;
+      esac
+      [ "$rc" -eq 0 ] && rc=1
+      return "$rc"
+    fi
   fi
   if [ "$rc" -ne 0 ]; then
     fm_lock_release "$remote_lock" || true
@@ -1100,6 +1181,7 @@ spawn_remote_secondmate() {
   remote_backend=$(printf '%s\n' "$out" | sed -n 's/^backend=//p' | tail -1)
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
+  remote_model=$(printf '%s\n' "$out" | sed -n 's/^model=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
@@ -1121,6 +1203,21 @@ spawn_remote_secondmate() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
     return 1
+  fi
+  if [ -z "$remote_model" ] || [ "$remote_model" = - ]; then
+    fm_lock_release "$remote_lock" || true
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: remote launch did not confirm its model; preserving its fleet seat for reconciliation" >&2
+    return 1
+  fi
+  requested_model=$model
+  [ "$requested_model" != - ] || requested_model=default
+  if [ "$remote_model" != "$requested_model" ]; then
+    # The seat owner already counts the host-confirmed actual model
+    # (reconcile-remote above); this record follows it.
+    model=$remote_model
+    model_mismatch=1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own
   # launch, rather than what this side hoped to deliver. That keeps the #995
@@ -1151,6 +1248,8 @@ spawn_remote_secondmate() {
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
+    [ -z "$accounting_gen" ] || echo "fleet_seat_generation=$accounting_gen"
+    [ -z "$remote_spawn_gen" ] || echo "remote_spawn_gen=$remote_spawn_gen"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
@@ -1176,6 +1275,13 @@ spawn_remote_secondmate() {
     return 1
   fi
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
+  if [ "$model_mismatch" -eq 1 ]; then
+    if [ -e "$CONFIG/fleet-seats" ] || [ -L "$CONFIG/fleet-seats" ]; then
+      echo "error: remote secondmate $id remains on confirmed model ${remote_model:-default}; requested model $requested_model was not launched" >&2
+      return 1
+    fi
+    echo "warning: remote secondmate $id remains on confirmed model ${remote_model:-default}; requested model $requested_model was not launched" >&2
+  fi
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -1215,6 +1321,61 @@ CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
 SPAWN_ENDPOINT_CLOSED=0
+# Fleet seat custody (bin/fm-fleet-seats.sh owns the transitions): TRACKED when
+# the seat owner recorded this launch's generation, DISPATCHED once it permitted
+# delivery, CONFIRMED once it accepted startup, ADOPTED when the owning control
+# or host transaction reserved the generation and passed it down.
+SPAWN_SEAT_TRACKED=0
+SPAWN_SEAT_POOLED=0
+SPAWN_SEAT_DISPATCHED=0
+SPAWN_SEAT_CONFIRMED=0
+SPAWN_SEAT_ADOPTED=0
+SPAWN_LIFECYCLE_JOINED=0
+SPAWN_REMOTE_OPERATION=${FM_REMOTE_SEAT_OPERATION:-}
+SPAWN_SEAT_ROUTE_FILE=
+
+spawn_seats() {  # <verb> <args...>: run the seat owner as this home
+  FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG FM_DATA_OVERRIDE=$DATA \
+    "$SCRIPT_DIR/fm-fleet-seats.sh" "$@"
+}
+
+# spawn_host_receipt_update <dispatched|started>: a host-local launch for a
+# remote parent's seat records its own delivery and startup in the host
+# operation receipt the host transaction opened (bin/fm-remote-secondmate-control.sh
+# owns it), so a lost reply or a crash cannot turn "maybe submitted" into
+# "never launched".
+spawn_host_receipt_update() {
+  local receipt="$STATE/$ID.seat-operation.$SPAWN_REMOTE_OPERATION"
+  case "$1" in
+  dispatched)
+    fm_remote_seat_receipt_update "$receipt" "$SPAWN_REMOTE_OPERATION" "$SPAWN_GEN" \
+      phase=dispatched "route_backend=$BACKEND" "route_target=$T"
+    ;;
+  started)
+    fm_remote_seat_receipt_update "$receipt" "$SPAWN_REMOTE_OPERATION" "$SPAWN_GEN" \
+      phase=started "actual_generation=$SPAWN_GEN"
+    ;;
+  *) return 1 ;;
+  esac
+}
+
+# spawn_seat_abort_custody: on a failed spawn, release a candidate that never
+# became executable or whose own endpoint this spawn closed; otherwise the seat
+# stays counted with its recorded route for recovery (a shell-only endpoint can
+# still run a buffered launch line).
+spawn_seat_abort_custody() {
+  [ "$SPAWN_SEAT_TRACKED" = 1 ] && [ "$SPAWN_SEAT_CONFIRMED" = 0 ] || return 0
+  if [ "$SPAWN_SEAT_DISPATCHED" = 0 ]; then
+    [ "$SPAWN_SEAT_ADOPTED" = 1 ] && return 0
+    spawn_seats release "$ID" --generation "$SPAWN_GEN" --reason prelaunch >/dev/null ||
+      echo "warning: the fleet seat reserved for $ID generation $SPAWN_GEN could not be released; it stays counted" >&2
+  elif [ "$SPAWN_ENDPOINT_CLOSED" = 1 ] &&
+    spawn_seats release "$ID" --generation "$SPAWN_GEN" --reason cancelled >/dev/null 2>&1; then
+    :
+  else
+    echo "warning: the fleet seat for $ID generation $SPAWN_GEN stays counted: its launch was submitted to ${T:-its endpoint} and startup was not confirmed (reconcile with bin/fm-fleet-seats.sh reclaim $ID --generation $SPAWN_GEN)" >&2
+  fi
+}
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1245,6 +1406,14 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ]; then
+    spawn_seat_abort_custody || true
+  fi
+  [ -z "$SPAWN_SEAT_ROUTE_FILE" ] || rm -f "$SPAWN_SEAT_ROUTE_FILE" 2>/dev/null || true
+  if [ "$SPAWN_LIFECYCLE_JOINED" = 1 ]; then
+    SPAWN_LIFECYCLE_JOINED=0
+    fm_supervisor_lifecycle_release "$STATE" "$ID" || true
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1582,6 +1751,45 @@ spawn_require_relocated_queued_work() {
     exit 1
   fi
 }
+# Supervisor lifecycle episode (bin/fm-secondmate-liveness-lib.sh): every
+# secondmate launch - initial, recovery, relaunch, and a host-local launch for a
+# remote parent - joins the task's one episode mutex before any reservation or
+# endpoint effect, adopting a verified carrier from the liveness, control, or
+# host transaction that already owns it. It is taken before the control lock,
+# matching the fleet-wide acquisition order.
+SPAWN_IS_SUPERVISOR=0
+[ "$KIND" != secondmate ] || SPAWN_IS_SUPERVISOR=1
+if [ "$RELAUNCH" -eq 1 ] && [ -f "$STATE/$ID.meta" ] &&
+  [ "$(fm_meta_get "$STATE/$ID.meta" kind 2>/dev/null || true)" = secondmate ]; then
+  SPAWN_IS_SUPERVISOR=1
+fi
+SPAWN_LIFECYCLE_ADOPTED=0
+if [ "$SPAWN_IS_SUPERVISOR" = 1 ]; then
+  spawn_lifecycle_rc=0
+  fm_supervisor_lifecycle_adopt "$STATE" "$ID" || spawn_lifecycle_rc=$?
+  case "$spawn_lifecycle_rc" in
+  0) SPAWN_LIFECYCLE_ADOPTED=1 ;;
+  1)
+    if [ -n "$SPAWN_REMOTE_OPERATION" ]; then
+      echo "error: a host-local supervisor launch for a parent seat operation must run inside the host's lifecycle episode" >&2
+      exit 1
+    fi
+    mkdir -p "$STATE" 2>/dev/null || true
+    if ! fm_supervisor_lifecycle_acquire "$STATE" "$ID" 30; then
+      echo "error: another lifecycle episode for secondmate $ID is running (pid ${FM_LOCK_HELD_PID:-unknown}); nothing was launched" >&2
+      exit 1
+    fi
+    SPAWN_LIFECYCLE_JOINED=1
+    ;;
+  *)
+    echo "error: the inherited lifecycle carrier for secondmate $ID does not verify against its live episode; refusing to launch" >&2
+    exit 1
+    ;;
+  esac
+elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
+  echo "error: a parent seat operation applies only to a secondmate launch" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1600,6 +1808,33 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+# Seat generation: minted once, before either reservation path, and reused as
+# the recorded spawn_gen, the staged launch-file nonce, and the host operation
+# token. Only the owning control transaction (this process's verified control
+# parent) or a host transaction inside its verified lifecycle episode may hand
+# one down.
+SPAWN_GEN=
+if [ -n "${FM_SPAWN_SEAT_GENERATION:-}" ]; then
+  case "$FM_SPAWN_SEAT_GENERATION" in
+  *[!A-Za-z0-9.]* | '')
+    echo "error: FM_SPAWN_SEAT_GENERATION is not a usable generation token" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$SPAWN_CONTROL_PARENT" = 1 ] ||
+    { [ -n "$SPAWN_REMOTE_OPERATION" ] && [ "$SPAWN_LIFECYCLE_ADOPTED" = 1 ]; }; then
+    SPAWN_GEN=$FM_SPAWN_SEAT_GENERATION
+    SPAWN_SEAT_ADOPTED=1
+  else
+    echo "error: a seat generation can be handed down only by the owning control or host transaction" >&2
+    exit 1
+  fi
+fi
+if [ -n "$SPAWN_REMOTE_OPERATION" ] && [ "$SPAWN_SEAT_ADOPTED" != 1 ]; then
+  echo "error: a host-local launch for a parent seat operation needs the parent's seat generation" >&2
+  exit 1
+fi
+[ -n "$SPAWN_GEN" ] || SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 if [ "$RELAUNCH" -eq 0 ]; then
   mkdir -p "$STATE" || {
     echo "error: could not create parent state directory" >&2
@@ -2414,6 +2649,40 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
     unset CLAUDE_CONFIG_DIR
+  fi
+fi
+
+# Fleet seat pool (bin/fm-fleet-seats.sh owns the contract): a ship, scout, or
+# local secondmate supervisor on a pooled model reserves this generation's
+# fleet-wide seat before any endpoint, worktree, or record exists, so a full
+# pool or an unreachable authority refuses at no unwind cost. The reservation
+# names the incarnation it replaces, so a relaunch on the same route keeps one
+# seat while a cross-pool relaunch needs its destination seat first. A
+# host-local supervisor launch for a remote parent consumes the parent's
+# reservation instead of taking a second one here.
+if [ -z "$SPAWN_REMOTE_OPERATION" ]; then
+  SPAWN_SEAT_PREV=-
+  if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    SPAWN_SEAT_PREV=$(fm_meta_get "$STATE/$ID.meta" spawn_gen 2>/dev/null || true)
+    [ -n "$SPAWN_SEAT_PREV" ] && [ "$SPAWN_SEAT_PREV" != "$SPAWN_GEN" ] || SPAWN_SEAT_PREV=-
+  fi
+  FLEET_SEAT_ARGS=(reserve "$ID" --generation "$SPAWN_GEN" --previous-generation "$SPAWN_SEAT_PREV"
+    --kind "$KIND" --harness "$HARNESS" --model "${MODEL:-default}" --holder-pid "$$")
+  [ "$RAW_LAUNCH" -eq 0 ] || FLEET_SEAT_ARGS+=(--raw-launch)
+  FLEET_SEAT_OUT=$(spawn_seats "${FLEET_SEAT_ARGS[@]}") || {
+    echo "error: spawn refused - $ID has no fleet seat for model ${MODEL:-default} (see the fleet-seats line above)" >&2
+    exit 1
+  }
+  [ -z "$FLEET_SEAT_OUT" ] || printf '%s\n' "$FLEET_SEAT_OUT"
+  case "$FLEET_SEAT_OUT" in
+    'fleet-seats: reserved '*) SPAWN_SEAT_TRACKED=1; SPAWN_SEAT_POOLED=1 ;;
+    'fleet-seats: recorded '*) SPAWN_SEAT_TRACKED=1 ;;
+  esac
+  if [ "$RELAUNCH" -eq 1 ] && [ "$SPAWN_SEAT_TRACKED" = 1 ] && [ "$SPAWN_SEAT_PREV" != - ]; then
+    spawn_seats release "$ID" --generation "$SPAWN_SEAT_PREV" --reason replaced || {
+      echo "error: spawn refused - $ID's predecessor is not proven stopped; no replacement was launched" >&2
+      exit 1
+    }
   fi
 fi
 
@@ -4873,7 +5142,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -5360,6 +5628,34 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
+# Seat dispatch (bin/fm-fleet-seats.sh): the reserved generation moves to
+# dispatching with this exact endpoint BEFORE the source line or Enter reaches
+# it, so a crash from here on leaves a counted reservation with a recoverable
+# route, and only the first dispatch may deliver.
+if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
+  SPAWN_SEAT_ROUTE_FILE=$(umask 077 && mktemp "$STATE/.seat-route-$ID.XXXXXX") || {
+    echo "error: could not stage the fleet seat route for $ID" >&2
+    exit 1
+  }
+  SPAWN_SEAT_HOME=
+  [ "$KIND" != secondmate ] || SPAWN_SEAT_HOME=$PROJ_ABS
+  jq -cn --arg b "$BACKEND" --arg t "$T" --arg h "$SPAWN_SEAT_HOME" --arg g "$SPAWN_GEN" \
+    '{placement: "local", backend: $b, target: $t, home: (if $h == "" then null else $h end),
+      host: null, remote_root: null, spawn_gen: $g, operation: null}' >"$SPAWN_SEAT_ROUTE_FILE" || {
+    echo "error: could not stage the fleet seat route for $ID" >&2
+    exit 1
+  }
+  spawn_seats dispatch "$ID" --generation "$SPAWN_GEN" --route-file "$SPAWN_SEAT_ROUTE_FILE" >/dev/null || {
+    echo "error: the fleet seat owner did not permit launch delivery for $ID generation $SPAWN_GEN; nothing was delivered" >&2
+    exit 1
+  }
+  SPAWN_SEAT_DISPATCHED=1
+elif [ -n "$SPAWN_REMOTE_OPERATION" ]; then
+  spawn_host_receipt_update dispatched || {
+    echo "error: the host operation receipt for $ID could not record launch dispatch; nothing was delivered" >&2
+    exit 1
+  }
+fi
 sleep 0.3
 SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
@@ -5505,6 +5801,41 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+
+# Supervisor startup confirmation: a pooled secondmate launch (or a host-local
+# launch for a remote parent's seat) succeeds only once the recovery-grade
+# classifier reads this generation's exact endpoint `alive`. A timeout or an
+# unprovable backend fails the spawn with the seat still counted and its route
+# recorded; it never reports success, and never frees the seat.
+if [ "$KIND" = secondmate ] && { [ "$SPAWN_SEAT_POOLED" = 1 ] || [ -n "$SPAWN_REMOTE_OPERATION" ]; }; then
+  spawn_startup_state=unverified
+  if fm_control_backend_state_verified "$BACKEND"; then
+    spawn_startup_elapsed=0
+    while :; do
+      spawn_startup_state=$(fm_backend_agent_state "$BACKEND" "$T" 2>/dev/null || printf unreadable)
+      [ "$spawn_startup_state" != alive ] || break
+      awk -v e="$spawn_startup_elapsed" -v t="${FM_CONTROL_LAUNCH_WAIT:-90}" 'BEGIN{exit !(e < t)}' || break
+      sleep "${FM_CONTROL_POLL:-0.5}"
+      spawn_startup_elapsed=$(awk -v e="$spawn_startup_elapsed" -v p="${FM_CONTROL_POLL:-0.5}" 'BEGIN{printf "%.3f", e + p}')
+    done
+  fi
+  if [ "$spawn_startup_state" != alive ]; then
+    echo "error: secondmate $ID was launched into $T but its startup was not confirmed (endpoint reads '$spawn_startup_state'); its fleet seat stays counted and its route is preserved for recovery" >&2
+    exit 1
+  fi
+  if [ "$SPAWN_SEAT_TRACKED" = 1 ]; then
+    spawn_seats confirm "$ID" --generation "$SPAWN_GEN" >/dev/null || {
+      echo "error: secondmate $ID started, but its fleet seat could not record the confirmed startup; it stays counted for reconciliation" >&2
+      exit 1
+    }
+    SPAWN_SEAT_CONFIRMED=1
+  else
+    spawn_host_receipt_update started || {
+      echo "error: secondmate $ID started, but the host operation receipt could not record it" >&2
+      exit 1
+    }
+  fi
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

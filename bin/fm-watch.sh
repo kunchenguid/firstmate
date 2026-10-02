@@ -2732,6 +2732,26 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # Fleet seat maintenance, then policy and grants for remote secondmates
+  # (bin/fm-fleet-seats.sh owns the contract). Mechanical and silent, at most
+  # every 30 seconds: a bounded reconcile pass first tries to finish seats whose
+  # launching process ended - each one inside its own task's lifecycle episode,
+  # skipped while that episode is busy, never killing anything - and then only
+  # the fleet root serves, each remote call bounded inside the script.
+  if { [ -e "$CONFIG/fleet-seats" ] || [ -d "$STATE/fleet-seats" ]; } \
+    && [ "$(age_of "$STATE/.fleet-seats-served")" -ge 30 ]; then
+    touch "$STATE/.fleet-seats-served" 2>/dev/null || true
+    if [ -d "$STATE/fleet-seats/holders" ] \
+      && ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+        "$SCRIPT_DIR/fm-fleet-seats.sh" reconcile --limit 8 >/dev/null 2>&1; then
+      triage_log "fleet seat reconciliation unavailable"
+    fi
+    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-fleet-seats.sh" serve-remotes >/dev/null 2>&1; then
+      triage_log "fleet seat serving unavailable"
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

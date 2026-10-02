@@ -51,6 +51,16 @@
 # request text, the bound, the failure vocabulary, and this report are all
 # computed here in the primary and are identical for both.
 #
+# Each persist request is bound to the incarnation it was sent to: the mate's
+# recorded generation (its host spawn generation for a remote route, else its
+# spawn_gen) is captured with the request and passed to the relaunch entry
+# point as --expect-generation. That entry point compares it inside the mate's
+# lifecycle episode before stopping anything, so if automatic recovery already
+# replaced the mate, the answer belonged to an earlier generation and the newer
+# agent gets the ordinary nudge instead of losing its conversation. Waiting for
+# answers happens outside every lifecycle lock, so one slow mate never blocks
+# another's restart.
+#
 # Nothing here forces, stashes, or discards anything. bin/fm-control.sh owns the
 # restart transaction, its checkpoint, its journal, and its rollback; a refusal
 # before the agent is stopped leaves the mate running exactly as it was.
@@ -72,7 +82,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
-  sed -n '2,65{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,75{s/^# \{0,1\}//;p;}' "$0"
 }
 
 case "${1:-}" in
@@ -128,6 +138,7 @@ HOST=()
 HARNESS=()
 MODEL=()
 EFFORT=()
+GENERATION=()
 RESTART_PID=()
 RESTART_RESULT=()
 
@@ -168,12 +179,18 @@ restart_mate() {  # <array-index>
   if [ "${PLACEMENT[i]}" = remote ]; then
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       "$SCRIPT_DIR/fm-remote-secondmate-relaunch.sh" \
-      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" < /dev/null 2>&1)
+      "$id" "${HARNESS[i]}" "${MODEL[i]:-default}" "${EFFORT[i]:-default}" \
+      --expect-generation "${GENERATION[i]}" < /dev/null 2>&1)
     restart_rc=$?
   else
     restart_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch 2>&1)
+      "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --expect-generation "${GENERATION[i]}" 2>&1)
     restart_rc=$?
+  fi
+  if [ "$restart_rc" -eq 6 ]; then
+    fall_back_to_nudge "$id" \
+      "its answer about the open work belonged to generation ${GENERATION[i]}, and a newer incarnation is running now, so that agent was not stopped"
+    return
   fi
   if [ "$restart_rc" -eq 0 ]; then
     ran_on=$(printf '%s\n' "$restart_out" | sed -n 's/^relaunched .* harness=\([^ ]*\).*/\1/p' | tail -1)
@@ -259,6 +276,7 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   HARNESS[i]=""
   MODEL[i]=""
   EFFORT[i]=""
+  GENERATION[i]=""
   if ! fm_secondmate_restart_capable "$STATE/$id.meta"; then
     REASON[i]=$FM_SECONDMATE_RESTART_REASON
     i=$((i + 1))
@@ -289,6 +307,27 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
     fi
   fi
 
+  GENERATION[i]=$(sed -n 's/^remote_spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
+  if [ "${PLACEMENT[i]}" = remote ]; then
+    host_route=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-on.sh" \
+      "$id" fm-remote-secondmate-control.sh route "$id" </dev/null 2>/dev/null) || host_route=
+    host_generation=$(printf '%s\n' "$host_route" | sed -n 's/^spawn_gen=//p' | tail -1)
+    if [ "$(printf '%s\n' "$host_route" | sed -n 's/^schema=//p' | tail -1)" != fm-remote-secondmate-control.v1 ] \
+      || [ -z "$host_generation" ] || [ "$host_generation" != "${GENERATION[i]}" ]; then
+      REASON[i]="its host launch generation does not match the recorded route, so an answer cannot safely authorize a restart"
+      i=$((i + 1))
+      continue
+    fi
+  else
+    GENERATION[i]=$(sed -n 's/^spawn_gen=//p' "$STATE/$id.meta" 2>/dev/null | tail -1)
+  fi
+  case "${GENERATION[i]}" in
+    ''|-|*[!A-Za-z0-9._-]*)
+      REASON[i]="its launch generation is missing or invalid, so an answer cannot safely authorize a restart"
+      i=$((i + 1))
+      continue
+      ;;
+  esac
   if ! corr=$(fm_pending_reply_create "$FM_HOME" "$STATE" "$id" \
     "$FM_SECONDMATE_PERSIST_REQUEST"); then
     REASON[i]="its answer about the open work cannot be tracked, so a clean reload could not be proven"
