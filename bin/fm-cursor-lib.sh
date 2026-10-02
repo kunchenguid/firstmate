@@ -30,11 +30,12 @@
 #
 # Launch resolution is stricter than process identity (see
 # fm_cursor_verify_executable): a probe alone may accept a candidate, but a
-# name or install-tree match alone is not enough when a bounded runner is
-# available, because a right-looking path can hold a broken file (including the
-# IDE shim that prints "No Cursor IDE installation found" on stderr). Without a
-# bounded runner the launch probe cannot run, so structural evidence alone still
-# stands there, as it always has.
+# name or install-tree match alone is never enough to launch, because a
+# right-looking path can hold a broken file (including the IDE shim that prints
+# "No Cursor IDE installation found" on stderr). Every launch candidate runs one
+# bounded --help through bin/fm-timeout-lib.sh (timeout, gtimeout, perl, or the
+# bash fallback), so a host without coreutils timeout still refuses a broken
+# preferred name instead of accepting it on structure alone.
 #
 # Process detection deliberately uses the structural signal only. Probing an
 # arbitrary pid's executable during an ancestry walk or a liveness poll would
@@ -51,6 +52,17 @@
 # immediately; the bound exists so a hung or interactive impostor cannot wedge
 # a spawn or a readiness check.
 FM_CURSOR_PROBE_TIMEOUT=${FM_CURSOR_PROBE_TIMEOUT:-10}
+
+# bin/fm-timeout-lib.sh is the single owner of bounded execution. It declares
+# set -u for its own hygiene; restore the caller's nounset setting so sourcing
+# this file does not impose set -u on consumers that deliberately omit it.
+_FM_CURSOR_LIB_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || return 1
+case $- in *u*) _fm_cursor_nounset=on ;; *) _fm_cursor_nounset=off ;; esac
+# shellcheck source=bin/fm-timeout-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CURSOR_LIB_DIR/fm-timeout-lib.sh"
+[ "$_fm_cursor_nounset" = on ] || set +u
+unset _fm_cursor_nounset
 
 # Canonical absolute path for $1, or the input unchanged when it cannot be
 # resolved. Symlink resolution is what makes the structural signal work, since
@@ -92,19 +104,11 @@ fm_cursor_path_is_cursor() {  # <path>
 # True when running `$1 --help` produces Cursor's own CLI identity. Bounded and
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
-fm_cursor_timeout_runner() {
-  if command -v timeout >/dev/null 2>&1; then printf 'timeout\n'
-  elif command -v gtimeout >/dev/null 2>&1; then printf 'gtimeout\n'
-  else return 1
-  fi
-}
-
 fm_cursor_bounded_output() {  # <path> <args...>
-  local path=$1 runner
+  local path=$1
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  runner=$(fm_cursor_timeout_runner) || return 1
-  "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
+  fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
 fm_cursor_help_marks_cursor() {  # <help-text>
@@ -136,20 +140,16 @@ fm_cursor_help_is_ide_shim_refusal() {  # <help-text>
 # candidate, whatever its name, must therefore either print Cursor's CLI
 # identity under one bounded --help probe, or carry the structural evidence AND
 # have that same probe exit successfully with non-empty output that is not the
-# IDE-shim refusal. The probe runs at most once and keeps both streams so a
-# stderr-only refusal is visible; a failed run is refused without retrying. A
-# host with no bounded runner cannot run the probe, so there the structural
-# verdict stands on its own, as it always has.
+# IDE-shim refusal. The probe always runs through fm_run_timed (at most once)
+# and keeps both streams so a stderr-only refusal is visible; a failed run is
+# refused without retrying. Structure alone never launches.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1 out runner
+  local path=$1 out rc=0
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  if ! runner=$(fm_cursor_timeout_runner); then
-    fm_cursor_path_is_cursor "$path"
-    return $?
-  fi
   # Keep stderr: the broken IDE shim prints only there. stdout-only capture
   # would hide the refusal text on a future exit-0 variant of the same file.
-  if out=$("$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1); then
+  out=$(fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" --help 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
     fm_cursor_help_marks_cursor "$out" && return 0
     fm_cursor_help_is_ide_shim_refusal "$out" && return 1
     # Successful --help without a Cursor marker still needs real output plus

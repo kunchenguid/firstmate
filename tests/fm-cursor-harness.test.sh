@@ -173,6 +173,32 @@ test_resolve_binary_skips_broken_cursor_agent() {
   pass "fm_cursor_resolve_binary: a broken cursor-agent is skipped for a working agent"
 }
 
+test_resolve_binary_skips_broken_without_coreutils_timeout() {
+  # Launch verify must not depend on coreutils/BSD timeout being installed.
+  # fm_run_timed's bash fallback still bounds the probe, so a host without
+  # timeout/gtimeout still refuses the broken preferred name instead of
+  # accepting it on structure alone (the gap the name-only accept left open).
+  local base broken good out
+  base="$TMP_ROOT/broken-bash-timeout"
+  broken="$base/share/cursor-agent/versions/2026.09.15-d2fe57e"
+  good="$base/share/cursor-agent/versions/2026.10.01-e373342"
+  mkdir -p "$broken" "$good" "$base/bin"
+  printf '#!/bin/sh\necho "Error: No Cursor IDE installation found. Use '\''cursor agent'\'' or '\''agent'\'' to run the agent." >&2\nexit 1\n' \
+    > "$broken/cursor-agent"
+  printf '#!/bin/sh\necho "Start the Cursor Agent"\n' > "$good/cursor-agent"
+  chmod +x "$broken/cursor-agent" "$good/cursor-agent"
+  ln -sf "$broken/cursor-agent" "$base/bin/cursor-agent"
+  ln -sf "$good/cursor-agent" "$base/bin/agent"
+  out=$(PATH="$base/bin:/usr/bin:/bin" FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_cursor_resolve_binary) \
+    || fail "bash-bounded resolve must fall through to the working agent"
+  [ "$out" = "$base/bin/agent" ] \
+    || fail "bash-bounded resolve must pick the working agent, got '$out'"
+  ! PATH="$base/bin:/usr/bin:/bin" FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    fm_cursor_verify_executable "$base/bin/cursor-agent" \
+    || fail "bash-bounded verify must still refuse the broken preferred name"
+  pass "fm_cursor_resolve_binary: bash timeout fallback still skips a broken cursor-agent"
+}
+
 test_verify_executable_single_successful_probe() {
   # Structural evidence plus a successful --help without a Cursor marker must
   # accept the candidate from that one launch - never a second bounded run.
@@ -500,6 +526,7 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_skips_broken_cursor_agent
+test_resolve_binary_skips_broken_without_coreutils_timeout
 test_verify_executable_single_successful_probe
 test_verify_executable_refuses_ide_shim_refusal_text
 test_resolve_binary_prefers_stable_path
