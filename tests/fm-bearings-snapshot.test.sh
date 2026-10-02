@@ -1425,6 +1425,29 @@ test_include_prs_is_the_only_fetch_path() {
   pass "--include-prs is the only path that fetches, and it enriches correctly"
 }
 
+test_large_candidate_pr_rows() {
+  local home fakebin json
+  home=$(make_home large-pr-rows); write_fixture "$home"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$NET_LOG"
+jq -nc '[range(1; 1201) | {number:., title:"Large PR fixture",
+  url:("https://github.com/kunchenguid/firstmate/pull/" + tostring),
+  headRefName:("fm/synthetic-" + tostring), reviewDecision:"APPROVED",
+  mergeable:"MERGEABLE", statusCheckRollup:[{conclusion:"SUCCESS",status:"COMPLETED"}]}]'
+SH
+  json=$(FM_BEARINGS_PR_LIMIT=1200 run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    (.candidate_prs | length) == 1200
+      and (.candidate_prs | tojson | length) > 131072
+      and (.candidate_prs | all(.checks == "passing" and .review == "APPROVED"))
+      and (.candidate_prs | any(.num == "1200" and .task == "synthetic-1200"))
+      and (.prs | contains("1200 open"))
+  ' >/dev/null || fail "large API-derived PR rows were lost during aggregation or projection"
+  pass "--include-prs streams large candidate PR arrays through aggregation and projection"
+}
+
 test_include_prs_maps_custom_branch_prefix_to_task() {
   local home fakebin json
   home=$(make_home custom-prefix); write_fixture "$home"
@@ -3403,6 +3426,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_queued_item_prose_never_hides_it
 test_include_prs_is_the_only_fetch_path
+test_large_candidate_pr_rows
 test_include_prs_maps_custom_branch_prefix_to_task
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
