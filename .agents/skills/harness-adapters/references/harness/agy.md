@@ -21,7 +21,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Composer | Borderless bare `>` row framed by two full-width `─` rules - shape-identical to pi's separated composer, so the shared classifier attributes it only through the backend's identity probe: a live agy identity proves an idle frame `empty`, anything else keeps the dead-shell rule's `unknown`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
 ## Trust, and where the decision persists
 
