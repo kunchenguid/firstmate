@@ -242,6 +242,7 @@ If these promotion steps were already completed before a relaunch, preserve the 
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
 7. Everything else in your original instructions carries over unchanged: the status protocol; the instruction inbox and its acknowledgement; the escalation rules, including ask-user; and every safety rule, except where the current delivery contract below explicitly replaces scout-only delivery rules.
+8. Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through the PR body's \`closes #N\` on merge, and the project board is not used.
 EOF
 promote_delivery_contract() {
   cat <<EOF
@@ -260,6 +261,12 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
+  if [ "$MODE" = no-mistakes ]; then
+    printf '%s\n' '# Current no-mistakes intent contract' \
+      "Pass \`--intent\` as only the Captain's intent subsection body above, plus any later words the captain actually supplied; never include the Firstmate spec."
+    fm_intent_append_instruction
+    printf '\n'
+  fi
   fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE"
 }
 mkdir -p "$DATA/$ID"

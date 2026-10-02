@@ -511,6 +511,45 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording bounds edits to corrections of wrong information"
 }
 
+# Ship briefs must forbid manual GitHub issue closing and project-board commands
+# (captain order 2026-09-02, root-caused by a fleet-wide GraphQL abuse-limit trip
+# from hand-run `gh issue close` calls); the no-mistakes DOD must also tell the
+# worker to carry that rule into `--intent` so pipeline seats inherit it. A scout
+# brief opens no PR and touches no issue lifecycle, so it must not carry the rule.
+test_ship_briefs_forbid_manual_issue_close_and_board_edits() {
+  local home id mode brief
+  home="$TMP_ROOT/no-manual-issue-close-home"
+  mkdir -p "$home/data"
+
+  for id_mode in "brief-noclose-nm:no-mistakes" "brief-noclose-dp:direct-PR" "brief-noclose-lo:local-only"; do
+    id=${id_mode%%:*}
+    mode=${id_mode##*:}
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$id: brief was not scaffolded"
+    assert_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command" "$brief" \
+      "$id: ship brief must forbid manual issue close/reopen and project-board commands"
+    assert_grep "issues close through" "$brief" \
+      "$id: ship brief must explain issues close via the PR body's closes #N on merge"
+  done
+
+  brief="$home/data/brief-noclose-nm/brief.md"
+  assert_grep "owns one fixed sentence that you append to the \`--intent\` string" "$brief" \
+    "no-mistakes DOD must point the worker at the launch overlay's manual-close sentence for --intent"
+  assert_no_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command - issues close through the PR body's \`closes #N\` on merge, and the project board is not used\.\"" "$brief" \
+    "no-mistakes DOD must not duplicate the overlay-owned --intent sentence"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-noclose-scout some-proj --scout >/dev/null 2>&1
+  brief="$home/data/brief-noclose-scout/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_no_grep "gh issue close" "$brief" \
+    "scout brief must not carry the ship-only manual-issue-close ban"
+  assert_no_grep "gh project" "$brief" \
+    "scout brief must not carry the ship-only project-board ban"
+
+  pass "fm-brief.sh: ship briefs forbid manual issue closing and board edits; scout briefs do not"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -1371,7 +1410,8 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   # One shared string, not two copies: the emitted rule must be byte-identical
   # across the ship and scout scaffolds so a later edit cannot fix one and miss
   # the other.
-  ship_rule=$(awk '/^7\. Never administer/,/^$/' "$home/data/brief-pool-no-mistakes/brief.md")
+  # Rule 8 (the ship-only manual-close ban) follows rule 7 directly, so it is cut here.
+  ship_rule=$(awk '/^7\. Never administer/,/^$/' "$home/data/brief-pool-no-mistakes/brief.md" | sed '/^8\. /,$d')
   scout_rule=$(awk '/^7\. Never administer/,/^$/' "$brief")
   [ -n "$ship_rule" ] || fail "ship brief emitted no shared-infrastructure rule to compare"
   [ "$ship_rule" = "$scout_rule" ] \
@@ -1408,6 +1448,7 @@ test_no_mistakes_dod_green_detection
 test_pr_based_dod_requires_non_draft
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_briefs_forbid_manual_issue_close_and_board_edits
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

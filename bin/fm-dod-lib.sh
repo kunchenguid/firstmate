@@ -215,6 +215,14 @@ fm_brief_marked_captain_words() {  # <task-body>
   '
 }
 
+# The one owner of the manual-close ban a no-mistakes worker appends to `--intent`,
+# so the pipeline's own seats (spawned from `--intent` alone) inherit it. Both the
+# spawn overlay and the promoted ship instructions emit it from here.
+fm_intent_append_instruction() {
+  # shellcheck disable=SC2016  # Literal backticks must remain unexpanded.
+  printf '%s\n' 'After those words, append this one fixed sentence to the `--intent` string, verbatim, as the sole exception to the exclusion above: "Never run `gh issue close`, `gh issue reopen`, or any `gh project` command - issues close through the PR body'"'"'s `closes #N` on merge, and the project board is not used." The pipeline'"'"'s own build/review/fix seats are spawned from `--intent` alone and never see this brief, so this sentence is how they inherit the ban.'
+}
+
 fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
@@ -222,6 +230,9 @@ fm_brief_intent_overlay() {  # <captain-intent>
 This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
 Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
 Preserve those words without adding speaker labels or direct address.
+EOF
+  fm_intent_append_instruction
+  cat <<'EOF'
 Firstmate-authored constraints, acceptance criteria, implementation details, decisions, and tradeoffs are specification, not captain intent.
 The Definition of done's rule that `--intent` must be self-sufficient still governs the string you pass: resolve any report, decision, or PR the intent below refers to into its substance rather than passing the pointer.
 
@@ -319,12 +330,13 @@ $drive_block
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
+Three firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+- The current no-mistakes intent contract, wherever it was delivered to you, owns one fixed sentence that you append to the \`--intent\` string after the captain's words, as the one exception to the exclusion above; its wording is not repeated here. The pipeline's own build/review/fix seats are spawned from \`--intent\` alone and never see this brief, so appending it there is the only way they inherit the ban; this is in addition to, not instead of, your own obligation under rule 8 above.
 EOF
 }
 
