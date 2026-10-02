@@ -70,6 +70,8 @@ RETURN_GRACE=${FM_GUARD_GRACE:-300}
 # advertised read-only guard stays literal.
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# shellcheck source=bin/fm-hold-status-lib.sh
+. "$SCRIPT_DIR/fm-hold-status-lib.sh"
 CONTRACT="$SCRIPT_DIR/fm-afk-contract.sh"
 # Functions only: decodes the stored hold reasons the catch-up listing shows.
 # shellcheck source=bin/fm-hold-reason-lib.sh
