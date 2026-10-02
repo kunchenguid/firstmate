@@ -1086,6 +1086,9 @@ FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
   remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-second.out"
 assert_grep 'remote reply channel stalled: mate=ios' "$TMP_ROOT/lag-second.out" \
   "an aged remote log ahead of its cursor did not wake"
+assert_grep 'remote reply channel stalled: mate=ios' \
+  "$PARENT/state/remote-replies/lag-ready.remote-reply-lag-ios-$(sed -n 's/^[0-9]* \([0-9]*\) 1$/\1/p' "$PARENT/state/remote-replies/ios.lag")" \
+  "the background watcher has no durable receipt to surface after a lag probe"
 for _ in $(seq 1 100); do
   [ "$(lag_failures)" -ge 3 ] && [ "$(reply_owner)" = none ] && break
   sleep 0.1

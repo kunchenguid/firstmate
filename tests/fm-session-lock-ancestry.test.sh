@@ -480,7 +480,7 @@ SH
 }
 
 test_guarded_codex_takeover_requires_quiet_exact_owner() {
-  local dir fakebin state owner watcher out
+  local dir fakebin state owner watcher out backup
   dir="$TMP_ROOT/codex-takeover"
   fakebin=$(fm_fakebin "$dir")
   state="$dir/state"
@@ -522,10 +522,13 @@ SH
   out=$(codex_lock status)
   assert_contains "$out" "take-over --expect-pid $owner --expect-session codex:thread-old" \
     "status did not show a guarded command with its exact current owner"
+  assert_contains "$out" "--attest-owner-ended $owner/codex:thread-old" \
+    "status did not require an explicit old-thread attestation"
   if codex_lock >/dev/null 2>&1; then
     fail "an ordinary Codex lock acquisition stole the shared daemon's lock"
   fi
-  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old >/dev/null 2>&1; then
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old \
+    --attest-owner-ended "$owner/codex:thread-old" >/dev/null 2>&1; then
     fail "take-over accepted a recent owner lock"
   fi
   perl -e 'utime(time-600,time-600,$ARGV[0]) or die $!' "$state/.lock"
@@ -533,19 +536,34 @@ SH
   watcher=$!
   mkdir -p "$state/.watch.lock"
   printf '%s\n' "$watcher" > "$state/.watch.lock/pid"
-  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old >/dev/null 2>&1; then
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old \
+    --attest-owner-ended "$owner/codex:thread-old" >/dev/null 2>&1; then
     fail "take-over accepted a live watcher"
   fi
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
   rm -f "$state/.watch.lock/pid"
   rmdir "$state/.watch.lock"
-  if codex_lock take-over --expect-pid "$owner" --expect-session codex:wrong >/dev/null 2>&1; then
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:wrong \
+    --attest-owner-ended "$owner/codex:wrong" >/dev/null 2>&1; then
     fail "take-over accepted a stale expected session"
   fi
-  out=$(codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old) \
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old >/dev/null 2>&1; then
+    fail "take-over accepted an owner without an old-thread attestation"
+  fi
+  if codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old \
+    --attest-owner-ended "$owner/codex:wrong" >/dev/null 2>&1; then
+    fail "take-over accepted an attestation naming a different thread"
+  fi
+  out=$(codex_lock take-over --expect-pid "$owner" --expect-session codex:thread-old \
+    --attest-owner-ended "$owner/codex:thread-old") \
     || fail "guarded take-over refused an idle exact owner: $out"
   assert_contains "$out" 'lock taken over' "take-over did not report its verified handoff"
+  backup=${out##*prior lock backup }
+  [ -f "$backup/lock" ] && [ "$(cat "$backup/lock")" = "$owner" ] \
+    || fail "take-over did not preserve the prior daemon lock"
+  [ "$(cat "$backup/lock-session")" = codex:thread-old ] \
+    || fail "take-over did not preserve the prior thread sidecar"
   [ "$(cat "$state/.lock-session")" = codex:thread-new ] \
     || fail "take-over did not publish the new thread identity"
   codex_lock >/dev/null || fail "the new Codex thread did not retain its lock"
@@ -557,13 +575,17 @@ SH
   out=$(codex_lock status)
   assert_contains "$out" "take-over --expect-pid $owner --expect-session none" \
     "status did not offer guarded recovery for a missing sidecar"
-  codex_lock take-over --expect-pid "$owner" --expect-session none >/dev/null \
+  if codex_lock take-over --expect-pid "$owner" --expect-session none >/dev/null 2>&1; then
+    fail "missing-sidecar recovery accepted a takeover without attestation"
+  fi
+  codex_lock take-over --expect-pid "$owner" --expect-session none \
+    --attest-owner-ended "$owner/none" >/dev/null \
     || fail "guarded take-over could not repair a missing sidecar"
   [ "$(cat "$state/.lock-session")" = codex:thread-new ] \
     || fail "missing-sidecar recovery did not publish a trusted thread"
   kill "$owner" 2>/dev/null || true
   wait "$owner" 2>/dev/null || true
-  pass "session-lock: a quiet exact shared daemon permits guarded takeover, including missing-sidecar repair; recent and watched owners refuse"
+  pass "session-lock: exact old-thread attestation, quiet guards, and prior-lock backup govern managed-daemon takeover"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------

@@ -321,7 +321,7 @@ cmd_source() {
 cmd_lag_check() {  # <secondmate-id>
   local id=${1:-} threshold=${FM_REMOTE_REPLY_LAG_SECONDS:-120}
   local cadence=${FM_REMOTE_REPLY_LAG_PROBE_SECONDS:-} now size marker probe
-  local prior_offset prior_since prior_alerted since key reason tmp
+  local prior_offset prior_since prior_alerted since key reason tmp ready
   validate_id "$id"
   remote_route_exists "$id"
   if [ -z "$cadence" ]; then
@@ -370,11 +370,17 @@ cmd_lag_check() {  # <secondmate-id>
   fi
   key="remote-reply-lag-$id-$since"
   reason="check: remote reply channel stalled: mate=$id remote_bytes=$size cursor=$CURSOR_OFFSET for $((now - since))s; inspect the process-event listener and watcher, then re-ensure remote-reply-$id"
+  ready="$CURSOR_DIR/lag-ready.$key"
+  [ ! -L "$ready" ] || return 1
   tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
   if ! fm_wake_append check "$key" "$reason"; then
     rm -f -- "$tmp"
     return 1
   fi
+  # The watcher probes in a background worker. Publish its delivery receipt
+  # before marking the episode alerted so a failed write retries next probe.
+  printf '%s\n' "$reason" > "$tmp" && mv -f -- "$tmp" "$ready" || { rm -f -- "$tmp"; return 1; }
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.lag.XXXXXX") || return 1
   printf '%s %s 1\n' "$CURSOR_OFFSET" "$since" > "$tmp" && mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
   "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$(source_id "$id")" >/dev/null 2>&1 || true
   printf '%s\n' "$reason"

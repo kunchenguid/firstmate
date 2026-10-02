@@ -25,19 +25,24 @@
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
 #                             fm-inbox.sh ready, from the same inspect helper.
-#        fm-lock.sh take-over --expect-pid PID --expect-session codex:ID|none
+#        fm-lock.sh take-over --expect-pid PID --expect-session codex:ID|none \
+#          --attest-owner-ended PID/codex:ID|none
 #                             Explicitly replace an idle shared Codex daemon
-#                             lock after matching its exact pid and sidecar.
+#                             lock after matching its exact pid and sidecar and
+#                             attesting that the previous thread has ended.
 #                             Refuses while a watcher is live or either lock
-#                             or watcher beacon was recently active. This is
-#                             the guarded recovery when a Desktop thread ends
-#                             but its shared daemon remains alive.
+#                             or watcher beacon was recently active. Those
+#                             guards do not prove the thread ended: taking
+#                             over an active thread can split one home between
+#                             two primaries. The operator must verify closure.
+#                             Backs up the prior lock before replacement.
 #                             A Codex Desktop primary live during the upgrade
 #                             to recorded Codex thread ids has no sidecar and
 #                             sees its own lock as foreign. Recover it: stop
 #                             that thread's watcher (fm-watch-arm.sh --stop),
 #                             wait out the quiet window, then run take-over
-#                             --expect-pid PID --expect-session none.
+#                             --expect-pid PID --expect-session none with
+#                             --attest-owner-ended PID/none.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +75,7 @@ if [ "${1:-}" = "status" ]; then
           none)
             echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID (managed Codex daemon; session none)"
             echo "recovery after verified idle: bin/fm-lock.sh take-over --expect-pid $FM_LOCK_INSPECT_PID --expect-session none"
+            echo "verify the old thread ended, then add --attest-owner-ended $FM_LOCK_INSPECT_PID/none; an active-thread takeover can split ownership"
             ;;
           codex:*)
             codex_id=${recorded#codex:}
@@ -78,6 +84,7 @@ if [ "${1:-}" = "status" ]; then
               *)
                 echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID (managed Codex daemon; session $recorded)"
                 echo "recovery after verified idle: bin/fm-lock.sh take-over --expect-pid $FM_LOCK_INSPECT_PID --expect-session $recorded"
+                echo "verify the old thread ended, then add --attest-owner-ended $FM_LOCK_INSPECT_PID/$recorded; an active-thread takeover can split ownership"
                 ;;
             esac
             ;;
@@ -95,14 +102,18 @@ fi
 TAKEOVER=0
 EXPECT_PID=
 EXPECT_SESSION=
+ATTEST_OWNER=
+TAKEOVER_BACKUP=
 if [ "${1:-}" = take-over ]; then
-  [ "$#" -eq 5 ] && [ "$2" = --expect-pid ] && [ "$4" = --expect-session ] || {
-    echo "usage: fm-lock.sh take-over --expect-pid PID --expect-session codex:ID|none" >&2
+  [ "$#" -eq 7 ] && [ "$2" = --expect-pid ] && [ "$4" = --expect-session ] \
+    && [ "$6" = --attest-owner-ended ] || {
+    echo "usage: fm-lock.sh take-over --expect-pid PID --expect-session codex:ID|none --attest-owner-ended PID/codex:ID|none" >&2
     exit 2
   }
   TAKEOVER=1
   EXPECT_PID=$3
   EXPECT_SESSION=$5
+  ATTEST_OWNER=$7
   case "$EXPECT_PID" in ''|*[!0-9]*) echo "error: expected pid must be numeric" >&2; exit 2 ;; esac
   case "$EXPECT_SESSION" in
     none) ;;
@@ -112,8 +123,12 @@ if [ "${1:-}" = take-over ]; then
       ;;
     *) echo "error: expected session must be codex:ID or none" >&2; exit 2 ;;
   esac
+  [ "$ATTEST_OWNER" = "$EXPECT_PID/$EXPECT_SESSION" ] || {
+    echo "error: attest-owner-ended must name the exact previous pid/session; verify that thread has ended" >&2
+    exit 2
+  }
 elif [ "$#" -ne 0 ]; then
-  echo "usage: fm-lock.sh [status|take-over --expect-pid PID --expect-session codex:ID|none]" >&2
+  echo "usage: fm-lock.sh [status|take-over --expect-pid PID --expect-session codex:ID|none --attest-owner-ended PID/codex:ID|none]" >&2
   exit 2
 fi
 
@@ -254,8 +269,14 @@ takeover_preflight() {
   [ -f "$LOCK" ] && [ ! -L "$LOCK" ] || die_takeover "session lock is missing or unsafe"
   old=$(cat "$LOCK" 2>/dev/null) || die_takeover "session lock is unreadable"
   [ "$old" = "$EXPECT_PID" ] || die_takeover "session lock pid changed"
-  recorded=$(fm_session_lock_recorded_session_id "$STATE" 2>/dev/null || true)
-  [ -n "$recorded" ] || recorded=none
+  if [ -e "$LOCK_SESSION" ] || [ -L "$LOCK_SESSION" ]; then
+    [ -f "$LOCK_SESSION" ] && [ ! -L "$LOCK_SESSION" ] \
+      || die_takeover "session identity is unsafe"
+    recorded=$(fm_session_lock_recorded_session_id "$STATE") \
+      || die_takeover "session identity is unreadable"
+  else
+    recorded=none
+  fi
   [ "$recorded" = "$EXPECT_SESSION" ] || die_takeover "session identity changed"
   fm_session_lock_shared_codex_pid "$old" || die_takeover "recorded owner is not a live managed Codex daemon"
   fm_harness_pid_alive "$old" || die_takeover "recorded owner cannot be verified"
@@ -277,6 +298,21 @@ takeover_preflight() {
 }
 
 die_takeover() { echo "error: take-over refused: $1" >&2; exit 1; }
+
+backup_takeover_lock() {
+  local backup
+  backup=$(umask 077; mktemp -d "$STATE/.lock-takeover.XXXXXX") \
+    || die_takeover "cannot create a prior-lock backup"
+  if ! { cp -P "$LOCK" "$backup/lock" \
+    && { [ "$EXPECT_SESSION" = none ] \
+      || cp -P "$LOCK_SESSION" "$backup/lock-session"; } \
+    && printf '%s\n' "$EXPECT_PID/$EXPECT_SESSION" > "$backup/expected-owner"; }; then
+    rm -f "$backup/lock" "$backup/lock-session" "$backup/expected-owner"
+    rmdir "$backup" 2>/dev/null || true
+    die_takeover "cannot preserve the prior lock"
+  fi
+  TAKEOVER_BACKUP=$backup
+}
 
 refuse_live_owner() {  # <recorded-pid>
   local recorded
@@ -311,6 +347,7 @@ CLAIM_LOCK_HELD=1
 
 if [ "$TAKEOVER" -eq 1 ]; then
   takeover_preflight
+  backup_takeover_lock
 fi
 
 if [ "$TAKEOVER" -eq 0 ] && { [ -e "$LOCK" ] || [ -L "$LOCK" ]; }; then
@@ -372,7 +409,7 @@ fi
 commit_lock_session
 release_claim_lock
 if [ "$TAKEOVER" -eq 1 ]; then
-  echo "lock taken over: prior managed Codex daemon pid $EXPECT_PID; harness pid $me"
+  echo "lock taken over: prior managed Codex daemon pid $EXPECT_PID; harness pid $me; prior lock backup $TAKEOVER_BACKUP"
 else
   echo "lock acquired: harness pid $me"
 fi

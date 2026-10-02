@@ -198,11 +198,16 @@ It enters its poll loop immediately and keeps scanning signals, stale panes, and
 - Grok retains its tracked background-task notification protocol.
 
 A Codex Desktop primary that was live during the upgrade to sidecar-recorded Codex thread identity holds a shared-daemon lock with no `state/.lock-session`, so its own thread now reads that lock as foreign.
+The lock and watcher beacon being quiet does not prove the old Codex thread ended.
+The operator must verify that the old thread is closed; taking over an active thread can split one home between two primaries.
 There is no automatic adoption; recover it explicitly:
 
 1. Stop that thread's watcher: `bin/fm-watch-arm.sh --stop`.
 2. Wait out the quiet window (`FM_LOCK_TAKEOVER_QUIET_SECONDS`, default 300 seconds) so neither `state/.lock` nor `state/.last-watcher-beat` was touched within it.
-3. From the Codex thread taking the lock, run `bin/fm-lock.sh take-over --expect-pid PID --expect-session none`, with `PID` from `bin/fm-lock.sh status`.
+3. From the Codex thread taking the lock, run `bin/fm-lock.sh take-over --expect-pid PID --expect-session none --attest-owner-ended PID/none`, with `PID` from `bin/fm-lock.sh status`.
+
+For a sidecar-recorded old thread, use `--expect-session codex:ID --attest-owner-ended PID/codex:ID` instead.
+The command preserves a copy of the prior lock and sidecar in `state/.lock-takeover.*` before replacing them.
 
 No adapter starts a replacement with a fire-and-forget shell `&` from a model command.
 The Claude hook's detached handling successor is launched by the hook itself, which waits for the successor's status line before it exits.

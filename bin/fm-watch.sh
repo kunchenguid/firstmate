@@ -1137,10 +1137,10 @@ secondmate_liveness_tick() {
 
 # The remote reply mirror has its own progress evidence: the remote log size
 # and the committed local cursor. The adapter owns the episode marker, its one
-# ensure-listening repair, and wake publication; this watcher only gives its new
-# actionable result a live cycle.
+# ensure-listening repair, and wake publication. Remote size reads can take 15s
+# each, so run them outside the watcher's signal and inactive-outcome path.
 remote_reply_lag_tick() {
-  local meta id kind host result
+  local meta id kind host
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
@@ -1150,9 +1150,37 @@ remote_reply_lag_tick() {
     id=${meta##*/}
     id=${id%.meta}
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" lag-check "$id") || continue
-    case "$result" in check:*) wake "$result" ;; esac
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-procevent-remote-reply.sh" lag-check "$id" >/dev/null 2>&1 || true
+  done
+}
+
+remote_reply_lag_start() {
+  (
+    trap - EXIT HUP INT TERM
+    mkdir -p "$STATE/remote-replies" || exit 1
+    [ -d "$STATE/remote-replies" ] && [ ! -L "$STATE/remote-replies" ] || exit 1
+    fm_lock_try_acquire "$STATE/remote-replies/.lag-check.lock" || exit 0
+    trap 'fm_lock_release "$STATE/remote-replies/.lag-check.lock" || true' EXIT
+    remote_reply_lag_tick
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+remote_reply_lag_after_output() {
+  [ "$1" -eq 0 ] || return 0
+  rm -f -- "$REMOTE_REPLY_LAG_READY"
+}
+
+remote_reply_lag_surface() {
+  local ready reason
+  for ready in "$STATE/remote-replies"/lag-ready.*; do
+    [ -e "$ready" ] || continue
+    [ -f "$ready" ] && [ ! -L "$ready" ] || continue
+    IFS= read -r reason < "$ready" || continue
+    case "$reason" in 'check: remote reply channel stalled: mate='*) ;; *) continue ;; esac
+    REMOTE_REPLY_LAG_READY=$ready
+    FM_WAKE_POST_OUTPUT_ACTION=remote_reply_lag_after_output
+    wake "$reason"
   done
 }
 
@@ -2686,6 +2714,11 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # A completed background probe is already queued; surface it before other
+  # potentially slow per-cycle work, then start the next bounded probe.
+  remote_reply_lag_surface
+  remote_reply_lag_start
+
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" capture || true
@@ -2735,11 +2768,6 @@ while :; do
   # Then deliver any queued-but-unsurfaced result, including one a runner
   # published while this watcher was between cycles.
   procevent_surface_queued
-
-  # A live source can still stop advancing its cursor. Its remote adapter
-  # compares remote bytes with that cursor and owns the once-per-episode
-  # listener repair and wake.
-  remote_reply_lag_tick
 
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
