@@ -109,7 +109,8 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 CI requires its per-root bounds, so an unenforceable deadline or address-space limit refuses lint rather than running uncapped; the script header owns the envelope and per-root execution contract.
 Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.sh` verifies complete/disjoint executed roots and unchanged analysis flags.
 The workflow uploads each partition's quiet telemetry plus its per-root lifecycle sidecar to distinguish analysis cost, memory use, and host contention.
-No fast mode, path skips, reduced checks, or paid runner provisioning is part of this layout.
+The lint partitions keep no fast mode, path skips, or reduced checks, and the layout adds no paid runner provisioning.
+The only path skipping is the change-scope gate in [Change scope and validation cost](#change-scope-and-validation-cost), which never applies to lint.
 
 The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the current watch-triage floor alone exceeds that objective.
 The immediate packing target is the runner's modeled script budget, not a claim that more shards alone can make an indivisible script faster.
@@ -130,10 +131,22 @@ A lane that reaches its tier bound needs investigation and a distribution or run
 
 | Tier | Jobs | Bound | Rationale |
 |---|---|---|---|
-| Fast | coverage guard, repo invariants, timing aggregate | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
+| Fast | change-scope gate, coverage guard, repo invariants, timing aggregate | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
 | Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same policy instead of allowing per-lane packing estimates or one-off caps to set the bound. |
 | Heavy | Herdr | family-run step 20 minutes under a 75-minute job-level last-resort backstop | Healthy runs finish in about 7-10 minutes, so the step tripwire fails a wedged suite while the `always()` cleanup and timing upload still run, and the job cap only catches a hang outside that step. |
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) holds the executable values and names each job's tier beside its `timeout-minutes`.
-[`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.
+[`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it, and the heavy lanes gate on the change-scope signals while failing closed to full rigor.
 A passing coverage guard does not establish a healthy job duration; refresh the healthy figures above from the lanes' uploaded timing artifacts.
+
+## Change scope and validation cost
+
+Every CI run starts with the `detect-changes` gate, which diffs the change against its base and publishes two signals: `code` (any changed file outside markdown and `docs/`) and `shell` (any changed file under `bin/`, `tests/`, `.github/`, or ending in `.sh`). The heavy lanes wait on this gate and skip when their signal is false; an unreadable diff fails closed to the full matrix, so a detector failure can only spend runners, never silently drop coverage.
+
+| Change | What runs | Expected wall cost | What is skipped, and why it is safe |
+|---|---|---|---|
+| Docs-only (`*.md`, `docs/**`) | scope gate, both lint partitions, coverage guard, invariants, no-mistakes compliance | ~1-2 minutes | Behavior lanes, Herdr lane, timing aggregate, macOS box: none of them execute prose, so there is no breakage they could catch. |
+| Non-shell code | everything above plus the full behavior matrix and Herdr lane | ~23 minutes (slowest serial shard sets the wall) | macOS box only: stock-Bash regressions can only come from shell-visible changes. |
+| Shell-visible code | the full matrix | ~23 minutes | Nothing: this is the one full-rigor path every code change keeps. |
+
+The security-sensitive gates never skip: both lint partitions, the gate-refuse and owner-routing coverage inside the behavior lanes, and the no-mistakes compliance check run on every change that can reach them. Pipeline-side, no-mistakes Test rounds iterate with `bin/fm-test-run.sh --changed` and leave the full matrix to CI instead of paying for both on every round.

@@ -73,7 +73,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # Tier membership is the executable inventory of the timeout policy: a new job
 # must join a tier, and a job-level value outside these tiers is exactly the
 # one-off number the policy removed.
-FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate'
+FAST_TIER_JOBS='detect-changes test-coverage invariants tests-timing-aggregate'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
 HEAVY_TIER_JOBS='tests-herdr'
 
@@ -249,6 +249,36 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+# The change-scope gate owns which lanes a docs-only or non-shell change may
+# skip: behavior lanes and Herdr wait on the code signal, the macOS box waits
+# on the shell signal, everything fails closed to full rigor when the scope is
+# unreadable, and the always-on jobs (lint, coverage, invariants) stay
+# unconditional so a prose change still carries signal.
+test_heavy_lanes_gate_on_change_scope() {
+  ruby -ryaml - "$CI_WORKFLOW" <<'RUBY' || fail "change-scope gate contract"
+jobs = YAML.load_file(ARGV[0]).fetch("jobs")
+scope = jobs.fetch("detect-changes")
+raise "scope gate must publish code and shell signals" unless scope.fetch("outputs").keys.sort == %w[code shell]
+%w[tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial tests-herdr].each do |name|
+  job = jobs.fetch(name)
+  raise "#{name} must wait on the scope gate" unless Array(job["needs"]).include?("detect-changes")
+  condition = job["if"].to_s
+  raise "#{name} must gate on the code signal" unless condition.include?("needs.detect-changes.outputs.code")
+  raise "#{name} must fail closed when the scope is unreadable" unless condition.include?("needs.detect-changes.result")
+end
+aggregate = jobs.fetch("tests-timing-aggregate")
+raise "timing aggregate must wait on the scope gate" unless Array(aggregate["needs"]).include?("detect-changes")
+raise "timing aggregate must gate on the code signal" unless aggregate["if"].to_s.include?("needs.detect-changes.outputs.code")
+macos = jobs.fetch("macos-stock-bash")
+raise "macos box must wait on the scope gate" unless Array(macos["needs"]).include?("detect-changes")
+raise "macos box must gate on the shell signal" unless macos["if"].to_s.include?("needs.detect-changes.outputs.shell")
+%w[lint test-coverage invariants].each do |name|
+  raise "#{name} must stay unconditional" if jobs.fetch(name)["if"]
+end
+RUBY
+  pass "heavy lanes gate on the change-scope signals and fail closed"
+}
+
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
@@ -258,3 +288,4 @@ test_every_job_belongs_to_exactly_one_timeout_tier
 test_fast_tier_shares_one_short_tripwire
 test_normal_tier_shares_one_budget
 test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop
+test_heavy_lanes_gate_on_change_scope

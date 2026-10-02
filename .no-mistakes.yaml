@@ -47,3 +47,10 @@ test:
     Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
   evidence:
     store_in_repo: true
+
+# Iteration cost: the full behavior matrix runs in CI, which stays the
+# full-rigor gate, so pipeline Test rounds should select with
+# `bin/fm-test-run.sh --changed` (adding `--exclude-family real-herdr-gated`
+# only when the change cannot affect Herdr paths) instead of re-running the
+# whole matrix every round. Never narrow the pipeline's own lint, document,
+# review, or CI steps themselves.

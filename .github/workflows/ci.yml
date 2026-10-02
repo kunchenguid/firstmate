@@ -27,6 +27,52 @@ concurrency:
 # Each job comment identifies the tier implemented by its executable value.
 
 jobs:
+  # Change-scope gate: word-only and docs-only changes skip the heavy remote
+  # boxes below. Docs-only means every changed file is prose (markdown or
+  # under docs/); shell means the change is visible to the stock-Bash box
+  # (bin/, tests/, .github/, or *.sh). Heavy jobs wait on this gate and run
+  # the full matrix whenever the scope cannot be read, so a detector failure
+  # fails closed to full rigor instead of silently skipping coverage.
+  detect-changes:
+    name: Detect change scope
+    runs-on: ubuntu-latest
+    # Fast tier (see the timeout policy above).
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      shell: ${{ steps.scope.outputs.shell }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - id: scope
+        run: |
+          set -eu
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            base="${{ github.event.before }}"
+          fi
+          head="${{ github.sha }}"
+          # Fail closed: unreadable diffs stay full-rigor.
+          code=true
+          shell=true
+          if files=$(git diff --name-only "$base...$head" -- 2>/dev/null); then
+            code=false
+            shell=false
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              case "$f" in
+                *.md|docs/*) ;;
+                *) code=true ;;
+              esac
+              case "$f" in
+                bin/*|tests/*|.github/*|*.sh) shell=true ;;
+              esac
+            done <<<"$files"
+          fi
+          printf 'code=%s\n' "$code" >>"$GITHUB_OUTPUT"
+          printf 'shell=%s\n' "$shell" >>"$GITHUB_OUTPUT"
+
   lint:
     name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-latest
@@ -91,6 +137,10 @@ jobs:
   tests-portable-parallel-1:
     name: Behavior portable parallel 1
     runs-on: ubuntu-latest
+    # Docs-only changes skip this lane via the scope gate above; an unreadable
+    # scope fails closed to running the full matrix.
+    needs: detect-changes
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.code == 'true') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -135,6 +185,10 @@ jobs:
   tests-portable-parallel-2:
     name: Behavior portable parallel 2
     runs-on: ubuntu-latest
+    # Docs-only changes skip this lane via the scope gate above; an unreadable
+    # scope fails closed to running the full matrix.
+    needs: detect-changes
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.code == 'true') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
@@ -179,6 +233,10 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    # Docs-only changes skip these shards via the scope gate above; an
+    # unreadable scope fails closed to running the full matrix.
+    needs: detect-changes
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.code == 'true') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     strategy:
@@ -251,6 +309,10 @@ jobs:
   tests-herdr:
     name: Behavior tests (Herdr)
     runs-on: ubuntu-latest
+    # Docs-only changes skip this lane via the scope gate above; an unreadable
+    # scope fails closed to running the full matrix.
+    needs: detect-changes
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.code == 'true') }}
     # Heavy tier (see the timeout policy above): the last-resort job backstop.
     # The family-run step below owns the hang tripwire, so a wedged suite fails
     # there with the always() cleanup and timing upload still running.
@@ -375,11 +437,14 @@ jobs:
     # Fast tier: aggregation is seconds of work over lane artifacts.
     timeout-minutes: 5
     needs:
+      - detect-changes
       - tests-portable-parallel-1
       - tests-portable-parallel-2
       - tests-portable-serial
       - tests-herdr
-    if: always()
+    # No lanes to aggregate on docs-only changes; an unreadable scope still
+    # aggregates rather than silently dropping the timing record.
+    if: ${{ always() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.code == 'true') }}
     steps:
       - uses: actions/checkout@v6
       - name: Download lane timing artifacts
@@ -412,6 +477,10 @@ jobs:
   macos-stock-bash:
     name: Stock macOS Bash snapshot compatibility
     runs-on: macos-latest
+    # Only shell-visible changes need the stock-Bash box; an unreadable scope
+    # fails closed to running it.
+    needs: detect-changes
+    if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.shell == 'true') }}
     # Normal tier (see the timeout policy above).
     timeout-minutes: 30
     steps:
