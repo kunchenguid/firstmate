@@ -121,7 +121,7 @@ The Claude turn-end guard owns that notice commit contract, the monotonic failur
 
 On a non-Pi primary, a home that runs the supervision host runs `bin/fm-supervision-host.sh` in place of the arm its re-arm owner would start.
 The host owns successive watcher cycles through the same arm.
-[supervision-host.md](supervision-host.md#failure-direction) owns the hand-back's downtime restoration, including when a confirmed successor already exited; the arm's recovery and acknowledgement contracts below still apply.
+[supervision-host.md](supervision-host.md#failure-direction) owns the hand-back's downtime restoration, including when the successor already exited; the arm's recovery and acknowledgement contracts below still apply.
 
 ## Actionable wake ordering
 
