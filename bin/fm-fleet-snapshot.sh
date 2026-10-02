@@ -99,9 +99,9 @@
 #     ahead of captain-actionable rows so separately projected live decisions cannot
 #     crowd Charted-Next-eligible work out of the summary. Each group is ordered by
 #     filed date newest first, with undated rows stable at the end.
-#     A queued title, blocked_reason, or hold_reason keeps up to 500 characters, so
-#     the lavish board's untruncated Charted Next text survives the handoff for any
-#     realistic backlog item while the bounded rows stay far inside the byte cap.
+#     A queued title, blocked_reason, or hold_reason crosses untruncated (whitespace
+#     collapsed only), so the lavish board's Charted Next text survives the handoff
+#     whole; the summary byte cap alone bounds those fields.
 #     Structured-home input must declare the current home-summary and hold-classifier
 #     schemas; a live ledger or cached copy missing either declaration or declaring
 #     an unsupported version is unavailable even when it contains no captain holds.
@@ -1120,13 +1120,13 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
         holds:$holds_all[:$queued_n],
-        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(500)),
+        queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | tostring | gsub("\\s+"; " ")),
           question:(if .hold_kind == "captain" then (.title + ": " + .hold_reason) else null end),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
           blocked_by_ids:((.blocked_by_ids // []) | map(trunc(120))),
           unresolved_blocker_ids:((.unresolved_blocker_ids // []) | map(trunc(120))),
-          blocked_reason:((.blocked_reason // null) | if . == null then null else trunc(500) end),
-          hold_reason:((.hold_reason // null) | if . == null then null else trunc(500) end),
+          blocked_reason:((.blocked_reason // null) | if . == null then null else tostring | gsub("\\s+"; " ") end),
+          hold_reason:((.hold_reason // null) | if . == null then null else tostring | gsub("\\s+"; " ") end),
           hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
           hold_until:((.hold_until // null) | if . == null then null else trunc(40) end),
           hold_bucket:(.hold_bucket // null),

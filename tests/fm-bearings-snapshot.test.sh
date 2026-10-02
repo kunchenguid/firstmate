@@ -2618,6 +2618,8 @@ EOF
   append_secondmate_registry "$home" text-mate "$mate"
   mate_title="Amend the DC app guardrail to permit agent builds and runs inside the isolated simulator lane on every supported handheld scanner model"
   mate_reason="waiting on the scanner vendor to confirm which firmware ships next quarter and whether the simulator lane image can be redistributed to every agent home before the next release window opens"
+  mate_title="$mate_title, then repeat the same guardrail amendment for the warehouse tablet lane, the receiving dock kiosk lane, the returns bench lane, the cycle count lane, and the outbound staging lane so that every agent build and run path stays inside an isolated simulator with no access to production devices, production credentials, the shared signing keys, or the release notarization accounts that the captain alone controls"
+  mate_reason="$mate_reason, and until legal confirms that the redistributed image may include the vendor debugging symbols, the proprietary scanner driver bundle, the calibration fixtures, and the firmware update tooling that the simulator lane needs to reproduce field failures faithfully on every handheld scanner model the warehouse fleet still runs"
   cat > "$mate/data/backlog.md" <<EOF
 ## In flight
 
@@ -2647,7 +2649,7 @@ EOF
       and (.omitted | any(.reveal == "--fields gate-text") | not)
   ' >/dev/null || fail "--fields gate-text did not carry the full gate title and reason: $full_json"
   printf '%s' "$full_json" | jq -e --arg title "$mate_title" --arg reason "$mate_reason" '
-    ($title | length) > 120 and ($reason | length) > 160
+    ($title | length) > 500 and ($reason | length) > 500
       and (.gates | any(.id == "mate-long-hold" and .owner == "text-mate"
         and .title_full == $title
         and .reason_full == ("until 2026-08-01: " + $reason)))
