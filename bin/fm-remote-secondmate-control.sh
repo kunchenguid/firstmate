@@ -10,6 +10,7 @@
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
+#   fm-remote-secondmate-control.sh inbox-health <id>
 #   fm-remote-secondmate-control.sh sync <id> [<parent-commit>]
 #   fm-remote-secondmate-control.sh update <id>
 #   fm-remote-secondmate-control.sh retire <id> [--force]
@@ -69,6 +70,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-secondmate-inbox-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -340,6 +343,13 @@ cmd_observe() {
   printf '\n'
 }
 
+cmd_inbox_health() {
+  local id=$1
+  validate_id "$id"
+  validate_home "$id"
+  fm_secondmate_inbox_health "$CONTROL_STATE/$id.inbox" || die "remote secondmate $id steering inbox is unavailable or unsafe"
+}
+
 # Make <commit> readable in this home's own object store without moving any other
 # checkout. Ordered by cost: already present, then this host's Firstmate copy (a
 # read-only fetch of that one commit, which never advances that copy's HEAD), then
@@ -443,6 +453,7 @@ case "${1:-}" in
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
+  inbox-health) shift; [ "$#" -eq 1 ] || usage; cmd_inbox_health "$@" ;;
   sync) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_sync "$@" ;;
   update) shift; [ "$#" -eq 1 ] || usage; cmd_update "$@" ;;
   retire) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_retire "$@" ;;
