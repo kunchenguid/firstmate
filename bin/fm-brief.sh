@@ -119,6 +119,9 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# When config/graphify-worktree exists under the active home, ship and scout
+# scaffolds tell workers to prefer the spawned worktree's optional graphify graph
+# for codebase questions before grep or bulk reads.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -301,6 +304,7 @@ fi
 # The optional home-local include is read before anything is written, so an
 # unusable file never leaves a partial scaffold behind.
 BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
+GRAPHIFY_WORKTREE_FILE="$CONFIG/graphify-worktree"
 BRIEF_INCLUDE_BODY=
 if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
   { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
@@ -312,6 +316,12 @@ if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_I
     exit 1
   fi
   [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
+fi
+GRAPHIFY_WORKTREE_GUIDANCE=
+if [ "$KIND" != secondmate ] && { [ -e "$GRAPHIFY_WORKTREE_FILE" ] || [ -L "$GRAPHIFY_WORKTREE_FILE" ]; }; then
+  # shellcheck disable=SC2016 # this generated brief line intentionally stays literal.
+  GRAPHIFY_WORKTREE_GUIDANCE='If `graphify-out/` exists in the worktree, answer codebase questions with `graphify query "<question>" --budget N` before reaching for grep or bulk file reads.
+'
 fi
 
 # Append the include as the last section of a ship or scout scaffold.
@@ -581,7 +591,7 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
-This is a SCOUT task: the deliverable is a written report, not a PR.
+${GRAPHIFY_WORKTREE_GUIDANCE}This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
 
@@ -652,7 +662,7 @@ $HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
-
+${GRAPHIFY_WORKTREE_GUIDANCE}
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
