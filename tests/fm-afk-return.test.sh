@@ -118,6 +118,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
     printf 'Submitted-at-most-once buffered items:\n'
     printf 'needs-decision: choose the retained release target\n'
   } > "$dir/home/state/.subsuper-inject-wedged"
+  printf 'failed: retain the marker-write fallback body\n' > "$dir/home/state/.subsuper-inject-uncertain.fixture"
   {
     printf '1784074271\t2\tsignal\trepair-task.status\tsignal: synthetic status\n'
     printf 'wake annotation: latest wake-EVENT observed at drain, not current state: repair-task.status: blocked synthetic dependency\n'
@@ -137,6 +138,9 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   grep -F $'evidence\twedge\tfm away-mode inject UNCERTAIN: native prompt outcome unknown; not replayed' "$gate" >/dev/null || fail "wedge evidence was not retained in the durable gate"
   grep -F $'evidence\twedge\tneeds-decision: choose the retained release target' "$gate" >/dev/null || fail "the uncertain payload was not retained in the durable gate"
   assert_contains "$out" 'catch-up wedge: needs-decision: choose the retained release target' "the return catch-up hid the uncertain payload"
+  grep -F $'evidence\twedge\tfailed: retain the marker-write fallback body' "$gate" >/dev/null || fail "the marker-write fallback was not retained in the durable gate"
+  assert_contains "$out" 'catch-up wedge: fm away-mode inject UNCERTAIN: uncertainty marker persistence failed; payload retained and not replayed' "the return catch-up hid the marker persistence error"
+  assert_contains "$out" 'catch-up wedge: failed: retain the marker-write fallback body' "the return catch-up hid the marker-write fallback body"
   grep -F $'evidence\tescalation\trepair-task.status: blocked synthetic dependency' "$gate" >/dev/null || fail "buffered escalation evidence was not retained in the durable gate"
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "return begin did not stop away mode exactly once"
   [ -s "$dir/home/state/.fake-drain" ] || fail "blocked return acknowledged its emitted wake before handling completed"
@@ -187,7 +191,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   [ "$(wc -l < "$dir/home/stop.log" | tr -d ' ')" -eq 1 ] || fail "repeated begin stopped an already-stopped daemon twice"
   wake_count=$(grep -c $'^evidence\twake\t1784074271' "$gate" || true)
   [ "$wake_count" -eq 1 ] || fail "repeated begin duplicated retained wake evidence ($wake_count copies)"
-  [ "$(grep -c $'^evidence\twedge\t' "$gate" || true)" -eq 3 ] || fail "repeated begin duplicated or dropped retained wedge evidence"
+  [ "$(grep -c $'^evidence\twedge\t' "$gate" || true)" -eq 5 ] || fail "repeated begin duplicated or dropped retained wedge evidence"
   [ "$(grep -c $'^evidence\tescalation\t' "$gate" || true)" -eq 1 ] || fail "repeated begin duplicated retained escalation evidence"
 
   printf 'resolved [key=synthetic-dependency]: refreshed the synthetic token and resumed the task\n' >> "$dir/home/state/repair-task.status"
@@ -199,6 +203,7 @@ test_return_gate_owns_remediation_and_reports_catchup_to_bearings() {
   [ ! -e "$gate" ] || fail "successful check left the return gate behind"
   [ ! -e "$dir/home/state/.subsuper-escalations" ] || fail "successful check left delivered escalation state behind"
   [ ! -e "$dir/home/state/.subsuper-inject-wedged" ] || fail "successful check left the wedge marker behind"
+  [ ! -e "$dir/home/state/.subsuper-inject-uncertain.fixture" ] || fail "successful check left the uncertainty fallback behind"
   [ -s "$dir/home/state/.fake-drain" ] || fail "successful return consumed its wake before handling completed"
   [ ! -e "$dir/home/state/.fake-drain-acks" ] || fail "successful return acknowledged its wake inside evidence publication"
   assert_contains "$out" 'WAKE_ACK_REQUIRED: after handling completes' "successful return did not hand acknowledgement to the handling turn"

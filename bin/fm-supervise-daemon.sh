@@ -673,7 +673,7 @@ escalate_add() {  # <state> <distilled-item>
 # buffer remains eligible for a later attempt, and 2 after an uncertain native
 # submission is recorded and retired from replay.
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg rc marker
+  local state=$1 buf item n msg rc marker recovery recovery_base suffix
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
@@ -695,19 +695,29 @@ escalate_flush() {  # <state>
     # exact buffered payload so a later housekeeping cycle cannot submit it a
     # second time.
     marker="$state/.subsuper-inject-wedged"
-    {
-      printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown as of %s; not replayed\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-      printf 'Submitted-at-most-once buffered items:\n'
-      cat "$buf" 2>/dev/null
-    } > "$marker" 2>/dev/null || {
-      log "inject uncertain: uncertainty marker could not be written; buffer preserved for recovery"
-      return 1
-    }
-    if ! : > "$buf"; then
-      log "inject uncertain: uncertainty marker was written but the escalation buffer could not be cleared"
+    recovery_base="$state/.subsuper-inject-uncertain.$(date +%s).$$"
+    recovery=$recovery_base
+    suffix=0
+    while [ -e "$recovery" ]; do
+      suffix=$((suffix + 1))
+      recovery="$recovery_base.$suffix"
+    done
+    if ! mv "$buf" "$recovery"; then
+      log "inject uncertain: escalation buffer could not be retired from automatic replay"
       return 1
     fi
     rm -f "${buf}.since"
+    {
+      printf 'fm away-mode inject UNCERTAIN: native prompt outcome unknown as of %s; not replayed\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+      printf 'Submitted-at-most-once buffered items:\n'
+      cat "$recovery" 2>/dev/null
+    } > "$marker" 2>/dev/null || {
+      log "inject uncertain: uncertainty marker could not be written; payload retained at $recovery and retired from automatic replay"
+      return 2
+    }
+    if ! rm -f "$recovery"; then
+      log "inject uncertain: uncertainty marker was written but its fallback recovery record could not be removed"
+    fi
     return 2
   fi
   return 1
