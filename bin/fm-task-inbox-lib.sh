@@ -59,8 +59,8 @@
 # stuck-busy reason without typing. A non-busy due check or acknowledgement resets
 # this budget. Fire-and-forget retries remain outside escalation. A positively
 # dead or missing endpoint skips delivery and the ladder and escalates directly.
-# This library owns only the schedule and escalation marker.
-# If attempt bookkeeping cannot be persisted while the record remains unhandled,
+# This library owns the schedule, durable budgets, and escalation marker.
+# If delivery-attempt or busy-deferral bookkeeping fails while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
 # writing the deduplication marker: normal polls surface a message once, while a
