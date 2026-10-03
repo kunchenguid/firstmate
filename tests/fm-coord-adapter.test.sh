@@ -670,3 +670,31 @@ settled=$(PATH="$tmp/forge:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_HEAD="$head" 
 [ "$(field "$settled" state)" = refused ] || fail 'a not-landed attempt must settle without an operator step'
 coord inspect '{}' | python3 -c 'import json,sys; assert not json.load(sys.stdin)["slots"]' || fail 'the settled attempt must release the integration slot'
 pass 'a coordinator restart during a remote attempt keeps its identity so the exit settles the slot'
+
+db=$tmp/central/widened.sqlite3
+coord init > /dev/null
+make_home widened
+make_brief widened widened 301
+git -C "$repo" worktree add -q --detach "$tmp/widened-wt" origin/main
+adapter "$tmp/widened" dispatch widened "$repo" "$tmp/widened-wt" "$tmp/widened.brief" branch/widened codex > /dev/null 2>&1 || fail 'widened dispatch must complete'
+printf 'amended\n' > "$tmp/widened-wt/src/amended.py"
+git -C "$tmp/widened-wt" add src/amended.py
+git -C "$tmp/widened-wt" commit -qm amended
+adapter "$tmp/widened" pre-push widened "$tmp/widened-wt" > /dev/null 2>&1 || fail 'widened amendment push must complete'
+sqlite3 "$db" "UPDATE meta SET value='previous-boot' WHERE key='boot_id'"
+# Work committed after the restart but before the next checkpoint is in flight too.
+printf 'late\n' > "$tmp/widened-wt/src/late.py"
+git -C "$tmp/widened-wt" add src/late.py
+git -C "$tmp/widened-wt" commit -qm late
+adapter "$tmp/widened" heartbeat widened > /dev/null 2> "$tmp/widened-hb.err" || fail "post-restart heartbeat must recover: $(cat "$tmp/widened-hb.err")"
+python3 - "$tmp/widened/state/fm-coord-adapter.json" <<'PY' || fail 'the restarted task must hold a replacement claim'
+import json,sys
+assert json.load(open(sys.argv[1]))['tasks']['widened']['claim']['ok'] is True
+PY
+for path in amended late; do
+  make_home "intruder-$path"
+  make_brief "intruder-$path" "$path" "302-$path"
+  adapter "$tmp/intruder-$path" dispatch "intruder-$path" "$repo" "$repo" "$tmp/intruder-$path.brief" "branch/intruder-$path" claude > /dev/null 2> "$tmp/intruder.err" || fail 'intruder dispatch stays advisory'
+  case "$(cat "$tmp/intruder.err")" in *'held by widened'*) ;; *) fail "the replacement claim must still cover src/$path.py: $(cat "$tmp/intruder.err")" ;; esac
+done
+pass 'a replacement claim after a restart keeps amended scope and in-flight worktree paths'

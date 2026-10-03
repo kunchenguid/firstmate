@@ -248,7 +248,9 @@ class Adapter:
             warn(f"{task_id}: offline intent pending; no claim granted")
             return task
         common = {"intent_id": task["intent_id"], "home_id": self.config["home_id"], "generation": generation}
-        submitted = self.send(f"{task_id}:submit", "submit", {**common, "repo": task["repo"], "base": task["base"], "base_oid": task["base_oid"], "branch": task["branch"], "task_id": task_id, "goal": task["goal"], "resources": task["declared"], **({"issue": task["issue"]} if task["issue"] else {})})
+        key = f"{task_id}:submit"
+        scope = self.state["requests"][key]["payload"]["resources"] if key in self.state["requests"] else self.claim_scope(task)
+        submitted = self.send(key, "submit", {**common, "repo": task["repo"], "base": task["base"], "base_oid": task["base_oid"], "branch": task["branch"], "task_id": task_id, "goal": task["goal"], "resources": scope, **({"issue": task["issue"]} if task["issue"] else {})})
         if submitted is None:
             warn(f"{task_id}: intent pending; no claim granted")
             return task
@@ -266,6 +268,13 @@ class Adapter:
             task["resources"] = submitted["resources"]
             self.save()
         return task
+
+    def claim_scope(self, task):
+        # Claim scope is durable task state: a replacement claim covers the brief, every amendment, and the work already in the worktree.
+        paths = set(task.get("amended", []))
+        if task.get("worktree"):
+            paths |= set(self.changed_paths(task, task["worktree"]))
+        return task["declared"] + [r for r in ({"type": "file", "name": p} for p in sorted(paths)) if r not in task["declared"]]
 
     def dispatch(self, task_id, project, worktree, brief, branch, harness):
         if harness not in {"claude", "codex", "omp", "opencode"}:
@@ -358,6 +367,7 @@ class Adapter:
                 task["resources"] = sorted({tuple(x) for x in task["resources"]} | {("file", p) for p in added})
                 task["resources"] = [list(x) for x in task["resources"]]
                 task["pending_paths"] = sorted(set(undeclared) - added)
+                task["amended"] = sorted(set(task.get("amended", [])) | added)
                 self.save()
             elif amended:
                 for conflict in amended["conflicts"]:
@@ -449,7 +459,7 @@ class Adapter:
             self.state["requests"][key] = {"op": "release", "payload": {"request_id": str(uuid.uuid4()), "home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}}
             task["releasing"] = key
         self.reset_task(task_id)
-        for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths"):
+        for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths", "amended", "worktree"):
             task.pop(flag, None)
         self.save()
         self.reset = False
