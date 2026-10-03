@@ -230,6 +230,46 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
 }
 
+# Stock macOS Bash 3.2 has no BASHPID, and spawn sources this library under
+# set -u. Unsetting BASHPID on Bash 4+ is the same unbound-variable case.
+# The command outlasts a watchdog poll, and an owner that dies during startup
+# still ends it: echo ran would miss both, and a fallback of $$ would retarget
+# the owner to PPID and miss the death.
+test_exec_timed_runs_when_bashpid_is_unset() {
+  local path dir out rc=0 watchdog started
+  # Keep the perl watchdog, but leave sh on PATH: Bash 3.2's pid fallback is
+  # `exec sh -c`, and a perl-only PATH would hide that failure as success.
+  path="$TMP_ROOT/nobashpid-bin"
+  dir="$TMP_ROOT/nobashpid"
+  mkdir -p "$path" "$dir"
+  ln -s "$(command -v sh)" "$path/sh"
+  out=$(unset BASHPID; . "$ROOT/bin/fm-timeout-lib.sh"; PATH="$PERL_ONLY:$path" fm_exec_timed 5 1 bash -c 'sleep 0.3; echo ran') || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed died without BASHPID (rc=$rc: $out)"
+  [ "$out" = ran ] || fail "fm_exec_timed without BASHPID printed '$out'"
+  # shellcheck disable=SC2016
+  PATH="$PERL_ONLY:$path" bash -c '
+    unset BASHPID
+    . "$1/bin/fm-timeout-lib.sh"
+    (
+      while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
+      fm_exec_timed 60 1 bash -c "exec sleep 300"
+    ) >/dev/null 2>&1 &
+    echo $! > "$2/watchdog"
+    exit 0
+  ' _ "$ROOT" "$dir"
+  wait_for_file "$dir/watchdog"
+  watchdog=$(cat "$dir/watchdog")
+  started=$SECONDS
+  while kill -0 "$watchdog" 2>/dev/null; do
+    if [ "$((SECONDS - started))" -ge 15 ]; then
+      kill -KILL "$watchdog" 2>/dev/null || true
+      fail "without BASHPID, a watchdog whose owner died during startup ran on toward its bound"
+    fi
+    sleep 0.02
+  done
+  pass "fm_exec_timed runs under set -u when BASHPID is unset"
+}
+
 # perl is preferred whenever it exists, because only its watchdog can reap a
 # leftover descendant after replacing the caller.
 test_perl_is_preferred_over_timeout() {
@@ -337,6 +377,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_exec_timed_runs_when_bashpid_is_unset
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
