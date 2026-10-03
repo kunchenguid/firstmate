@@ -18,9 +18,10 @@
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
 # run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
-# and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
-# bin/fm-promote.sh, which takes the forge binding from here because it is a
-# project fact rather than a task choice.
+# bin/fm-bootstrap.sh's no-mistakes mirror check (--raw posture per registered
+# clone), and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal
+# and for bin/fm-promote.sh, which takes the forge binding from here because it
+# is a project fact rather than a task choice.
 #
 # Registry line format (data/projects.md):
 #   - <name> - <desc> (added <date>)                                 -> no-mistakes off fm/  (legacy default)

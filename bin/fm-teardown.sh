@@ -5,6 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# Returning a worktree to its treehouse pool also frees one pool slot, so after
+# a successful return teardown releases the oldest capacity hold recorded for
+# that same pool (bin/fm-capacity-lib.sh owns the reason contract
+# bin/fm-spawn.sh writes when the pool refuses a spawn) and prints which item
+# became ready. The release is best-effort: a failure leaves the hold recorded
+# for the next teardown to retry and never aborts the teardown itself.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of
@@ -350,6 +356,8 @@ done
 unset _teardown_source
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -2675,6 +2683,7 @@ remove_firstmate_home() {
       restore_firstmate_home_process_events "$abs_home_path" "$label" "$process_event_backup" || return $?
       return 1
     }
+    fm_capacity_release_after_return "$CONFIG" "$DATA" "$abs_home_path" "$FM_ROOT"
     [ -z "$process_event_backup" ] || rm -rf -- "$process_event_backup"
     return 0
   fi
@@ -3281,6 +3290,7 @@ cleanup_firstmate_home_children() {
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
+            fm_capacity_release_after_return "$CONFIG" "$DATA" "$child_wt" "$child_proj"
           else
             child_return_rc=$?
             if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
@@ -3620,6 +3630,13 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+  # The returned worktree freed exactly one pool slot, so hand it to the oldest
+  # capacity hold recorded for that same pool (bin/fm-capacity-lib.sh owns the
+  # reason contract bin/fm-spawn.sh records): releasing makes the held item
+  # dispatchable again instead of waiting for the next backlog re-evaluation.
+  # Best-effort by design - a failed release leaves the hold recorded for the
+  # next teardown to retry, never aborting this one.
+  fm_capacity_release_after_return "$CONFIG" "$DATA" "$WT" "$PROJ"
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
