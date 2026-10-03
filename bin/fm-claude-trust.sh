@@ -485,7 +485,9 @@ const attempt = () => {
   if (mode === "worktree") {
     if (declinedExternalImports(projects, project)) {
       throw new Error(
-        `project entry for ${project} in ${store} already declined external CLAUDE.md imports; refusing to override that consent`,
+        `project entry for ${project} in ${store} already declined external CLAUDE.md imports; refusing to override that consent. ` +
+        `Approved=false and WarningShown=true records an explicit denial, not a missing workspace trust entry. ` +
+        `Ask the operator whether external @includes should be re-enabled for this project before changing these flags; do not delete the project entry or the store to bypass the denial`,
       );
     }
     const carryImportConsent = approvedExternalImports(projects, project);

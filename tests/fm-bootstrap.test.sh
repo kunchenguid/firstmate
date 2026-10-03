@@ -65,6 +65,9 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+case "$*" in
+  *--root*) [ "${FM_FAKE_TREEHOUSE_ROOT_HELP:-1}" = 1 ]; exit $? ;;
+esac
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
   if [ "${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
@@ -722,7 +725,12 @@ test_treehouse_lease_check_follows_resolved_backend() {
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "MISSING: treehouse" "backend=herdr must still require treehouse with durable lease support"
   assert_not_contains "$out" "MISSING: tmux" "backend=herdr must not demand tmux even when treehouse is too old"
-  pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_ROOT_HELP=0 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "lease support without --root must require a Treehouse upgrade"
+  pass "bootstrap: treehouse lease and root checks follow the resolved backend's worktree provider"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {

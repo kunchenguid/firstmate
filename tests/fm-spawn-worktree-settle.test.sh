@@ -39,6 +39,10 @@ make_settle_fakebin() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*)
+    if [ -n "${FM_FAKE_LEASE_PATH:-}" ] && [ -f "$FM_FAKE_LEASE_PATH" ]; then
+      cat "$FM_FAKE_LEASE_PATH"
+      exit 0
+    fi
     countfile="${FM_FAKE_PANE_COUNTFILE:?FM_FAKE_PANE_COUNTFILE unset}"
     n=0
     [ -f "$countfile" ] && n=$(cat "$countfile")
@@ -56,7 +60,21 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    for arg in "$@"; do
+      case "$arg" in
+        'treehouse get '*)
+          [ -z "${FM_FAKE_PANE_LOG:-}" ] || printf '%s\n' "$arg" >> "$FM_FAKE_PANE_LOG"
+          if [ -n "${FM_FAKE_LEASE_PATH:-}" ]; then
+            (cd "$FM_FAKE_PROJECT" && eval "$arg --lease --lease-holder spawn-test") > "$FM_FAKE_LEASE_PATH" || exit 1
+            if [ "${FM_FAKE_DIRTY_LEASE:-0}" = 1 ]; then
+              printf 'preserve this work\n' > "$(cat "$FM_FAKE_LEASE_PATH")/uncommitted.txt"
+            fi
+          fi
+          ;;
+      esac
+    done
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -110,6 +128,7 @@ EOF
 
 run_settle_spawn() {
   local id=$1
+  shift
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
@@ -117,7 +136,7 @@ run_settle_spawn() {
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 # A single stale first read (the exact incident) must not be accepted: the
@@ -243,6 +262,166 @@ test_spawn_syncs_a_configured_environment_file() {
   pass "spawn synchronizes configured local environment files after worktree setup"
 }
 
+# Different clones with identical origins and basenames were sharing a pool.
+# A persistent wrong-clone cwd must fail before refresh, trust, or task wiring,
+# for every harness, not just Claude's later trust-store scope check.
+test_foreign_clone_slot_is_never_adopted() {
+  local rec id harness out status foreign foreign_slot before
+  for harness in codex claude; do
+    id="settle-foreign-$harness"
+    rec=$(make_settle_case "$id" "$id" 100000)
+    read_settle_record "$rec"
+    foreign="$(dirname "$PROJ_DIR")/other/project"
+    foreign_slot="$(dirname "$PROJ_DIR")/foreign-slot"
+    git clone --quiet "$(git -C "$PROJ_DIR" remote get-url origin)" "$foreign"
+    git -C "$foreign" worktree add --quiet --detach "$foreign_slot" HEAD
+    STALE_DIR=$foreign_slot
+    before=$(git -C "$foreign_slot" rev-parse HEAD)
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+    out=$(run_settle_spawn "$id" --harness "$harness")
+    status=$?
+    [ "$status" -ne 0 ] || fail "$harness accepted another clone's slot"
+    assert_contains "$out" 'different clone' "refusal did not identify wrong-clone ownership"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'foreign slot published task state'
+    [ ! -e "$foreign/.git/FETCH_HEAD" ] || fail 'foreign slot fetched before ownership check'
+    [ "$(git -C "$foreign_slot" rev-parse HEAD)" = "$before" ] || fail 'foreign slot was reset'
+    pass "$harness refuses a foreign-clone slot before any refresh or trust write"
+  done
+}
+
+test_old_treehouse_refuses_before_allocation() {
+  local rec id out status
+  id=settle-old-treehouse
+  rec=$(make_settle_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "$*" in *--root*) echo 'unknown flag: --root' >&2; exit 1 ;; esac
+exit 0
+SH
+  out=$(run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'old Treehouse unexpectedly launched'
+  assert_contains "$out" 'v2.2.0 or newer' 'missing actionable upgrade diagnostic'
+  assert_contains "$out" 'no slot was acquired' 'missing safe refusal diagnostic'
+  [ ! -e "$COUNTFILE" ] || fail 'old Treehouse reached allocation polling'
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail 'old Treehouse published task metadata'
+  pass 'old Treehouse refuses before endpoint allocation with an upgrade diagnostic'
+}
+
+test_clone_root_is_stable_and_quoted() {
+  local rec id out status root1 root2 root3 original alias linked
+  id=settle-clone-root
+  rec=$(make_settle_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  export FM_FAKE_PANE_LOG="$HOME_DIR/pane.log"
+  export TREEHOUSE_ROOT="$HOME_DIR/pools with 'quotes'"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "initial clone root spawn failed: $out"
+  root1=$(grep 'treehouse get --root' "$FM_FAKE_PANE_LOG")
+  [ -n "$root1" ] || fail 'spawn did not send a scoped pool command'
+  original=$PROJ_DIR
+  alias="$HOME_DIR/project-alias"
+  ln -s "$original" "$alias"
+  PROJ_DIR=$alias
+  : > "$FM_FAKE_PANE_LOG"
+  fm_test_spawn_brief "$HOME_DIR" "$id-alias"
+  out=$(run_settle_spawn "$id-alias")
+  expect_code 0 $? "alias spawn failed: $out"
+  root2=$(grep 'treehouse get --root' "$FM_FAKE_PANE_LOG")
+  [ "$root1" = "$root2" ] || fail 'symlink alias changed clone namespace'
+  linked="$HOME_DIR/linked-project"
+  git -C "$original" worktree add --quiet --detach "$linked" HEAD
+  PROJ_DIR=$linked
+  : > "$FM_FAKE_PANE_LOG"
+  fm_test_spawn_brief "$HOME_DIR" "$id-linked"
+  out=$(run_settle_spawn "$id-linked")
+  expect_code 0 $? "linked project spawn failed: $out"
+  root3=$(grep 'treehouse get --root' "$FM_FAKE_PANE_LOG")
+  [ "$root1" = "$root3" ] || fail 'linked project changed clone namespace'
+  unset FM_FAKE_PANE_LOG TREEHOUSE_ROOT
+  pass 'clone pool command is stable across symlink and linked-project aliases'
+}
+
+# Use real Treehouse when installed with --root, but always with a disposable
+# HOME and root. The fake terminal only replaces the interactive subshell with
+# --lease; the pool command, allocation, Git checks and spawn are all real.
+test_real_treehouse_keeps_same_origin_clones_separate() {
+  local real rec id case_dir original_home a b wt common expected root_a root_b legacy_a legacy_b snapshot out status
+  real=$(command -v treehouse || true)
+  if [ -z "$real" ] || ! "$real" get --root "$TMP_ROOT" --help >/dev/null 2>&1; then
+    printf '# skip real clone-pool allocation: Treehouse v2.2.0+ required\n'
+    return
+  fi
+  id=settle-real-clones
+  rec=$(make_settle_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  case_dir=$(dirname "$PROJ_DIR")
+  a=$PROJ_DIR
+  b="$case_dir/other/project"
+  git clone --quiet "$(git -C "$a" remote get-url origin)" "$b"
+  original_home=$HOME
+  export HOME="$case_dir/isolated-user"
+  mkdir -p "$HOME"
+  unset TREEHOUSE_ROOT
+  export TREEHOUSE_NO_UPDATE_CHECK=1
+  # Create the exact legacy mixed-pool shape without touching ~/.treehouse.
+  legacy_a=$(cd "$a" && "$real" get --lease --lease-holder legacy-a) || fail 'legacy a allocation failed'
+  legacy_b=$(cd "$b" && "$real" get --lease --lease-holder legacy-b) || fail 'legacy b allocation failed'
+  [ "$(dirname "$(dirname "$legacy_a")")" = "$(dirname "$(dirname "$legacy_b")")" ] || fail 'fixture did not reproduce a shared pool'
+  snapshot=$(cat "$(dirname "$(dirname "$legacy_a")")/treehouse-state.json")
+  # Forward through the real executable without modifying the user's binary.
+  printf '#!/usr/bin/env bash\nexec %q "$@"\n' "$real" > "$FAKEBIN_DIR/treehouse"
+  export FM_FAKE_LEASE_PATH="$case_dir/leased-path"
+  export FM_FAKE_PROJECT="$a"
+  export FM_FAKE_PANE_LOG="$case_dir/pool-command"
+  export TREEHOUSE_ROOT="$HOME/pool roots with 'quotes'"
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "real clone-a spawn failed: $out"
+  wt=$(cat "$FM_FAKE_LEASE_PATH")
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)
+  expected=$(git -C "$a" rev-parse --path-format=absolute --git-common-dir)
+  [ "$common" = "$expected" ] || fail 'clone-a spawn acquired another clone'
+  root_a=$(dirname "$(dirname "$wt")")
+  assert_grep "worktree=$wt" "$HOME_DIR/state/$id.meta" 'real lease not published'
+  PROJ_DIR=$b
+  export FM_FAKE_PROJECT="$b"
+  fm_test_spawn_brief "$HOME_DIR" "$id-b"
+  out=$(run_settle_spawn "$id-b")
+  status=$?
+  expect_code 0 "$status" "real clone-b spawn failed: $out"
+  wt=$(cat "$FM_FAKE_LEASE_PATH")
+  common=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)
+  expected=$(git -C "$b" rev-parse --path-format=absolute --git-common-dir)
+  [ "$common" = "$expected" ] || fail 'clone-b spawn acquired another clone'
+  root_b=$(dirname "$(dirname "$wt")")
+  [ "$root_a" != "$root_b" ] || fail 'separate clones still share a pool'
+  (cd "$b" && "$real" return --if-lease-holder spawn-test "$wt") >/dev/null \
+    || fail 'absolute-path return could not release a clone-scoped slot'
+  # Abort after allocation as well: no temporary leases may touch the legacy
+  # foreign slots, even when the launch cannot reach its normal completion.
+  export FM_FAKE_DIRTY_LEASE=1
+  fm_test_spawn_brief "$HOME_DIR" "$id-abort"
+  out=$(run_settle_spawn "$id-abort")
+  status=$?
+  [ "$status" -ne 0 ] || fail 'dirty real allocation unexpectedly launched'
+  assert_contains "$out" 'is not clean' 'abort did not hit the dirty-copy guard'
+  [ ! -e "$HOME_DIR/state/$id-abort.meta" ] || fail 'aborted allocation published state'
+  assert_no_grep --lease "$FM_FAKE_PANE_LOG" 'spawn created temporary durable skip leases'
+  [ "$snapshot" = "$(cat "$(dirname "$(dirname "$legacy_a")")/treehouse-state.json")" ] || fail 'spawn modified the legacy mixed pool'
+  case "$root_b" in "$HOME/"*) ;; *) fail 'test pool escaped isolated HOME' ;; esac
+  HOME=$original_home
+  export HOME
+  unset FM_FAKE_LEASE_PATH FM_FAKE_PROJECT FM_FAKE_PANE_LOG FM_FAKE_DIRTY_LEASE TREEHOUSE_ROOT TREEHOUSE_NO_UPDATE_CHECK
+  pass 'real Treehouse allocates own-clone slots, quotes roots, and leaves mixed legacy pools untouched'
+}
+
+test_real_treehouse_keeps_same_origin_clones_separate
+test_foreign_clone_slot_is_never_adopted
+test_old_treehouse_refuses_before_allocation
+test_clone_root_is_stable_and_quoted
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted

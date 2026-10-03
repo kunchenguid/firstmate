@@ -393,6 +393,31 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+## Clone-scoped Treehouse allocation
+
+Verified 2026-10-03 with Treehouse v2.2.0, real Git repositories, and fixture terminals (no live agent or GUI-backend claim):
+
+```sh
+bin/fm-test-run.sh tests/fm-spawn-worktree-settle.test.sh tests/fm-spawn-dispatch-profile.test.sh
+```
+
+Relevant output:
+
+```text
+ok - real Treehouse allocates own-clone slots, quotes roots, and leaves mixed legacy pools untouched
+ok - codex refuses a foreign-clone slot before any refresh or trust write
+ok - claude refuses a foreign-clone slot before any refresh or trust write
+ok - old Treehouse refuses before endpoint allocation with an upgrade diagnostic
+ok - clone pool command is stable across symlink and linked-project aliases
+# all fm-spawn-worktree-settle tests passed
+# all fm-spawn-dispatch-profile tests passed
+```
+
+The real allocation case uses an isolated `HOME`, replaces only the terminal's interactive subshell with a durable test lease, and verifies that two same-origin clones allocate from distinct pools without changing a pre-existing mixed pool, including on a failed spawn.
+It self-skips without Treehouse's root capability; run with the pin installed by `bin/fm-install-treehouse.sh` to exercise it.
+The allocation command and ownership guard are shared by tmux, Herdr, Zellij, and cmux before harness-specific launch; Orca and persistent secondmate launches do not use this allocation path.
+[`fm-spawn.sh`](../../bin/fm-spawn.sh) owns root selection and the fail-closed compatibility check.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.

@@ -188,6 +188,12 @@
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
+#   Treehouse-backed launches also require the spawning clone's Git common dir.
+#   Fresh Treehouse allocations use --root under
+#   ${TREEHOUSE_ROOT:-$HOME}/.treehouse/firstmate-clones/<hash>, keyed by the
+#   physical Git common dir, overriding repo/user pool-root configuration.
+#   This requires Treehouse v2.2.0+ (--root support), checked before allocation.
+#   Existing pools are neither migrated nor cleaned; relaunch retains its path.
 #   On the backends that discover that path by reading the task pane's own cwd,
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
@@ -2595,6 +2601,19 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Treehouse keys pools by basename + origin, so independent clones would
+  # otherwise recycle each other's slots. Namespace new pools by physical Git
+  # common directory without changing project/user config or existing pools.
+  spawn_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir) &&
+    spawn_common=$(CDPATH='' cd -- "$spawn_common" && pwd -P) || exit 1
+  spawn_clone_key=$(printf '%s' "$spawn_common" | git hash-object --stdin) || exit 1
+  spawn_pool_base=${TREEHOUSE_ROOT:-${HOME:?HOME or TREEHOUSE_ROOT is required for clone-isolated pools}}
+  case "$spawn_pool_base" in /*) ;; *) spawn_pool_base="$PROJ_ABS/$spawn_pool_base" ;; esac
+  SPAWN_TREEHOUSE_ROOT="$spawn_pool_base/.treehouse/firstmate-clones/$spawn_clone_key"
+  if ! treehouse get --root "$SPAWN_TREEHOUSE_ROOT" --help >/dev/null 2>&1; then
+    echo "error: Treehouse must support get --root (v2.2.0 or newer) for clone-isolated allocation; upgrade Treehouse with operator approval, then retry; no slot was acquired" >&2
+    exit 1
+  fi
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -2727,7 +2746,8 @@ real_path_or_raw() { # <path>
 
 # True when <path> is an isolated worktree of the spawning project: a real
 # directory that is its own worktree root, is not the spawning project itself,
-# and does not share the project repository's common git dir. SPAWN_WT_TOP is
+# and is a linked worktree of that same clone for Treehouse backends.
+# Orca owns its separate checkout allocation. SPAWN_WT_TOP is
 # left holding the worktree root the check read, and SPAWN_WT_REASON a short
 # phrase naming why a rejected path failed, both for the refusal messages.
 #
@@ -2742,7 +2762,7 @@ real_path_or_raw() { # <path>
 SPAWN_WT_TOP=
 SPAWN_WT_REASON=
 spawn_worktree_isolated() { # <path>
-  local path=$1 wt_real wt_top_real wt_git_dir proj_common
+  local path=$1 wt_real wt_top_real wt_git_dir wt_common proj_common
   SPAWN_WT_TOP=
   SPAWN_WT_REASON=
   wt_real=
@@ -2788,6 +2808,14 @@ spawn_worktree_isolated() { # <path>
   if [ "$wt_git_dir" = "$proj_common" ]; then
     SPAWN_WT_REASON="it is the repository's primary checkout (its git dir is the spawning project's common git dir)"
     return 1
+  fi
+  if [ "$BACKEND" != orca ]; then
+    wt_common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+      wt_common=$(CDPATH='' cd -- "$wt_common" 2>/dev/null && pwd -P) || wt_common=
+    if [ -z "$wt_common" ] || [ "$wt_common" != "$proj_common" ]; then
+      SPAWN_WT_REASON="it belongs to a different clone, not the spawning project's Git common directory"
+      return 1
+    fi
   fi
   return 0
 }
@@ -3653,7 +3681,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  spawn_pool_root_quoted=${SPAWN_TREEHOUSE_ROOT//\'/\'\\\'\'}
+  spawn_send_text_line "$WT_TARGET" "treehouse get --root '$spawn_pool_root_quoted'"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3669,8 +3698,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # there: on some tmux/WSL setups a brand-new window's pane_current_path
   # transiently reports an unrelated stale path (seen live as another real git
   # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path passes spawn_worktree_isolated too (it resolves to a real,
-  # distinct worktree top-level), so accepting it on one read alone silently
+  # stale path can pass spawn_worktree_isolated too when it is another linked
+  # worktree of the same clone, so accepting it on one read alone silently
   # records the wrong worktree= in state/<id>.meta. Require two consecutive
   # reads to agree on the same isolated path before accepting it; a mismatch
   # just becomes the new candidate rather than resetting the wait, so a pane
