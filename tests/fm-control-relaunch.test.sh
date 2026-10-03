@@ -1830,6 +1830,61 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
+# A task record can outlive the pool's memory of its slot: once the slot went
+# back and was handed to another task, relaunching into it would put a second
+# worker in somebody else's working copy exactly as a fresh allocation would.
+# tests/fm-spawn-pool-slot-occupancy.test.sh owns the allocation half of that
+# guarantee, and 76 is the bad-slot exit both halves report.
+test_spawn_relaunch_refuses_a_slot_reassigned_to_another_task() {
+  local dir out rc slot
+  dir=$(new_case reassigned-slot rl76)
+  add_ship_task "$dir" rl76 claude
+  # A direct fm-spawn --relaunch requires a positively agent-free endpoint, the
+  # state fm-control leaves behind after stopping the previous agent.
+  printf 'zsh' > "$dir/fake/command"
+  slot="$dir/pool/1/proj"
+  mkdir -p "$dir/pool/1" "$dir/other-home/state"
+  git -C "$dir/proj" worktree move "$dir/wt" "$slot"
+  printf '{"worktrees":[]}\n' > "$dir/pool/treehouse-state.json"
+  sed "s|^worktree=.*|worktree=$slot|" "$dir/home/state/rl76.meta" > "$dir/slot.meta"
+  mv "$dir/slot.meta" "$dir/home/state/rl76.meta"
+  printf '%s' "$slot" > "$dir/fake/cwd"
+  : > "$dir/other-home/state/neighbour-task.meta"
+  printf 'task=neighbour-task\nhome=%s\n' "$dir/other-home" > "$dir/pool/1/.fm-slot-owner"
+
+  out=$(run_spawn "$dir" rl76 --relaunch --harness claude); rc=$?
+  expect_code 76 "$rc" "relaunching into a reassigned slot should refuse as a bad slot"$'\n'"$out"
+  assert_contains "$out" "no longer its own" \
+    "the refusal did not say the recorded copy had been reassigned"
+  assert_contains "$out" "neighbour-task" \
+    "the refusal did not name the task that now holds the copy"
+  [ ! -s "$dir/fake/keys" ] || fail "a refused relaunch must send nothing to the pane"
+  assert_grep "task=neighbour-task" "$dir/pool/1/.fm-slot-owner" \
+    "the refused relaunch disturbed the holder's claim"
+  pass "fm-spawn --relaunch: refuses a recorded copy the pool has since given to another task"
+}
+
+# The same shape with the task's OWN claim still on the slot must relaunch, so
+# the guard above cannot quietly block every pooled relaunch.
+test_spawn_relaunch_accepts_a_slot_the_task_still_holds() {
+  local dir out rc slot
+  dir=$(new_case own-slot rl77)
+  add_ship_task "$dir" rl77 claude
+  printf 'zsh' > "$dir/fake/command"
+  slot="$dir/pool/1/proj"
+  mkdir -p "$dir/pool/1"
+  git -C "$dir/proj" worktree move "$dir/wt" "$slot"
+  printf '{"worktrees":[]}\n' > "$dir/pool/treehouse-state.json"
+  sed "s|^worktree=.*|worktree=$slot|" "$dir/home/state/rl77.meta" > "$dir/slot.meta"
+  mv "$dir/slot.meta" "$dir/home/state/rl77.meta"
+  printf '%s' "$slot" > "$dir/fake/cwd"
+  printf 'task=rl77\nhome=%s\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+
+  out=$(run_spawn "$dir" rl77 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a slot the task still holds must relaunch"$'\n'"$out"
+  pass "fm-spawn --relaunch: a pooled copy the task still holds is relaunched normally"
+}
+
 # --- 7. reclaiming a task whose endpoint is gone ----------------------------
 #
 # Before this, `missing` was a terminal state: fm-spawn --relaunch accepted only
@@ -2444,6 +2499,8 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
+test_spawn_relaunch_refuses_a_slot_reassigned_to_another_task
+test_spawn_relaunch_accepts_a_slot_the_task_still_holds
 test_tmux_refuses_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
