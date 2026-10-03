@@ -6,8 +6,8 @@
 #   fm-route-dispatch.sh --brief <file> [--execute] [--json]
 #
 # If --execute is specified, it automatically dispatches matched tasks to the
-# owning second mate using bin/fm-send.sh. A dispatch message whose base64
-# form exceeds MAX_ENCODED_BYTES is refused unsent (exit 2). With --json --execute, the
+# owning second mate using bin/fm-send.sh. A message to a remote second mate
+# whose base64 form exceeds MAX_ENCODED_BYTES is refused unsent (exit 2). With --json --execute, the
 # router JSON is always printed, extended with `dispatched` and
 # `send_exit_code`, and the script exits with the send status.
 set -euo pipefail
@@ -65,6 +65,7 @@ ROUTER_JSON=$(python3 "$SCRIPT_DIR/fm-route-domain.py" --json "${ROUTER_ARGS[@]}
 router_field() {
   printf '%s' "$ROUTER_JSON" | python3 -c '
 import json, sys
+sys.stdout.reconfigure(errors="surrogateescape")
 v = json.load(sys.stdin).get(sys.argv[1])
 sys.stdout.write(sys.argv[2] if v is None else str(v))
 sys.stdout.write("x")' "$1" "${2-}"
@@ -81,9 +82,12 @@ MESSAGE_BYTES=$(printf '%s' "$MESSAGE" | wc -c | tr -d ' ')
 # shellcheck disable=SC2017 # ceil(bytes / 3) * 4 is the base64 length
 ENCODED_BYTES=$(( (MESSAGE_BYTES + 2) / 3 * 4 ))
 
+# Only a remote send rides argv; a local send writes the inbox directly.
+REMOTE_HOST=$(sed -n 's/^remote_host=//p' "${FM_STATE_OVERRIDE:-$FM_HOME/state}/$ROUTE.meta" 2>/dev/null | tail -n 1) || true
+
 message_fits() {
-  [ "$ENCODED_BYTES" -le "$MAX_ENCODED_BYTES" ] && return 0
-  echo "error: dispatch message is $MESSAGE_BYTES bytes ($ENCODED_BYTES base64), over the $MAX_ENCODED_BYTES-byte encoded single-argument limit of the send transport; not sent" >&2
+  [ -z "$REMOTE_HOST" ] || [ "$ENCODED_BYTES" -le "$MAX_ENCODED_BYTES" ] && return 0
+  echo "error: remote dispatch message is $MESSAGE_BYTES bytes ($ENCODED_BYTES base64), over the $MAX_ENCODED_BYTES-byte encoded single-argument limit of the send transport; not sent" >&2
   return 1
 }
 

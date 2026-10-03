@@ -214,6 +214,8 @@ def main() -> None:
     parser.add_argument("--registry", type=Path, help="Path to secondmates.md")
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
     args = parser.parse_args()
+    # Write the message's original bytes back out (dispatch_cmd).
+    sys.stdout.reconfigure(errors="surrogateescape")
 
     fm_root = Path(os.environ.get("FM_HOME") or Path(__file__).resolve().parent.parent)
     reg_path = args.registry or (fm_root / "data" / "secondmates.md")
@@ -227,10 +229,11 @@ def main() -> None:
         if not args.brief.is_file():
             parser.error(f"brief file not found: {args.brief}")
         # Bytes, not read_text: text mode would translate CRLF, and the
-        # dispatched message must be the brief byte for byte.
-        task_text = args.brief.read_bytes().decode("utf-8", errors="replace")
+        # dispatched message must be the brief byte for byte. surrogateescape
+        # (as argv already uses) carries invalid UTF-8 through unchanged.
+        task_text = args.brief.read_bytes().decode("utf-8", errors="surrogateescape")
     elif not sys.stdin.isatty():
-        task_text = sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        task_text = sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
 
     # Only Jev's copy is whitespace-collapsed (by withhold); the dispatched
     # message stays exactly as given.
@@ -278,7 +281,9 @@ def main() -> None:
             as_json=args.json,
         )
 
-    clean_task = withhold(task_text, never_send)[:500]
+    # Jev gets a valid-UTF-8 view; only the dispatched message keeps raw bytes.
+    jev_text = task_text.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+    clean_task = withhold(jev_text, never_send)[:500]
     payload = {
         "model": TS_MODEL,
         "state": {"task": clean_task},

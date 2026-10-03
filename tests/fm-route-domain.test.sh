@@ -324,6 +324,15 @@ HUGE="$TDIR/huge.md"
 { printf 'seller leads\n'; head -c 200000 /dev/zero | tr '\0' 'x'; printf '\n'; } > "$HUGE"
 out=$("$DISPATCH" --brief "$HUGE") || fail "a brief over 128 KiB must not abort the dispatcher"
 assert_contains "$out" "Route:      seller-outreach" "a brief over 128 KiB is classified"
+# A local send writes the inbox directly, so the remote encoded cap does not
+# apply: a brief past that cap (but within one argv string) is sent whole.
+LOCALBIG="$TDIR/local-big.md"
+{ printf 'seller leads\n'; head -c 100000 /dev/zero | tr '\0' 'l'; printf '\n'; } > "$LOCALBIG"
+rm -f "$TDIR/argv"
+"$DISPATCH" --brief "$LOCALBIG" --execute >/dev/null 2>&1 || fail "a brief over the remote cap to a local secondmate must be sent"
+[ "$(tail -n +3 "$TDIR/argv")" = "$(cat "$LOCALBIG")" ] || fail "a brief over the remote cap must reach a local fm-send.sh whole"
+# A remote secondmate's send rides one ssh argument, so it is capped.
+printf 'kind=secondmate\nremote_host=box\n' > "$FAKE/state/seller-outreach.meta"
 rm -f "$TDIR/argv"
 code=0; err=$("$DISPATCH" --brief "$HUGE" --execute 2>&1 >/dev/null) || code=$?
 [ "$code" -eq 2 ] || fail "an oversized --execute message must be refused with exit 2, got $code"
@@ -336,10 +345,10 @@ rm -f "$TDIR/argv"
 code=0; "$DISPATCH" --brief "$OVER" --execute >/dev/null 2>&1 || code=$?
 [ "$code" -eq 2 ] || fail "a message one byte over the encoded cap must exit 2, got $code"
 [ ! -e "$TDIR/argv" ] || fail "a message over the encoded cap must not reach fm-send.sh"
-[ ! -e "$TDIR/argv" ] || fail "an oversized message must not reach fm-send.sh"
 code=0; json=$("$DISPATCH" --brief "$HUGE" --json --execute 2>/dev/null) || code=$?
 [ "$code" -eq 2 ] || fail "an oversized --json --execute message must exit 2, got $code"
 [ "$(printf '%s' "$json" | field dispatched)" = False ] || fail "an oversized message must be reported undispatched"
+printf 'kind=secondmate\n' > "$FAKE/state/seller-outreach.meta"
 
 # A registry whose last entry has no trailing newline still offers that entry.
 REG_NONL="$TDIR/no-newline.md"
@@ -378,6 +387,22 @@ tail -c "$(wc -c < "$BRIEF")" "$TDIR/body" > "$TDIR/body-tail"
 [ "$(cksum < "$TDIR/body-tail")" = "$(cksum < "$BRIEF")" ] || fail "inbox body must end with the brief byte-identical: $(od -c "$TDIR/body" | head)"
 task=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["state"]["task"])')
 [ "$task" = "$(python3 -c 'import sys; print(" ".join(open(sys.argv[1], "rb").read().decode().split()))' "$BRIEF")" ] || fail "the Jev request must collapse the brief to one line: $task"
+
+# Invalid UTF-8 in a brief reaches the inbox unchanged; Jev gets valid text.
+BADBRIEF="$TDIR/bad-utf8.md"
+printf 'seller leads \377\376 caf\351 \300\257 \355\240\200 done\n' > "$BADBRIEF"
+PATH="$TDIR/fakebin:$PATH" FM_ROOT_OVERRIDE="$REAL" FM_HOME="$REAL" FM_SEND_SETTLE=0 \
+  "$REAL/bin/fm-route-dispatch.sh" --brief "$BADBRIEF" --execute >/dev/null 2>&1 || fail "an invalid-UTF-8 dispatch failed"
+bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$REAL/state/seller-outreach.inbox/002.msg" > "$TDIR/bad-body"
+tail -c "$(wc -c < "$BADBRIEF")" "$TDIR/bad-body" > "$TDIR/bad-body-tail"
+[ "$(cksum < "$TDIR/bad-body-tail")" = "$(cksum < "$BADBRIEF")" ] || fail "inbox body must end with the invalid-UTF-8 brief byte-identical: $(od -c "$TDIR/bad-body" | tail -3)"
+last_request | python3 -c 'import json,sys; t=json.load(sys.stdin)["body"]["state"]["task"]; sys.exit(0 if t.startswith("seller leads \ufffd") else 1)' || fail "Jev must get a replacement-decoded view of invalid bytes"
+cmd=$("$ROUTER" --brief "$BADBRIEF" | sed -n 's/^dispatch_cmd=//p')
+rm -f "$TDIR/argv"
+bash -c "$cmd"
+# The fake fm-send.sh appends one newline after the message.
+tail -n +3 "$TDIR/argv" | head -c "$(wc -c < "$BADBRIEF")" > "$TDIR/bad-argv"
+[ "$(cksum < "$TDIR/bad-argv")" = "$(cksum < "$BADBRIEF")" ] || fail "dispatch_cmd must carry invalid UTF-8 bytes intact"
 
 # A remote secondmate receives a brief at the encoded cap through the real
 # fm-on.sh, byte-identical, and every argument fits Linux's per-argument limit.
