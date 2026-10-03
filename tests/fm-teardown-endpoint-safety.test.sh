@@ -1095,7 +1095,8 @@ test_unclaimed_duplicate_requires_records_only_release() {
   git -C "$dir/project" branch fm/stale-task
   fm_write_meta "$dir/home/state/stale-two.meta" \
     "window=firstmate:fm-stale-two" "endpoint_task_id=stale-two" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task"
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task" \
+    "spawn_gen=spawn-stale-two"
   if command -v tasks-axi >/dev/null 2>&1; then
     cat > "$dir/home/.tasks.toml" <<'TOML'
 backend = "markdown"
@@ -1107,6 +1108,8 @@ TOML
       > "$dir/home/data/backlog.md"
     tasks-axi add stale-task "stale duplicate" --kind ship --file "$dir/home/data/backlog.md" >/dev/null
     tasks-axi start stale-task --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi add stale-two "second stale duplicate" --kind ship --file "$dir/home/data/backlog.md" >/dev/null
+    tasks-axi start stale-two --file "$dir/home/data/backlog.md" >/dev/null
   fi
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -1140,6 +1143,9 @@ TOML
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
+  # The guard checks below rewrite a bare stale record; the backlog gate (and its
+  # spawn_gen requirement) is already covered above, so take it out of the way.
+  rm -f "$dir/home/.tasks.toml" "$dir/home/data/backlog.md"
   claim_pool_slot "$dir" live-task
   fm_write_meta "$dir/home/state/stale-task.meta" \
     "window=firstmate:fm-stale-task" "endpoint_task_id=stale-task" \
@@ -1162,8 +1168,12 @@ TOML
 test_records_only_release_uses_landed_work_proofs() {
   local dir unique current
   dir=$(stage_unclaimed_duplicate duplicate-unlanded ship "branch=fm/stale-task")
+  # The commit must change content: an empty change is already in the default
+  # branch by content, which ordinary teardown rightly counts as landed.
+  unique=$(printf '100644 blob %s\tunique.txt\n' \
+    "$(printf 'unique\n' | git -C "$dir/project" hash-object -w --stdin)" | git -C "$dir/project" mktree)
   unique=$(printf 'unique\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
-    commit-tree 'HEAD^{tree}' -p HEAD)
+    commit-tree "$unique" -p HEAD)
   git -C "$dir/project" update-ref refs/heads/fm/stale-task "$unique"
   expect_release_refused "$dir" stale-task "not landed" "unique unlanded commit"
 
