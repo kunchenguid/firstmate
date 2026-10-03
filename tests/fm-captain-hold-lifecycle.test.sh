@@ -807,6 +807,28 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+test_completion_keeps_pr_identity_parseable() {
+  local home id
+  home=$(make_home completion-pr-identity)
+  id=sample-pr-review
+  tasks_in "$home" add "$id" "Review sample PR" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create PR review origin"
+  write_origin_meta "$home" "$id"
+  cat >> "$home/state/$id.meta" <<'EOF'
+pr=https://github.com/example/repo/pull/802
+pr_head=0123456789abcdef0123456789abcdef01234567
+EOF
+
+  run_captain "$home" complete "$id" --none >/dev/null \
+    || fail "could not record completion of PR review origin"
+  bash -c '. "$1"; fm_pr_metadata_identity_parse "$2"' _ \
+    "$ROOT/bin/fm-pr-lib.sh" "$home/state/$id.meta" \
+    || fail "completion made the recorded PR identity unparseable"
+  assert_grep "decisions_reviewed=1" "$home/state/$id.meta" \
+    "completion review attestation missing"
+  pass "captain-hold completion keeps a recorded PR identity parseable"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -4639,6 +4661,7 @@ test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
+test_completion_keeps_pr_identity_parseable
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

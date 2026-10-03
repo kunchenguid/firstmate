@@ -358,6 +358,9 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# After the single pr= identity line, only valid pr_head= values and the
+# explicitly allowlisted Relay carriers below may appear. Writers must keep
+# unrelated metadata before that tail or an armed merge poll fails validation.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

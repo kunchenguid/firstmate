@@ -1731,7 +1731,7 @@ reconcile_note() {
 
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc transfers=() resolved
-  local resolved_how attested_by_prefix='' origin_state unrecorded_origin=''
+  local resolved_how attested_by_prefix='' origin_state unrecorded_origin='' decision_meta_tmp
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
   validate_slug origin-id "$origin"
   shift
@@ -1786,7 +1786,25 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      # Insert the review attestation before the preserved tail to satisfy the
+      # identity parser's ordering contract (fm_pr_metadata_identity_parse,
+      # bin/fm-pr-lib.sh).
+      decision_meta_tmp=$(mktemp "${meta}.decisions.XXXXXX") \
+        || fail "could not stage decision metadata for $origin"
+      if ! awk -F= -v keys="$keys" '
+          BEGIN { pending = "decisions_reviewed=1\ndecision_keys=" keys }
+          $1 == "decisions_reviewed" || $1 == "decision_keys" { next }
+          !inserted && ($1 == "pr" || $1 == "pr_head" || $1 ~ /^x_/) {
+            print pending
+            inserted = 1
+          }
+          { print }
+          END { if (!inserted) print pending }
+        ' "$meta" > "$decision_meta_tmp" \
+        || ! fm_backlog_atomic_transition publish "$decision_meta_tmp" "$meta" "task record" "$STATE"; then
+        rm -f "$decision_meta_tmp"
+        fail "could not record decision review metadata for $origin"
+      fi
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0

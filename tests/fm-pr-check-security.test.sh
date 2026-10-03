@@ -16,6 +16,7 @@ POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 REGISTER="$ROOT/bin/fm-check-register.sh"
+CONTROL="$ROOT/bin/fm-control.sh"
 TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 fm_git_identity fmtest fmtest@example.invalid
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -3439,6 +3440,183 @@ SH
   pass "device re-record publication waits without rewriting its registration"
 }
 
+# A minimal tmux stub for driving a real bin/fm-control.sh relaunch: pane state
+# lives in files under FM_FAKE_DIR, matching the model in
+# tests/fm-control-relaunch.test.sh's make_tmux_stub. Only the operations a
+# relaunch actually exercises are implemented; everything else is a silent
+# no-op, which is safe because no assertion below depends on it.
+relaunch_make_tmux_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift
+    literal=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) shift 2 ;;
+        -l) literal=1; shift ;;
+        *) break ;;
+      esac
+    done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      case "$payload" in
+        ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
+      esac
+      printf '%s\n' "$payload" >> "$D/literal"
+      case "$payload" in
+        /exit|/quit) printf 'zsh' > "$D/command" ;;
+        *'encode launch-brief'* | *'Firstmate operational input waiting: read'*)
+          cat "$D/becomes" > "$D/command" ;;
+      esac
+    else
+      printf '%s\n' "$payload" >> "$D/keys"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  capture-pane)
+    if [ -s "$D/composer" ]; then
+      printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
+  list-windows)
+    [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  new-session) exit 0 ;;
+  new-window)
+    shift
+    name=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -n) name=${2:-}; shift 2 ;;
+        -c|-t) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$name" >> "$D/windows"
+    printf '@9\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/tmux"
+}
+
+# Seeds the fake pane a relaunch reads: the live agent's reported command, what
+# it becomes once relaunched, the recorded window, and the worktree path pane
+# reads resolve to.
+relaunch_seed_fake_pane() {  # <case-dir> <id>
+  local dir=$1 id=$2
+  mkdir -p "$dir/fake"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  printf 'claude' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/becomes"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf 'firstmate' > "$dir/fake/session-name"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+}
+
+relaunch_run_control() {  # <case-dir> <args...>
+  local dir=$1; shift
+  mkdir -p "$dir/user-home"
+  # The full ambient PATH, not BASE_PATH: launching a replacement agent needs
+  # real tools (node, for claude workspace-trust pre-registration) that the
+  # gh-focused checks above deliberately exclude.
+  env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
+    -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
+}
+
+# Exercise both transaction-marker and trace-carrier writes through the real
+# control plane; the armed poll must still satisfy fm_pr_metadata_identity_parse
+# (bin/fm-pr-lib.sh) afterward.
+test_relaunch_preserves_an_armed_merge_poll() {
+  local dir out rc id=task-relaunch expected
+  dir=$(make_case relaunch-armed-poll)
+  # The spawn isolation assertion requires wt to be a REAL linked worktree of
+  # project, not the two independent repos make_case built for the checks
+  # above, which never drive a spawn.
+  rm -rf "$dir/wt"
+  fm_git_worktree "$dir/project" "$dir/wt" "task-$id"
+  write_task_meta "$dir" "$id"
+  printf 'harness=claude\nx_custom=keep-before-pr\ncustom_note=keep-after-custom\nx_request_extra=also-before-pr\nother_note=keep-after-extra\n' \
+    >> "$dir/home/state/$id.meta"
+  : > "$dir/home/config/trace-context"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s on\n' "$$" > "$dir/home/state/.trace-context-effective"
+  mkdir -p "$dir/home/data/$id"
+  cat > "$dir/home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+Exercise relaunch behavior for $id.
+
+## Firstmate spec
+Preserve the task while replacing its agent process.
+EOF
+  relaunch_make_tmux_stub "$dir"
+  relaunch_seed_fake_pane "$dir" "$id"
+
+  expected=0123456789abcdef0123456789abcdef01234567
+  FM_TEST_GH_HEAD=$expected run_check_entry "$dir" "$id" https://github.com/example/repo/pull/802 \
+    > "$dir/arm.out" 2> "$dir/arm.err" || fail "could not arm the merge poll before relaunch: $(cat "$dir/arm.err")"
+  # These Relay carriers are accepted after pr=; custom x_* fields above are
+  # not. Both groups must survive relaunch without invalidating the armed poll.
+  printf 'x_request=request-802\nx_request_ts=123\nx_followups=2\nx_platform=test\nx_reply_max_chars=500\n' \
+    >> "$dir/home/state/$id.meta"
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
+    || fail "the merge poll was not validly armed before relaunch"
+
+  out=$(FM_TRACE_CONTEXT=on relaunch_run_control "$dir" "$id" relaunch --note "continue after restart"); rc=$?
+  expect_code 0 "$rc" "relaunch of a task with an armed merge poll should succeed"$'\n'"$out"
+  grep -q '^control_relaunch_tx=' "$dir/home/state/$id.meta" \
+    || fail "relaunch did not record control_relaunch_tx, so this case did not exercise the reported ordering defect"
+  grep -Eq '^traceparent=00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$' "$dir/home/state/$id.meta" \
+    || fail "relaunch did not record traceparent, so this case did not exercise trace propagation"
+
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
+    || fail "relaunch broke the armed merge poll's metadata identity parse (issue #5802)"
+  grep -qxF 'pr=https://github.com/example/repo/pull/802' "$dir/home/state/$id.meta" \
+    || fail "relaunch lost the recorded PR"
+  grep -qxF "pr_head=$expected" "$dir/home/state/$id.meta" \
+    || fail "relaunch lost the recorded PR head"
+  # The published task-record contract preserves the custom fields' position
+  # among unrelated metadata, not merely their presence somewhere before pr=.
+  awk -F= '
+    $1 == "x_custom" { custom = NR }
+    $1 == "custom_note" { note = NR }
+    $1 == "x_request_extra" { extra = NR }
+    $1 == "other_note" { other = NR }
+    $1 == "pr" { pr = NR }
+    END { exit !(custom && custom < note && note < extra && extra < other && other < pr) }
+  ' "$dir/home/state/$id.meta" || fail "relaunch moved custom x_* fields out of their original metadata position"
+  local field
+  for field in x_custom=keep-before-pr x_request_extra=also-before-pr \
+    x_request=request-802 x_request_ts=123 x_followups=2 x_platform=test x_reply_max_chars=500; do
+    grep -qxF "$field" "$dir/home/state/$id.meta" \
+      || fail "relaunch lost preserved metadata: $field"
+  done
+  pass "fm-control relaunch: an armed merge poll stays authenticated with custom x_* fields, Relay carriers, transaction and trace context"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch
@@ -3484,3 +3662,4 @@ test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
+test_relaunch_preserves_an_armed_merge_poll
