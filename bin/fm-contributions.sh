@@ -59,8 +59,9 @@
 # A final observation applies
 # to every owner without another forge read. When the budget refuses a read
 # mid-observation, that URL's records stay untouched and the poll moves to the
-# next URL that still has a full observation reserve; only a genuine forge
-# failure or head change records an error.
+# next URL that still has a full observation reserve; only evidence the read
+# itself produced - a forge failure, a malformed response, a client death
+# outside the bound set, or a head change - records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -215,14 +216,7 @@ unmeasured() {
   : > "$TMP/budget-exhausted"
 }
 
-# fm-timeout-lib.sh owns which statuses report its bound, so ask it rather than
-# re-deriving one of them here. TERM's 143, INT's 130 and HUP's 129 reach
-# forge() when the signal hit the read and not the poll, which stays possible
-# because every mechanism runs the read in its own process group; a signal to
-# the whole group ends the poll at its own trap instead, with nothing left to
-# classify. A read any of those stopped answered nothing either. Every status
-# outside this set is unavailable evidence, including a client death by some
-# other signal such as SIGSEGV's 139.
+# The script header owns the read-outcome classification contract in full.
 read_cut_short() { # exit-status
   if fm_timed_out "$1"; then return 0; fi
   case $1 in 129|130|143) return 0 ;; esac
@@ -237,12 +231,7 @@ forge() {
   [ "$remaining" -le 5 ] || remaining=5
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # Five statuses mean the read answered nothing and so is unmeasured: 124, the
-  # bound the runner reports for its own per-read cap or the deadline; 137, a
-  # client SIGKILLed by something other than the runner, whose own escalation
-  # fm_run_external_timeout collapses into 124 and whose perl watchdog exits 124
-  # from its handler; and TERM's 143, INT's 130 and HUP's 129 aimed at the read
-  # alone. Every other nonzero status is unavailable evidence.
+  # read_cut_short sorts the status; the script header owns that contract.
   if read_cut_short "$rc"; then
     unmeasured
   elif [ "$rc" -ne 0 ]; then
