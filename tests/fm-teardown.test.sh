@@ -2133,7 +2133,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   set -e
   [ "$rc" -ne 0 ] || fail "mate-teardown-refuses: teardown proceeded with an undelivered final line"
   grep -q 'has not reached the parent channel' "$case_dir/stderr" \
-    || fail "mate-teardown-refuses: refusal did not name the parent channel: $(cat "$case_dir/stderr")"
+    || fail "mate-teardown-refuses: refusal did not name the parent channel: $(tail -6 "$case_dir/stderr")"
   [ -f "$case_dir/state/task-x1.meta" ] && [ -f "$case_dir/state/task-x1.status" ] \
     || fail "mate-teardown-refuses: refusal did not retain the task records"
   [ -f "$case_dir/state/task-x1.grok-turnend-token" ] \
@@ -2207,7 +2207,7 @@ SH
   : > "$marker"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
-    || fail "herdr-marker-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
+    || fail "herdr-marker-cleanup: forced teardown failed: $(tail -6 "$case_dir/stderr")"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
 }
@@ -2507,7 +2507,7 @@ SH
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-child-preflight: teardown continued through an unresolvable child lock"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "herdr-child-preflight: refusal erased the parent record"
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
@@ -2579,7 +2579,7 @@ SH
   [ -e "$ready" ] || fail "descendant-locks: the contending lifecycle action never acquired its lock"
 
   rc=0
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  run_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   if [ "$rc" -eq 0 ]; then
     : > "$release"
     wait "$holder_pid" 2>/dev/null || true
@@ -2604,7 +2604,7 @@ SH
   : > "$release"
   wait "$holder_pid" 2>/dev/null || true
   rc=0
-  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  run_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
   expect_code 0 "$rc" "descendant-locks: uncontended retry should complete"
   [ ! -e "$case_dir/state/task-x1.meta" ] && [ ! -d "$home" ] \
     || fail "descendant-locks: uncontended retry retained retired task state"
@@ -2622,7 +2622,7 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-child-unconfirmed-close: teardown erased records after an ambiguous close"
   [ -e "$closed" ] || fail "herdr-child-unconfirmed-close: fixture did not attempt the child close"
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-unconfirmed-close: ambiguous close erased child metadata"
@@ -2694,7 +2694,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-grandchild-unconfirmed-close: teardown erased records after an ambiguous grandchild close"
   [ -e "$closed" ] \
@@ -4217,7 +4217,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup() {
   prepare_teardown_source_copy "$case_dir"
   rm -f "$case_dir/test-root/bin/fm-transition-lib.sh"
   rc=0
-  run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  run_copied_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   assert_source_refusal_preserved_state "$case_dir" "missing-child-source" "required herdr source"
   [ -e "$home/state/child-herdr.meta" ] || fail "missing-child-source: the refusal erased the child record"
   [ -d "$home" ] || fail "missing-child-source: the refusal removed the secondmate home"
@@ -4261,7 +4261,7 @@ SH
   : > "$case_dir/tmux.log"
   rm -f "$case_dir/test-root/bin/fm-backend-hometag-lib.sh"
   rc=0
-  run_copied_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  run_copied_teardown "$case_dir" --force --retire-secondmate task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   assert_source_refusal_preserved_state "$case_dir" "missing-own-source" "required zellij source"
   [ -e "$home/state/child-tmux.meta" ] || fail "missing-own-source: the refusal erased the child record"
   [ -e "$home/state/child-tmux.status" ] || fail "missing-own-source: the refusal erased the child status"
@@ -4295,7 +4295,163 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+# --- retirement authority is scoped to persistent homes ---------------------
+# A secondmate home is retired only by authority naming that exact home, so a
+# cleanup list a caller assembled cannot retire one as a side effect. That guard
+# must stay off ordinary work: a ship or scout task tears down exactly as before,
+# and offering the authority for one of those kinds means the target was selected
+# wrong, so it refuses rather than proceeding. The authorized-retirement pass
+# lives with the secondmate fixtures in tests/fm-secondmate-safety.test.sh.
+test_ordinary_ship_teardown_needs_no_retirement_authority() {
+  local case_dir rc
+  case_dir=$(make_case ship-no-authority)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ship-no-authority: an ordinary ship teardown must still need no retirement authority"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "ship-no-authority: teardown printed a REFUSED line"
+  ! grep -q -- --retire-secondmate "$case_dir/stderr" \
+    || fail "ship-no-authority: an ordinary ship teardown demanded retirement authority"
+  assert_absent "$case_dir/state/task-x1.meta" "ship-no-authority: teardown left the task record behind"
+  pass "an ordinary ship teardown is unchanged by the secondmate retirement guard"
+}
+
+test_ordinary_scout_teardown_needs_no_retirement_authority() {
+  local case_dir rc
+  case_dir=$(make_case scout-no-authority)
+  write_meta "$case_dir" scout scout
+  wt_commit "$case_dir" "scratch investigation"
+  mkdir -p "$case_dir/data/task-x1"
+  printf '# Findings\n\nThe scratch worktree is not the work product.\n' \
+    > "$case_dir/data/task-x1/report.md"
+  # The scout's own completion gate, unrelated to retirement authority: an
+  # inventoried report is what teardown already required before this change.
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete task-x1 --none >/dev/null \
+    || fail "scout-no-authority: could not inventory the scout report"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "scout-no-authority: an ordinary scout teardown must still need no retirement authority: $(tail -6 "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "scout-no-authority: teardown printed a REFUSED line"
+  ! grep -q -- --retire-secondmate "$case_dir/stderr" \
+    || fail "scout-no-authority: an ordinary scout teardown demanded retirement authority"
+  assert_absent "$case_dir/state/task-x1.meta" "scout-no-authority: teardown left the task record behind"
+  assert_present "$case_dir/data/task-x1/report.md" "scout-no-authority: teardown discarded the report"
+  pass "an ordinary scout teardown is unchanged by the secondmate retirement guard"
+}
+
+test_retirement_authority_on_ordinary_task_refuses() {
+  local case_dir rc
+  case_dir=$(make_case ship-wrong-authority)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --retire-secondmate task-x1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "ship-wrong-authority: retirement authority was accepted for a ship task"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "ship-wrong-authority: the refusal was not stated: $(tail -6 "$case_dir/stderr")"
+  grep -Fq 'not a secondmate home' "$case_dir/stderr" \
+    || fail "ship-wrong-authority: the refusal did not name the kind mismatch: $(tail -6 "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" "ship-wrong-authority: teardown removed the record after refusing"
+  assert_present "$case_dir/wt" "ship-wrong-authority: teardown returned the worktree after refusing"
+  pass "retirement authority offered for an ordinary task refuses as a mis-selected target"
+}
+
+# A task id may legitimately begin with a dash (fm-spawn accepts one), so the
+# target collector must keep reading such an id as the target it is. Only a
+# long-option spelling is an option, otherwise a real task could never be
+# cleaned up and its worktree and treehouse lease would leak.
+test_leading_dash_task_id_is_torn_down_as_a_target() {
+  local dash_id case_dir rc
+  for dash_id in -foo --foo --force --retire-secondmate; do
+    case_dir=$(make_case "dash-id${dash_id}")
+    fm_write_meta "$case_dir/state/$dash_id.meta" \
+      "window=firstmate:fm-$dash_id" \
+      "endpoint_task_id=$dash_id" \
+      "worktree=$case_dir/wt" \
+      "project=$case_dir/project" \
+      "kind=ship" \
+      "mode=local-only" \
+      "spawn_gen=teardown-test-dash-id"
+    wt_commit "$case_dir" "fix the thing"
+    add_fork_with_pushed_branch "$case_dir"
+
+    set +e
+    FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+      "$TEARDOWN" "$dash_id" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expect_code 0 "$rc" "dash-id: the task id $dash_id must tear down: $(tail -6 "$case_dir/stderr")"
+    ! grep -q 'unknown teardown option' "$case_dir/stderr" \
+      || fail "dash-id: the task id $dash_id was read as an option: $(tail -6 "$case_dir/stderr")"
+    assert_absent "$case_dir/state/$dash_id.meta" "dash-id: teardown left the task record $dash_id behind"
+  done
+  pass "a dash-leading task id, including one spelling an option name, is torn down as a target"
+}
+
+test_multi_target_teardown_refuses_and_names_the_secondmates() {
+  local case_dir rc
+  case_dir=$(make_case batch-refusal)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  # Two persistent homes swept into the same selection list alongside the ship task.
+  fm_write_secondmate_meta "$case_dir/state/design.meta" "$case_dir/design-home"
+  fm_write_secondmate_meta "$case_dir/state/ops.meta" "$case_dir/ops-home"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+  PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 design ops > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "batch-refusal: a three-target teardown was accepted"
+  grep -Fq '3 targets were given' "$case_dir/stderr" \
+    || fail "batch-refusal: the refusal did not name the target count: $(tail -6 "$case_dir/stderr")"
+  grep -Fq '2 of those targets are persistent secondmate homes' "$case_dir/stderr" \
+    || fail "batch-refusal: the refusal did not count the secondmates: $(tail -6 "$case_dir/stderr")"
+  grep -Fq 'design ops' "$case_dir/stderr" \
+    || fail "batch-refusal: the refusal did not name the secondmate ids: $(tail -6 "$case_dir/stderr")"
+  # Caught before the first seat dies: every record the list named is intact.
+  assert_present "$case_dir/state/task-x1.meta" "batch-refusal: the first target was torn down anyway"
+  assert_present "$case_dir/state/design.meta" "batch-refusal: a secondmate record was removed"
+  assert_present "$case_dir/state/ops.meta" "batch-refusal: a secondmate record was removed"
+  pass "a multi-target teardown refuses with the count and the secondmate ids before any change"
+}
+
 test_local_only_fork_remote_allows
+test_ordinary_ship_teardown_needs_no_retirement_authority
+test_ordinary_scout_teardown_needs_no_retirement_authority
+test_retirement_authority_on_ordinary_task_refuses
+test_multi_target_teardown_refuses_and_names_the_secondmates
+test_leading_dash_task_id_is_torn_down_as_a_target
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

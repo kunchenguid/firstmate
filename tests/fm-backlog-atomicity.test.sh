@@ -777,7 +777,7 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   id=atomic-dispatch-b1
   case_dir=$(make_home dispatch-ok "$id")
   add_item "$case_dir" "$id"
-  cp "$ROOT/.tasks.toml" "$(home_of "$case_dir")/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$(home_of "$case_dir")/.tasks.toml"
   record_tasks_axi_calls "$case_dir"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
@@ -2898,6 +2898,50 @@ test_configured_adapter_refuses_a_data_directory_outside_the_home() {
 }
 
 
+test_configured_markdown_path_receives_lifecycle_transitions() {
+  local case_dir home id out
+  id=atomic-configured-markdown-b15
+  case_dir=$(make_home configured-markdown "$id")
+  home=$(home_of "$case_dir")
+  mkdir -p "$home/records"
+  mv "$home/data/backlog.md" "$home/records/tasks.md"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "records/tasks.md"
+EOF
+  tasks-axi add "$id" "item for $id" --kind ship --file "$home/records/tasks.md" >/dev/null
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "configured-markdown spawn failed: $out"
+  [ "$(tasks-axi show "$id" --file "$home/records/tasks.md" | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+    || fail "spawn skipped the configured markdown backlog"
+  pass "configured markdown paths receive lifecycle transitions"
+}
+
+test_configured_markdown_path_preserves_hash_characters() {
+  local case_dir home id out
+  id=atomic-configured-markdown-hash-b15
+  case_dir=$(make_home configured-markdown-hash "$id")
+  home=$(home_of "$case_dir")
+  mkdir -p "$home/records"
+  mv "$home/data/backlog.md" "$home/records/tasks#1.md"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "records/tasks#1.md"
+EOF
+  tasks-axi add "$id" "item for $id" --kind ship --file "$home/records/tasks#1.md" >/dev/null
+
+  out=$(run_ship_spawn "$case_dir" "$id") \
+    || fail "hash-path configured-markdown spawn failed: $out"
+  [ "$(tasks-axi show "$id" --file "$home/records/tasks#1.md" | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+    || fail "spawn skipped the configured markdown backlog containing #"
+  pass "configured markdown paths preserve hash characters"
+}
+
 test_dispatch_and_completion_are_structural() {
   local case_dir home id meta out pr
   id=fm-structural-b15
@@ -3129,6 +3173,8 @@ test_spawn_refuses_a_special_file_tasks_config
 test_spawn_refuses_an_unsafe_tasks_config_before_exempting_a_missing_backlog
 test_spawn_refuses_a_data_directory_symlinked_outside_the_home
 test_configured_adapter_refuses_a_data_directory_outside_the_home
+test_configured_markdown_path_receives_lifecycle_transitions
+test_configured_markdown_path_preserves_hash_characters
 test_dispatch_and_completion_are_structural
 test_refused_teardown_leaves_the_item_live
 test_environment_selected_adapter_is_not_forced_to_markdown

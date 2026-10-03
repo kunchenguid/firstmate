@@ -244,12 +244,20 @@ It never initiates a survey or audit during recovery.
 
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Run `bin/fm-teardown.sh <id> --retire-secondmate <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+
+That flag is the decision, and its value must be the exact home being retired.
+Without it teardown refuses and changes nothing, so a cleanup list a caller assembled cannot retire standing homes as a side effect, and `--force` never substitutes for it: discarding work and choosing which home to retire are separate decisions.
+Offering the flag for any other kind also refuses, because that mismatch means the target was selected wrong.
+Teardown acts on one target per invocation; extra task ids are refused before anything is locked, naming the count and any secondmates among them, so a mistaken selection list is caught while every seat is still alive.
+Choose targets from `bin/fm-fleet-view.sh --cleanup-candidates`, which labels every live task with its kind and prints the command that kind takes.
+Never select them by matching a worktree path: a path suffix cannot tell a crewmate worktree of the firstmate project from a secondmate home, and both are laid out the same way.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
 Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
-A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
+An empty queue is not that check and never authorizes retirement; it is a healthy second mate waiting for routed work.
+A remote route delegates the same guard to its configured host and additionally refuses while the primary has a pending handoff outbox or unresolved routed reply.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
 When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.

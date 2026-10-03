@@ -419,6 +419,29 @@ SH
   done
 }
 
+# fm_base_path_without_node <dir> [base_path]
+# Builds <dir>/base-no-node as a symlink farm of every executable on base_path
+# EXCEPT node, and echoes that dir. A case that removes the fake node from its
+# fakebin to force a MISSING diagnostic must also keep the real host node out of
+# the lookup path (CI runners have no /bin/node; hosts with one would silently
+# answer and the MISSING contract would never fire). Usage:
+#   no_node_base=$(fm_base_path_without_node "$case_dir")
+#   PATH="$fakebin:$no_node_base" ...
+fm_base_path_without_node() {
+  local dir=$1 base=${2:-${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}}
+  local out="$dir/base-no-node" IFS=: d tool
+  mkdir -p "$out"
+  for d in $base; do
+    [ -d "$d" ] || continue
+    for tool in "$d"/*; do
+      [ -e "$tool" ] || continue
+      [ "${tool##*/}" = node ] && continue
+      [ -e "$out/${tool##*/}" ] || ln -s "$tool" "$out/${tool##*/}"
+    done
+  done
+  printf '%s\n' "$out"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

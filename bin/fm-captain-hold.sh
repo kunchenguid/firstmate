@@ -298,9 +298,25 @@ acquire_task_control_lock() {  # <task-id>
   CAPTAIN_CONTROL_LOCK="$STATE/.control-$1.lock"
   fm_lock_acquire_wait "$CAPTAIN_CONTROL_LOCK"
   CAPTAIN_CONTROL_LOCK_HELD=1
+  # Every record mutation below (the hold's `tasks-axi hold`, the answer's
+  # resolution record plus `tasks-axi done` close) must also hold the
+  # per-task record lock (state/.meta-<id>.lock) - the lock the stale sweep's
+  # reclaim and teardown's completion serialize on, in the same control-then-
+  # meta order. Without it, a hold or close landing between the sweep's final
+  # in-flight proof and its separate reopen lets the sweep resurrect a
+  # finished or newly held row as Queued.
+  CAPTAIN_META_LOCK=$(fm_meta_lock_path "$STATE/$1.meta") \
+    || fail "could not resolve task metadata lock"
+  fm_lock_acquire_wait "$CAPTAIN_META_LOCK"
+  CAPTAIN_META_LOCK_HELD=1
 }
 
 release_task_control_lock() {
+  if [ "$CAPTAIN_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$CAPTAIN_META_LOCK" || return 1
+    CAPTAIN_META_LOCK_HELD=0
+    CAPTAIN_META_LOCK=
+  fi
   [ "$CAPTAIN_CONTROL_LOCK_HELD" = 1 ] || return 0
   fm_lock_release "$CAPTAIN_CONTROL_LOCK"
   CAPTAIN_CONTROL_LOCK_HELD=0
@@ -352,9 +368,12 @@ tasks_axi() {
   local data file root backend
   data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
   root=$(fm_backlog_root "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
+  # Holds and their answers are firstmate-owned state changes, so they carry
+  # firstmate's audit identity unless the caller already exported an actor.
+  fm_tasks_axi_export_actor
   backend=$(fm_tasks_axi_backend "$root") || return 2
   if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
+    file=$(fm_backlog_markdown_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
     (cd "$root" && tasks-axi "$@" --file "$file")
   else
     (cd "$root" && tasks-axi "$@")
@@ -2000,7 +2019,7 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
     exit 2
   fi
   if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") \
+    file=$(fm_backlog_markdown_file "$data") \
       || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
     if [ ! -e "$file" ] && [ ! -L "$file" ]; then
       # No backlog file at all: this home records no captain calls, so the task
