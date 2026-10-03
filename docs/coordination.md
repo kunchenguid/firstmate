@@ -126,7 +126,7 @@ It also recognizes the complete set of those columns in previously patched versi
 Version 4 binds participant homes to host IDs and records whether a wrapper was local or remote, plus any remote exit attestation.
 Earlier active attempts are classified as local because all prior attempts required a coordinator-local PID.
 Existing participants without a host ID must bind one through `enroll` before a new attempt; a bound host ID cannot change.
-Version 5 replaces the hostname with a durable machine identity, `/etc/machine-id` on Linux or `IOPlatformUUID` on macOS, so a hostname change cannot turn a same-host home remote; the coordinator refuses to initialize or enroll a same-host home when that identity is unavailable.
+Version 5 replaces the hostname with a durable machine identity, a 32-character lowercase hexadecimal `/etc/machine-id` on Linux or `IOPlatformUUID` on macOS, so a hostname change cannot turn a same-host home remote; the coordinator refuses to initialize or enroll a same-host home when that identity is missing, empty, `uninitialized`, malformed, or unreadable through `ioreg`.
 The migration rebinds a participant whose version-4 host ID equals the coordinator's current hostname to the machine identity and clears every other host ID, so each such home must bind again once through `enroll` before its next attempt.
 It leaves recorded attempts, including their local or remote classification and host ID, unchanged.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.

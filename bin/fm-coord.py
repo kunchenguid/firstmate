@@ -56,9 +56,14 @@ def boot_id():
 def local_host_id():
     linux = Path("/etc/machine-id")
     if linux.exists():
-        return token("machine:" + linux.read_text(encoding="ascii").strip(), "coordinator host_id")
+        value = linux.read_text(encoding="ascii", errors="replace").strip()
+        require(re.fullmatch(r"[0-9a-f]{32}", value) is not None, "machine identity unavailable; /etc/machine-id is empty, uninitialized, or malformed")
+        return "machine:" + value
     if sys.platform == "darwin":
-        result = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True, check=True)
+        try:
+            result = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            raise Refusal("machine identity unavailable; ioreg failed")
         match = re.search(r'"IOPlatformUUID" = "([0-9A-Fa-f-]+)"', result.stdout)
         require(match is not None, "machine identity unavailable")
         return "machine:" + match.group(1)

@@ -55,6 +55,21 @@ coord enroll '{"request_id":"rebind-remote","home_id":"was-remote","repos":["own
 v4_state 'assert hosts["renamed-local"] == hosts["fresh"] and hosts["was-remote"] == "remote-test-host"' || fail 'a cleared v4 participant must rebind its host once through enroll'
 reject enroll '{"request_id":"rebind-remote-again","home_id":"was-remote","repos":["owner/repo"],"host_id":"other-host"}' 'a rebound host must not change again'
 pass 'v4 database migrates hostname bindings to machine identity without reinterpreting attempts'
+
+if [ ! -e /etc/machine-id ] && [ "$(uname -s)" = Darwin ]; then
+  mkdir -p "$tmp/ioreg-fail" "$tmp/ioreg-empty"
+  printf '#!/bin/sh\nexit 1\n' > "$tmp/ioreg-fail/ioreg"
+  printf '#!/bin/sh\necho no-identity\n' > "$tmp/ioreg-empty/ioreg"
+  chmod +x "$tmp/ioreg-fail/ioreg" "$tmp/ioreg-empty/ioreg"
+  for stub in ioreg-fail ioreg-empty; do
+    db=$tmp/$stub.sqlite3
+    if PATH="$tmp/$stub:$PATH" coord init > "$tmp/unexpected" 2> "$tmp/error"; then
+      fail "init must refuse when macOS machine identity is unavailable ($stub)"
+    fi
+    grep -q '^fm-coord: machine identity unavailable' "$tmp/error" || fail "$stub must surface a clear machine identity refusal"
+  done
+  pass 'unavailable macOS machine identity refuses clearly'
+fi
 db=$main_db
 
 authority_token=test-authority-credential-0123456789abcdef
