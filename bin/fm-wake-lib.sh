@@ -1432,7 +1432,7 @@ fm_task_set_lock_path() {  # <state-dir>
 # the walk at the current home, which is the correct answer rather than an
 # error: the parent lives on another machine, so its filesystem can neither hold
 # nor be observed by a lock taken here, and a remote-seeded home is itself the
-# top of the local tree that bin/fm-teardown.sh's collect_local_firstmate_states
+# top of the local tree that fm_treehouse_collect_local_states below
 # enumerates (that walk already skips remote registry entries for the same
 # reason). Refusing a remote binding instead made every operation anchored here
 # fail closed inside a remote secondmate home and its local descendants.
@@ -1495,20 +1495,209 @@ fm_treehouse_project_lock_path() {  # <project-dir>
 }
 
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
-# Require both its pool state and the same Git common directory as the recorded
-# project; an ordinary linked worktree is not evidence that Treehouse owns it.
+# Detection MUST NOT depend on recorded project identity: a foreign-clone slot
+# is still a slot, and must still take the allocation lock and ownership guards.
 fm_treehouse_pool_slot() {  # <project-dir> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
-  [ -d "$project" ] && [ -d "$worktree" ] || return 1
+  local worktree=$2 slot pool state
+  [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   pool=$(dirname "$(dirname "$slot")")
   state="$pool/treehouse-state.json"
-  [ -f "$state" ] && [ ! -L "$state" ] || return 1
-  project_common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  [ -e "$state" ] || [ -L "$state" ] ||
+    [ -e "$(dirname "$slot")/.fm-slot-owner" ] || [ -L "$(dirname "$slot")/.fm-slot-owner" ]
+}
+
+# Physical Git identity, never remote equality: Treehouse keys pools by repo
+# basename and origin URL, so independent clones can see the same pool.
+fm_treehouse_same_repository() {  # <project-dir> <worktree>
+  local project_common slot_common
+  project_common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  slot_common=$(git -C "$2" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
   slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
   [ "$project_common" = "$slot_common" ]
+}
+
+fm_treehouse_require_repository() {  # <project-dir> <worktree>
+  fm_treehouse_same_repository "$1" "$2" && return 0
+  echo "REFUSED: worktree $2 does not belong to recorded project $1 (Git common directory mismatch or unreadable identity); nothing was changed." >&2
+  echo "Preserve the slot and its claims; reconcile the actual Git pool owner before retrying. Never force a foreign-clone return." >&2
+  return 1
+}
+
+# Parse only structured pool status, using the universal Node dependency.
+# Allocation also validates availability; return needs only registered paths.
+fm_treehouse_status_paths() {  # <allocation|return>, JSON on stdin
+  node -e '
+    const rows = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const allocation = process.argv[1] === "allocation";
+    const states = ["available", "dirty", "in-use", "leased", "you\u0027re here"];
+    if (!Array.isArray(rows) || rows.some(r => !r || typeof r.path !== "string" ||
+        !r.path.startsWith("/") || /[\r\n\t]/.test(r.path) ||
+        (allocation && !states.includes(r.status)))) {
+      throw new Error("invalid Treehouse pool status");
+    }
+    for (const row of rows) console.log(allocation ? row.status + "\t" + row.path : row.path);
+  ' "$1"
+}
+
+# Prove that return's cwd selects the pool containing this exact physical slot.
+# Common Git identity alone cannot prove this when Treehouse root config changed.
+fm_treehouse_return_preflight() {  # <project-dir> <worktree>
+  local project=$1 worktree=$2 out paths path canonical target
+  FM_TREEHOUSE_RETURN_PATH=$worktree
+  fm_treehouse_pool_slot "$project" "$worktree" || return 0
+  fm_treehouse_require_repository "$project" "$worktree" || return 1
+  target=$(CDPATH='' cd -- "$worktree" && pwd -P) || return 1
+  out=$(cd "$project" && treehouse status --json) || {
+    echo "REFUSED: cannot inspect Treehouse pool for $project; structured status requires Treehouse 2.1.0 or newer (bin/fm-install-treehouse.sh owns the verified pin)." >&2
+    return 1
+  }
+  paths=$(printf '%s\n' "$out" | fm_treehouse_status_paths return) || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    canonical=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || continue
+    if [ "$canonical" = "$target" ]; then
+      # Treehouse matches paths in its state; use its proven spelling for
+      # return, while every Firstmate identity check compares physical paths.
+      FM_TREEHOUSE_RETURN_PATH=$path
+      return 0
+    fi
+  done <<< "$paths"
+  echo "REFUSED: Treehouse pool selected by $project does not contain $target; preserving the slot, processes, and metadata." >&2
+  return 1
+}
+
+# Read Treehouse's own pool resolution before get can reset an available slot.
+# Call under the project allocation lock. Unknown JSON and foreign entries fail
+# closed, even when currently leased: a process can exit between status and get.
+# A retained claim or task record requires guarded teardown before reuse.
+fm_treehouse_allocation_preflight() {  # <project-dir>
+  local project=$1 out paths slot marker
+  out=$(cd "$project" && treehouse status --json) || {
+    echo "REFUSED: cannot inspect Treehouse pool for $project; structured status requires Treehouse 2.1.0 or newer (bin/fm-install-treehouse.sh owns the verified pin)." >&2
+    return 1
+  }
+  paths=$(printf '%s\n' "$out" | fm_treehouse_status_paths allocation) || {
+    echo "REFUSED: cannot inspect Treehouse pool identity for $project before allocation" >&2
+    return 1
+  }
+  while IFS=$'\t' read -r _ slot; do
+    [ -n "$slot" ] || continue
+    fm_treehouse_require_repository "$project" "$slot" || return 1
+    fm_treehouse_require_exclusive_record "" allocation "$STATE" "$slot" || return 1
+    marker=$(fm_treehouse_slot_owner_marker "$slot") || return 1
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      echo "REFUSED: pool slot $slot retains an ownership claim at $marker; run guarded teardown for its owner before allocating again." >&2
+      return 1
+    fi
+  done <<< "$paths"
+}
+
+fm_treehouse_allocation_begin() {
+  local fm_allocation_project=$1 fm_allocation_lock
+  fm_allocation_lock=$(fm_treehouse_project_lock_path "$fm_allocation_project") || {
+    echo "error: could not resolve the shared Treehouse project lock for $fm_allocation_project" >&2
+    return 1
+  }
+  if ! fm_lock_try_acquire "$fm_allocation_lock"; then
+    echo "error: another Treehouse slot allocation or return is in progress for $fm_allocation_project; refusing to race it" >&2
+    return 1
+  fi
+  if ! fm_treehouse_allocation_preflight "$fm_allocation_project"; then
+    fm_lock_release "$fm_allocation_lock"
+    return 1
+  fi
+  printf -v "$2" '%s' "$fm_allocation_lock" || {
+    fm_lock_release "$fm_allocation_lock"
+    return 1
+  }
+}
+
+fm_treehouse_collect_local_states() {
+  local record_state=$1 root home reg line child known existing i=0
+  local -a homes
+  if ! command -v secondmate_registry_parse_line >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh
+    . "$FM_WAKE_LIB_DIR/fm-secondmate-registry-lib.sh"
+  fi
+  if ! command -v fm_meta_get >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-backend.sh
+    . "$FM_WAKE_LIB_DIR/fm-backend.sh"
+  fi
+  TREEHOUSE_OWNER_STATES=("$record_state")
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
+    return 1
+  }
+  homes=("$root")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
+      [ "$existing" != "$home/state" ] || known=1
+    done
+    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || {
+      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
+      return 1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || {
+            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$reg"
+  done
+}
+
+fm_treehouse_require_exclusive_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local slot state_dir other other_id field other_path other_slot
+  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 0
+  fm_treehouse_collect_local_states "$record_state" || return 1
+  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -e "$other" ] || [ -L "$other" ] || continue
+      [ -f "$other" ] && [ -r "$other" ] && [ ! -L "$other" ] || {
+        echo "REFUSED: unsafe task record $other; cannot prove slot exclusivity" >&2
+        return 1
+      }
+      # Identity, not spelling: the same record reached through a differently
+      # resolved state dir (e.g. a symlinked $FM_HOME) is still this record. A
+      # differently named hardlink is another task's record, so the name must
+      # match too.
+      [ "${other##*/}" = "${record_meta##*/}" ] && [ "$other" -ef "$record_meta" ] && continue
+      other_id=$(basename "$other" .meta)
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] || continue
+        other_slot=$(CDPATH='' cd -- "$other_path" 2>/dev/null && pwd -P) || continue
+        [ "$other_slot" = "$slot" ] || continue
+        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
+        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+        return 1
+      done
+    done
+  done
 }
 
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
@@ -1539,11 +1728,14 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
-# Claim a pool slot for a task, replacing whatever the previous holder left.
-# The rename is atomic, so a reader either sees the old claim or the new one.
+# Claim an unclaimed slot, or idempotently refresh this home/task's claim.
+# Never replace another owner: an exiting worker can make an occupied slot
+# available between the allocation preflight and get. The rename is atomic.
 fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   local worktree=$1 id=$2 home=$3 marker tmp
   [ -n "$id" ] || return 1
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$home"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in mine|absent) ;; *) return 1 ;; esac
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
   # move the new claim inside it and leave the slot reading as unclaimable.
@@ -1560,17 +1752,17 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
 
-# Read the claim on a pool slot and compare it with a task id.
+# Read the claim on a pool slot and compare its physical home/task identity.
 # Sets FM_TREEHOUSE_SLOT_OWNER to one of:
-#   mine   - the claim names this task
-#   other  - the claim names a different task, so the slot was reassigned
+#   mine   - the claim names this physical home and task id
+#   other  - the claim names a different home/task pair
 #   absent - no claim: the slot was taken before claims existed, or returned since
 #   unsafe - a claim file exists but cannot be read as a claim
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
-# claimant as evidence. The home is reported, never matched: a home that moved
-# must not turn a task's own slot into a refusal.
-fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+# claimant as evidence. Ownership is the pair (physical home, task id), since
+# different homes may use the same task id. A moved home requires reconciliation.
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id> [home]
+  local worktree=$1 id=$2 home=${3:-$FM_HOME} marker line owner_id='' owner_home='' task_seen=0 home_seen=0
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1582,16 +1774,24 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      task=*) owner_id=${line#task=} ;;
-      home=*) owner_home=${line#home=} ;;
+      task=*)
+        [ "$task_seen" = 0 ] || return 0
+        task_seen=1
+        owner_id=${line#task=}
+        ;;
+      home=*)
+        [ "$home_seen" = 0 ] || return 0
+        home_seen=1
+        owner_home=${line#home=}
+        ;;
     esac
   done < "$marker" || return 0
-  [ -n "$owner_id" ] || return 0
+  [ -n "$owner_id" ] && [ -n "$owner_home" ] || return 0
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ]; then
+  if [ "$owner_id" = "$id" ] && [ "$owner_home" -ef "$home" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other
@@ -1601,9 +1801,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id> [home]
   local worktree=$1 id=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$id"
+  fm_treehouse_slot_owner_state "$worktree" "$id" "${3:-$FM_HOME}"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
