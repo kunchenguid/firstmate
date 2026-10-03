@@ -955,7 +955,8 @@ EOF
 }
 
 test_spawn_refreshes_legacy_worker_roles() {
-  local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line
+  local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line provenance
+  provenance='This task was dispatched by Firstmate, the local orchestration tool the user runs to hand coding tasks to agents in disposable git worktrees; this message is its task brief, and every result it produces is reported to the user.'
   rec=$(make_home worker-roles)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
@@ -985,6 +986,10 @@ EOF
       first_line=$(sed -n '1p' "$brief")
       [ "$first_line" = '# Current worker role contract' ] ||
         fail "$project_kind $kind did not put worker identity first"
+      # An unrelated project's own instructions never explain Firstmate, so the
+      # brief itself must say who dispatched it before asserting an identity.
+      [ "$(sed -n '2p' "$brief")" = "$provenance" ] ||
+        fail "$project_kind $kind did not name its dispatcher before the worker identity"
       assert_grep 'follow this brief instead of that supervisor contract' "$brief" "$project_kind $kind omitted worker authority"
       assert_grep "$home/state/$id.inbox" "$brief" "$project_kind $kind omitted its exact steering inbox"
       assert_grep 'When this task works on Firstmate itself' "$brief" "$project_kind $kind made the exception unconditional"
