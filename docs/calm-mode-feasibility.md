@@ -17,7 +17,7 @@ Pi 0.81.1 was installed when Calm was first built, and Pi 0.82.0 was the later r
 The inspected Pi CHANGELOG shows no relevant presentation API introduced at either version, so those versions remain verification evidence rather than compatibility bounds.
 The exported classes used by the adapters (`AssistantMessageComponent` and `InteractiveMode`) are undocumented internals with no stated version guarantee.
 `tests/fm-calm-pi-extension.test.sh` records the installed Pi version as evidence without gating on it and covers both newer synthetic versions and an unavailable adapter seam.
-This host tracks Pi latest, so the version the evidence is pinned to moves; the [2026-09-07 record](#2026-09-07-pi-0851-renderer-and-export-dom-verification) owns the currently pinned version and the renderer comparison behind it.
+The [2026-10-03 record](#2026-10-03-pi-101-html-renderer-compatibility-verification) owns the latest HTML-renderer comparison; these dated observations are evidence, not version gates.
 
 ### Built-in tool override constraints
 
@@ -671,6 +671,39 @@ not ok - Pi 0.87.1 lacks the queue-retention capability Calm needs to hide queue
 ```
 
 With the queued-row adapter left uninstalled, the real-Pi Escape case failed on the listed notification, `Pi Calm listed a queued Firstmate notification`.
+
+## 2026-10-03 Pi 1.0.1 HTML-renderer compatibility verification
+
+Pi 1.0.1's shipped `dist/core/export-html/tool-renderer.js` takes a `getToolRenderers` callback where Pi 1.0.0 and 0.85.1 take `getToolDefinition`.
+Its `renderCall` and `renderResult` catch a missing callback and return `undefined`, so an older fixture can silently lose the custom HTML it is meant to assert.
+The Calm renderer fixture supplies both names through the same registered-tool lookup, preserving the real renderer and all existing export, share, and non-submit assertions on either API.
+The production extension requires no change for this seam.
+
+Verified on macOS with Node v25.9.0 using a temporary npm prefix; both `PATH` and `FM_PI_PACKAGE_DIR` select the same Pi package, and the shared installation is unchanged.
+Refresh the full renderer, lifecycle, native TUI, and export-DOM evidence with:
+
+```sh
+pi_test_prefix=$(mktemp -d)
+npm install --global --prefix "$pi_test_prefix" @earendil-works/pi-coding-agent@1.0.1
+PATH="$pi_test_prefix/bin:$PATH" \
+  FM_PI_PACKAGE_DIR="$pi_test_prefix/lib/node_modules/@earendil-works/pi-coding-agent" \
+  bash bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh
+```
+
+Observed with Pi 1.0.1:
+
+```text
+ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
+FM_TEST_END 2026-10-03T18:35:15Z tests/fm-calm-pi-extension.test.sh exit=0 duration_ms=43835 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=43932
+```
+
+Repeating the same installation and test commands with `@earendil-works/pi-coding-agent@1.0.0` also passed the complete suite through the older callback:
+
+```text
+FM_TEST_END 2026-10-03T18:36:17Z tests/fm-calm-pi-extension.test.sh exit=0 duration_ms=41855 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=41956
+```
 
 ## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
 
