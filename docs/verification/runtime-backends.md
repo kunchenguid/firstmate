@@ -2591,3 +2591,14 @@ ok - Codex codex-cli 0.159.2 / Herdr 0.9.1: unknown registration reads alive, sh
 
 The spontaneous mid-command exit reported by a worker was not reproduced by this bounded wait.
 The guard isolates its session through `bin/fm-herdr-lab.sh`, including the default-session fleet-state tripwire at teardown.
+
+## Label-less unknown registrations (the TakeOne husk)
+
+Verified on 2026-10-03 with Herdr 0.9.1 in a private lab session.
+A TakeOne worker (task t1-pm-12, harness codex) exited to its shell in the live fleet and left a registration reading `agent_status=unknown` with NO `.agent` label, observed live with `herdr agent get` on pane `w291:pZ` (read-only evidence).
+Over a pane whose process state is positively `shell`, the Codex-only unknown carve-out read `unknown`, so recovery read `unreadable` and `bin/fm-control.sh` refused both `exit` and `relaunch` ("endpoint reads 'unreadable' rather than a positively classified state").
+
+Herdr 0.9.1 refuses an empty `pane report-agent` label (`invalid_agent: agent label must not be empty`), so this body cannot be resynthesized through the CLI; the lab reproduction pins the captured incident body at the adapter seam while `pane get` and `pane process-info` answer from the real lab server over a real nested shell.
+In that lab, before the fix the pane read `unknown` and recovery `unreadable`; after the fix the same pane reads `stale-agent` and recovers `dead`, which unblocks `exit` and `relaunch` in the preserved pane.
+A label-less unknown/stale registration never reads `live`: with no label it holds no process identity to keep authoritative, so only the positive shell-only proof settles it (issue #4115's intent) and every other process view stays `unknown`.
+The portable cases, including the never-live rule and the unchanged Codex and other-harness carve-outs, are in `tests/fm-backend-herdr.test.sh` (`test_unlabeled_unknown_registration_reads_the_process_view`).
