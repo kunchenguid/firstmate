@@ -447,6 +447,11 @@ test_agy_trust_refuses_out_of_scope_paths() {
 # FM_FAKE_AGY_RACE=1 models Herdr's native busy verdict rendering one capture
 # before the dialog paints; FM_FAKE_AGY_ANSWER=stuck models a dialog whose
 # answer never turns into a busy turn.
+# FM_FAKE_AGY_OVERLAY=1 models the verified blind spot the gate's second proof
+# exists for: a full-screen overlay panel covering a turn that is already
+# streaming, so the pane carries neither statusline hint and no busy verdict is
+# ever readable. FM_FAKE_AGY_WORKER_APPEND=1 models the worker appending its
+# own status line once it has read the launched brief.
 make_agy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -462,6 +467,9 @@ fake_screen() {
       ;;
     busy)
       printf 'Generating...\n└ Tip: press f to see the full diff.\n\nesc to cancel                                Gemini 3.8 Flash · low\n'
+      ;;
+    overlay)
+      printf 'Welcome to Antigravity CLI!\n\nChoose your color scheme:\n\n> terminal\n  light\n  dark\n\n[Next]\n\n↑/↓ Navigate · enter Confirm                   Gemini 3.8 Flash · low\n'
       ;;
     racing)
       printf 'esc to cancel                                Gemini 3.8 Flash · low\n'
@@ -501,6 +509,10 @@ case "${1:-}" in
         *--prompt-interactive*)
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_AGY_STATE"
+          if [ "${FM_FAKE_AGY_WORKER_APPEND:-0}" = 1 ]; then
+            printf 'working [at=%s]: setup done\n' "$(date +%s)" \
+              >> "$FM_FAKE_AGY_WORKER_STATUS"
+          fi
           ;;
       esac
       exit 0
@@ -510,7 +522,11 @@ case "${1:-}" in
         case "$state" in
           launched)
             if fake_path_trusted; then
-              printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+              if [ "${FM_FAKE_AGY_OVERLAY:-0}" = 1 ]; then
+                printf 'overlay\n' > "$FM_FAKE_AGY_STATE"
+              else
+                printf 'busy\n' > "$FM_FAKE_AGY_STATE"
+              fi
             elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
               printf 'racing\n' > "$FM_FAKE_AGY_STATE"
             else
@@ -610,6 +626,9 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_FAKE_AGY_OVERLAY="${FM_FAKE_AGY_OVERLAY:-0}" \
+    FM_FAKE_AGY_WORKER_APPEND="${FM_FAKE_AGY_WORKER_APPEND:-0}" \
+    FM_FAKE_AGY_WORKER_STATUS="$home/state/$id.status" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
@@ -838,6 +857,64 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn() {
   pass "fm-spawn: an agy dialog that never turns busy fails the spawn and closes the endpoint"
 }
 
+test_agy_overlay_hidden_turn_is_proved_by_the_worker_status_append() {
+  local id rec out rc
+  id="agy-overlay-z14-$$"
+  rec=$(make_agy_spawn_case overlay "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_OVERLAY=1 FM_FAKE_AGY_WORKER_APPEND=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" \
+    "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "a pre-trusted worker that appended its own status must pass the gate behind an overlay: $out"
+  assert_not_contains "$out" "did not start processing its brief" \
+    "the gate failed a worker whose own status append proved it was processing"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "the gate closed the endpoint of a worker that had already reported"
+  [ "$(cat "$CASE_DIR/agy.state")" = overlay ] \
+    || fail "the overlay case must never reach a readable busy verdict (state: $(cat "$CASE_DIR/agy.state"))"
+  pass "fm-spawn: a worker status append proves a started agy turn the overlay hides from the pane"
+}
+
+test_agy_overlay_without_a_worker_append_still_fails_the_spawn() {
+  local id rec out rc
+  id="agy-overlay-mute-z15-$$"
+  rec=$(make_agy_spawn_case overlay-mute "$id")
+  read_agy_spawn_record "$rec"
+  # A status line already on file before launch is history, never proof: the
+  # gate compares against the baseline it captured, not against emptiness.
+  printf 'working [at=1700000000]: from an earlier incarnation\n' > "$HOME_DIR/state/$id.status"
+  rc=0
+  out=$(FM_FAKE_AGY_OVERLAY=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "an overlay with no busy verdict and no new worker append must not pass the gate"
+  assert_contains "$out" "did not start processing its brief in the pre-trusted worktree" \
+    "the silent overlay failed without its concrete reason"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  pass "fm-spawn: neither a pre-launch status line nor a hidden turn alone passes the gate"
+}
+
+test_agy_worker_append_never_substitutes_for_the_workspace_proof() {
+  local id rec out rc store
+  id="agy-append-untrusted-z16-$$"
+  rec=$(make_agy_spawn_case append-untrusted "$id")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  printf '%s\n' '{not json' > "$store"
+  rc=0
+  out=$(FM_FAKE_AGY_ASSUME_TRUSTED=1 FM_FAKE_AGY_WORKER_APPEND=1 run_agy_spawn "$CASE_DIR" \
+    "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a worker append on a path that was never confirmed trusted must not pass the gate"
+  assert_contains "$out" "never showed its folder-trust dialog on an unregistered worktree" \
+    "the unconfirmed workspace failed without its concrete reason"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  pass "fm-spawn: a worker status append proves processing, never which worktree the turn runs in"
+}
+
 test_agy_missing_binary_refuses_before_pane_creation() {
   local id rec out rc
   id="agy-missing-z5-$$"
@@ -914,6 +991,9 @@ test_agy_dialog_despite_registration_is_answered_once
 test_agy_unregistered_path_ignores_busy_until_the_dialog_is_answered
 test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
+test_agy_overlay_hidden_turn_is_proved_by_the_worker_status_append
+test_agy_overlay_without_a_worker_append_still_fails_the_spawn
+test_agy_worker_append_never_substitutes_for_the_workspace_proof
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring

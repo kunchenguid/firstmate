@@ -1283,13 +1283,21 @@ test_housekeeping_declared_time_controls_pause_recheck() {
   [ ! -s "$state/.subsuper-escalations" ] \
     || fail "a near-future declared time was rechecked before that time"
 
+  # Inside the ceiling, a distant declared time now extends the recheck instead
+  # of being capped at the flat cadence.
   printf 'paused: waiting for release until %s\n' "$distant" > "$state/$task.status"
   echo $((now - 300)) > "$state/.subsuper-paused-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
-    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_UNTIL_MAX_SECS=86400 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a distant declared time inside the ceiling was rechecked anyway"
+
+  echo $((now - 300)) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_UNTIL_MAX_SECS=240 housekeeping "$state"
   escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
-  [ "$escalations" -eq 1 ] || fail "a wrong-year declared time silenced daemon housekeeping beyond the cadence"
-  grep -F 'declared time is beyond the recheck cadence' "$state/.subsuper-escalations" >/dev/null \
+  [ "$escalations" -eq 1 ] || fail "a wrong-year declared time silenced daemon housekeeping beyond the ceiling"
+  grep -F 'declared time is beyond the recheck ceiling' "$state/.subsuper-escalations" >/dev/null \
     || fail "the bounded daemon recheck gave the wrong reason: $(cat "$state/.subsuper-escalations")"
   grep -F 'declared clearing time has passed' "$state/.subsuper-escalations" >/dev/null \
     && fail "the bounded daemon recheck falsely claimed the future declared time passed"
@@ -1304,7 +1312,7 @@ test_housekeeping_declared_time_controls_pause_recheck() {
     FM_STATE_OVERRIDE="$state" FM_PAUSE_RESURFACE_SECS=240 housekeeping "$state"
   escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
   [ "$escalations" -eq 2 ] || fail "a reached declared time bypassed the reset pause cadence"
-  pass "housekeeping bounds a distant declared time, defers to a near one, and rechecks a passed one at once"
+  pass "housekeeping extends a distant declared time to the ceiling, bounds it there, defers to a near one, and rechecks a passed one at once"
 }
 
 # A pane still idle but whose status is no longer a pause (the crew changed state

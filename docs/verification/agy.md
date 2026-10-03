@@ -7,11 +7,11 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
-| Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
-| Platform | Linux x64 (Arch, kernel 7.2.3) |
-| Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and the readiness gate on `agy 1.2.12` (2026-09-28) |
+| Verified | 2026-09-10; readiness gate re-verified 2026-09-28 |
+| Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable; `/opt/homebrew/bin/agy`, a Mach-O arm64 executable, for the 2026-09-28 record |
+| Platform | Linux x64 (Arch, kernel 7.2.3); macOS arm64 (Darwin 25.5.0) for the 2026-09-28 record |
+| Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout. The 2026-09-28 record read Herdr 0.8.2's own bundled agent manifest and agy's own CLI logs; it created no Herdr session and drove no Herdr lifecycle action |
 
 Every command below ran inside the disposable firstmate task worktree or the named Herdr lab session.
 No captain fleet state was touched.
@@ -69,6 +69,47 @@ It polls the pane capture, answers the dialog with a single Enter the first time
 Because Herdr's native `working` verdict is known to coexist with an unanswered dialog, the gate is strict about order: a busy verdict counts as ready only when the worktree was pre-registered before launch or the dialog has already been seen and answered; on an unregistered path it keeps polling for the dialog instead of accepting the early busy verdict.
 When the brief cannot be confirmed to run within the window (an answered dialog never turns busy, a pre-trusted pane never turns busy, or an unregistered pane never shows the dialog), the spawn fails, records `failed:` in the task status, and closes the endpoint so no orphan worker survives outside task control.
 `tests/fm-agy-harness.test.sh` covers the helper's registration and scope refusals against a throwaway store, and drives a fake pane whose dialog decision reads the store the spawn just wrote: the pre-trusted launch with no dialog, a dialog that renders anyway answered exactly once, the premature busy verdict on an unregistered path waiting for the dialog, and both fail-and-close paths.
+
+### The rendered busy verdict is not sufficient (2026-09-28, agy 1.2.12, macOS arm64, Herdr 0.8.2)
+
+Two pre-trusted `gemini-3.8-flash-high` spawns on 2026-09-24 failed the gate while their turns were genuinely streaming.
+agy's own CLI log for one of them (`~/.gemini/antigravity-cli/log/cli-20260924_143418.log`) times the whole run:
+
+```
+14:34:18  Launching CLI mode
+14:34:21  conversation_manager.go:699] Forwarding user message to conversation d5d64235-...
+14:34:25  http_helpers.go:305] URL: .../v1internal:streamGenerateContent?alt=sse
+14:34:29  ... 14:34:35 ... 14:34:40 ... 14:34:45 ... 14:34:52   (seven streaming calls)
+14:34:54  common.go:386] Terminal gone, shutting down
+```
+
+The turn was submitted 3 seconds after launch and streamed continuously for 31 seconds, and the worker appended its own `working:` status line inside the window; the gate nevertheless read no busy verdict across all 60 polls and closed the pane at 14:34:54.
+
+The cause is that the gate's two nominal sources are one source.
+agy suppresses both statusline hints (`esc to cancel` and `? for shortcuts`) while a full-screen overlay panel covers the pane - its own changelog records this as the fix for those hints "erroneously appearing inside full-screen overlay panels (such as `/changelog`, `/artifact`, and `/settings`)".
+Both spawns launched on a host where agy's first-run panel was still pending (`jetski_state.pbtxt` recorded no appearance step), so a full-screen welcome panel rendered over the streaming turn, and a pty capture of a fresh `--prompt-interactive` launch reproduced it: the final frame carried the panel's own `↑/↓ Navigate · enter Confirm` footer and neither statusline hint.
+Herdr's native verdict does not cover that blind spot, because it is rendered-pane detection too: the `agy` manifest bundled in Herdr 0.8.2 (`version = "2026.06.24.1"`) declares exactly one blocked rule and two working rules, both reading the pane -
+
+```
+[[rules]]
+id = "spinner_working"
+state = "working"
+region = "whole_recent"
+line_regex = ['^\s*[\u2800-\u28FF]+\s+\p{Alphabetic}+\w*ing\b']
+[[rules]]
+id = "background_tasks_working"
+state = "working"
+region = "bottom_non_empty_lines(5)"
+line_regex = ['(?i)\s*[1-9][0-9]*\s+task']
+```
+
+- and no `esc to cancel` rule at all (that rule belongs to the adjacent `amp` manifest).
+A pane whose spinner line is covered therefore reads `idle` natively and `unknown agy-regex` in `fm_busy_lib`, both from the same withdrawn rendering.
+
+`agy_wait_for_working` therefore accepts a second, independent proof: a status line the worker appended to `state/<id>.status` after launch, compared against a line count captured before the launch command was sent.
+Only the worker that read the launched brief can write it, no vendor rendering decision can withdraw it, and a status line already on file from an earlier incarnation is history rather than proof.
+It stays behind the same trust ordering as the busy verdict: a worker reached through an untrusted pane can read an absolute brief path and append an absolute status path from agy's own scratch directory, so the append proves processing, never which worktree the turn runs in.
+The three colocated regressions in `tests/fm-agy-harness.test.sh` drive a fake pane that reaches no readable busy verdict: the overlay case passes only on the worker's append, the same overlay with no new append still fails and closes the endpoint, and an append on a path that was never confirmed trusted still fails.
 
 ## Model and effort
 
