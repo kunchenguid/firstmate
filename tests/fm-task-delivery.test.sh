@@ -1218,6 +1218,38 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
     "the gerrit worker was not told to report each pipeline fix the squash hides"
   assert_grep 'pipeline changes: none' "$brief" \
     "the gerrit worker was not told what to report when the pipeline fixed nothing"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'pipe it on standard input to `gerrit-axi message <change> --json`' "$brief" \
+    "the gerrit worker was not told to post the pipeline summary on the change from stdin"
+  assert_no_grep 'gerrit-axi message <change> --file' "$brief" \
+    "the gerrit worker was told to write the pipeline summary to a file"
+  assert_no_grep 'mktemp' "$brief" \
+    "the gerrit worker was told to create a summary file outside its worktree"
+  assert_grep 'If you publish again after posting, post a fresh summary the same way on the new patch set' "$brief" \
+    "a republish after the summary leaves the final patch set without its own summary"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'with `{patch_set}` from the message posted on the final patch set' "$brief" \
+    "the gerrit ready report does not name the final patch set's summary"
+  assert_grep 'the same content a GitHub pull request'"'"'s pipeline section carries' "$brief" \
+    "the gerrit summary message was not tied to what a pull request's pipeline section shows"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'the summary says `no findings`' "$brief" \
+    "the gerrit worker was not told what the summary says when the pipeline found nothing"
+  assert_grep 'done [at=<epoch>]: PR {change url} published for review; pipeline summary posted on patch set {patch_set}' "$brief" \
+    "the gerrit ready report does not name the summary message"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Its first line is exactly `no-mistakes pipeline summary for run <run id>`' "$brief" \
+    "the gerrit worker was not given the summary line its ready report is checked for"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'each step'"'"'s entry is a line starting with that step'"'"'s name and a colon (`review: ...`)' "$brief" \
+    "the gerrit worker was not given the entry shape its ready report is checked for"
+  assert_grep 'so a skipped or failed post cannot pass' "$brief" \
+    "the gerrit worker was not told its ready report is checked against the posted summary"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'The one exception is the `gerrit-axi message <change>` your Definition of done names, which posts the pipeline summary with no label or vote, once on each patch set you publish' "$brief" \
+    "rule 1 still forbids the one summary message the contract requires"
+  assert_grep 'post no other message on any change' "$brief" \
+    "the summary-message carve-out lets the worker post other messages"
   assert_no_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" \
     "the gerrit contract still demands a PR with green checks this forge cannot produce"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1237,6 +1269,8 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   FM_HOME="$home" "$BRIEF" forge-dod-n1 other-project --mode no-mistakes >/dev/null \
     || fail "a default-forge no-mistakes brief should scaffold"
   plain="$home/data/forge-dod-n1/brief.md"
+  assert_no_grep 'gerrit-axi message' "$plain" \
+    "a default-forge no-mistakes worker was told to post a Gerrit message"
   awk '/^You drive no-mistakes by responding to its gates/ { emit = 1 }
        emit { print }
        emit && /hard rule violation\.$/ { exit }' "$brief" > "$TMP_ROOT/forge-dod/gerrit-middle"
@@ -1464,6 +1498,12 @@ test_promotion_carries_the_forge_binding() {
   sendroot="$TMP_ROOT/forge-promote/sendroot"
   mkdir -p "$home/state" "$home/data" "$home/projects/proj" "$sendroot/bin"
   printf '%s\n' '- proj [no-mistakes forge=gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  # A gerrit-axi that has `message`, so the promotion's capability check passes
+  # on a runner with no gerrit-axi installed.
+  mkdir -p "$TMP_ROOT/forge-promote/fakebin"
+  # shellcheck disable=SC2016 # The fake's \$1 expands when it runs, not here.
+  printf '#!/bin/sh\n[ "$1" = message ] && exit 0\nexit 2\n' > "$TMP_ROOT/forge-promote/fakebin/gerrit-axi"
+  chmod +x "$TMP_ROOT/forge-promote/fakebin/gerrit-axi"
   cat > "$sendroot/bin/fm-send.sh" <<'STUB'
 #!/usr/bin/env bash
 printf '%s' "$2" > "$FM_TEST_CAPTURE"
@@ -1478,7 +1518,8 @@ STUB
   fill_brief_subsections "$home/data/$id/brief.md" \
     "Fix what the investigation found on the Gerrit project." "Carry over only the fix."
 
-  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
+  out=$(PATH="$TMP_ROOT/forge-promote/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
     || fail "promotion should take the registered forge with no flag to remember"
   payload="$TMP_ROOT/forge-promote/payload"
   ( cd "$sendroot" \
@@ -1537,6 +1578,8 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
   assert_grep 'Do NOT run /no-mistakes.' "$brief" "the direct-PR worker was not kept off the pipeline"
   assert_no_grep 'pipeline changes:' "$brief" \
     "the direct-PR worker was asked to report pipeline fixes from a pipeline it never runs"
+  assert_no_grep 'gerrit-axi message' "$brief" \
+    "the direct-PR worker was told to post a pipeline summary from a pipeline it never runs"
 
   # A stack is several changes and the merge watch follows one, so the shape is
   # refused with that reason until pinned-membership watching exists.
@@ -1612,6 +1655,60 @@ EOF
   pass "fm-project-mode: --branch-prefix resolves order-independently and defaults to the legacy fm/ prefix"
 }
 
+# The worker posts its pipeline summary only after it has published, so a
+# gerrit-axi without `message` would surface at the last step. A no-mistakes
+# ship to a Gerrit project is refused before anything exists when the installed
+# gerrit-axi cannot post one, and so is its promotion; direct-PR, which posts no
+# summary, is not held to it.
+test_gerrit_no_mistakes_requires_summary_capable_gerrit_axi() {
+  local rec home proj fakebin out status meta
+  rec=$(make_home forge-capable "- proj [no-mistakes forge=gerrit] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  # A gerrit-axi from before 0.3.0 refuses `message` as an unknown command.
+  # shellcheck disable=SC2016 # The fake's \$1 expands when it runs, not here.
+  printf '#!/bin/sh\n[ "$1" = message ] && exit 2\nexit 0\n' > "$fakebin/gerrit-axi"
+  chmod +x "$fakebin/gerrit-axi"
+  FM_HOME="$home" "$BRIEF" forge-capable-s1 proj --mode no-mistakes --forge gerrit >/dev/null \
+    || fail "a gerrit no-mistakes brief should scaffold"
+  fill_brief_subsections "$home/data/forge-capable-s1/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-capable-s1 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a no-mistakes gerrit ship launched with a gerrit-axi that cannot post its summary"
+  # shellcheck disable=SC2016 # Backticks are literal refusal text.
+  assert_contains "$out" 'posts its pipeline summary with `gerrit-axi message`, which the installed gerrit-axi does not support' \
+    "the refusal did not name the missing gerrit-axi capability"
+  assert_contains "$out" "gerrit-axi 0.3.0 or later" "the refusal did not name the release that fixes it"
+  assert_absent "$home/state/forge-capable-s1.meta" "the refused spawn still recorded a task"
+
+  FM_HOME="$home" "$BRIEF" forge-capable-s2 proj --mode direct-PR --forge gerrit >/dev/null \
+    || fail "a gerrit direct-PR brief should scaffold"
+  fill_brief_subsections "$home/data/forge-capable-s2/brief.md" "Publish the change." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" forge-capable-s2 "$proj" claude --mode direct-PR --yolo off 2>&1)
+  assert_not_contains "$out" "does not support" "a direct-PR ship was held to a summary it never posts"
+
+  meta="$home/state/forge-capable-p1.meta"
+  printf 'window=fm-forge-capable-p1\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$proj" > "$meta"
+  FM_HOME="$home" "$BRIEF" forge-capable-p1 proj --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  fill_brief_subsections "$home/data/forge-capable-p1/brief.md" "Fix what the scout found." "Carry over only the fix."
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" forge-capable-p1 --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a promotion to a no-mistakes gerrit ship accepted a gerrit-axi that cannot post its summary"
+  assert_contains "$out" "the installed gerrit-axi does not support" \
+    "the promotion refusal did not name the missing gerrit-axi capability"
+  grep -qx 'kind=scout' "$meta" || fail "the refused promotion still flipped the task record"
+
+  # The same launch with a gerrit-axi that has `message` is not refused for it.
+  # shellcheck disable=SC2016 # The fake's \$1 expands when it runs, not here.
+  printf '#!/bin/sh\n[ "$1" = message ] && exit 0\nexit 0\n' > "$fakebin/gerrit-axi"
+  out=$(run_spawn "$home" "$fakebin" forge-capable-s1 "$proj" claude --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "gerrit-axi" "a capable gerrit-axi was still refused"
+  pass "forge=gerrit: a no-mistakes ship needs a gerrit-axi that can post its summary before it launches"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -1635,6 +1732,7 @@ test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
+test_gerrit_no_mistakes_requires_summary_capable_gerrit_axi
 test_spawn_and_promote_require_filled_task_subsections
 test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"
