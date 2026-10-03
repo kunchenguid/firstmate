@@ -17,6 +17,9 @@ TMP_ROOT=$(fm_test_tmproot fm-live-lab)
 LIVE_LAB="$ROOT/bin/fm-live-lab.sh"
 TRUST="$ROOT/bin/fm-claude-trust.sh"
 
+# lab_socket_of <tmux-dir>: the explicit socket a lab's TMUX_TMPDIR names.
+lab_socket_of() { printf '%s/tmux-%s/default\n' "$1" "$(id -u)"; }
+
 live_lab_cleanup() {
   local dir pid marker
   for marker in "$TMP_ROOT/orphan-child" "$TMP_ROOT/late-child" "$TMP_ROOT/reused-child"; do
@@ -25,7 +28,9 @@ live_lab_cleanup() {
   while read -r pid; do [ -n "$pid" ] && { pkill -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }; done < "$TMP_ROOT/pids"
   while read -r dir; do
     [ -n "$dir" ] || continue
-    env -u TMUX TMUX_TMPDIR="$dir" tmux kill-server 2>/dev/null
+    # Only the explicit lab socket, and only while it exists: a missing
+    # TMUX_TMPDIR would make tmux fall back to the user's default server.
+    [ ! -S "$(lab_socket_of "$dir")" ] || env -u TMUX tmux -S "$(lab_socket_of "$dir")" kill-server 2>/dev/null
     case "$dir" in /tmp/fml.*) rm -rf "$dir" ;; esac
   done < "$TMP_ROOT/tmux-dirs"
   rm -rf "/tmp/fm-labt$$-mate" "/tmp/fm-labt$$-worker" "/tmp/fm-labt$$-other" /tmp/fm-labt"$$"-*+*
@@ -34,6 +39,8 @@ live_lab_cleanup() {
 trap live_lab_cleanup EXIT
 
 command -v tmux >/dev/null 2>&1 || { echo "ok - skipped: tmux is not installed"; exit 0; }
+# shellcheck disable=SC2119 # No bases: the gate checks the real default ones.
+fm_tmux_isolation_gate
 
 FAKE_HOME="$TMP_ROOT/fakehome"
 mkdir -p "$FAKE_HOME/.pi/agent" "$FAKE_HOME/.treehouse/existing-pool"
@@ -64,6 +71,7 @@ make_lab() {
   git -C "$home" -c user.name=t -c user.email=t@example.invalid commit -qm lab
   tmux_dir=$("$ROOT/bin/fm-lab-home.sh" tmux-dir "$home") || fail "lab tmux dir"
   printf '%s\n' "$tmux_dir" >> "$TMP_ROOT/tmux-dirs"
+  mkdir -m 700 "$tmux_dir/tmux-$(id -u)" || fail "lab tmux socket dir"
   find "$HOME/.treehouse" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort > "$root/.treehouse-before"
   {
     echo 'fm-live-lab v1'
@@ -120,7 +128,8 @@ lab_tmux() {  # <root> <tmux args...>
   local dir
   dir=$(sed -n 's/^tmux_dir=//p' "$1/.fm-live-lab")
   shift
-  env -u TMUX TMUX_TMPDIR="$dir" tmux "$@"
+  [ -n "$dir" ] || return 1
+  env -u TMUX tmux -S "$(lab_socket_of "$dir")" "$@"
 }
 
 start_sleeper() {
@@ -637,11 +646,14 @@ SH
 cat > "$WORKSRC/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
 id=$1
-tmux new-window -d -t firstmate: -n "fm-$id" -c "$FM_HOME" 'exec sleep 45 >/dev/null 2>&1' || exit 1
+# The lab's explicit socket, never TMUX_TMPDIR alone, which falls back to the
+# user's default server when its directory is missing.
+lab_tmux() { tmux -S "${TMUX_TMPDIR:?}/tmux-$(id -u)/default" "$@"; }
+lab_tmux new-window -d -t firstmate: -n "fm-$id" -c "$FM_HOME" 'exec sleep 45 >/dev/null 2>&1' || exit 1
 # A missing =name can silently resolve to the current window: verify the name.
 for (( n=0; n<30; n++ )); do
-  if tmux list-windows -t firstmate -F '#{window_name}' | grep -Fxq "fm-$id"; then
-    pid=$(tmux display-message -p -t "firstmate:=fm-$id" '#{pane_pid}')
+  if lab_tmux list-windows -t firstmate -F '#{window_name}' | grep -Fxq "fm-$id"; then
+    pid=$(lab_tmux display-message -p -t "firstmate:=fm-$id" '#{pane_pid}')
     [ -z "$pid" ] || break
   fi
   sleep 0.1

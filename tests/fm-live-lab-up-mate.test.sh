@@ -5,6 +5,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 command -v tmux >/dev/null 2>&1 || { echo 'ok - skipped: tmux is not installed'; exit 0; }
+# shellcheck disable=SC2119 # No bases: the gate checks the real default ones.
+fm_tmux_isolation_gate
 TMP_ROOT=$(fm_test_tmproot fm-live-up-mate)
 export HOME="$TMP_ROOT/user"
 mkdir -p "$HOME/.pi/agent" "$HOME/.treehouse" "$TMP_ROOT/source/bin" "$TMP_ROOT/fakebin"
@@ -25,8 +27,11 @@ fi
 SH
 cat > "$TMP_ROOT/source/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
-tmux new-window -d -t firstmate: -n "fm-$1" -c "$FM_HOME/../mate" 'exec sleep 45' || exit 1
-pid=$(tmux display-message -p -t "firstmate:=fm-$1" '#{pane_pid}')
+# The lab's explicit socket, never TMUX_TMPDIR alone, which falls back to the
+# user's default server when its directory is missing.
+lab_tmux() { tmux -S "${TMUX_TMPDIR:?}/tmux-$(id -u)/default" "$@"; }
+lab_tmux new-window -d -t firstmate: -n "fm-$1" -c "$FM_HOME/../mate" 'exec sleep 45' || exit 1
+pid=$(lab_tmux display-message -p -t "firstmate:=fm-$1" '#{pane_pid}')
 printf '%s\n' "$pid" > "$FM_HOME/../mate/state/.lock"
 printf 'window=firstmate:fm-%s\n' "$1" > "$FM_HOME/state/$1.meta"
 SH

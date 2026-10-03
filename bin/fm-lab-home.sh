@@ -17,7 +17,10 @@
 # FM_HOME=<dir>; any FM_*_OVERRIDE relocation defeats the allowance.
 # tmux-dir is the single owner of the short private socket directory: callers
 # use TMUX_TMPDIR=<printed-dir> and call teardown from their cleanup trap after
-# killing only the server addressed through that directory.
+# killing only their own server by its explicit socket,
+# tmux -S <printed-dir>/tmux-<uid>/<name>, and only while that socket exists:
+# TMUX_TMPDIR alone silently falls back to /tmp/tmux-<uid> once the directory
+# is gone, which reaches the user's default server.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
