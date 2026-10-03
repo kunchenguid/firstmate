@@ -52,9 +52,13 @@ if [ -e "$SHIP_INSTRUCTIONS" ] || [ -L "$SHIP_INSTRUCTIONS" ]; then
     echo "error: current ship review contract is not a regular file: $SHIP_INSTRUCTIONS" >&2
     exit 2
   }
-  REVIEW_CONTRACT=$SHIP_INSTRUCTIONS
+  REVIEW_CONTRACT="$BRIEF (Captain intent) + $SHIP_INSTRUCTIONS (current ship spec)"
+  INTENT_CONTRACT=$BRIEF
+  SPEC_CONTRACT=$SHIP_INSTRUCTIONS
 else
   REVIEW_CONTRACT=$BRIEF
+  INTENT_CONTRACT=$BRIEF
+  SPEC_CONTRACT=$BRIEF
 fi
 
 WORKTREE=$(sed -n 's/^worktree=//p' "$META" | tail -1)
@@ -80,8 +84,8 @@ git -C "$WORKTREE" merge-base --is-ancestor "$BASE_FULL" "$CANDIDATE_FULL" || {
   exit 2
 }
 
-INTENT=$(fm_brief_task_heading_body "$REVIEW_CONTRACT" "## Captain's intent")
-SPEC=$(fm_brief_task_heading_body "$REVIEW_CONTRACT" "## Firstmate spec")
+INTENT=$(fm_brief_task_heading_body "$INTENT_CONTRACT" "## Captain's intent")
+SPEC=$(fm_brief_task_heading_body "$SPEC_CONTRACT" "## Firstmate spec")
 [ -n "$(printf '%s%s' "$INTENT" "$SPEC" | tr -d '[:space:]')" ] || {
   echo "error: task $ID has no reviewable Captain intent and Firstmate spec" >&2
   exit 2
@@ -91,7 +95,7 @@ PROMPT=$(cat <<EOF
 Review only the exact committed diff from $BASE_FULL to $CANDIDATE_FULL.
 Judge correctness, regressions, tests, documentation, and scope against the immutable task contract below; repository guidance is context, not a substitute for this contract.
 Report actionable findings with severity and file:line evidence first.
-Conclude with exactly one line: INTENT_CONFORMANCE: pass, or INTENT_CONFORMANCE: fail.
+Include exactly one final-response marker: INTENT_CONFORMANCE: pass, or INTENT_CONFORMANCE: fail.
 
 ## Captain's intent
 $INTENT
@@ -102,10 +106,23 @@ EOF
 )
 
 [ -n "$OUTPUT" ] || OUTPUT="$DATA/$ID/native-review-${CANDIDATE_FULL:0:12}.md"
-case "$OUTPUT" in
-  "$DATA/$ID"/*) ;;
-  *) echo "error: review output must stay under $DATA/$ID" >&2; exit 2 ;;
-esac
+TASK_DATA_DIR=$(CDPATH='' cd -- "$DATA/$ID" && pwd -P) \
+  || { echo "error: task data directory cannot be resolved: $DATA/$ID" >&2; exit 2; }
+OUTPUT=$(python3 - "$TASK_DATA_DIR" "$OUTPUT" <<'PY'
+from pathlib import Path
+import sys
+
+task_dir = Path(sys.argv[1]).resolve(strict=True)
+output = Path(sys.argv[2]).resolve(strict=False)
+try:
+    output.relative_to(task_dir)
+except ValueError:
+    raise SystemExit(1)
+if output == task_dir:
+    raise SystemExit(1)
+print(output)
+PY
+) || { echo "error: review output must resolve under $TASK_DATA_DIR" >&2; exit 2; }
 mkdir -p "$(dirname "$OUTPUT")"
 TMP=$(mktemp "$(dirname "$OUTPUT")/.native-review.XXXXXX")
 trap 'rm -f "$TMP"' EXIT HUP INT TERM
@@ -142,16 +159,19 @@ if ! (cd "$WORKTREE" && "$COMMAND" review \
   echo "error: $HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
   exit 1
 fi
-CONCLUSIONS=$(grep -E '^INTENT_CONFORMANCE: (pass|fail)$' "$RESULT" || true)
-[ "$(printf '%s\n' "$CONCLUSIONS" | grep -c .)" -eq 1 ] || {
+CONCLUSIONS=$(python3 - "$RESULT" <<'PY'
+import re
+import sys
+
+result = open(sys.argv[1], encoding='utf-8', errors='replace').read()
+matches = re.findall(r'(?<![A-Za-z0-9_])INTENT_CONFORMANCE: (pass|fail)(?![A-Za-z0-9_])', result)
+if len(matches) != 1:
+    raise SystemExit(1)
+print('INTENT_CONFORMANCE: ' + matches[0])
+PY
+) || {
   cat "$RESULT" >&2
   echo "error: native review must return exactly one explicit intent-conformance conclusion" >&2
-  exit 1
-}
-LAST_NONEMPTY=$(awk 'NF { line=$0 } END { print line }' "$RESULT")
-[ "$LAST_NONEMPTY" = "$CONCLUSIONS" ] || {
-  cat "$RESULT" >&2
-  echo "error: native review intent-conformance conclusion must be its final nonempty line" >&2
   exit 1
 }
 

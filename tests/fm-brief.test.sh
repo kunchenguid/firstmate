@@ -337,8 +337,8 @@ test_native_review_dod_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode review-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "bin/fm-native-review.sh" "$brief" \
-    "review-PR brief did not route review through its executable owner"
+  assert_contains "$(cat "$brief")" "Run \`$ROOT/bin/fm-native-review.sh\`" \
+    "review-PR brief did not route review through the supervising Firstmate root"
   assert_grep "immutable Captain intent and Firstmate acceptance" "$brief" \
     "review-PR brief did not require the task contract in review"
   assert_grep "complete final diff again" "$brief" \

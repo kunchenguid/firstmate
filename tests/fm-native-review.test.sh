@@ -122,6 +122,16 @@ Deliver the promoted implementation.
 ## Firstmate spec
 Verify the ship-time acceptance and exclusions.
 EOF
+  python3 - "$dir/home/data/task/brief.md" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace('Preserve the requested behavior.',
+                    'Deliver the promoted implementation.\n\nHonor the later authenticated clarification.')
+path.write_text(text)
+PY
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   out="$dir/home/data/task/promoted-review.md"
@@ -129,10 +139,49 @@ EOF
     --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
     || fail "promoted native review route failed"
   assert_grep "Deliver the promoted implementation" "$dir/argv" "promoted review omitted current Captain intent"
+  assert_grep "Honor the later authenticated clarification" "$dir/argv" "promoted review omitted later authenticated Captain intent"
   assert_grep "Verify the ship-time acceptance and exclusions" "$dir/argv" "promoted review omitted current ship spec"
-  assert_no_grep "Preserve the requested behavior" "$dir/argv" "promoted review reused stale scout intent"
-  assert_grep "ship-instructions.md" "$out" "promoted review evidence omitted its current contract source"
+  assert_grep "ship-instructions.md (current ship spec)" "$out" "promoted review evidence omitted its composite current contract source"
   pass "native review: promoted ships use the current ship-time contract"
+}
+
+test_structured_result_marker_is_accepted() {
+  local dir base candidate output
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  sed -i "s/printf 'No findings.\\\\nINTENT_CONFORMANCE: pass\\\\n'/printf 'Summary. INTENT_CONFORMANCE: pass\\\\n\\\\nFull review comments:\\\\nNone.\\\\n'/" "$dir/bin/traex"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  output="$dir/home/data/task/structured.md"
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$output" >/dev/null \
+    || fail "structured native review result was refused"
+  assert_grep "Full review comments:" "$output" "structured native review evidence was truncated"
+  pass "native review: structured harness result marker is parsed"
+}
+
+test_output_must_resolve_under_task_directory() {
+  local dir base candidate escaped link rc=0 out
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  escaped="$dir/home/data/escaped.md"
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" \
+    --output "$dir/home/data/task/../../escaped.md" 2>&1) || rc=$?
+  expect_code 2 "$rc" "a traversal review output must be refused"
+  assert_absent "$escaped" "traversal review output escaped the task directory"
+  assert_contains "$out" "must resolve under" "traversal-output refusal was not actionable"
+
+  link="$dir/home/data/task/linked"
+  ln -s "$dir/home/data" "$link"
+  rc=0
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$link/symlink-escaped.md" 2>&1) || rc=$?
+  expect_code 2 "$rc" "a symlink-escaped review output must be refused"
+  assert_absent "$dir/home/data/symlink-escaped.md" "symlink review output escaped the task directory"
+  pass "native review: output containment is canonical"
 }
 
 test_missing_conclusion_is_refused() {
@@ -169,5 +218,7 @@ test_missing_capability_fails_actionably
 test_moving_or_uncommitted_candidate_is_refused
 test_untracked_candidate_input_is_refused
 test_promoted_ship_uses_current_ship_contract
+test_structured_result_marker_is_accepted
+test_output_must_resolve_under_task_directory
 test_missing_conclusion_is_refused
 test_failing_conclusion_preserves_evidence_and_stops_delivery

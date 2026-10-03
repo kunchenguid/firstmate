@@ -28,6 +28,8 @@
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 
+FM_DOD_ROOT=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
   cat <<'EOF'
@@ -251,7 +253,7 @@ EOF
 Delivery contract: mode=review-PR
 This task ships **review-PR**: implement and test, run the selected harness's native review, then push the feature branch, open a PR, and verify required forge checks.
 Review only after the acceptance evidence is satisfied and the result is committed.
-Run \`bin/fm-native-review.sh\` with the exact task base, candidate commit, and an output path under the task data directory.
+Run \`$FM_DOD_ROOT/bin/fm-native-review.sh\` with the exact task base, candidate commit, and an output path under the task data directory.
 The helper supplies the immutable Captain intent and Firstmate acceptance, scope, and exclusions to the native reviewer and requires an explicit intent-conformance conclusion.
 Apply routine corrections that are already required by the accepted contract, rerun affected tests, commit, and review the complete final diff again.
 Ask-user findings are never yours to answer; append \`needs-decision\` and stop. Firstmate applies \`ask-user-authority\`.
