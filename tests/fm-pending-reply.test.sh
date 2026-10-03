@@ -2500,6 +2500,58 @@ test_mid_session_opt_in_does_not_repeat_the_reminder() {
   pass "a mid-session opt-in does not repeat the reminder"
 }
 
+# A close recorded for one escalation does not hide the next one. The record is
+# reset for a resend, the resend lands, and the missed report escalates again
+# while the flag is absent; once the flag is back, the new escalation is
+# reminded and listed.
+test_reescalation_without_the_flag_drops_the_old_dismissal() {
+  local home state corr rec status
+  home=$(setup_parent reescalate-flag-off)
+  opt_in_resurface "$home"
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(fm_pending_reply_create "$home" "$state" mate "wake after lost transport")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "prepare delivery failed"
+  fm_pending_reply_mark_delivery_unknown "$state" "$corr" || fail "mark delivery unknown failed"
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "first escalation should fire"
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
+  export FM_PENDING_REPLY_SESSION=s2
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "remind after the close failed"
+  [ -n "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] \
+    || fail "the operator close was not recorded on the record"
+
+  fm_pending_reply_reset_known_undelivered "$state" "$corr" || fail "reset for the resend failed"
+  rm -f "$home/config/pending-reply-resurface"
+  export FM_PENDING_REPLY_NOW=5000
+  fm_pending_reply_prepare_delivery "$state" "$corr" || fail "resend prepare failed"
+  fm_pending_reply_confirm_delivery "$state" "$corr" || fail "resend confirm failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  FM_PENDING_REPLY_NOW=6000 fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  FM_PENDING_REPLY_NOW=7000 fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  FM_PENDING_REPLY_NOW=8000 fm_pending_reply_maybe_escalate "$state" "$corr" || fail "second escalation should fire"
+  [ "$(phase_of "$state" "$corr")" = escalated ] || fail "phase should be escalated again"
+  [ -z "$(fm_pending_reply_get "$rec" escalation_dismissed_epoch)" ] \
+    || fail "an escalation without the flag kept the earlier dismissal"
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s2 ] \
+    || fail "the second escalation did not record the session that received it"
+
+  opt_in_resurface "$home"
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s3
+  "$ROOT/bin/fm-pending-reply-remind.sh" "$state" || fail "later-session remind failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "the earlier close hid the new escalation from the reminder"
+  "$ROOT/bin/fm-pending-reply-remind.sh" --decisions "$state" \
+    | jq -e --arg key "pending-reply-$corr" 'any(.[]; .key == $key)' >/dev/null \
+    || fail "the earlier close hid the new escalation from bearings"
+  unset FM_PENDING_REPLY_SESSION FM_PENDING_REPLY_NOW FM_HOME
+  pass "a re-escalation without the flag is not hidden by an earlier close"
+}
+
 # A close past a long status log is still found. The scan must not need the
 # whole log resident to see it.
 test_dismissal_scan_finds_a_close_after_a_long_log() {
@@ -2579,6 +2631,7 @@ test_dismissal_scan_is_saved_under_record_lock
 test_resurface_stays_off_without_the_flag
 test_resurface_flag_follows_the_config_dir
 test_mid_session_opt_in_does_not_repeat_the_reminder
+test_reescalation_without_the_flag_drops_the_old_dismissal
 test_dismissal_scan_finds_a_close_after_a_long_log
 test_failed_dismissal_read_is_not_cached_as_open
 test_queued_reminder_does_not_mark_unnamed_record

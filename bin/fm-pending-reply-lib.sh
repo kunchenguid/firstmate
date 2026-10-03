@@ -1360,9 +1360,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   # not send another wake. The reminder still runs only when the flag is on.
   fm_pending_reply_set "$rec" surfaced_session \
     "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
-  if fm_pending_reply_resurface_enabled; then
-    fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
-  fi
+  fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
   return 0
 }
 
