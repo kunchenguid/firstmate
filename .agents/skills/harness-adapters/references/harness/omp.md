@@ -36,7 +36,7 @@ The optional claude-bridge extension runs a nested executable literally named `c
 
 ## Worker posture overlay
 
-The captain's own `~/.omp/agent/config.yml` is never written; the tracked `.omp/fm-worker-overlay.yml` is passed with `--config` for the one session and pins only the settings whose captain-level values would park an unattended worker on a prompt, change its pinned model, or make its composer unreadable.
+The captain's own `~/.omp/agent/config.yml` is never written; the tracked `.omp/fm-worker-overlay.yml` is passed with `--config` for the one session and pins only the settings whose captain-level values would park an unattended worker on a prompt, change its pinned model, make its composer unreadable, or vocalize its output.
 `../../../bin/fm-spawn.sh`'s header owns the exact list and the reason for each pin.
 
 ## Extension loading
