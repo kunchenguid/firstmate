@@ -111,7 +111,22 @@ case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+    done
+    printf 'firstmate\n'; exit 0 ;;
+  capture-pane)
+    # An empty bordered composer, so the shared composer classifier reads
+    # empty. FM_FAKE_TMUX_COMPOSER=pending renders leftover composer text
+    # instead, for suites that prove a readiness gate refuses.
+    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
+      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0
+    ;;
   list-windows)
     if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"

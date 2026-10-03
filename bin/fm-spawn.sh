@@ -87,6 +87,17 @@
 #   build agent's variant, keyed to the resolved model, inside the
 #   OPENCODE_CONFIG_CONTENT JSON its launch already carries (config schema
 #   verified on opencode 1.18.32); without a model the axis is recorded but omitted.
+#   OpenCode v1 retains its --model/--prompt launch against the resolved
+#   executable. V2 workers pin the resolved model through the root model key
+#   of that same inline config (the v2 root command accepts neither --model
+#   nor an auto-submitting --prompt), start isolated with --standalone --auto
+#   so no shared service must reload and no external-directory approval can
+#   park them, then take the brief pointer only after the backend proves an
+#   empty composer. The detected form is probed on the exact executable the
+#   pane launches (resolved from PATH once and substituted as
+#   __OPENCODEBIN__), so a differing spawning/pane PATH cannot select one
+#   form and start the other; a caller-supplied raw OpenCode command
+#   bypasses detection and runs as given.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -366,11 +377,12 @@
 #                  omp's cwd-only auto-discovery cannot load it a second time)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
+#     __OPENCODEBIN__ quoted concrete opencode executable path resolved from
+#                  PATH once, so the version probe and the pane launch the
+#                  same binary (present in both the 1.x and 2.x templates)
 #     __OPENCODEMODEL__ config-default model fragment for OpenCode 2.x, whose
 #                  bare command rejects --model (empty on 1.x and whenever no
-#                  model is resolved)
-#     __OPENCODEAUTO__ --auto for OpenCode 2.x, whose external_directory guard
-#                  would otherwise park an unattended worker (empty on 1.x)
+#                  model is resolved; the v1 template carries no such slot)
 #     __BRIEFDOORBELL__ quoted printable doorbell naming the launch-brief record this
 #                  script published into the receiving home's operational inbox
 #     __WORKTREE__  absolute path to the task worktree
@@ -1907,11 +1919,13 @@ pi_supports_approve() {
 # the bare command, while 2.x rejects it there (the flag lives on the
 # single-shot `opencode run` only, which is not the persistent TUI the fleet
 # supervises). Probe the bare help for the flag, same shape as the Pi probes.
-# An absent or inconclusive probe keeps the 1.x flag form so older binaries
-# keep launching exactly as before.
+# Returns 0 when the flag is present (1.x form), 1 when the help reads fine
+# but carries no such flag (2.x form), and 2 when the help itself could not
+# be read, so callers can keep an inconclusive probe on the historical form
+# instead of mistaking a broken binary for a new major.
 opencode_bare_supports_model_flag() {
   local executable=$1 help
-  help=$("$executable" --help 2>&1) || return 1
+  help=$("$executable" --help 2>&1) || return 2
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--model([[:space:],=]|$)'
 }
 
@@ -2079,7 +2093,20 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' opencode __OPENCODEAUTO____MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode)
+    # V2's root command accepts neither --model nor an auto-submitting
+    # --prompt, so a v2 worker launches bare (isolated with --standalone, and
+    # --auto so its external-directory approvals resolve the way the 1.x
+    # allow-all config did) and takes the brief pointer only after the
+    # post-launch gate below proves an empty composer. V1 keeps the
+    # --model/--prompt launch. Both name the resolved __OPENCODEBIN__ outright
+    # so the pane starts the executable the probe checked.
+    if [ "${OPENCODE_V2:-0}" = 1 ]; then
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__OPENCODEMODEL____EFFORTFLAG__}'\'' __OPENCODEBIN__ --standalone --auto'
+    else
+      printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' __OPENCODEBIN__ __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    fi
+    ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
@@ -2255,6 +2282,8 @@ launch_template() {
   esac
 }
 
+OPENCODE_V2=0
+OPENCODE_BIN=
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
@@ -2301,6 +2330,35 @@ case "$ARG3" in
   }
   ;;
 esac
+
+# OpenCode's interactive surface is version-dependent (opencode_bare_supports_model_flag
+# owns the probe), so a normal launch is re-composed for the detected form.
+# A caller-supplied raw command is the unverified-adapter escape hatch and is
+# launched exactly as given: it skips this detection entirely, so it is never
+# replaced by the stock template and never receives the v2 post-launch pointer.
+# For a normal launch, resolve the installed CLI ONCE and probe that exact
+# executable, then launch the same resolved binary through __OPENCODEBIN__.
+# A bare `opencode` here would probe the spawning process's PATH while the pane
+# launched its own, so a differing PATH could select v1 at spawn and start v2 in
+# the pane (or the reverse); the resolved path makes probe and pane agree.
+# An inconclusive probe (help unreadable) keeps the historical 1.x flag form,
+# the same fail-safe the probe's own contract promises.
+if [ "$HARNESS" = opencode ] && [ "$RAW_LAUNCH" = 0 ]; then
+  OPENCODE_BIN=$(resolve_pi_executable opencode) || {
+    echo "error: opencode executable not found on PATH; install it or select a different verified harness" >&2
+    exit 1
+  }
+  opencode_probe_rc=0
+  opencode_bare_supports_model_flag "$OPENCODE_BIN" || opencode_probe_rc=$?
+  case "$opencode_probe_rc" in
+  0 | 2) OPENCODE_V2=0 ;;
+  *) OPENCODE_V2=1 ;;
+  esac
+  if [ "$OPENCODE_V2" = 1 ]; then
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || exit 1
+  fi
+  LAUNCH=${LAUNCH//__OPENCODEBIN__/$(shell_quote "$OPENCODE_BIN")}
+fi
 
 # muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -5083,22 +5141,14 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 # A pinned Pi launch confines Pi's model lookup to the declared provider.
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG"
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
+# V2 carries no __MODELFLAG__ in its template (the bare command rejects it),
+# so the resolved model rides the config default instead. The v1 template is
+# untouched by this: its __MODELFLAG__ substitutes exactly as before.
 OPENCODEMODEL=
-OPENCODEAUTO=
-if [ "$HARNESS" = opencode ] && ! opencode_bare_supports_model_flag opencode; then
-  # 2.x form: no --model on the bare command, so the flag is dropped and the
-  # resolved model rides the config default instead. 2.x also gates reads
-  # outside the launch cwd behind external_directory (default ask), which
-  # would park an unattended worker on a permission modal the moment it
-  # touches its brief, inbox, or status paths - so the launch auto-approves
-  # everything the config does not deny, restoring the 1.x allow-all
-  # posture. A failed probe keeps the historical 1.x flag form above.
-  MODELFLAG=
-  OPENCODEAUTO="--auto "
+if [ "$OPENCODE_V2" = 1 ]; then
   OPENCODEMODEL=$(opencode_config_model_fragment "$MODEL")
 fi
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
-LAUNCH=${LAUNCH//__OPENCODEAUTO__/$OPENCODEAUTO}
 LAUNCH=${LAUNCH//__OPENCODEMODEL__/$OPENCODEMODEL}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
@@ -5416,6 +5466,36 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# V2's root command only prefills --prompt without submitting it, so the
+# launch above carries no brief: the pointer goes in only after the backend
+# proves an empty composer, in the kimi/rovo launch-then-confirm shape. A
+# composer that never reads empty refuses the spawn with a clear error rather
+# than typing the brief into a dialog, a banner, or a half-drawn TUI and
+# losing it; a submit the backend cannot confirm refuses the same way.
+if [ "$OPENCODE_V2" = 1 ]; then
+  OPENCODE_READY=0
+  OPENCODE_READY_POLLS=${FM_OPENCODE_READY_POLLS:-120}
+  OPENCODE_POLL_INTERVAL=${FM_OPENCODE_POLL_INTERVAL:-0.5}
+  opencode_poll=0
+  while [ "$opencode_poll" -lt "$OPENCODE_READY_POLLS" ]; do
+    if [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]; then
+      OPENCODE_READY=1
+      break
+    fi
+    opencode_poll=$((opencode_poll + 1))
+    [ "$opencode_poll" -ge "$OPENCODE_READY_POLLS" ] || sleep "$OPENCODE_POLL_INTERVAL"
+  done
+  if [ "$OPENCODE_READY" != 1 ]; then
+    echo "error: opencode v2 did not show a verified empty composer; brief was not sent to $T" >&2
+    exit 1
+  fi
+  OPENCODE_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  OPENCODE_SUBMIT=$(fm_backend_send_text_submit "$BACKEND" "$T" "$OPENCODE_POINTER" 3 0.5 0 "$W") || OPENCODE_SUBMIT=send-failed
+  if [ "$OPENCODE_SUBMIT" != empty ]; then
+    echo "error: opencode v2 brief submission was not confirmed ($OPENCODE_SUBMIT); inspect $T" >&2
+    exit 1
+  fi
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
