@@ -747,6 +747,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$KIND" = ship ]; then
+    case "$MODE" in
+      review-prod-only | no-mistakes | no-mistakes-prod-only)
+        echo "error: task $ID records legacy delivery mode '$MODE'; migrate it explicitly to review-PR or direct-PR before relaunch" >&2
+        exit 1
+        ;;
+    esac
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2

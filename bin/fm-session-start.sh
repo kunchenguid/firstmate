@@ -356,6 +356,11 @@ if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
     printf '●  cannot finish inside the bound is a fleet problem, not a reporting detail.\n'
     printf '%s\n' "$BAR"
   fi
+  if [ "$SESSION_START_RC" -eq 2 ] \
+    && [ "$(cat "$SESSION_START_STAGE_FILE" 2>/dev/null || true)" = legacy-daemon-active ]; then
+    rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
+    exit 2
+  fi
   rm -f "$SESSION_START_STAGE_FILE" 2>/dev/null || true
   exit 0
 fi
@@ -1010,7 +1015,19 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "Legacy mode records"
-if [ -e "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
+LEGACY_DAEMON_PID=$(cat "$STATE/.supervise-daemon.pid" 2>/dev/null || true)
+LEGACY_DAEMON_IDENTITY=$(cat "$STATE/.supervise-daemon.lock/pid-identity" 2>/dev/null || true)
+LEGACY_DAEMON_CURRENT=
+case "$LEGACY_DAEMON_PID" in
+  ''|*[!0-9]*) ;;
+  *) LEGACY_DAEMON_CURRENT=$(fm_pid_identity "$LEGACY_DAEMON_PID" 2>/dev/null || true) ;;
+esac
+if [ -n "$LEGACY_DAEMON_IDENTITY" ] \
+  && [ "$LEGACY_DAEMON_CURRENT" = "$LEGACY_DAEMON_IDENTITY" ]; then
+  LEGACY_DAEMON_ACTIVE=1
+  printf 'LEGACY_DAEMON_ACTIVE: pid %s still owns %s/.supervise-daemon.lock; stop that legacy daemon explicitly before arming ordinary supervision. This session will not stop it automatically.\n' \
+    "$LEGACY_DAEMON_PID" "$STATE"
+elif [ -e "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
   printf 'preserved but inactive - this version does not start a legacy away/quiet daemon; ordinary supervision remains authoritative.\n'
 else
   printf '(none)\n'
@@ -1044,7 +1061,14 @@ fi
 # printed, and whatever it has not is named as not yet confirmed.
 stage network-checks
 section "NETWORK CHECKS"
-if [ "$READ_ONLY" -eq 1 ]; then
+if [ "${LEGACY_DAEMON_ACTIVE:-0}" -ne 0 ]; then
+  cat <<EOF
+Do not arm ordinary supervision while legacy daemon pid $LEGACY_DAEMON_PID is active.
+Stop that exact legacy process explicitly, then rerun bin/fm-session-start.sh.
+This script leaves the process and all historical records untouched.
+
+EOF
+elif [ "$READ_ONLY" -eq 1 ]; then
   printf 'skipped (read-only session) - GitHub authentication and project clone refresh\n'
   printf 'were not run.\n'
   printf 'They need the fleet lock, and this session must not spawn, steer, or merge, so it\n'
@@ -1095,7 +1119,7 @@ EOF
 
 record_stage_duration complete
 
-if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+if [ "${LEGACY_DAEMON_ACTIVE:-0}" -eq 0 ] && [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
   case "$COMPLETION_PID" in
@@ -1117,4 +1141,8 @@ if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   fi
 fi
 
+if [ "${LEGACY_DAEMON_ACTIVE:-0}" -ne 0 ]; then
+  stage legacy-daemon-active
+  exit 2
+fi
 exit 0

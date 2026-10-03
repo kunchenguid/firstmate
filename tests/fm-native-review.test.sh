@@ -206,7 +206,7 @@ test_structured_result_marker_is_accepted() {
 }
 
 test_output_must_resolve_under_task_directory() {
-  local dir base candidate escaped link rc=0 out
+  local dir base candidate escaped link original_brief rc=0 out
   dir=$(make_case traex)
   write_reviewer "$dir" traex
   base=$(cat "$dir/base")
@@ -226,6 +226,14 @@ test_output_must_resolve_under_task_directory() {
     --base "$base" --candidate "$candidate" --output "$link/symlink-escaped.md" 2>&1) || rc=$?
   expect_code 2 "$rc" "a symlink-escaped review output must be refused"
   assert_absent "$dir/home/data/symlink-escaped.md" "symlink review output escaped the task directory"
+
+  original_brief=$(cat "$dir/home/data/task/brief.md")
+  rc=0
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$dir/home/data/task/brief.md" 2>&1) || rc=$?
+  expect_code 2 "$rc" "a review output that replaces its task contract must be refused"
+  assert_contains "$out" "must not replace task contract input" "contract-overwrite refusal was not actionable"
+  assert_equals "$original_brief" "$(cat "$dir/home/data/task/brief.md")" "review output replaced the immutable task contract"
   pass "native review: output containment is canonical"
 }
 

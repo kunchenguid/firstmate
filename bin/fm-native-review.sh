@@ -132,6 +132,14 @@ if output == task_dir:
 print(output)
 PY
 ) || { echo "error: review output must resolve under $TASK_DATA_DIR" >&2; exit 2; }
+for CONTRACT_INPUT in "$BRIEF" "$SHIP_INSTRUCTIONS"; do
+  [ -e "$CONTRACT_INPUT" ] || continue
+  CONTRACT_INPUT_REAL=$(CDPATH='' cd -- "$(dirname "$CONTRACT_INPUT")" && pwd -P)/$(basename "$CONTRACT_INPUT")
+  [ "$OUTPUT" != "$CONTRACT_INPUT_REAL" ] || {
+    echo "error: review output must not replace task contract input $CONTRACT_INPUT_REAL" >&2
+    exit 2
+  }
+done
 mkdir -p "$(dirname "$OUTPUT")"
 TMP=$(mktemp "$(dirname "$OUTPUT")/.native-review.XXXXXX")
 trap 'rm -f "$TMP"' EXIT HUP INT TERM

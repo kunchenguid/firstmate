@@ -2100,7 +2100,7 @@ EOF
 }
 
 test_legacy_mode_records_are_inactive() {
-  local rec root home fakebin out
+  local rec root home fakebin out rc legacy_pid legacy_identity
   rec=$(new_world legacy-mode-records)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2117,6 +2117,23 @@ EOF
   assert_contains "$out" "bin/fm-watch" "ordinary watcher instructions were not emitted"
   assert_not_contains "$out" "load /afk" "removed away skill was still advertised"
   assert_not_contains "$out" "load /quiet" "removed quiet skill was still advertised"
+
+  rm -f "$home/state/.afk" "$home/state/.afk-contract"
+  sleep 300 &
+  legacy_pid=$!
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$legacy_pid" > "$home/state/.supervise-daemon.pid"
+  legacy_identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' fixture "$ROOT" "$legacy_pid")
+  printf '%s\n' "$legacy_identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+  rc=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || rc=$?
+  kill "$legacy_pid" 2>/dev/null || true
+  wait "$legacy_pid" 2>/dev/null || true
+  expect_code 2 "$rc" "a live legacy daemon must make session start fail actionably"
+  assert_contains "$out" "LEGACY_DAEMON_ACTIVE: pid $legacy_pid" "live legacy daemon diagnostic omitted its exact process"
+  assert_contains "$out" "will not stop it automatically" "legacy daemon diagnostic did not preserve the no-auto-stop boundary"
+  assert_not_contains "$out" "ordinary supervision remains authoritative" "live legacy daemon was falsely reported inactive"
 
   pass "legacy mode records are preserved but cannot reactivate removed modes"
 }
