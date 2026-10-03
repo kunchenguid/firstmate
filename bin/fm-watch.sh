@@ -2872,6 +2872,10 @@ EOF
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  if [ "${watcher_scan_ready:-0}" -eq 0 ]; then
+    : > "$STATE/.watcher-scan-ready"
+    watcher_scan_ready=1
+  fi
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
