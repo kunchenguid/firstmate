@@ -8,7 +8,6 @@
 #   fm-task-state.sh progress <task-id>
 #   fm-task-state.sh update-progress <task-id> --expected-token TOKEN --progress '<json>'
 #   fm-task-state.sh progress-list
-#   fm-task-state.sh update-brief <task-id> --requirement=TEXT
 #
 # Legacy metadata and explicit executor=local-agent records delegate unchanged
 # to fm-crew-state.sh.
@@ -65,39 +64,6 @@ case "${1:-}" in
     . "$SCRIPT_DIR/fm-task-progress-lib.sh"
     # shellcheck disable=SC2031 # The sourced implementation uses a subshell by design.
     fm_task_progress_update "$progress_id" "$task_progress_expected" "$task_progress_json"
-    exit $?
-    ;;
-  update-brief)
-    intent_operation=$1
-    intent_id=${2:-}
-    [ -n "$intent_id" ] || {
-      echo 'REFUSED: update-brief requires an existing canonical task id and --requirement TEXT' >&2
-      exit 6
-    }
-    [ "$#" -ge 3 ] || {
-      echo 'REFUSED: update-brief requires --requirement TEXT' >&2
-      exit 6
-    }
-    shift 2
-    [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
-      echo 'REFUSED: intent updates belong to MAIN' >&2
-      exit 6
-    }
-    # The authenticated native-session reader and brief replacement share the
-    # ordinary task lease/meta boundary. They write no separate task state.
-    # shellcheck source=bin/fm-wake-lib.sh
-    . "$SCRIPT_DIR/fm-wake-lib.sh"
-    # shellcheck source=bin/fm-lease-lib.sh
-    . "$SCRIPT_DIR/fm-lease-lib.sh"
-    fm_lease_valid_id "$intent_id" || exit 2
-    fm_lease_guard "$intent_id" 'task intent update' || exit $?
-    intent_lock=$(fm_meta_lock_path "$STATE/$intent_id.meta") || exit 1
-    intent_rc=0
-    trap 'intent_rc=$?; fm_lock_release "$intent_lock"; fm_lease_guard_release; exit "$intent_rc"' EXIT
-    fm_lock_acquire_wait "$intent_lock" || exit 1
-    intent_data=${FM_DATA_OVERRIDE:-$FM_HOME/data}
-    FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$intent_data" \
-      python3 "$SCRIPT_DIR/fm-task-intent.py" "$intent_operation" "$intent_id" "$@"
     exit $?
     ;;
 esac

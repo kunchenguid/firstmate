@@ -234,7 +234,7 @@ fm_task_progress_execution_generation() { # <task>
   esac
 }
 
-# Bind a compact admission to authenticated intent and executor identity
+# Bind a compact admission to the current task brief and executor identity
 # without persisting either in the task body. A later brief correction or
 # worker replacement invalidates the read token and forces MAIN to publish a
 # fresh material next step before Branch can act again.

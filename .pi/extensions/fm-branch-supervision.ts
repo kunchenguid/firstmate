@@ -2121,7 +2121,7 @@ ${context.command}
           `The worker owns native review, corrections, tests, and branch custody; the review must bind the committed base and candidate plus the accepted intent. MAIN owns authority-bearing findings and final semantic acceptance. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
           `Use silent routine reporting after verified ordinary advancement as well as unchanged healthy observation; the next executor result receives another bounded admission without a MAIN progress rewrite. Report captain when an exact effect must be prepared by MAIN, actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
-          `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
+          `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. A changed task brief invalidates this admission. Stop after at most eight tool calls.\n` +
           JSON.stringify({ task: offer.task, goal: progress.goal, acceptance: progress.acceptance,
             current_state: progress.current_state, remaining_gap: progress.remaining_gap,
             next_step: progress.next_step, task_state: progress.task_state,

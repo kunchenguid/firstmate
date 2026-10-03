@@ -23,17 +23,6 @@ const MAX_REMINDER_INTERVALS = 10;
 const BATCH = 8;
 const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
 
-function processedRequirement(value: unknown): string {
-  if (typeof value !== "string") throw new Error("intent update requires processed requirement text in input");
-  if (!value.trim()) throw new Error("intent update input must contain non-whitespace processed requirement text");
-  if (value.length > 8192) throw new Error("intent update input exceeds the 8192-character limit");
-  if (value.includes("\0")) throw new Error("intent update input must not contain NUL characters");
-  if (/^#{1,2}(?:[ \t]+|$)/m.test(value)) {
-    throw new Error("intent update input must keep structure inside the Intent subsection; use Markdown heading level 3 or deeper");
-  }
-  return value;
-}
-
 // The existing heartbeat owner accepts and starts a bounded public readback.
 // Its receipt permits only logical-run release, not semantic task completion.
 export type ContinuationReceiver = {
@@ -87,10 +76,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  // Compatibility for dialog adapters: the native transcript owns chat evidence.
-  // Capturing a message does not enroll work or create an input obligation.
-  function capture(_text: string, _key?: string): string { return ""; }
-
   function instruction(lines: string[]): string {
     return "Unfinished task records require goal-directed MAIN follow-through:\n" +
       lines.join("\n") + "\nUse fm_task_continuation read/update for the task goal, acceptance method, current state, remaining gap and next step. " +
@@ -114,7 +99,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (!progress.recorded) {
           const reason = progress.task_state === "done"
             ? "Done row retains a nonempty compact gap; MAIN must reopen/start it before routing the recorded next step"
-            : "authenticated intent, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
+            : "task brief, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
           const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${reason}`).digest("hex");
           reconciliations.push({ task_id: id, reason, key });
           continue;
@@ -370,26 +355,5 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     },
   });
-  // Intent updates are a thin MAIN-only write into the canonical brief.
-  // The brief remains the sole intent record; no transcript source, receipt,
-  // mapping, or parallel history is created here.
-  registerFirstmateTool(pi, {
-    name: "fm_task_intent_update", label: "Update task intent",
-    description: "Replace the existing task's final Intent with explicitly supplied processed requirement text. input is the complete requirement text itself. This does not create intent history, update progress, execute work, or accept the goal.",
-    executionMode: "sequential",
-    parameters: Type.Object({ task: Type.String(),
-      input: Type.String({ description: "Complete processed requirement text that replaces the existing final Intent." }) }),
-    async execute(_id, params, _signal, _update, _ctx: ExtensionContext) {
-      try {
-        if (!owns()) throw new Error("this session does not own the fleet lock");
-        if (!atom(params.task)) throw new Error("intent update requires an existing canonical task id");
-        const requirement = processedRequirement(params.input);
-        const result = await command(["update-brief", params.task, `--requirement=${requirement}`]);
-        return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
-      } catch (error) {
-        return { content: [{ type: "text" as const, text: String(error) }], details: undefined, isError: true };
-      }
-    },
-  });
-  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: (_task?: string) => false };
+  return { preserve, sessionFile: () => context?.sessionManager.getSessionFile() };
 }

@@ -76,6 +76,36 @@ test_supported_harness_binds_contract_and_identity() {
   pass "native review: Codex and TraeX receive exact identity and task intent"
 }
 
+test_ordinary_brief_edit_rebinds_review_intent() {
+  local dir base candidate out
+  dir=$(make_case codex)
+  write_reviewer "$dir" codex
+  cat >"$dir/home/data/task/brief.md" <<'EOF'
+# Task
+## Captain's intent
+确认不是通过枚举的方式来覆盖这些场景。
+
+### 验收
+使用行为测试验证开放式分类。
+
+## Firstmate spec
+Do not widen scope.
+EOF
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  out="$dir/home/data/task/ordinary-edit-review.md"
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
+    || fail "native review rejected an ordinarily edited brief"
+  assert_grep '\u786e\u8ba4\u4e0d\u662f\u901a\u8fc7\u679a\u4e3e\u7684\u65b9\u5f0f' "$dir/argv" \
+    "native review did not receive processed Intent from an ordinary brief edit"
+  assert_grep '### \u9a8c\u6536' "$dir/argv" \
+    "native review lost multiline structured Intent from an ordinary brief edit"
+  assert_no_grep 'Preserve the requested behavior' "$dir/argv" \
+    "native review retained the stale pre-edit Intent"
+  pass "native review: ordinary brief edits replace the review Intent"
+}
+
 test_missing_capability_fails_actionably() {
   local dir base candidate out rc=0
   dir=$(make_case pi)
@@ -316,6 +346,7 @@ test_existing_review_evidence_counts_toward_cap() {
 }
 
 test_supported_harness_binds_contract_and_identity
+test_ordinary_brief_edit_rebinds_review_intent
 test_missing_capability_fails_actionably
 test_moving_or_uncommitted_candidate_is_refused
 test_candidate_change_during_review_is_refused
