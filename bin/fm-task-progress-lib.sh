@@ -36,13 +36,14 @@ fm_task_progress_sha256_file() { # <path>
   fi
 }
 
-fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD/BLOCKED
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status links link artifact
+fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD/BLOCKED/LINKS
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} out status
   FM_TASK_PROGRESS_BODY=
   FM_TASK_PROGRESS_GOAL=
   FM_TASK_PROGRESS_STATE=
   FM_TASK_PROGRESS_HELD=
   FM_TASK_PROGRESS_BLOCKED=
+  FM_TASK_PROGRESS_LINKS=
   out=$(fm_backlog_row_show "$data" "$1" --full)
   status=$?
   [ "$status" -eq 0 ] || {
@@ -57,26 +58,11 @@ fm_task_progress_detail() { # <task>; sets FM_TASK_PROGRESS_BODY/GOAL/STATE/HELD
     echo "REFUSED: could not decode task $1 goal" >&2
     return 1
   }
-  links=$(printf '%s\n' "$out" | sed -n 's/^  links: //p' | head -1 \
+  FM_TASK_PROGRESS_LINKS=$(printf '%s\n' "$out" | sed -n 's/^  links: //p' | head -1 \
     | fm_task_progress_decode_scalar) || {
     echo "REFUSED: could not decode task $1 artifact links" >&2
     return 1
   }
-  # tasks-axi's Markdown presentation appends each structured artifact value
-  # to the displayed title. Recover the original task title for compact goal
-  # identity; a genuine title correction still invalidates the scope. Strip
-  # one suffix per declared link so a title that itself ended in the same path
-  # remains intact after the backend adds its second copy.
-  while IFS= read -r link; do
-    link=${link#"${link%%[![:space:]]*}"}
-    artifact=${link#*:}
-    [ "$artifact" != "$link" ] || continue
-    case "$FM_TASK_PROGRESS_GOAL" in
-      *" $artifact") FM_TASK_PROGRESS_GOAL=${FM_TASK_PROGRESS_GOAL%" $artifact"} ;;
-    esac
-  done <<EOF
-$(printf '%s' "$links" | tr ',' '\n')
-EOF
   FM_TASK_PROGRESS_BODY=$(printf '%s\n' "$out" | sed -n 's/^  body: //p' | head -1 \
     | fm_task_progress_decode_scalar) || {
     echo "REFUSED: could not decode task $1 body" >&2
@@ -96,12 +82,51 @@ EOF
   esac
 }
 
+# Return 0 only when the configured task owner proves there is no current row,
+# 1 when a row exists, and 2 for every unreadable/ambiguous backend result.
+fm_task_progress_current_absent() { # <task>
+  local error status
+  error=$(mktemp "${TMPDIR:-/tmp}/fm-task-current.XXXXXX") || return 2
+  if fm_task_progress_detail "$1" 2>"$error"; then
+    rm -f "$error"
+    return 1
+  fi
+  status=$?
+  if grep -qx 'code: NOT_FOUND' "$error"; then
+    rm -f "$error"
+    return 0
+  fi
+  cat "$error" >&2
+  rm -f "$error"
+  [ "$status" -ne 0 ] || status=2
+  return 2
+}
+
+fm_task_progress_recover_goal() { # <task>
+  local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
+  local brief brief_digest='' generation='' artifacts
+  brief="$data/$id/brief.md"
+  if [ -f "$brief" ] && [ ! -L "$brief" ]; then
+    brief_digest=$(fm_task_progress_sha256_file "$brief") || return 1
+  fi
+  generation=$(fm_task_progress_execution_generation "$id") || return 1
+  artifacts=$(printf '%s' "$FM_TASK_PROGRESS_LINKS" | tr ',' '\n' | sed -n 's/^[[:space:]]*[^:]*://p' \
+    | jq -Rsc 'split("\n") | map(select(length > 0))') || return 1
+  FM_TASK_PROGRESS_GOAL=$(printf '%s' "$FM_TASK_PROGRESS_BODY" \
+    | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" recover-goal \
+      --task "$id" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
+      --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" \
+      --brief-sha256 "$brief_digest" --execution-generation "$generation" \
+      --artifacts-json "$artifacts") || return $?
+}
+
 fm_task_progress_read() ( # <task>
   local context
   # Keep configured-backend reads off the unbounded Pi event path.
   # shellcheck disable=SC2030 # This reader is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   fm_task_progress_detail "$1" || return $?
+  fm_task_progress_recover_goal "$1" || return $?
   context=$(fm_task_progress_context "$1") || return $?
   printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
     read --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
@@ -247,6 +272,7 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
   trap 'rc=$?; [ -z "${tmp:-}" ] || rm -f -- "$tmp"; fm_lock_release "$lock"; fm_lease_guard_release; exit "$rc"' EXIT
   fm_lock_acquire_wait "$lock" || exit 1
   fm_task_progress_detail "$id" || exit $?
+  fm_task_progress_recover_goal "$id" || exit $?
   context=$(fm_task_progress_context "$id") || exit $?
   [ "$FM_TASK_PROGRESS_STATE" != "done" ] || {
     echo "REFUSED: completed task $id cannot receive progress updates" >&2
@@ -270,33 +296,39 @@ fm_task_progress_update() ( # <task> <expected-record-token> <progress-json>
 )
 
 fm_task_progress_list() ( # active task ids plus Done rows with an open compact gap
-  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing done_listing id values
+  local data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data} listing done_listing active_ids done_ids id values tmp
   # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
   listing=$(fm_backlog_row_list "$data" --state in_flight --limit 10000) || return $?
   done_listing=$(fm_backlog_row_list "$data" --state "done" --limit 10000) || return $?
-  {
-    printf '%s\n' "$listing" | awk '
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-task-progress-list.XXXXXX") || return 1
+  trap 'rm -f "$tmp"' EXIT
+  active_ids=$(printf '%s\n' "$listing" | awk '
     /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
     rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
       line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
     }
     rows { rows=0 }
-    '
-    printf '%s\n' "$done_listing" | awk '
+    ')
+  done_ids=$(printf '%s\n' "$done_listing" | awk '
       /^tasks\[[0-9]+\]\{id,state,/ { rows=1; next }
       rows && /^  [A-Za-z0-9][A-Za-z0-9._-]*,/ {
         line=$0; sub(/^  /,"",line); sub(/,.*/,"",line); print line; next
       }
       rows { rows=0 }
-    ' | while IFS= read -r id; do
-      values=$(fm_task_progress_values "$id") || exit $?
-      if [ "$values" != null ] && printf '%s' "$values" | jq -e \
-          '.remaining_gap != "" and .next_step != ""' >/dev/null; then
-        printf '%s\n' "$id"
-      fi
-    done
-  } | LC_ALL=C sort -u | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
+    ')
+  printf '%s\n' "$active_ids" >"$tmp" || return 1
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    values=$(fm_task_progress_values "$id") || return $?
+    if [ "$values" != null ] && printf '%s' "$values" | jq -e \
+        '.remaining_gap != "" and .next_step != ""' >/dev/null; then
+      printf '%s\n' "$id" >>"$tmp" || return 1
+    fi
+  done <<EOF
+$done_ids
+EOF
+  LC_ALL=C sort -u "$tmp" | jq -Rsc '{tasks:(split("\n") | map(select(length > 0)))}'
 )
 
 # Legacy teardown remains available for records that never adopted compact

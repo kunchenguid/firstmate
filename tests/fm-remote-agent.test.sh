@@ -210,6 +210,12 @@ bytedcli ida chat completion close — Options: --session-id <id>' "$model_optio
     ;;
   *" ida --region sg session raw list "*)
     case "$mode" in list-unavailable) error HTTP_503 'service unavailable'; exit 1 ;; esac
+    if [ -n "${FM_IDA_FAKE_LIST_DONE_TASK:-}" ] \
+        && mkdir "${FM_IDA_FAKE_LIST_DONE_CLAIM:?}" 2>/dev/null; then
+      TASKS_AXI_BACKEND=markdown tasks-axi done "$FM_IDA_FAKE_LIST_DONE_TASK" \
+        --file "$FM_HOME/data/backlog.md" >/dev/null \
+        || { error FIXTURE_ERROR 'could not close task at list boundary'; exit 1; }
+    fi
     rows="[]"
     if [ -s "$sessions" ]; then
       rows=$(awk -F '\t' -v created="$(date -u '+%Y-%m-%d %H:%M:%S')" '{printf "{\"id\":%s,\"name\":\"%s\",\"agentInfo\":{\"id\":9001,\"name\":\"iDA Test\"},\"latestTaskStatus\":\"%s\",\"createTime\":\"%s\"}\n",$1,$2,$3,created}' "$sessions" | jq -s .)
@@ -1599,6 +1605,17 @@ test_terminal_disposition_guards_remote_effects() {
   assert_absent "$(state_file "$home" "$id")" 'terminal iDA dispatch created provider state'
   [ ! -s "$home/bytedcli.log" ] || fail 'terminal iDA dispatch reached the provider'
 
+  id=ida-terminal-at-submit
+  home=$(new_home terminal-at-submit); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  rc=0
+  FM_IDA_FAKE_LIST_DONE_TASK="$id" FM_IDA_FAKE_LIST_DONE_CLAIM="$home/list-done.claim" \
+    dispatch_ida "$home" "$fakebin" "$id" >"$home/dispatch.out" 2>"$home/dispatch.err" || rc=$?
+  creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 0 ] || fail 'iDA created a provider task after the backlog became terminal'
+  [ "$(phase_of "$home" "$id")" = submission-not-started ] \
+    || fail 'terminal request-boundary refusal crossed the durable submission checkpoint'
+
   id=ida-terminal-followup
   home=$(new_home terminal-followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
   : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
@@ -1645,6 +1662,17 @@ test_terminal_disposition_guards_remote_effects() {
     'retained-execution redispatch lost its identity blocker'
   assert_absent "$(state_file "$home" "$id")" 'retained-execution redispatch replaced provider state'
   [ ! -s "$home/bytedcli.log" ] || fail 'retained-execution redispatch reached the provider'
+
+  id=ida-current-over-retained
+  home=$(new_home current-over-retained); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  jq -n --arg id "$id" '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:"remote-old",disposition:"archived"}' \
+    >"$home/data/$id/lifecycle.json"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null \
+    || fail 'retained rich execution identity controlled a current task dispatch'
+  wait_phase "$home" "$id" terminal-success || fail 'current task over retained history did not finish'
+  [ "$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)" -eq 1 ] \
+    || fail 'current task over retained history did not issue exactly one provider create'
   pass 'iDA terminal admission blocks dispatch, followup, retirement, and task-id reuse without provider replay'
 }
 
@@ -1655,6 +1683,10 @@ case "${FM_REMOTE_TEST_CASE:-}" in
     ;;
   retirement)
     test_retirement_pairs_backlog_and_preserves_failed_close
+    exit 0
+    ;;
+  terminal)
+    test_terminal_disposition_guards_remote_effects
     exit 0
     ;;
 esac

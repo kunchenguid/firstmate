@@ -84,6 +84,47 @@ def identity_digest(context: str) -> str | None:
     return digest(json.dumps(stable, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+def stable_identity(goal: str, brief_sha256: str, execution_generation: str) -> str:
+    stable = {
+        "goal": goal,
+        "brief_sha256": brief_sha256,
+        "execution_generation": execution_generation,
+    }
+    return digest(json.dumps(stable, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def recover_goal(body: str, goal: str, brief_sha256: str,
+                 execution_generation: str, artifacts: list[str]) -> str:
+    """Recover only backend-appended title artifacts from the stored identity.
+
+    tasks-axi exposes structured links and a presentation title, but not whether
+    a matching suffix was original prose or appended later.  The compact
+    marker's stable identity resolves that ambiguity without storing another
+    title: try every suffix-removal order and select the value whose existing
+    identity digest matches.  With no marker or no match, preserve the title.
+    """
+    values, _, _, stored_identity = parse(body)
+    if values is None or stored_identity is None:
+        return goal
+    pending: list[tuple[str, tuple[int, ...]]] = [(goal, tuple(range(len(artifacts))))]
+    seen: set[tuple[str, tuple[int, ...]]] = set()
+    while pending:
+        candidate, remaining = pending.pop(0)
+        key = (candidate, remaining)
+        if key in seen:
+            continue
+        seen.add(key)
+        if stable_identity(candidate, brief_sha256, execution_generation) == stored_identity:
+            return candidate
+        for position in remaining:
+            artifact = artifacts[position]
+            suffix = " " + artifact
+            if artifact and candidate.endswith(suffix):
+                pending.append((candidate[:-len(suffix)], tuple(
+                    item for item in remaining if item != position)))
+    return goal
+
+
 def context_relation(stored: str | None, stored_identity: str | None, current: str) -> str:
     if stored == digest(current.encode()):
         return "exact"
@@ -153,7 +194,7 @@ def render(values: dict[str, object], context: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read or replace the compact progress block in an existing task body.")
-    parser.add_argument("action", choices=("read", "values", "replace"))
+    parser.add_argument("action", choices=("read", "values", "replace", "recover-goal"))
     parser.add_argument("--task", required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--state", required=True)
@@ -162,11 +203,21 @@ def main() -> int:
     parser.add_argument("--context", default="")
     parser.add_argument("--expected-token")
     parser.add_argument("--progress-json")
+    parser.add_argument("--brief-sha256", default="")
+    parser.add_argument("--execution-generation", default="")
+    parser.add_argument("--artifacts-json", default="[]")
     args = parser.parse_args()
     raw = sys.stdin.buffer.read()
     try:
         body = raw.decode("utf-8")
         goal = text(args.goal, "goal")
+        if args.action == "recover-goal":
+            artifacts = json.loads(args.artifacts_json)
+            if not isinstance(artifacts, list) or not all(isinstance(item, str) for item in artifacts):
+                raise Refusal("artifacts-json must be a text array")
+            print(recover_goal(body, goal, args.brief_sha256,
+                               args.execution_generation, artifacts))
+            return 0
         current = projection(args.task, goal, args.state, args.held, args.blocked, body, args.context)
         if args.action == "read":
             print(json.dumps(current, ensure_ascii=False, separators=(",", ":")))

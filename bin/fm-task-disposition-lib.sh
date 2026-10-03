@@ -196,10 +196,20 @@ fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
 # it already owned an execution. This is a read-only immutable identity fact,
 # not active lifecycle admission or progress.
 fm_task_historical_execution_guard() { # <data-dir> <task-id>
-  local data=$1 task=$2 record="$1/$2/lifecycle.json"
+  local data=$1 task=$2 record="$1/$2/lifecycle.json" current_status
   # shellcheck source=bin/fm-remote-execution-receipt-lib.sh
   . "$FM_TASK_DISPOSITION_LIB_DIR/fm-remote-execution-receipt-lib.sh"
   fm_remote_execution_receipt_guard "$data" "$task" || return $?
+  # A retained rich record cannot govern a reused id while the configured
+  # ordinary task owner still has a current row. The dedicated execution
+  # receipt above remains authoritative regardless of row presence.
+  if fm_task_progress_current_absent "$task"; then
+    current_status=0
+  else
+    current_status=$?
+  fi
+  [ "$current_status" -ne 2 ] || return 6
+  [ "$current_status" -eq 0 ] || return 0
   [ -e "$record" ] || [ -L "$record" ] || return 0
   [ -f "$record" ] && [ ! -L "$record" ] || {
     echo "REFUSED: task $task has unsafe retained execution history" >&2

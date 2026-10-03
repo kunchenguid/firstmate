@@ -38,4 +38,24 @@ jq -e --arg task "$TASK" '
 [ "$(shasum "$HOME_DIR/data/$TASK/lifecycle.json")" = "$historical_hash" ] \
   || fail 'recording a merge receipt rewrote retained historical lifecycle data'
 
-pass 'merge receipts: an empty valid historical merge array is a successful empty read and does not block new exact receipts'
+CURRENT=current-task
+mkdir -p "$HOME_DIR/data/$CURRENT"
+cat >"$HOME_DIR/.tasks.toml" <<'EOF'
+backend = "markdown"
+[markdown]
+path = "data/backlog.md"
+EOF
+printf '## In flight\n- [ ] current-task - Current task (kind: ship)\n  body\n\n## Queued\n\n## Done\n' \
+  >"$HOME_DIR/data/backlog.md"
+printf '{malformed retained rich history\n' >"$HOME_DIR/data/$CURRENT/lifecycle.json"
+FM_HOME="$HOME_DIR" bash -c \
+  '. "$1"; fm_merge_receipt_record "$2" "$3" "$4" "$5"' \
+  _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$CURRENT" generation-current \
+  'https://codebase.example.invalid/merge_requests/2' \
+  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  || fail 'retained rich history controlled a current task merge receipt'
+jq -e '.task_id=="current-task" and .execution_generation=="generation-current"' \
+  "$HOME_DIR/state/$CURRENT.merge-receipts.jsonl" >/dev/null \
+  || fail 'current task merge receipt was not recorded independently of rich history'
+
+pass 'merge receipts: historical facts require current-task absence and current receipts ignore retained rich state'

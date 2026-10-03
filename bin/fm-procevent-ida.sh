@@ -450,6 +450,12 @@ submit_observation() { # <id> <root>
   arguments="$root/arguments.json"; out="$root/submit.out"; err="$root/submit.err"
   fm_remote_instruction_validate "$id" "$REMOTE_STATE_INSTRUCTION_FILE" || return 1
   [ "$(fm_remote_sha256_file "$REMOTE_STATE_INSTRUCTION_FILE")" = "$REMOTE_STATE_INSTRUCTION_SHA256" ] || die "iDA instruction file changed before submission"
+  # Dispatch and provider submission are separated by an asynchronous waiter.
+  # Re-read business disposition at the actual request boundary so a task that
+  # became Done or archived after dispatch cannot create an external task.
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "$DATA" "$id" 'remote submission' || return $?
   checkpoint_submission_boundary "$id" || die "iDA submission state changed before the request boundary"
   agent_id_arg=$IDA_STATE_AGENT_ID; model_arg=$IDA_STATE_MODEL
   jq -n --rawfile content "$REMOTE_STATE_INSTRUCTION_FILE" --arg name "$IDA_STATE_MARKER" \

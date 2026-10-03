@@ -18,7 +18,7 @@ fm_merge_receipt_validate_value() { # <label> <value>
 }
 
 fm_merge_receipt_history() { # <task>
-  local id=$1 state data file historical
+  local id=$1 state data file historical current_status
   state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state}
   data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
   file=$(fm_merge_receipt_file "$id") || return 1
@@ -33,7 +33,17 @@ fm_merge_receipt_history() { # <task>
       then . else error("invalid merge receipt row") end' "$file" || return 1
   fi
   historical="$data/$id/lifecycle.json"
-  if [ -f "$historical" ] && [ ! -L "$historical" ]; then
+  # Retained rich data is a last-resort immutable receipt source only after the
+  # configured ordinary owner proves that no current task row exists.
+  # shellcheck source=bin/fm-task-progress-lib.sh
+  . "$FM_MERGE_RECEIPT_BIN/fm-task-progress-lib.sh"
+  if fm_task_progress_current_absent "$id"; then
+    current_status=0
+  else
+    current_status=$?
+  fi
+  [ "$current_status" -ne 2 ] || return 1
+  if [ "$current_status" -eq 0 ] && [ -f "$historical" ] && [ ! -L "$historical" ]; then
     jq -c --arg id "$id" '
       if (.schema=="fm-task-lifecycle.v1" or .schema=="fm-task-lifecycle.v2") and .task_id==$id then
         [.owner_receipts.merge[]? |

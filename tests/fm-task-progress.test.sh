@@ -70,6 +70,40 @@ printf '%s' "$updated" | jq -e '
   .remaining_gap=="Validation has not passed" and
   .next_step=="Run the authorized validation and review its result"' >/dev/null \
   || fail "updated projection lost resumable progress"
+
+# tasks-axi may append structured artifacts in an order different from its
+# sorted links field. The stored compact identity must recover the exact
+# original title, while a path that was already part of the original title
+# must remain ordinary goal text.
+task_cmd add artifact-order "Artifact order goal" --kind ship --body "Original body." --start >/dev/null \
+  || fail "artifact-order fixture add failed"
+mkdir -p "$HOME_DIR/data/artifact-order"
+printf '%s\n' 'Artifact-order intent.' >"$HOME_DIR/data/artifact-order/brief.md"
+printf '%s\n' 'spawn_gen=artifact-g1' >"$HOME_DIR/state/artifact-order.meta"
+artifact_initial=$(progress progress artifact-order) || fail "artifact-order initial read failed"
+progress update-progress artifact-order --expected-token "$(printf '%s' "$artifact_initial" | jq -r .record_token)" \
+  --progress "$record" >/dev/null || fail "artifact-order progress update failed"
+task_cmd update artifact-order --pr https://github.com/example/repo/pull/1 >/dev/null \
+  || fail "artifact-order PR link failed"
+task_cmd update artifact-order --report data/artifact-order/report.md >/dev/null \
+  || fail "artifact-order report link failed"
+artifact_read=$(progress progress artifact-order) || fail "artifact-order decorated read failed"
+printf '%s' "$artifact_read" | jq -e \
+  '.goal=="Artifact order goal" and .recorded==true and .context_relation=="exact"' >/dev/null \
+  || fail "artifact order corrupted the original goal identity"
+
+task_cmd add natural-artifact "Natural goal data/natural-artifact/report.md" --kind scout \
+  --body "Original body." --start >/dev/null || fail "natural-artifact fixture add failed"
+mkdir -p "$HOME_DIR/data/natural-artifact"
+printf '%s\n' 'Natural-artifact intent.' >"$HOME_DIR/data/natural-artifact/brief.md"
+printf '%s\n' 'spawn_gen=natural-g1' >"$HOME_DIR/state/natural-artifact.meta"
+natural_initial=$(progress progress natural-artifact) || fail "natural-artifact initial read failed"
+assert_equals "Natural goal data/natural-artifact/report.md" "$(printf '%s' "$natural_initial" | jq -r .goal)" \
+  "a genuine artifact-shaped title suffix was removed"
+progress update-progress natural-artifact --expected-token "$(printf '%s' "$natural_initial" | jq -r .record_token)" \
+  --progress "$record" >/dev/null || fail "natural-artifact progress update failed"
+assert_equals "Natural goal data/natural-artifact/report.md" "$(progress progress natural-artifact | jq -r .goal)" \
+  "stored identity did not preserve genuine artifact-shaped title text"
 assert_grep '<!-- firstmate-progress:v1 context=' "$HOME_DIR/data/backlog.md" \
   "progress did not reuse the original task record"
 assert_absent "$HOME_DIR/data/ordinary/lifecycle.json" \
@@ -262,8 +296,20 @@ printf '%s' "$complete" | jq -e '.remaining_gap=="" and .next_step==""' >/dev/nu
   || fail "satisfied goal retained an executable next step"
 
 listed=$(progress progress-list) || fail "active task discovery failed"
-assert_equals $'dash-body\nlegacy-cloud\nordinary\nremote' "$(printf '%s' "$listed" | jq -r '.tasks[]')" \
+assert_equals $'artifact-order\ndash-body\nlegacy-cloud\nnatural-artifact\nordinary\nremote' "$(printf '%s' "$listed" | jq -r '.tasks[]')" \
   "monitoring did not retain Done rows whose compact gaps remain open"
+
+task_cmd add malformed-done "Malformed compact row" --kind ship \
+  --body '<!-- firstmate-progress:v1 malformed -->' --start >/dev/null \
+  || fail "malformed Done fixture add failed"
+task_cmd "done" malformed-done >/dev/null || fail "malformed Done fixture completion failed"
+out=$(progress progress-list 2>&1)
+rc=$?
+[ "$rc" -ne 0 ] || fail "progress-list silently truncated a malformed Done compact row"
+assert_contains "$out" "malformed Firstmate progress block" \
+  "progress-list failure did not expose the unreadable Done row"
+task_cmd update malformed-done --body "Legacy body without compact progress." >/dev/null \
+  || fail "malformed Done fixture repair failed"
 
 mkdir -p "$TMP_ROOT/fakebin"
 # shellcheck disable=SC2016 # These variables expand when the generated fixture runs.
@@ -308,7 +354,7 @@ expect_code 6 "$rc" "branch progress write"
 assert_contains "$out" "task progress belongs to MAIN" "branch update refusal lost ownership reason"
 
 task_cmd "done" ordinary >/dev/null || fail "fixture completion failed"
-assert_equals $'dash-body\nlegacy-cloud\nremote' "$(progress progress-list | jq -r '.tasks[]')" \
+assert_equals $'artifact-order\ndash-body\nlegacy-cloud\nnatural-artifact\nremote' "$(progress progress-list | jq -r '.tasks[]')" \
   "accepted completion hid or invented open compact gaps"
 FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
   '. "$1"; fm_cleanup_completion_mode ordinary g2' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
