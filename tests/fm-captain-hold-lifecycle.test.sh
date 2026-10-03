@@ -3017,22 +3017,23 @@ SH
   pass "an answer before cleanup replay preserves the retained report"
 }
 
-test_answer_before_cleanup_replay_notes_a_retained_gerrit_change() {
-  local home id repo wt rc show real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
-  home=$(make_home answer-before-replay-gerrit)
-  id=sample-answer-before-replay-gerrit
+assert_answer_before_cleanup_replay_notes_a_retained_change() {  # <slug> <forge> <url> <note>
+  local slug=$1 forge=$2 change_url=$3 note=$4
+  local home id repo wt rc show real_tasks_axi
+  home=$(make_home "answer-before-replay-$slug")
+  id=sample-answer-before-replay-$slug
   repo="$home/projects/sample"
   wt="$home/projects/$id"
-  fm_git_worktree "$repo" "$wt" fm/answer-before-replay-gerrit
-  tasks_in "$home" add "$id" "Ship the held Gerrit change" --kind ship \
-    --repo sample --start >/dev/null || fail "could not create the held Gerrit answer fixture"
+  fm_git_worktree "$repo" "$wt" "fm/answer-before-replay-$slug"
+  tasks_in "$home" add "$id" "Ship the held $forge change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held $forge answer fixture"
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
     "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
-    "pr=$gerrit_url" "spawn_gen=fixture-$id"
+    "pr=$change_url" "spawn_gen=fixture-$id"
   printf 'done: change landed\n' > "$home/state/$id.status"
   run_captain "$home" hold "$id" --reason "captain must choose the follow-up" >/dev/null \
-    || fail "could not hold the landed Gerrit task for the captain"
+    || fail "could not hold the landed $forge task for the captain"
   real_tasks_axi=$(command -v tasks-axi)
   cat > "$home/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
@@ -3066,12 +3067,24 @@ SH
 
   printf 'Proceed with the landed change.\n' > "$home/answer.txt"
   run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
-    || fail "the captain could not answer a Gerrit task before cleanup replay"
-  show=$(tasks_in "$home" show "$id" --full) || fail "the answered Gerrit row is gone"
-  assert_contains "$show" "state: done" "the answer did not close the Gerrit row"
-  assert_contains "$show" "Gerrit change $gerrit_url" \
-    "the answer dropped the retained Gerrit change URL"
-  pass "an answer before cleanup replay notes the retained Gerrit change"
+    || fail "the captain could not answer a $forge task before cleanup replay"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered $forge row is gone"
+  assert_contains "$show" "state: done" "the answer did not close the $forge row"
+  assert_contains "$show" "$note" \
+    "the answer dropped the retained $forge change URL"
+  pass "an answer before cleanup replay notes the retained $forge change"
+}
+
+test_answer_before_cleanup_replay_notes_a_retained_gerrit_change() {
+  local gerrit_url=https://gerrit.example.com/c/project/+/12345
+  assert_answer_before_cleanup_replay_notes_a_retained_change gerrit Gerrit \
+    "$gerrit_url" "Gerrit change $gerrit_url"
+}
+
+test_answer_before_cleanup_replay_notes_a_retained_gitlab_merge_request() {
+  local gitlab_url=https://gitlab.example.com/group/subgroup/project/-/merge_requests/42
+  assert_answer_before_cleanup_replay_notes_a_retained_change gitlab GitLab \
+    "$gitlab_url" "GitLab merge request $gitlab_url"
 }
 
 test_unusable_pending_close_record_names_its_reason() {
@@ -4170,6 +4183,7 @@ test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable
 test_answer_before_cleanup_replay_preserves_the_retained_report
 test_answer_before_cleanup_replay_notes_a_retained_gerrit_change
+test_answer_before_cleanup_replay_notes_a_retained_gitlab_merge_request
 test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
