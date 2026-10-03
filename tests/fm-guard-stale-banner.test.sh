@@ -41,6 +41,20 @@ record_live_watcher() {
   printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
 }
 
+# Record a live watcher whose lock names a different checkout's watcher path -
+# the same watcher script at a different absolute path, as when a treehouse
+# worktree's guard supervises the primary's home.
+record_live_watcher_foreign_checkout() {
+  local dir=$1 pid=$2 home identity
+  home=$(case_home "$dir")
+  identity=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") || return 1
+  mkdir -p "$home/state/.watch.lock"
+  printf '%s\n' "$pid" > "$home/state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$home/state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/foreign-checkout/bin/fm-watch.sh" > "$home/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$home/state/.watch.lock/pid-identity"
+}
+
 # These cases exercise the persistent-watcher model (a live pid is the real
 # liveness signal), so pin the model rather than letting the host test runner's
 # ambient harness ancestry pick it.
@@ -906,6 +920,51 @@ test_extension_live_watcher_is_healthy_without_ownership_evidence() {
   pass "fm-guard stale banner: extension model stays silent for a live watcher"
 }
 
+# The false "watcher still down" alarm on a healthy fleet: the lock records the
+# claiming watcher's own absolute path, which embeds its checkout location, and
+# the guard compared it against its own checkout's watcher path. When the guard
+# ran from a different checkout of the same firstmate tree than the one that
+# armed the watcher (a treehouse worktree supervising the primary's home), the
+# exact-path comparison rejected a live, beating watcher as "no live watcher"
+# and re-armed a healthy cycle for no reason. The watcher script's name is the
+# right granularity: the fm-home check pins the home and the pid-identity check
+# pins the process.
+test_persistent_live_watcher_from_another_checkout_is_healthy() {
+  local dir home out pid
+  dir=$(make_guard_case persistent-foreign-checkout)
+  home=$(case_home "$dir")
+  sleep 60 &
+  pid=$!
+  record_live_watcher_foreign_checkout "$dir" "$pid" \
+    || fail "could not record the live watcher with a foreign checkout path"
+  touch "$home/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ -z "$out" ] \
+    || fail "a live identity-matched watcher from another checkout must stay silent, got: $out"
+  assert_absent "$home/state/.guard-watcher-stale-banner" \
+    "a live watcher from another checkout must not open a down-episode"
+  pass "fm-guard stale banner: live beating watcher from another checkout is healthy"
+}
+
+# The alarm must survive the false-positive fix: a beacon aged well past
+# grace with no live watcher is a genuine supervision lapse and still prints
+# the full banner naming the stale beacon.
+test_persistent_stale_beacon_without_live_watcher_alarms() {
+  local dir out
+  dir=$(make_guard_case persistent-stale-beacon)
+  # Age the beacon far beyond grace: a handling turn that outran the watch
+  # cycle's recovery, not a live-beating false positive.
+  touch -t 201901010000 "$(case_home "$dir")/state/.last-watcher-beat"
+  out=$(run_guard_case "$dir")
+  [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+    || fail "a genuinely stale beacon without a live watcher must alarm: $out"
+  assert_contains "$out" "no watcher has a fresh beacon" \
+    "the persistent stale-beacon banner must name the stale beacon"
+  pass "fm-guard stale banner: a genuinely stale beacon still alarms without a live watcher"
+}
+
 # The cases above pin the model. This one takes the end-user path instead: no
 # FM_SUPERVISION_MODEL at all, so bin/fm-harness.sh must route a Pi primary to the
 # extension model on its own. Without that routing the tolerance would never reach
@@ -966,6 +1025,8 @@ test_autoarm_open_claim_does_not_explain_stale_beacon
 test_autoarm_long_turn_does_not_silence_other_models
 test_persistent_no_watcher_banner_names_missing_process
 test_persistent_no_watcher_episode_survives_beacon_touch
+test_persistent_live_watcher_from_another_checkout_is_healthy
+test_persistent_stale_beacon_without_live_watcher_alarms
 test_fresh_beacon_without_live_watcher_stays_alarm
 test_x_mode_without_live_watcher_stays_alarm
 test_healthy_recovery_rearms_next_stale_episode

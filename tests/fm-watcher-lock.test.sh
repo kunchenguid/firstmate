@@ -1546,6 +1546,89 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The false "watcher still down" alarm on a healthy fleet: the lock records the
+# claiming watcher's own absolute path, which embeds its checkout location, and
+# the owning check compared it against its own checkout's watcher path. When a
+# guard ran from a different checkout of the same firstmate tree than the one
+# that armed the watcher (a treehouse worktree supervising the primary's home),
+# the exact-path comparison rejected a live, beating watcher as "no live
+# watcher" and re-armed a healthy cycle for no reason. The fm-home check pins
+# the home, the pid-identity check pins the process, and only the checkout
+# prefix of the recorded watcher path is widened to the script name.
+test_fm_watcher_lock_matches_pid_widens_checkout_not_home() {
+  local dir state home root pid identity verdict matched
+  dir=$(make_case lock-checkout-widening)
+  state="$dir/state"
+  home="$dir/home"
+  root="$dir/root"
+  mkdir -p "$home" "$root" "$dir/foreign-checkout/bin"
+
+  sleep 60 &
+  pid=$!
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$pid") \
+    || fail "could not identify the fake watcher"
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$dir/foreign-checkout/bin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  touch "$state/.last-watcher-beat"
+
+  # (a) A lock whose fm-home equals the caller's home and whose watcher path
+  # names another checkout of the same script still matches a live watcher,
+  # and the supervision verdict stays healthy with a fresh beacon.
+  matched=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"; then printf yes; else printf no; fi
+  ' _ "$LIB" "$state" "$WATCH" "$pid" "$home")
+  [ "$matched" = yes ] \
+    || fail "a lock armed by another checkout of this home must still match its live watcher"
+  verdict=$(FM_SUPERVISION_MODEL=persistent FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    bash -c '
+      . "$1"
+      fm_watcher_supervision_verdict "$2" "$3" "$4" "$5" "$6"
+      printf "%s" "$FM_WATCHER_VERDICT_OK"
+    ' _ "$LIB" "$state" "$WATCH" 300 "$home" "$root")
+  [ "$verdict" = true ] \
+    || fail "a live beating watcher armed by another checkout must keep the verdict healthy, got OK=$verdict"
+
+  # (b) A lock whose fm-home names a different home does not match, even with
+  # a live pid, matching identity, and a fresh beacon - the home pin stays.
+  printf '%s\n' "$dir/other-home" > "$state/.watch.lock/fm-home"
+  matched=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_watcher_lock_matches_pid "$2" "$3" "$4" "$5"; then printf yes; else printf no; fi
+  ' _ "$LIB" "$state" "$WATCH" "$pid" "$home")
+  [ "$matched" = no ] \
+    || fail "a lock recorded for a different home must not match this home's watcher check"
+  verdict=$(FM_SUPERVISION_MODEL=persistent FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    bash -c '
+      . "$1"
+      fm_watcher_supervision_verdict "$2" "$3" "$4" "$5" "$6"
+      printf "%s %s" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"
+    ' _ "$LIB" "$state" "$WATCH" 300 "$home" "$root")
+  [ "$verdict" = "false no-watcher" ] \
+    || fail "a foreign-home lock with a fresh beacon must read as no watcher, got: $verdict"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+
+  # (c) The widening must not mask a genuinely stalled beat: the same live,
+  # identity-matched, same-home watcher with a beacon aged far past grace
+  # still alarms as stale-beacon.
+  touch -t 201901010000 "$state/.last-watcher-beat"
+  verdict=$(FM_SUPERVISION_MODEL=persistent FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    bash -c '
+      . "$1"
+      fm_watcher_supervision_verdict "$2" "$3" "$4" "$5" "$6"
+      printf "%s %s" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON"
+    ' _ "$LIB" "$state" "$WATCH" 300 "$home" "$root")
+  [ "$verdict" = "false stale-beacon" ] \
+    || fail "a live watcher with a stale beacon must still alarm, got: $verdict"
+
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watcher lock matches by script name across checkouts while the home and pid-identity pins hold"
+}
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1585,3 +1668,4 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_fm_watcher_lock_matches_pid_widens_checkout_not_home
