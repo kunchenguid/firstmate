@@ -3702,6 +3702,154 @@ test_normalize_key() {
   pass "fm_backend_herdr_normalize_key: Enter/Escape/C-c map to herdr's verified enter/escape/ctrl+c"
 }
 
+# --- agent naming: the presentation-only crew-<head>-<digest> label ---------
+#
+# The helper attempts `agent rename` directly, returns on the first acceptance,
+# and otherwise retries inside a bounded poll budget before giving up silently.
+# Fixtures below script that call sequence through make_herdr_fakebin's ordinal
+# responses.
+
+# herdr_name_agent_renamed_to: the name every accepted rename carried.
+herdr_name_agent_renamed_to() {  # <log>
+  awk -v FS="$(printf '\x1f')" '$2 == "agent" && $3 == "rename" { print $5 }' "$1"
+}
+
+# herdr_name_agent_rename_count: how many rename attempts reached the fake CLI.
+herdr_name_agent_rename_count() {  # <log>
+  grep -c "$(printf 'agent\x1frename')" "$1" || true
+}
+
+test_name_agent_sanitizes_and_truncates_the_task_id() {
+  local dir log resp fb
+  dir="$TMP_ROOT/name-agent"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent_best_effort default:w1:p2 "FM-Name/Herdr.Agents-With-A-Very-Long-Tail"' "$ROOT"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=default"$'\x1f''agent'$'\x1f''rename'$'\x1f''w1:p2'$'\x1f''crew-fm-name-herdr-agen-26f3738d'$'\x1f''--session' \
+    "the rename did not fold the task id to herdr's lowercase alphabet under a crew-<head>-<digest> name inside the 32-character limit"
+  pass "fm_backend_herdr_name_agent_best_effort: renames the agent to crew-<head>-<digest> folded to herdr's accepted name alphabet and length"
+}
+
+test_name_agent_distinguishes_ids_sharing_a_long_head() {
+  local dir log resp fb id name prev=
+  # Two ordinary task ids that agree for their first 30 characters: the
+  # readable head alone cannot tell their panes apart, so the digest must.
+  for id in fix-the-login-redirect-bug-on-safari fix-the-login-redirect-bug-on-firefox; do
+    dir="$TMP_ROOT/name-agent-$id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    fb=$(make_herdr_fakebin "$dir")
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent_best_effort default:w1:p2 "$1"' "$ROOT" "$id"
+    name=$(herdr_name_agent_renamed_to "$log")
+    case "$name" in
+      crew-[a-z]*) ;;
+      *) fail "the name for '$id' must start with crew- and herdr's required lowercase letter, got '$name'" ;;
+    esac
+    [ "${#name}" -le 32 ] || fail "the name for '$id' must stay within herdr's 32-character limit, got ${#name} characters in '$name'"
+    case "$name" in
+      *[!a-z0-9_-]*) fail "the name for '$id' must hold only lowercase letters, digits, '-' and '_', got '$name'" ;;
+    esac
+    [ "$name" != "$prev" ] || fail "two task ids sharing a long head must not collide on one agent name, both got '$name'"
+    prev=$name
+  done
+  pass "fm_backend_herdr_name_agent_best_effort: task ids sharing a long head still name their panes apart"
+}
+
+test_name_agent_retries_until_the_agent_registers() {
+  local dir log resp fb attempts
+  dir="$TMP_ROOT/name-agent-retry"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Herdr refuses with agent_not_found until the launched harness process is
+  # registered, a beat after the launch line runs.
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent_best_effort default:w1:p2 crew-id' "$ROOT" 2>/dev/null
+  attempts=$(herdr_name_agent_rename_count "$log")
+  [ "$attempts" = 2 ] ||
+    fail "the rename should be retried once the first attempt finds no registered agent, got $attempts attempts"
+  pass "fm_backend_herdr_name_agent_best_effort: retries the rename until herdr has registered the launched agent"
+}
+
+test_name_agent_never_fails_the_spawn() {
+  local dir log resp fb out status attempts
+  dir="$TMP_ROOT/name-agent-refused"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Every attempt inside the budget is refused; the attempt AFTER the budget
+  # would be accepted, so an unbounded loop shows up as an extra attempt here
+  # rather than as a hang.
+  printf '1\n' > "$resp/1.exit"
+  printf '1\n' > "$resp/2.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_AGENT_NAME_POLLS=2 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent_best_effort default:w1:p2 crew-id' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" = 0 ] || fail "a refused presentation rename must not fail its spawn, got status $status"
+  [ -z "$out" ] || fail "a refused presentation rename must stay silent on a healthy spawn, got '$out'"
+  attempts=$(herdr_name_agent_rename_count "$log")
+  [ "$attempts" = 2 ] ||
+    fail "the rename must stop at the configured budget of 2 attempts, got $attempts"
+  pass "fm_backend_herdr_name_agent_best_effort: a rename herdr keeps refusing stops at its budget as a silent, successful no-op"
+}
+
+test_name_agent_gives_up_on_an_unparseable_target() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/name-agent-bad-target"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_name_agent_best_effort nonsense crew-id' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" = 0 ] || fail "an unparseable target must not fail its spawn, got status $status"
+  [ -z "$out" ] || fail "an unparseable target must stay silent, got '$out'"
+  [ ! -s "$log" ] || fail "an unparseable target must not reach herdr at all, got $(cat "$log")"
+  pass "fm_backend_herdr_name_agent_best_effort: an unparseable target renames nothing and still succeeds"
+}
+
+# herdr_name_agent_opted_in: run the spawn's naming step - the
+# config/herdr-agent-names opt-in gating the helper - against <config-dir>
+# under the fake CLI, printing its stderr.
+herdr_name_agent_opted_in() {  # <dir> <config-dir>
+  local dir=$1 config=$2 fb
+  mkdir -p "$dir/responses"; : > "$dir/log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; if fm_backend_herdr_agent_names_enabled "$1"; then fm_backend_herdr_name_agent_best_effort default:w1:p2 crew-id; fi' "$ROOT" "$config" 2>&1
+}
+
+test_name_agent_on_config_issues_the_rename() {
+  local dir config value out
+  for value in on '' ' On '; do
+    dir="$TMP_ROOT/name-agent-optin-on-${#value}"; config="$dir/config"; mkdir -p "$config"
+    printf '%s\n' "$value" > "$config/herdr-agent-names"
+    out=$(herdr_name_agent_opted_in "$dir" "$config")
+    [ -z "$out" ] || fail "an opted-in naming config must stay silent, got '$out'"
+    [ "$(herdr_name_agent_rename_count "$dir/log")" = 1 ] ||
+      fail "config/herdr-agent-names '$value' must issue the rename, got log $(cat "$dir/log")"
+  done
+  pass "config/herdr-agent-names: on, or an empty file, opts the spawn in to the agent rename"
+}
+
+test_name_agent_off_or_absent_config_makes_no_herdr_call() {
+  local dir config out
+  dir="$TMP_ROOT/name-agent-optin-absent"; config="$dir/config"; mkdir -p "$config"
+  out=$(herdr_name_agent_opted_in "$dir" "$config")
+  [ -z "$out" ] || fail "an absent naming config must stay silent, got '$out'"
+  [ ! -s "$dir/log" ] || fail "an absent naming config must make no herdr call, got $(cat "$dir/log")"
+  dir="$TMP_ROOT/name-agent-optin-off"; config="$dir/config"; mkdir -p "$config"
+  printf 'OFF\n' > "$config/herdr-agent-names"
+  out=$(herdr_name_agent_opted_in "$dir" "$config")
+  [ -z "$out" ] || fail "an off naming config must stay silent, got '$out'"
+  [ ! -s "$dir/log" ] || fail "an off naming config must make no herdr call, got $(cat "$dir/log")"
+  pass "config/herdr-agent-names: naming defaults to off, and off or absent makes no herdr call"
+}
+
+test_name_agent_unrecognized_config_warns_and_stays_off() {
+  local dir config out
+  dir="$TMP_ROOT/name-agent-optin-typo"; config="$dir/config"; mkdir -p "$config"
+  printf 'yes\n' > "$config/herdr-agent-names"
+  out=$(herdr_name_agent_opted_in "$dir" "$config")
+  assert_contains "$out" 'unrecognized value "yes"' "an unrecognized naming value must warn naming it"
+  [ ! -s "$dir/log" ] || fail "an unrecognized naming value must behave as off, got $(cat "$dir/log")"
+  pass "config/herdr-agent-names: an unrecognized value warns and falls back to off"
+}
+
 # --- capture / send_key / kill / current_path --------------------------------
 
 test_capture_calls_pane_read() {
@@ -5911,6 +6059,14 @@ test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only
 test_parse_target
 test_normalize_key
+test_name_agent_sanitizes_and_truncates_the_task_id
+test_name_agent_distinguishes_ids_sharing_a_long_head
+test_name_agent_retries_until_the_agent_registers
+test_name_agent_never_fails_the_spawn
+test_name_agent_gives_up_on_an_unparseable_target
+test_name_agent_on_config_issues_the_rename
+test_name_agent_off_or_absent_config_makes_no_herdr_call
+test_name_agent_unrecognized_config_warns_and_stays_off
 test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
