@@ -16,8 +16,9 @@
 # beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
 # while an away record (state/.afk-contract, never quiet mode's) exists an
 # item held for the captain is never rechecked at all, in either posture.
-# While state/.afk exists, the daemon owns triage and this watcher queues and exits
-# on every wake. Printed reason lines:
+# state/.afk selects one-shot delivery for daemon triage: this watcher queues
+# and exits on every wake. This flag does not prove the daemon started; see
+# docs/configuration.md "Away-mode supervisor backend". Printed reason lines:
 #   signal: <file>...      status/turn-end signals, surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
@@ -323,10 +324,9 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # eligible proof, any check, a stale pane whose crew is not provably working, a
 # provably-working stale past the threshold, or anything unknown) is written to
 # the durable queue and exits. That wakes the LLM through the background-task
-# completion. The same classifier
-# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# completion. The same classifier (fm-classify-lib.sh) backs the away-mode
+# daemon. In the flag-selected one-shot mode described above, this watcher
+# never double-triages or runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy

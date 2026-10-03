@@ -529,10 +529,17 @@ The `/afk` sub-supervisor injects escalation digests into firstmate's own pane i
 It currently supports only `tmux` and `herdr` supervisor panes.
 
 Set `FM_SUPERVISOR_BACKEND=tmux|herdr` and `FM_SUPERVISOR_TARGET=<target>` to override both axes explicitly; for herdr the target is `"<session>:<pane-id>"`.
-Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1` with `HERDR_PANE_ID`, then falls back to `tmux`.
+Backend detection uses `FM_SUPERVISOR_BACKEND`, then `$TMUX_PANE`, then `HERDR_ENV=1` with `HERDR_PANE_ID`.
+If no backend is detected, direct daemon startup uses `tmux`; `bin/fm-afk-launch.sh start` instead requires an explicit `FM_SUPERVISOR_BACKEND`.
 
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
-Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
+Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr.
+With none of those operator pane handles, away-mode pane escalation is unavailable and nothing is aimed at a guessed pane.
+The daemon then refuses to arm, naming `target_source=UNAVAILABLE` on stderr and in `state/.supervise-daemon.log`.
+`bin/fm-afk-launch.sh start` refuses before launching it with the same verdict on stderr and in that log.
+Successful daemon startup logs the selected target and backend and both resolution sources, so the operator can check which pane was selected.
+On the native Claude and Grok background-job path, `bin/fm-afk-launch.sh start-native` writes the `state/.afk` flag before this daemon refusal, so away mode can be flagged with no daemon running; check the daemon's startup result before treating away supervision as armed.
+The [turn-end guard's daemon ownership rules](turnend-guard.md#away-and-quiet-mode-daemon-ownership) define when a turn can still end after refusal.
 
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
@@ -2391,9 +2398,9 @@ FM_SEND_RETRIES=3       # fm-send typed-plane Enter-retry attempts after typing 
 FM_SEND_SLEEP=0.4       # seconds between fm-send typed-plane submit checks
 FM_SEND_SETTLE=1        # seconds fm-send waits after a successful typed-plane submit; 0 disables
 FM_PENDING_REPLY_GRACE_SECS=120   # seconds after the request turn completes without a correlated parent report before its one recovery repost is eligible, and after the recovery turn completes before the missed-report escalation is eligible; never counted from delivery
-# sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk
-FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only, otherwise detects $TMUX_PANE then HERDR_ENV/HERDR_PANE_ID before tmux fallback
-FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>, otherwise auto-detected
+# sub-supervisor (bin/fm-supervise-daemon.sh); presence-gated via /afk; discovery and refusal: "Away-mode supervisor backend" above
+FM_SUPERVISOR_BACKEND=             # optional supervisor pane backend override; tmux/herdr only
+FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; tmux target or herdr <session>:<pane-id>
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
