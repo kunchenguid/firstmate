@@ -158,7 +158,7 @@ config=json.load(open(path))
 config['db']=sys.argv[2]
 json.dump(config,open(path,'w'))
 PY
-adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/offline-ci.err" || fail 'offline CI checkpoint remains advisory'
+adapter "$tmp/codex" pre-ci codex batch-offline > /dev/null 2> "$tmp/offline-ci.err" || fail 'offline CI checkpoint remains advisory'
 adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2> "$tmp/offline-push.err" || fail 'offline push checkpoint remains advisory'
 python3 - "$(adapter "$tmp/codex" view)" <<'PY' || fail 'offline checkpoints must be journaled locally'
 import json,sys
@@ -186,7 +186,7 @@ state=json.load(open(path))
 state['tasks']['codex']['claim']['fence']+=1
 json.dump(state,open(path,'w'))
 PY
-adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/stale.err" || fail 'stale writer stays advisory'
+adapter "$tmp/codex" pre-ci codex batch-stale > /dev/null 2> "$tmp/stale.err" || fail 'stale writer stays advisory'
 case "$(cat "$tmp/stale.err")" in *'cannot be checked'*) ;; *) fail 'stale writer must warn' ;; esac
 pass 'stale branch writer generation warns before CI request'
 

@@ -189,9 +189,11 @@ class Adapter:
             self.save()
         return task
 
+    def resolve_repo(self, project):
+        return self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
+
     def dispatch(self, task_id, project, brief, branch, harness):
-        self.repo = self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
-        repo = self.repo
+        repo = self.repo = self.resolve_repo(project)
         if harness not in {"claude", "codex", "omp", "opencode"}:
             warn(f"{task_id}: {harness} has no coordination adapter; dispatch continues without a grant")
             self.required(repo, False, f"{harness} has no coordination adapter")
@@ -307,7 +309,7 @@ class Adapter:
                 self.state["session_epoch"] = self.state.get("session_epoch", 0) + 1
             task["admission"] = task.get("admission", 0) + 1
             task["intent_id"] = f"{home_id}:{task['repo']}:{task_id}:{task['admission']}"
-            for field in ("claim", "claim_attempt", "version", "resources", "published_head"):
+            for field in ("claim", "claim_attempt", "version", "resources", "published_head", "renew_key"):
                 task.pop(field, None)
             self.save()
         if not task.get("claim", {}).get("ok"):
@@ -338,7 +340,7 @@ class Adapter:
         task = self.state["tasks"].get(task_id)
         if not task:
             raise ValueError(f"{task_id}: no local intent record for CI pulse")
-        key = f"{task_id}:pulse:{batch_id}"
+        key = f"{self.key(task_id, task)}:pulse:{batch_id}"
         prior = self.state["requests"].get(key)
         answered = prior is not None and "reply" in prior
         self.required(task["repo"], not answered, f"batch {batch_id} pulse was already requested")
@@ -397,6 +399,8 @@ def main():
             return 0
         if command in {"pre-push", "pre-ci", "heartbeat"} and len(sys.argv) > 2:
             adapter.repo = adapter.state["tasks"].get(sys.argv[2], {}).get("repo")
+            if adapter.repo is None and command == "pre-push" and len(sys.argv) == 4:
+                adapter.repo = adapter.resolve_repo(sys.argv[3])
         if command == "dispatch" and len(sys.argv) == 7:
             adapter.dispatch(*sys.argv[2:])
         elif command == "pre-push" and len(sys.argv) == 4:
@@ -423,7 +427,8 @@ def main():
         return 0
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         warn(str(exc))
-        return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos else 1
+        unowned = adapter is not None and adapter.repo is None and command in {"pre-push", "pre-ci"} and adapter.enforced_repos
+        return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos and not unowned else 1
 
 
 if __name__ == "__main__":

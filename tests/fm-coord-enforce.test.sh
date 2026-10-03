@@ -195,9 +195,30 @@ case "$after" in "$before "*) ;; *) fail 'unacknowledged events must keep their 
 case " $after " in *" $acked "*) fail 'acknowledged event must not reappear after recovery' ;; esac
 pass 'outbox replay after interrupted-transaction recovery keeps unacknowledged event IDs and order'
 
+python3 - "$tmp/a/state/fm-coord-adapter.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+state=json.load(open(path))
+task=state['tasks']['a']
+live={'home_id':'a','generation':state['requests']['session']['reply']['generation'],'claim_id':task['claim']['claim_id'],'fence':task['claim']['fence']}
+task['renew_key']='a:renew:lost'
+state['requests']['a:renew:lost']={'op':'renew','payload':{**live,'request_id':'lost-renew'}}
+state['requests']['a:pulse:batch-two']={'op':'pulse-batch','payload':{**live,'intent_id':task['intent_id'],'head_oid':task['published_head'],'batch_id':'batch-two','request_id':'lost-pulse'}}
+json.dump(state,open(path,'w'))
+PY
 adapter "$tmp/a" readmit a "$repo" > /dev/null 2> "$tmp/err" || fail "readmit must recover a task fenced by manual recovery: $(cat "$tmp/err")"
 adapter "$tmp/a" pre-push a "$repo" > /dev/null 2> "$tmp/err" || fail "readmitted writer must publish under its new generation: $(cat "$tmp/err")"
-pass 'readmit opens a new session and intent after recovery revokes the claim'
+adapter "$tmp/a" heartbeat a > /dev/null 2> "$tmp/err" || fail "readmitted writer must renew despite a lost pre-readmit renew: $(cat "$tmp/err")"
+adapter "$tmp/a" pre-ci a batch-two > /dev/null 2> "$tmp/err" || fail "readmitted writer must pulse a batch whose pre-readmit request was lost: $(cat "$tmp/err")"
+pass 'readmit opens a new session and intent after recovery revokes the claim and drops stale renew and pulse requests'
+
+if adapter "$tmp/b" pre-push missing "$repo" > /dev/null 2> "$tmp/err"; then
+  fail 'enforced push without a local intent must refuse'
+fi
+if adapter "$tmp/b" pre-ci missing > /dev/null 2> "$tmp/err"; then
+  fail 'CI pulse without a local intent must refuse in a home with enforcement'
+fi
+pass 'missing local intent cannot bypass enforcement'
 
 mkdir -p "$tmp/shadow/config" "$tmp/shadow/state"
 printf '{"mode":"shadow","home_id":"shadow","repos":["owner/repo"],"db":"%s"}\n' "$db" > "$tmp/shadow/config/coordination.json"
