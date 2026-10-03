@@ -781,7 +781,7 @@ test_watcher_successor_escalation_stays_quiet() {
   for check in 1 2 3; do
     FM_FAKE_TMUX_AGENT="$agent" FM_FAKE_TMUX_MISSING="$missing" busy_steer_check "$dir"
     [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] \
-      || fail "$mode successor escalation repeated with stale predecessor ring history"
+      || fail "$mode successor escalation repeated on check $check with stale predecessor ring history"
   done
   [ "$(cut -f1 "$dir/state/t1.inbox/.ring-state")" = 001.msg ] \
     || fail "$mode successor changed the predecessor's delivery history"
