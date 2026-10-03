@@ -1,0 +1,10 @@
+{
+  "name": "spyglass",
+  "version": "1.0.0",
+  "description": "Firstmate Spyglass for Claude Code: a read-only live fleet view with a status-line summary, a /fleet pane, per-worker session panes, toasts when something needs the captain, and a Firstmate update flag. Its hooks module may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or Claude Code's tengu_plugin_hooks_modules rollout flag, but the mod activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly 1 and is otherwise a complete no-op.",
+  "author": {
+    "name": "Firstmate",
+    "url": "https://github.com/kunchenguid/firstmate"
+  },
+  "types": "./lib/fm-spyglass-types.d.ts"
+}
