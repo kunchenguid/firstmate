@@ -17,8 +17,11 @@ This skill is the single owner of the decision policy for no-mistakes ask-user f
 Finding authority is determined by the criteria below, not by `yolo`.
 Firstmate always applies this judgment, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
-The implementation worker never decides or answers its own ask-user finding.
+By default the implementation worker never decides or answers its own ask-user finding.
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+A home with the opt-in `config/worker-decides-findings` flag ([`docs/configuration.md`](../../../docs/configuration.md#worker-decides-routine-findings-configworker-decides-findings)) instead lets the worker decide a gate whose every ask-user finding is a step 3 fix or a pure style or preference nit outside accepted intent, which it declines; any step 4 case escalates as before.
+`bin/fm-dod-lib.sh` owns that worker-facing policy text, whose escalate list mirrors step 4 below, so change both together.
+Firstmate audits each self-decided gate from the worker's recorded verdicts against this procedure, and steers a wrong verdict before the run lands.
 
 ## Decide
 
