@@ -8,8 +8,8 @@
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
-#      including newlines, with a doorbell naming the inbox glob, numeric order,
-#      and handled/.
+#      including newlines, with a doorbell naming the inbox and deferring to
+#      the brief's inbox section.
 #   2. Sequencing dedups per worker lifetime: the handled mv retires a record,
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #      The idempotent enqueue (the remote steer leg's primitive) additionally
@@ -29,6 +29,11 @@
 #   7. A fire-and-forget record stays outside the ladder, but one whose first
 #      ring did not land gets exactly one retry ring and never escalates. The
 #      retry waits while the worker has an open decision of its own.
+#   8. The worker's batched take and ack (bin/fm-task-inbox.sh): take prints
+#      every waiting record byte-exact in numeric order and changes nothing, so
+#      a worker lost before acting still finds it waiting; ack --through moves
+#      exactly the printed records with the same handled/ move the ladder
+#      reads, never one that arrived after the take.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -169,11 +174,12 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "list \"\$FM_TASK_INBOX\"/*.msg" "doorbell should list all unhandled records through FM_TASK_INBOX"
+  assert_contains "$doorbell" "waiting in \"\$FM_TASK_INBOX\"," "doorbell should name the inbox through FM_TASK_INBOX"
   assert_contains "$doorbell" "'t1.inbox' steering inbox" "doorbell should quote and name the inbox"
-  assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
-  assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
-  assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
+  assert_contains "$doorbell" "handle it as the inbox section of your brief says." \
+    "doorbell should defer reading and acknowledging to the brief's inbox section"
+  assert_not_contains "$doorbell" "*.msg" "doorbell must not prescribe the manual list sequence"
+  assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be a constant doorbell line"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
   esac
@@ -182,7 +188,7 @@ test_write_is_durable_and_exact() {
   doorbell3=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$state/t1.inbox/handled/${rec2##*/}")
   [ "$doorbell3" = "$doorbell" ] \
     || fail "a record already acknowledged into handled/ must still ring its own inbox, got: $doorbell3"
-  pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
+  pass "inbox: a steer is written durably and round-trips byte-exact with a constant doorbell line"
 }
 
 # The doorbell may land in a pane whose agent has exited, where it is a shell
@@ -647,6 +653,74 @@ test_ring_ladder_policy() {
   pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
 }
 
+test_take_prints_then_ack_acknowledges_through_the_printed_sequence() {
+  local state dir out rc expected n args
+  state="$TMP_ROOT/take/state"; mkdir -p "$state"
+  dir="$state/t1.inbox"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 $'first\nsecond line\n' >/dev/null \
+    || fail "take fixture write failed"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "no trailing newline" fire-and-forget >/dev/null \
+    || fail "take fixture write failed"
+  for n in 3 4 5 6 7 8 9 10; do
+    inbox_lib "$state" fm_task_inbox_write "$state" t1 "msg $n" >/dev/null \
+      || fail "take fixture write failed"
+  done
+  age_path "$dir/001.msg"
+  out=$(FM_TASK_INBOX="$dir" bash "$ROOT/bin/fm-task-inbox.sh" take; printf x) \
+    || fail "take should succeed on a readable inbox"
+  out=${out%x}
+  expected=$'=== 001.msg ===\nfirst\nsecond line\n=== 002.msg ===\nno trailing newline\n'
+  for n in 3 4 5 6 7 8 9; do
+    expected+="=== 00$n.msg ==="$'\n'"msg $n"$'\n'
+  done
+  expected+=$'=== 010.msg ===\nmsg 10\n=== acknowledge after acting: ack --through 010 ===\n'
+  [ "$out" = "$expected" ] || fail "take should print every record byte-exact in numeric order, got: $out"
+  [ -f "$dir/001.msg" ] && [ -f "$dir/010.msg" ] \
+    || fail "take must leave every record waiting until the worker acknowledges it"
+  case "$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" in
+    "ring $dir/001.msg") : ;;
+    *) fail "a taken but unacknowledged record must still ring" ;;
+  esac
+  # A record that lands after the take is not acknowledged unread.
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "late arrival" >/dev/null \
+    || fail "late fixture write failed"
+  out=$(FM_TASK_INBOX="$dir" bash "$ROOT/bin/fm-task-inbox.sh" ack --through 010) \
+    || fail "ack should succeed"
+  [ "$out" = "acknowledged 10" ] || fail "ack should report the count it moved, got: $out"
+  for n in 001 002 003 010; do
+    [ -f "$dir/handled/$n.msg" ] || fail "ack should acknowledge $n.msg into handled/"
+  done
+  [ -f "$dir/011.msg" ] || fail "ack must not acknowledge a record that arrived after the take"
+  out=$(bash "$ROOT/bin/fm-task-inbox.sh" take "$dir") || fail "second take failed"
+  assert_contains "$out" "late arrival" "the late record should be taken next"
+  assert_contains "$out" "ack --through 011" "the late take should name its own sequence"
+  bash "$ROOT/bin/fm-task-inbox.sh" ack --through 011 "$dir" >/dev/null || fail "second ack failed"
+  [ "$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)" = quiet ] \
+    || fail "an acknowledged inbox should be quiet for the re-ring ladder"
+  out=$(bash "$ROOT/bin/fm-task-inbox.sh" take "$dir") || fail "take on an empty inbox should succeed"
+  [ "$out" = "no waiting messages" ] || fail "an empty inbox should say so, got: $out"
+  out=$(bash "$ROOT/bin/fm-task-inbox.sh" take "$state/absent.inbox") || fail "take on an absent inbox should succeed"
+  [ "$out" = "no waiting messages" ] || fail "an absent inbox should say so, got: $out"
+  out=$(bash "$ROOT/bin/fm-task-inbox.sh" ack --through 099 "$state/absent.inbox") \
+    || fail "ack on an absent inbox should succeed"
+  [ "$out" = "acknowledged 0" ] || fail "ack on an absent inbox should move nothing, got: $out"
+  printf 'schema=fm-task-inbox.v1\nno separator\n' > "$dir/012.msg"
+  rc=0
+  bash "$ROOT/bin/fm-task-inbox.sh" take "$dir" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "an unreadable record should fail take, got rc=$rc"
+  [ -f "$dir/012.msg" ] || fail "an unreadable record must stay waiting"
+  for args in "ack $dir" "ack --through abc $dir" "take $dir extra"; do
+    rc=0
+    # shellcheck disable=SC2086  # deliberate word splitting of the fixture args
+    bash "$ROOT/bin/fm-task-inbox.sh" $args >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "usage error should exit 2 for: $args (got rc=$rc)"
+  done
+  rc=0
+  env -u FM_TASK_INBOX bash "$ROOT/bin/fm-task-inbox.sh" take >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "take with no inbox named should refuse, got rc=$rc"
+  pass "inbox: take prints every waiting record unchanged and ack acknowledges through the printed sequence"
+}
+
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
@@ -678,7 +752,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" "$log" \
+  grep -qF "Firstmate instruction waiting in \"\$FM_TASK_INBOX\", your 't1.inbox' steering inbox" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
@@ -970,6 +1044,7 @@ test_fire_and_forget_records_never_enter_the_ladder
 test_fire_and_forget_retry_is_owed_once
 test_fire_and_forget_retry_is_quiet_without_the_flag
 test_ring_ladder_policy
+test_take_prints_then_ack_acknowledges_through_the_printed_sequence
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox

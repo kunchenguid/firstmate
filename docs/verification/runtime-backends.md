@@ -822,11 +822,13 @@ The guard also notes whether the starfield and the placeholder were actually dra
 
 ## Steering-inbox doorbell
 
-The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
+The steering channel's one behavioral assumption - a real worker agent follows the constant doorbell line, which names the inbox and defers to its brief's inbox section for how to read and acknowledge it - was originally verified, while the doorbell itself still spelled out the list, read, and `mv` into `handled/` sequence, on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
 
 ```sh
 FM_SEND_INBOX_LIVE_E2E=1 tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
+
+The guard has since been updated for the generic doorbell: each worker is first handed the inbox section of a real generated brief, then steered. That updated guard has not been re-run live, so the output below is the earlier self-describing doorbell's evidence.
 
 Observed output (combined across the full run and the grok rerun after the advisory-skip narrowing landed):
 
