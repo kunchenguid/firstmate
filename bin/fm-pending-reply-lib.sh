@@ -50,7 +50,10 @@
 #   request_turn_completed_epoch=
 #   recovery_attempted_epoch=
 #   recovery_sender_pid=
-#   recovery_sender_identity=
+#   recovery_sender_identity= Linux /proc start ticks plus full cmdline hex
+#                             when stat and cmdline are readable; otherwise
+#                             ps lstart plus command.
+#                             Existing ps-form records remain readable.
 #   recovery_sent_epoch=
 #   recovery_delivery_outcome=
 #   recovery_turn_seen_busy=
@@ -1021,6 +1024,31 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
 }
 
 fm_pending_reply_pid_identity() {  # <pid>
+  local pid=$1 proc_root stat_line starttime cmdline_hex
+  local -a stat_fields
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+  # /proc stat field 22 counts clock ticks since boot, so a host clock step
+  # cannot change it; ps lstart re-renders those ticks against the wall-clock
+  # boot time and would read a live sender as dead after a clock step.
+  # Start ticks distinguish reused PIDs; the full cmdline
+  # preserves the sender command identity.
+  if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
+    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
+    # After the final comm delimiter, array index 19 is proc stat field 22.
+    read -r -a stat_fields <<< "${stat_line##*)}"
+    [ "${#stat_fields[@]}" -ge 20 ] || return 1
+    starttime=${stat_fields[19]}
+    case "$starttime" in ''|*[!0-9]*) return 1 ;; esac
+    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
+    [ -n "$cmdline_hex" ] || return 1
+    printf 'proc-starttime=%s cmdline-hex=%s' "$starttime" "$cmdline_hex"
+    return 0
+  fi
+  fm_pending_reply_ps_identity "$pid"
+}
+
+fm_pending_reply_ps_identity() {  # <pid>
   local pid=$1 identity
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   identity=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
@@ -1033,7 +1061,12 @@ fm_pending_reply_sender_alive() {  # <record-path>
   pid=$(fm_pending_reply_get "$rec" recovery_sender_pid)
   expected=$(fm_pending_reply_get "$rec" recovery_sender_identity)
   [ -n "$expected" ] || return 1
-  actual=$(fm_pending_reply_pid_identity "$pid") || return 1
+  case "$expected" in
+    proc-starttime=*) actual=$(fm_pending_reply_pid_identity "$pid") || return 1 ;;
+    # A record written before start-tick identity holds the ps form; keep
+    # honoring it so an upgrade does not strand an in-flight recovery.
+    *) actual=$(fm_pending_reply_ps_identity "$pid") || return 1 ;;
+  esac
   [ "$actual" = "$expected" ]
 }
 
