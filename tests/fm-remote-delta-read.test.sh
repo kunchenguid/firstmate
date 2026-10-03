@@ -34,6 +34,16 @@ run_reader() { # <offset> <prefix> <wait> [rel]
     "$READER" "${4:-$DELTA_LOG_REL}" "$1" "$2" "$3"
 }
 
+printf 'sized\n' > "$DELTA_HOME/$DELTA_LOG_REL"
+[ "$(FM_HOME="$DELTA_HOME" "$READER" size "$DELTA_LOG_REL")" = 6 ] \
+  || fail 'the size probe did not report exact remote bytes'
+FM_HOME="$DELTA_HOME" "$READER" size '../outside' >/dev/null 2>&1 \
+  && fail 'the size probe accepted traversal'
+ln -s replies.status "$DELTA_HOME/state/size-link.status"
+FM_HOME="$DELTA_HOME" "$READER" size state/size-link.status >/dev/null 2>&1 \
+  && fail 'the size probe accepted a symlink'
+pass 'the remote size probe reports bytes and refuses unsafe paths'
+
 # A growing log returns the complete appended lines with exact boundaries.
 : > "$DELTA_HOME/$DELTA_LOG_REL"
 run_reader 0 "$EMPTY_SHA" 4 > "$TMP_ROOT/growth.out" &

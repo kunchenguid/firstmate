@@ -96,11 +96,13 @@ So `clear` or `compact` cannot skip startup sweeps after a truncated run.
 
 `bin/fm-lock.sh` treats a lock as this session's own when it is owned through either of these:
 
-- The shared ancestry verdict.
-- A trusted same-session Claude id.
+- The shared ancestry verdict, except when the owner is a managed Codex app-server shared across threads.
+- A trusted same-session Claude id or Codex thread id recorded beside that shared daemon's lock.
 
 So a proven `clear` or `compact` re-emit re-verifies ownership and proceeds.
 A lock another live session took meanwhile still produces the ordinary read-only digest.
+An idle managed Codex daemon remains live after its owning Desktop thread ends; `bin/fm-lock.sh take-over` provides a guarded handoff when its exact recorded pid and thread identity are known, its watcher is gone, and its lock and beacon have been quiet long enough.
+The operator must also verify that the old thread has ended and explicitly attest to that exact pid and session; quiet lock evidence alone cannot rule out an active thread, and an incorrect takeover can split ownership.
 
 ### Nudge wrapper on a run-tier harness
 

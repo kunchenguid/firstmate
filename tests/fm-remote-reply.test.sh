@@ -53,6 +53,13 @@ if [ -n "${FM_REMOTE_REPLY_POLL_LOG:-}" ]; then
   printf 'x\n' >> "$FM_REMOTE_REPLY_POLL_LOG"
 fi
 [ "${FM_REMOTE_REPLY_FAIL_READ:-}" != 1 ] || exit 255
+[ ! -e "${FM_REMOTE_REPLY_FAIL_FLAG:-/nonexistent}" ] || exit 255
+if [ -e "${FM_REMOTE_REPLY_FAIL_DELTA_FLAG:-/nonexistent}" ]; then
+  if ! printf '%s' "${@: -1}" | base64 -d 2>/dev/null | tr '\0' '\n' | grep -qx size; then
+    printf 'x\n' >> "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
+    exit 255
+  fi
+fi
 host=$1
 entry=$2
 shift 2
@@ -173,6 +180,9 @@ if [ -z "$RESULT" ]; then
   fail "the remote reply delta was not durably captured"
 fi
 assert_grep 'done [corr=0123456789abcdef]' "$RESULT" "captured delta lost the correlated status line"
+if remote_env "$ADAPTER" terminal "$RESULT"; then
+  fail "an ordinary delta was classified terminal and tried to retire its re-armed listener"
+fi
 # One remote note, one announcement: the adapter declares self-announcing, so a
 # fully autohandled capture publishes NO check wake - the mirrored status bytes
 # are the single announcement, observed here through the same signature-vs-seen
@@ -823,18 +833,38 @@ fi
 stop_reply_listener || fail "the continuity listener did not stop"
 pass "a remote reply listener stays owned across empty waits and a delta"
 
-# A failed transport is not an empty wait: do not launch a second read under
-# the same owner, even when the launch floor is short.
+# A failed transport retries briefly under the same owner, then publishes one
+# durable failure and exits so reconcile's launch floor owns recovery.
 : > "$TMP_ROOT/failed-polls"
-FM_REMOTE_REPLY_FAIL_READ=1 FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
+touch "$TMP_ROOT/fail-remote-read"
+FM_REMOTE_REPLY_FAIL_FLAG="$TMP_ROOT/fail-remote-read" \
+  FM_REMOTE_REPLY_POLL_LOG="$TMP_ROOT/failed-polls" \
   FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1 \
   remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
 failed_reader=$!
 wait "$failed_reader" || fail "failed reader did not leave the runner"
 sleep 2
-[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 1 ] \
-  || fail "failed reader relaunched within the launch floor"
-pass "a failed remote read exits instead of relistening"
+[ "$(wc -l < "$TMP_ROOT/failed-polls" | tr -d ' ')" -eq 3 ] \
+  || fail "the listener did not stop after its three-read retry budget"
+assert_grep 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue" \
+  "three failed reads did not publish a durable failure"
+[ -f "$PARENT/state/remote-replies/ios.source-failed" ] \
+  || fail "the failed-read episode left no durable marker"
+printf 'working: recovered after transport failure\n' >> "$REMOTE/state/parent-replies.status"
+rm -f "$TMP_ROOT/fail-remote-read"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+for _ in $(seq 1 100); do
+  grep -q 'recovered after transport failure' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'recovered after transport failure' "$PARENT/state/ios.status" \
+  "a relaunched listener did not ingest after transport recovery"
+assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
+  "a recovered read did not close the failed-read episode"
+[ "$(grep -c 'remote reply listener ios failed three consecutive reads' "$PARENT/state/.wake-queue")" -eq 1 ] \
+  || fail "one failed-read episode published duplicate wakes"
+stop_reply_listener || fail "the recovered listener did not stop"
+pass "a failed remote read retries a bounded number of times, wakes once, and exits"
 
 # Make local ingestion persistently fail after the delta has been captured.
 # Its durable generation must remain the only copy until reconciliation.
@@ -988,9 +1018,106 @@ assert_grep "offset=$replay_offset" "$PARENT/state/remote-replies/ios.cursor" \
   "the recapture did not rebuild the lost cursor"
 pass "a cursor-loss whole-log recapture is acknowledged quietly with no duplicate wake"
 
+# The old log can lose a few bytes from an already ingested final line. Its
+# terminal continuity break is correct, but recovery must prove that the
+# retained complete tail matches the acknowledged raw delta before rewinding.
+stop_reply_listener || fail "the reply listener did not stop before the rebase fixture"
+printf 'note: rebase anchor stays intact\n' >> "$REMOTE/state/parent-replies.status"
+rebase_anchor_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+printf 'done [corr=0123456789abcdef]: rebase tail is complete\n' \
+  >> "$REMOTE/state/parent-replies.status"
+rebase_old_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the two-line rebase tail was not ingested"
+rebase_delta_gen=$GEN
+assert_grep "offset=$rebase_old_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "the rebase fixture did not commit the full tail"
+stop_reply_listener || fail "the reply listener did not stop before its suffix was shortened"
+cp "$REMOTE/state/parent-replies.status" "$TMP_ROOT/rebase-full-source"
+perl -e 'my $p=shift; my $n=-s $p; truncate($p,$n-5) or die $!' \
+  "$REMOTE/state/parent-replies.status" || fail "could not shorten the rebase fixture by five bytes"
+cp "$REMOTE/state/parent-replies.status" "$TMP_ROOT/rebase-short-source"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/rebase-break.out" 2>&1 &
+RUNNER=$!
+wait "$RUNNER" || fail "the shortened reply log did not produce a terminal result"
+rebase_break="$PARENT/state/procevent-inbox/$SID.$GEN.result"
+assert_present "$rebase_break" "the shortened reply log produced no captured break"
+assert_present "${rebase_break%.result}.handled" "the truncation result was not acknowledged"
+[ "$(remote_env "$ADAPTER" classify "$rebase_break")" = continuity-broken ] \
+  || fail "a five-byte shrink did not break continuity"
+assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" \
+  "the five-byte shrink did not publish a continuity block"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "the shortened source stayed registered before a guarded rebase"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$((rebase_old_offset - 1))" \
+  > "$TMP_ROOT/rebase-wrong-offset.out" 2>&1; then
+  fail "rebase accepted a stale expected cursor offset"
+fi
+mv "$PARENT/state/remote-replies/ios.$rebase_delta_gen.ingested" \
+  "$TMP_ROOT/rebase-ingest-receipt"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-no-proof.out" 2>&1; then
+  fail "rebase accepted a tail without its ingestion receipt"
+fi
+assert_grep 'last ingested delta is unavailable' "$TMP_ROOT/rebase-no-proof.out" \
+  "missing durable ingestion proof did not explain the rebase refusal"
+mv "$TMP_ROOT/rebase-ingest-receipt" \
+  "$PARENT/state/remote-replies/ios.$rebase_delta_gen.ingested"
+perl -0pi -e 's/rebase anchor/rebase Anchor/' "$REMOTE/state/parent-replies.status"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-changed-tail.out" 2>&1; then
+  fail "rebase accepted changed bytes in the retained complete tail"
+fi
+assert_grep 'retained remote tail differs' "$TMP_ROOT/rebase-changed-tail.out" \
+  "changed retained bytes did not explain the rebase refusal"
+cp "$TMP_ROOT/rebase-short-source" "$REMOTE/state/parent-replies.status"
+perl -e 'my ($p,$n)=@ARGV; truncate($p,$n+5) or die $!' \
+  "$REMOTE/state/parent-replies.status" "$replay_offset" \
+  || fail "could not leave only an incomplete retained line"
+perl -0pi -e 's/note:/Note:/' "$REMOTE/state/parent-replies.status"
+if remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-changed-fragment.out" 2>&1; then
+  fail "rebase accepted changed bytes in an incomplete retained line"
+fi
+assert_grep 'retained remote tail differs' "$TMP_ROOT/rebase-changed-fragment.out" \
+  "changed incomplete bytes bypassed the rebase proof"
+assert_grep "offset=$rebase_old_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "a refused rebase changed the committed cursor"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "a refused rebase registered a source"
+cp "$TMP_ROOT/rebase-short-source" "$REMOTE/state/parent-replies.status"
+remote_env "$ADAPTER" rebase ios --expect-offset "$rebase_old_offset" \
+  > "$TMP_ROOT/rebase-success.out" \
+  || fail "a verified five-byte suffix trim could not rebase: $(cat "$TMP_ROOT/rebase-success.out")"
+assert_grep "rebased: ios offset=$rebase_anchor_offset" "$TMP_ROOT/rebase-success.out" \
+  "rebase did not stop at the last verified complete line"
+rebase_backup=$(sed -n 's/^rebased: ios offset=[0-9]* prior-cursor=//p' "$TMP_ROOT/rebase-success.out")
+assert_grep "offset=$rebase_old_offset" "$rebase_backup" \
+  "rebase did not preserve the prior cursor for inspection"
+assert_grep "offset=$rebase_anchor_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "rebase did not commit its verified complete-line cursor"
+assert_grep 'resolved [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" \
+  "rebase did not publish a continuity resolution"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "rebase did not register the reply source"
+cp "$TMP_ROOT/rebase-full-source" "$REMOTE/state/parent-replies.status"
+printf 'done [corr=abcdef0123456789]: reply after verified rebase\n' \
+  >> "$REMOTE/state/parent-replies.status"
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the rebased listener did not ingest the restored tail and next reply"
+assert_grep 'reply after verified rebase' "$PARENT/state/ios.status" \
+  "the next reply after rebase did not reach the parent"
+[ "$(grep -cF 'rebase tail is complete' "$PARENT/state/ios.status")" -eq 1 ] \
+  || fail "rebase replay duplicated an already ingested tail line"
+pass "a five-byte suffix trim rebases only after exact tail proof and resumes without duplicate mirroring"
+
 # The adapter re-armed at the committed cursor. Truncation is detected from the
 # next blocking source and escalated once; it is never silently treated as a new
 # log or re-armed past the break.
+continuity_before=$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")
 stop_reply_listener || fail "the reply listener did not stop before the continuity break"
 printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/parent-replies.status"
 GEN=$((GEN + 1))
@@ -1001,6 +1128,8 @@ RESULT_TWELVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.$GEN.result" -p
 [ -n "$RESULT_TWELVE" ] || fail "continuity break produced no durable result"
 [ "$(remote_env "$ADAPTER" classify "$RESULT_TWELVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
+remote_env "$ADAPTER" terminal "$RESULT_TWELVE" \
+  || fail "a continuity break did not classify as terminal"
 set +e
 remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" > "$TMP_ROOT/handle-nine.out" 2>&1
 handle_rc=$?
@@ -1009,9 +1138,9 @@ set -e
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
-[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
-  || fail "continuity replay duplicated the escalation"
-status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
+[ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq "$((continuity_before + 1))" ] \
+  || fail "a new continuity episode was lost or replay duplicated its escalation"
+status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1)" >/dev/null \
   || fail "new continuity escalation has unknown emission time"
 if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
   printf '\nNew continuity escalation after ingest retry:\n'
@@ -1029,10 +1158,164 @@ assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
 remote_env "$ADAPTER" handle ios "$GEN" "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
+printf '0 1700000000 1\n' > "$PARENT/state/remote-replies/ios.lag"
+printf 'check: remote reply channel stalled: mate=ios\n0 1700000000\n' \
+  > "$PARENT/state/remote-replies/ios.lag-ready"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"
 assert_absent "$PARENT/state/remote-replies/ios.caught-up" \
   "adapter retirement left a caught-up watermark a later route could inherit"
+assert_absent "$PARENT/state/remote-replies/ios.source-failed" \
+  "adapter retirement left a failed-read episode a later route could inherit"
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "retirement left a pending lag receipt for the watcher to announce"
 pass "remote reply retirement quiesces and refuses unhandled captured results"
+
+# A watcher compares the remote log size with the committed cursor. One lag
+# episode re-ensures the listener and wakes only after the bound. While delta
+# reads keep failing the cursor stays behind, and a later probe in the same
+# episode neither repairs nor wakes again. Cursor progress clears its marker.
+lag_failures() { wc -l < "$TMP_ROOT/fail-delta-read" | tr -d ' '; }
+export FM_REMOTE_REPLY_FAIL_DELTA_FLAG="$TMP_ROOT/fail-delta-read"
+: > "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
+remote_env "$ADAPTER" arm ios >/dev/null
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-first.out"
+[ ! -s "$TMP_ROOT/lag-first.out" ] || fail "lag woke before its bound"
+[ "$(lag_failures)" -eq 0 ] || fail "lag repaired its listener before its bound"
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-second.out"
+assert_grep 'remote reply channel stalled: mate=ios' "$TMP_ROOT/lag-second.out" \
+  "an aged remote log ahead of its cursor did not wake"
+assert_grep 'remote reply channel stalled: mate=ios' \
+  "$PARENT/state/remote-replies/ios.lag-ready" \
+  "the background watcher has no durable receipt to surface after a lag probe"
+for _ in $(seq 1 100); do
+  [ "$(lag_failures)" -ge 3 ] && [ "$(reply_owner)" = none ] && break
+  sleep 0.1
+done
+[ "$(lag_failures)" -eq 3 ] || fail "a stalled-channel episode did not re-ensure its listener"
+[ "$(reply_owner)" = none ] || fail "the re-ensured listener outlived its failed-read budget"
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-third.out"
+[ ! -s "$TMP_ROOT/lag-third.out" ] || fail "one lag episode woke repeatedly"
+sleep 0.5
+[ "$(lag_failures)" -eq 3 ] || fail "one lag episode re-ensured its listener repeatedly"
+read -r _ _ lag_alerted < "$PARENT/state/remote-replies/ios.lag"
+[ "$lag_alerted" = 1 ] || fail "the still-behind lag episode lost its alerted state"
+[ "$(grep -c 'remote reply channel stalled: mate=ios' "$PARENT/state/.wake-queue")" -eq 1 ] \
+  || fail "one lag episode queued duplicate wakes"
+rm -f "$FM_REMOTE_REPLY_FAIL_DELTA_FLAG"
+unset FM_REMOTE_REPLY_FAIL_DELTA_FLAG
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/lag-catchup.out" 2>&1 &
+for _ in $(seq 1 100); do
+  grep -q 'source was replaced' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'source was replaced' "$PARENT/state/ios.status" \
+  "lagged reply was not ingested after the listener restarted"
+for _ in $(seq 1 100); do
+  [ ! -e "$PARENT/state/remote-replies/ios.lag-ready" ] && break
+  sleep 0.1
+done
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "committing cursor progress did not clear its obsolete lag receipt"
+stop_reply_listener || fail "lag catchup listener did not stop"
+for _ in $(seq 1 100); do
+  [ "$(reply_owner)" = none ] && break
+  sleep 0.1
+done
+sleep 1.1
+FM_REMOTE_REPLY_LAG_SECONDS=1 FM_REMOTE_REPLY_LAG_PROBE_SECONDS=1 \
+  remote_env "$ADAPTER" lag-check ios > "$TMP_ROOT/lag-caught-up.out"
+[ ! -s "$TMP_ROOT/lag-caught-up.out" ] || fail "a caught-up channel still woke"
+assert_absent "$PARENT/state/remote-replies/ios.lag" "catchup did not clear the lag episode"
+assert_absent "$PARENT/state/remote-replies/ios.lag-ready" \
+  "catchup left a stale receipt for the watcher to announce"
+pass "an aged remote reply lag re-ensures its listener and wakes once per episode, and catchup resets it"
+
+# The live failure mode is a detached reconcile launch that never proves a
+# claim, followed by an attached start that can read and apply the same reply.
+# Keep both paths in this relay fixture instead of treating a launch-failed
+# wake as proof that the remote route itself is broken.
+REAL_PERL=$(command -v perl)
+export FM_TEST_REAL_PERL="$REAL_PERL"
+cat > "$FAKEBIN/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = detach ]; then exit 125; fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+chmod +x "$FAKEBIN/perl"
+detached_rc=0
+FM_TEST_REAL_PERL="$REAL_PERL" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  remote_env "$ROOT/bin/fm-procevent.sh" reconcile > "$TMP_ROOT/detached-fail.out" 2>&1 \
+  || detached_rc=$?
+[ "$detached_rc" -ne 0 ] || fail "an unconfirmed detached launch was reported as healthy"
+assert_grep 'failed=1' "$TMP_ROOT/detached-fail.out" \
+  "the detached path did not report its unconfirmed launch"
+[ "$(reply_owner)" = none ] || fail "a failed detached launch invented an owner"
+assert_grep 'remote-reply-ios is registered but its launch did not prove' "$PARENT/state/.wake-queue" \
+  "the detached failure had no durable actionable wake"
+rm -f "$FAKEBIN/perl"
+unset FM_TEST_REAL_PERL
+printf 'working: attached launch after detached failure\n' >> "$REMOTE/state/parent-replies.status"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/attached-recovery.out" 2>&1 &
+for _ in $(seq 1 100); do
+  grep -q 'attached launch after detached failure' "$PARENT/state/ios.status" && break
+  sleep 0.1
+done
+assert_grep 'attached launch after detached failure' "$PARENT/state/ios.status" \
+  "an attached launch did not ingest after detached confirmation failed"
+stop_reply_listener || fail "attached recovery listener did not stop"
+pass "a failed detached launch surfaces durably and an attached launch ingests the backlog"
+
+# Re-arm can expose another break immediately. Force it after ensure-listening
+# returns, before the rebase command exits, so the resolution must already
+# precede the new block in the durable status stream.
+GEN=$(find "$PARENT/state/procevent-inbox" -maxdepth 1 -name "$SID.*.result" -print \
+  | awk -F. '{ print $(NF - 1) }' | sort -n | tail -1)
+GEN=${GEN:-0}
+printf 'note: rebase ordering anchor\n' >> "$REMOTE/state/parent-replies.status"
+printf 'done [corr=abcdef0123456789]: rebase ordering tail\n' \
+  >> "$REMOTE/state/parent-replies.status"
+order_old_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+GEN=$((GEN + 1))
+await_reply_result "$PARENT/state/procevent-inbox/$SID.$GEN.result" \
+  || fail "the ordering fixture was not ingested"
+stop_reply_listener || fail "the ordering fixture listener did not stop"
+perl -e 'my $p=shift; my $n=-s $p; truncate($p,$n-5) or die $!' \
+  "$REMOTE/state/parent-replies.status" || fail "could not shorten the ordering fixture"
+GEN=$((GEN + 1))
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/order-break.out" 2>&1 &
+RUNNER=$!
+wait "$RUNNER" || fail "the ordering fixture did not publish its first break"
+assert_present "$PARENT/state/procevent-inbox/$SID.$GEN.handled" \
+  "the ordering fixture break was not acknowledged"
+order_next_gen=$((GEN + 1))
+cat > "$TMP_ROOT/rebase-order-hook" <<'SH'
+#!/usr/bin/env bash
+printf 'failed: a second continuity break after rebase\n' > "$FM_TEST_REBASE_REMOTE_LOG"
+for _ in $(seq 1 800); do
+  [ -f "$FM_TEST_REBASE_NEXT_HANDLED" ] && exit 0
+  sleep 0.05
+done
+exit 1
+SH
+chmod +x "$TMP_ROOT/rebase-order-hook"
+FM_TEST_REBASE_AFTER_ENSURE_HOOK="$TMP_ROOT/rebase-order-hook" \
+  FM_TEST_REBASE_REMOTE_LOG="$REMOTE/state/parent-replies.status" \
+  FM_TEST_REBASE_NEXT_HANDLED="$PARENT/state/procevent-inbox/$SID.$order_next_gen.handled" \
+  remote_env "$ADAPTER" rebase ios --expect-offset "$order_old_offset" \
+  > "$TMP_ROOT/rebase-order.out" 2>&1 \
+  || fail "the second break could not be reproduced during re-arm: $(cat "$TMP_ROOT/rebase-order.out")"
+order_resolved_line=$(grep -nF 'resolved [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1 | cut -d: -f1)
+order_blocked_line=$(grep -nF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | tail -1 | cut -d: -f1)
+[ "$order_blocked_line" -gt "$order_resolved_line" ] \
+  || fail "a rebase resolution hid the immediately subsequent continuity break"
+assert_absent "$PARENT/state/procevent/$SID.source" \
+  "the second continuity break left its source registered"
+pass "rebase resolution precedes a break detected during listener re-arm"
 
 echo "ALL TESTS PASSED"

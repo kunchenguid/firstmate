@@ -8,9 +8,9 @@
 # Stop hook fires inside the lock-owning primary session before it may arm or
 # rewake. Two signals decide ownership, either one sufficient: the recorded pid
 # is a member of this process's contiguous harness ancestry, or the trusted
-# Claude session id below matches the id recorded beside a live lock. Neither
-# signal ever fails open: no id, no sidecar, an untrusted id, or a different
-# recorded id leaves the ancestry verdict exactly as it was.
+# Claude or Codex thread id below matches the id recorded beside a live lock.
+# A managed Codex app-server is shared across threads, so its ancestry alone
+# never proves ownership. Other harnesses retain the ancestry verdict.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -172,6 +172,19 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# A Codex Desktop tool shell can descend from the shared managed app-server.
+# That process survives individual threads and is never sufficient ownership
+# evidence by itself. Other Codex processes retain the ordinary PID rule.
+fm_session_lock_shared_codex_pid() {  # <pid>
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  case "${comm##*/}:$args" in
+    codex:*app-server*--managed-daemon*) return 0 ;;
+  esac
+  return 1
+}
+
 # --- trusted same-session identity -------------------------------------------
 # Claude Code hands every hook and tool shell CLAUDE_CODE_SESSION_ID (the
 # session's conversation id) and CLAUDE_PID (the pid of the process running the
@@ -195,25 +208,40 @@ fm_harness_pid_alive() {
 # non-goal. Two genuinely different live sessions sharing one id is not a
 # supported state (Claude refuses to resume a running session under its id).
 
-# Print the Claude session id this process may own with, or return 1. $1 is the
+# Print the verified session or thread id this process may own with, or return 1. $1 is the
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
-  [ -n "$id" ] || return 1
-  case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} codex_id=${CODEX_THREAD_ID:-}
+  local pids=${1:-} pid comm args
   if [ -z "$pids" ]; then
     pids=$(fm_harness_ancestry_pids) || return 1
   fi
+  if [ -n "$id" ] && [ -n "$claude_pid" ]; then
+    case "$id" in *$'\n'*|*$'\r'*) id= ;; esac
+    case "$claude_pid" in *[!0-9]*) id= ;; esac
+  fi
+  if [ -n "$id" ] && [ -n "$claude_pid" ]; then
+    while IFS= read -r pid; do
+      [ "$pid" = "$claude_pid" ] || continue
+      comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      fm_harness_process_matches "$comm" "$args" || return 1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+      printf '%s\n' "$id"
+      return 0
+    done <<EOF
+$pids
+EOF
+  fi
+  case "$codex_id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  [ "${#codex_id}" -le 128 ] || return 1
   while IFS= read -r pid; do
-    [ "$pid" = "$claude_pid" ] || continue
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
-    [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
-    printf '%s\n' "$id"
-    return 0
+    case "${comm##*/}:$args" in
+      codex:*) printf 'codex:%s\n' "$codex_id"; return 0 ;;
+    esac
   done <<EOF
 $pids
 EOF
@@ -252,12 +280,13 @@ fm_session_lock_same_session() {  # <state> [<ancestry-pids>]
 # the sidecar still names that session. Every other session records the
 # outermost pid of its contiguous run, exactly as before.
 fm_session_lock_anchor_pid() {
-  local pids
+  local pids trusted
   pids=$(fm_harness_ancestry_pids) || return 1
-  if fm_session_lock_trusted_session_id "$pids" >/dev/null; then
-    printf '%s\n' "$CLAUDE_PID"
-    return 0
-  fi
+  trusted=$(fm_session_lock_trusted_session_id "$pids") || trusted=
+  case "$trusted" in
+    ''|codex:*) ;;
+    *) printf '%s\n' "$CLAUDE_PID"; return 0 ;;
+  esac
   _fm_harness_outermost_pid "$pids"
 }
 
@@ -280,6 +309,11 @@ fm_session_lock_owned_by_self() {
     ''|*[!0-9]*) return 1 ;;
   esac
   pids=$(fm_harness_ancestry_pids) || return 1
+  if fm_session_lock_shared_codex_pid "$lock_pid"; then
+    fm_session_lock_same_session "$state" "$pids" || return 1
+    fm_harness_pid_alive "$lock_pid"
+    return $?
+  fi
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
   done <<EOF
@@ -297,7 +331,7 @@ EOF
 # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
 FM_SESSION_LOCK_FOREIGN_OWNER_PID=
 fm_session_lock_foreign_owner_live() {
-  local state=$1 lock_pid pids pid
+  local state=$1 lock_pid
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=
   [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
   lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
@@ -305,13 +339,8 @@ fm_session_lock_foreign_owner_live() {
     ''|*[!0-9]*) return 1 ;;
   esac
   fm_harness_pid_alive "$lock_pid" || return 1
-  pids=$(fm_harness_ancestry_pids) || return 1
-  while IFS= read -r pid; do
-    [ "$pid" = "$lock_pid" ] && return 1
-  done <<EOF
-$pids
-EOF
-  fm_session_lock_same_session "$state" "$pids" && return 1
+  fm_harness_ancestry_pids >/dev/null || return 1
+  fm_session_lock_owned_by_self "$state" && return 1
   # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
   FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
   return 0
