@@ -94,19 +94,6 @@ Each effective `FM_HOME` contains private operational directories.
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
-## Codex crew hooks
-
-The optional, local, gitignored `config/codex-crew-hooks` file controls Codex lifecycle hooks for crewmate and scout launches.
-When the file is absent or contains the single token `off`, Firstmate passes `--disable hooks`, preserving the default hook-free launch.
-When it contains the single token `on`, Firstmate leaves Codex hooks enabled.
-Any other content makes `bin/fm-spawn.sh` print a `warning: invalid config/codex-crew-hooks` diagnostic at launch and launch with hooks disabled.
-The precondition is hook trust the operator grants once, interactively in Codex, in the repository checkout.
-That trust holds for linked worktrees of the repository carrying the same `.codex/hooks.json` content, which is where crewmates and scouts launch ([verification](verification/runtime-backends.md#codex-hook-trust)).
-A changed hooks file needs trust again, and the machine's own `~/.codex/hooks.json` hooks must be trusted the same way.
-This setting never answers or bypasses Codex's "Hooks need review" modal; an untrusted hooks file still parks the worker on that modal.
-Firstmate never writes Codex's trust store and never uses `--dangerously-bypass-hook-trust`.
-Secondmate launches are unchanged, and this setting is not inherited into secondmate homes.
-
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
@@ -134,6 +121,19 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 - `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 
 - Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
+
+## Codex crew hooks
+
+The optional, local, gitignored `config/codex-crew-hooks` file controls Codex lifecycle hooks for crewmate and scout launches.
+When the file is absent or contains the single token `off`, Firstmate passes `--disable hooks`, preserving the default hook-free launch.
+When it contains the single token `on`, Firstmate leaves Codex hooks enabled.
+Any other content makes `bin/fm-spawn.sh` print a `warning: invalid config/codex-crew-hooks` diagnostic at launch and launch with hooks disabled.
+The precondition is hook trust the operator grants once, interactively in Codex, in the repository checkout.
+That trust holds for linked worktrees of the repository carrying the same `.codex/hooks.json` content, which is where crewmates and scouts launch ([verification](verification/runtime-backends.md#codex-hook-trust)).
+A changed hooks file needs trust again, and the machine's own `~/.codex/hooks.json` hooks must be trusted the same way.
+This setting never answers or bypasses Codex's "Hooks need review" modal; an untrusted hooks file still parks the worker on that modal.
+Firstmate never writes Codex's trust store and never uses `--dangerously-bypass-hook-trust`.
+Secondmate launches are unchanged, and this setting is not inherited into secondmate homes.
 
 ## Orchestrator behavior (AGENTS.md)
 
