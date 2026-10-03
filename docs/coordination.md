@@ -33,7 +33,7 @@ Resources are objects with `type` and `name`, except `rename` with `from` and `t
 Repository paths use relative POSIX syntax; repeated separators and `.` collapse, while absolute paths, backslashes and `..` fail.
 File, directory, dependency-manifest and generated-output resources share the path conflict domain; the last two canonicalize to files.
 Equal paths overlap; a directory also overlaps any descendant file or directory.
-`rename` expands to claims on both old and new file paths.
+`rename` expands to directory claims on both old and new paths, so it covers a renamed file and every descendant of a renamed directory.
 `issue`, `schema-object`, `migration-sequence`, and `integration` overlap by exact type and canonical name.
 Use one stable issue spelling such as `owner/repo#123`; this increment does not look up forge aliases.
 An `area` resolves through the repository area registry to its canonical name and declared directory prefixes.

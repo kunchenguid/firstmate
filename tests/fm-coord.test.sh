@@ -89,6 +89,11 @@ independent_result=$(claim independent "$loser" "$( [ "$loser" = a ] && printf '
 [ "$(field "$independent_result" ok)" = True ] || fail 'independent files should both admit'
 pass 'independent file admission'
 
+for zone in UTC Asia/Tokyo America/Los_Angeles; do
+  TZ=$zone coord check "$(printf '{"home_id":"%s","generation":%s,"claim_id":"%s","fence":%s}' "$loser" "$loser_generation" "$(field "$free_result" claim_id)" "$(field "$free_result" fence)")" > /dev/null || fail "caller timezone $zone must not change boot identity or revoke live claims"
+done
+pass 'boot identity is independent of caller timezone'
+
 for scenario in directory rename area; do
   case "$scenario" in
     directory) resource='[{"type":"directory","name":"src"}]' ;;
@@ -108,6 +113,16 @@ area_grant=$(claim area-other "$winner" "$gw")
 area_denial=$(claim area "$loser" "$( [ "$loser" = a ] && printf '%s' "$ga" || printf '%s' "$gb" )")
 [ "$(field "$area_denial" ok)" = False ] || fail 'second alias of one area must conflict'
 pass 'directory, rename, and area alias overlap'
+
+submit pkg-child "$winner" "$gw" '[{"type":"file","name":"pkg/old/a.py"},{"type":"file","name":"pkg/target/b.py"}]' > /dev/null
+[ "$(field "$(claim pkg-child "$winner" "$gw")" ok)" = True ] || fail 'descendant files should grant'
+submit rename-from-dir "$loser" "$loser_generation" '[{"type":"rename","from":"pkg/old","to":"pkg/moved"}]' > /dev/null
+[ "$(field "$(claim rename-from-dir "$loser" "$loser_generation")" ok)" = False ] || fail 'directory rename source must overlap descendant file'
+submit rename-to-dir "$loser" "$loser_generation" '[{"type":"rename","from":"lib/fresh","to":"pkg/target"}]' > /dev/null
+[ "$(field "$(claim rename-to-dir "$loser" "$loser_generation")" ok)" = False ] || fail 'directory rename destination must overlap descendant file'
+submit rename-free "$loser" "$loser_generation" '[{"type":"rename","from":"lib/fresh","to":"lib/renamed"}]' > /dev/null
+[ "$(field "$(claim rename-free "$loser" "$loser_generation")" ok)" = True ] || fail 'unrelated directory rename should grant'
+pass 'directory rename covers descendants on both paths'
 
 outbox_before=$(coord outbox '{"limit":1000}')
 event_id=$(field "$winner_result" event_id)

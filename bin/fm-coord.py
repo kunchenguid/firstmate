@@ -44,7 +44,7 @@ def boot_id():
     if linux.exists():
         return linux.read_text(encoding="ascii").strip()
     if sys.platform == "darwin":
-        result = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, check=True)
+        result = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True, text=True, check=True)
         return result.stdout.strip()
     raise Refusal("boot identity unavailable; only macOS and Linux are supported")
 
@@ -76,8 +76,8 @@ def resources(db, repo, declared):
         require(isinstance(item, dict) and isinstance(item.get("type"), str), "resource must have a type")
         kind = item["type"]
         if kind == "rename":
-            result.add(("file", path(item.get("from"))))
-            result.add(("file", path(item.get("to"))))
+            result.add(("directory", path(item.get("from"))))
+            result.add(("directory", path(item.get("to"))))
         elif kind == "area":
             alias = token(item.get("name"), "area name")
             row = db.execute("SELECT name FROM area_aliases WHERE repo=? AND alias=?", (repo, alias)).fetchone()
