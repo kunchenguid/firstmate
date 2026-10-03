@@ -361,9 +361,10 @@ fm_pr_regular_destination_on_device_or_absent() {
 # Metadata identity contract: exactly one pr= line, and after it only pr_head=
 # and the x_* link fields are tolerated. Every writer that rewrites or appends
 # to a record with an armed poll (bin/fm-pr-check.sh, the bin/fm-spawn.sh
-# relaunch, bin/fm-captain-hold.sh completion) keeps the pr= block last for
-# that reason; a non-tolerated line after pr= makes the watcher refuse the
-# armed poll on every sweep until the next re-arm.
+# relaunch, bin/fm-captain-hold.sh completion, and the bin/fm-teardown.sh legacy
+# stamp) keeps the pr= block last for that reason; a non-tolerated line after
+# pr= makes the watcher refuse the armed poll on every sweep until the next
+# re-arm.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

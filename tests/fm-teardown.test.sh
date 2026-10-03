@@ -57,6 +57,8 @@ set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh disable=SC1091
+. "$ROOT/bin/fm-pr-lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -1557,7 +1559,7 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
   printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  add_failing_truncate_perl "$case_dir"
+  add_failing_legacy_stamp_rollback "$case_dir"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1694,9 +1696,13 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
 # Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
 # perl call in the lifecycle still runs the real interpreter, so the abandoned
 # attempt leaves its stamp behind for exactly the reason under test.
-add_failing_truncate_perl() {
-  local case_dir=$1 real
+add_failing_legacy_stamp_rollback() {
+  local case_dir=$1 real real_cp
   real=$(command -v perl)
+  real_cp=$(command -v cp)
+  # A no-poll record is rolled back by a perl truncate; an armed-poll record
+  # (a pr= line) is rolled back by copying its .legacy-prestamp backup back. Fail
+  # both so the stamp is retained regardless of which path the record takes.
   cat > "$case_dir/fakebin/perl" <<SH
 #!/usr/bin/env bash
 case "\$*" in
@@ -1705,6 +1711,12 @@ esac
 exec "$real" "\$@"
 SH
   chmod +x "$case_dir/fakebin/perl"
+  cat > "$case_dir/fakebin/cp" <<SH
+#!/usr/bin/env bash
+for a in "\$@"; do case "\$a" in *.legacy-prestamp) exit 1 ;; esac; done
+exec "$real_cp" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/cp"
 }
 
 test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
@@ -1715,7 +1727,7 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
-  add_failing_truncate_perl "$case_dir"
+  add_failing_legacy_stamp_rollback "$case_dir"
 
   set +e
   run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -1759,6 +1771,44 @@ test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
   [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$stamped" ] \
     || fail "legacy-stamp-retained: the flag-less refusal modified the task record"
   pass "a legacy stamp a failed rollback left behind still faces the endpoint gate"
+}
+
+# A pre-2025-format record (no spawn_gen) that carries an ARMED merge poll keeps
+# its pr=/pr_head= identity block as the last lines of its record, and
+# fm_pr_metadata_identity_parse refuses any other line after pr=. The legacy
+# teardown stamp must therefore land before the identity block, or the watcher's
+# trusted path would refuse the armed poll on every sweep (the same failure the
+# relaunch and captain-hold writers had). The close marker is forced to fail (its
+# target pre-created as a directory) so the stamp's rollback runs and, with the
+# rollback also failing, the stamped record is retained for inspection. This is
+# independent of the tasks-axi version because the forced close-marker failure
+# precedes the version-gated close transition.
+test_legacy_stamp_on_an_armed_poll_record_stays_identity_parseable() {
+  local case_dir rc url head
+  case_dir=$(make_case legacy-armed-poll)
+  write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  url=https://github.com/example/repo/pull/99
+  head=0123456789abcdef0123456789abcdef01234567
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$case_dir/state/task-x1.meta"
+  : > "$case_dir/state/task-x1.check.sh"
+  fm_pr_metadata_identity_parse "$case_dir/state/task-x1.meta" \
+    || fail "armed-legacy: the fixture record was not identity-parseable before the stamp"
+  seed_backlog_in_flight "$case_dir"
+  mkdir "$case_dir/state/task-x1.backlog-close"
+  add_failing_legacy_stamp_rollback "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "armed-legacy: the forced close failure must fail the teardown after stamping"
+  [ "$(legacy_meta_gen_count "$case_dir")" = 1 ] \
+    || fail "armed-legacy: the retained record did not carry the legacy stamp"
+  fm_pr_metadata_identity_parse "$case_dir/state/task-x1.meta" \
+    || fail "armed-legacy: the legacy stamp broke the armed poll identity contract: $(cat "$case_dir/state/task-x1.meta")"
+  [ "$(tail -n 1 "$case_dir/state/task-x1.meta")" = "pr_head=$head" ] \
+    || fail "armed-legacy: the identity block is no longer the tail of the record: $(cat "$case_dir/state/task-x1.meta")"
+  pass "a legacy teardown stamp on an armed-poll record lands before the identity block, keeping it parseable"
 }
 
 test_legacy_record_never_accepts_a_corrupt_spawn_gen() {
@@ -4702,6 +4752,7 @@ test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails
 test_retained_legacy_stamp_still_faces_the_endpoint_gate
+test_legacy_stamp_on_an_armed_poll_record_stays_identity_parseable
 test_legacy_record_never_accepts_a_corrupt_spawn_gen
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

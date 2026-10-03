@@ -545,6 +545,7 @@ TEARDOWN_LEGACY_ACCEPTED=0
 TEARDOWN_LEGACY_ENDPOINT=
 TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
+TEARDOWN_LEGACY_PRESTAMP_BACKUP=
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
 TEARDOWN_WINDOWLESS=0
@@ -626,6 +627,9 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
         fi
         TEARDOWN_LEGACY_PENDING=1
         TEARDOWN_LEGACY_RETAINED_STAMP=$FM_BACKLOG_META_SPAWN_GEN
+        # An armed-poll stamp is a rewrite kept behind a byte backup; a retained
+        # stamp means the prior attempt's backup was left behind, so drop it.
+        rm -f -- "$META.legacy-prestamp" 2>/dev/null || true
         ;;
     esac
   fi
@@ -3481,10 +3485,19 @@ if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
 # size before reporting success, so a rollback that cannot be proven complete
 # is reported as not rolled back.
 teardown_legacy_stamp_rollback() {
-  [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null || return 1
-  perl -e 'truncate($ARGV[0], $ARGV[1]) or exit 1' -- \
-    "$META" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" || return 1
-  [ "$(wc -c < "$META" | tr -d ' ')" = "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ]
+  if [ -n "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ] && [ -f "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ]; then
+    # An armed-poll record was stamped by inserting before the identity block,
+    # a rewrite a byte-size truncate cannot recover, so restore the exact
+    # pre-stamp bytes from the backup instead.
+    cp -f -- "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" "$META" || return 1
+    rm -f -- "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" || return 1
+    [ -f "$META" ]
+  else
+    [ "$TEARDOWN_LEGACY_PRESTAMP_SIZE" -gt 0 ] 2>/dev/null || return 1
+    perl -e 'truncate($ARGV[0], $ARGV[1]) or exit 1' -- \
+      "$META" "$TEARDOWN_LEGACY_PRESTAMP_SIZE" || return 1
+    [ "$(wc -c < "$META" | tr -d ' ')" = "$TEARDOWN_LEGACY_PRESTAMP_SIZE" ]
+  fi
 }
 
   # The accepted legacy incarnation is stamped under the meta lock already
@@ -3495,14 +3508,47 @@ teardown_legacy_stamp_rollback() {
   # dead-or-agent-less endpoint gate instead of sailing past it on a stamp the
   # abandoned attempt left behind.
   if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ] && [ -z "$TEARDOWN_LEGACY_RETAINED_STAMP" ]; then
-    TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
     TEARDOWN_LEGACY_STAMP_FAILED=
-    if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
-      printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
-    fi
-    if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
-      printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" >> "$META" \
-        || TEARDOWN_LEGACY_STAMP_FAILED=append
+    # A record that carries an armed poll (a pr= line) must keep its identity
+    # block last for fm_pr_metadata_identity_parse, so its stamp is inserted
+    # BEFORE the block rather than appended; that is a rewrite a byte-size
+    # truncate cannot roll back, so an armed-poll stamp also keeps a byte backup
+    # of the pre-stamp record. A record with no pr= line is stamped by plain
+    # append, which the pre-stamp byte size restores.
+    if ! grep -q '^pr=' "$META" 2>/dev/null; then
+      TEARDOWN_LEGACY_PRESTAMP_SIZE=$(wc -c < "$META" | tr -d ' ')
+      if [ -s "$META" ] && [ -n "$(tail -c 1 -- "$META" 2>/dev/null)" ]; then
+        printf '\n' >> "$META" || TEARDOWN_LEGACY_STAMP_FAILED=newline
+      fi
+      if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ]; then
+        printf 'spawn_gen=%s\n' "$TEARDOWN_META_SPAWN_GEN" >> "$META" \
+          || TEARDOWN_LEGACY_STAMP_FAILED=append
+      fi
+    else
+      rm -f -- "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" 2>/dev/null || true
+      TEARDOWN_LEGACY_PRESTAMP_BACKUP="$META.legacy-prestamp"
+      if ! cp -f -- "$META" "$TEARDOWN_LEGACY_PRESTAMP_BACKUP"; then
+        TEARDOWN_LEGACY_STAMP_FAILED=backup
+        TEARDOWN_LEGACY_PRESTAMP_BACKUP=
+      else
+        TEARDOWN_LEGACY_STAMP_MODE=$(/usr/bin/stat -f %Lp "$META" 2>/dev/null || stat -c %a "$META" 2>/dev/null)
+        TEARDOWN_LEGACY_STAMP_TMP=$(umask 077; mktemp "$(dirname "$META")/.fm-teardown-meta.XXXXXX" 2>/dev/null) || TEARDOWN_LEGACY_STAMP_TMP=
+        if [ -n "$TEARDOWN_LEGACY_STAMP_TMP" ]; then
+          if ! awk -v gen="$TEARDOWN_META_SPAWN_GEN" '
+              /^spawn_gen=/ { next }
+              !placed && /^pr=/ { print "spawn_gen=" gen; placed = 1 }
+              { print }
+            ' "$META" > "$TEARDOWN_LEGACY_STAMP_TMP" \
+            || ! chmod "${TEARDOWN_LEGACY_STAMP_MODE:-600}" "$TEARDOWN_LEGACY_STAMP_TMP" \
+            || ! mv -f -- "$TEARDOWN_LEGACY_STAMP_TMP" "$META"; then
+            rm -f -- "$TEARDOWN_LEGACY_STAMP_TMP"
+            TEARDOWN_LEGACY_STAMP_FAILED=insert
+          fi
+          TEARDOWN_LEGACY_STAMP_TMP=
+        else
+          TEARDOWN_LEGACY_STAMP_FAILED=tmp
+        fi
+      fi
     fi
     if [ -z "$TEARDOWN_LEGACY_STAMP_FAILED" ] \
        && ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
@@ -3534,6 +3580,12 @@ teardown_legacy_stamp_rollback() {
       fi
     fi
     exit 1
+  fi
+  # The close marker bound to the stamped incarnation, so the pre-stamp backup
+  # is no longer a rollback source; drop it (an armed-poll stamp is a rewrite).
+  if [ -n "$TEARDOWN_LEGACY_PRESTAMP_BACKUP" ]; then
+    rm -f -- "$TEARDOWN_LEGACY_PRESTAMP_BACKUP"
+    TEARDOWN_LEGACY_PRESTAMP_BACKUP=
   fi
 else
   if [ "$CLEANUP_RECOVERY" = orca ]; then
