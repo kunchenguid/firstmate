@@ -19,6 +19,22 @@
 #                                        codex-native/<id>. Other efforts retain
 #                                        their adapter's existing policy. Native
 #                                        Codex validates model support at startup.
+#        fm-harness.sh codex-effort-catalog
+#                                        print {"<slug>":[<effort>...]} from the
+#                                        supported_reasoning_levels in
+#                                        ${CODEX_HOME:-$HOME/.codex}/models_cache.json,
+#                                        or null when it is absent/unreadable/malformed.
+#                                        An entry without a supported_reasoning_levels
+#                                        array is malformed and left out.
+#        fm-harness.sh codex-supports-effort <model> <effort>
+#                                        A model the catalog lists supports exactly its
+#                                        listed levels among low|medium|high|xhigh|max.
+#                                        A default model, a model the catalog does not
+#                                        list, or an unavailable catalog (or jq) keeps the
+#                                        low|medium|high|xhigh baseline; max is never
+#                                        guessed. Unsupported efforts stay recorded but
+#                                        are omitted from launch flags. Ultra refusal is
+#                                        owned above.
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
@@ -516,6 +532,38 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+codex_effort_catalog() {
+  local catalog levels
+  catalog="${CODEX_HOME:-$HOME/.codex}/models_cache.json"
+  if [ -r "$catalog" ] && levels=$(jq -c '
+      if (.models | type) != "array" then error("invalid model catalog")
+      else reduce .models[] as $m ({};
+        if ($m.slug | type) == "string" and ($m.supported_reasoning_levels | type) == "array"
+        then .[$m.slug] = ((.[$m.slug] // []) + [$m.supported_reasoning_levels[]?.effort])
+        else . end)
+      end
+    ' "$catalog" 2>/dev/null) && [ -n "$levels" ]; then
+    printf '%s\n' "$levels"
+  else
+    printf 'null\n'
+  fi
+}
+
+codex_supports_effort() {
+  local model=${1:-} effort=${2:-} baseline=1 listed
+  case "$effort" in low|medium|high|xhigh) ;; max) baseline= ;; *) return 1 ;; esac
+  listed=$(jq -r -n --argjson levels "$(codex_effort_catalog)" --arg model "$model" --arg effort "$effort" '
+    if $model != "" and $model != "default" and ($levels | type) == "object" and ($levels | has($model))
+    then $levels[$model] | index($effort) != null
+    else "unlisted" end
+  ' 2>/dev/null) || listed=unlisted
+  case "$listed" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) [ -n "$baseline" ] ;;
+  esac
+}
+
 validate_native_effort() {
   local harness=${1:-} model=${2:-} effort=${3:-}
   [ "$effort" = ultra ] || return 0
@@ -529,6 +577,8 @@ validate_native_effort() {
 }
 
 case "${1:-}" in
+  codex-effort-catalog) codex_effort_catalog ;;
+  codex-supports-effort) shift; codex_supports_effort "$@" ;;
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
     case "${2:-}" in
