@@ -1358,12 +1358,12 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     fm_backend_capture() { fail "native busy observations should not capture"; }
     # shellcheck disable=SC2329
     fm_pending_reply_find_resolve_line() {
-      local status_file=$1 corr=$2 line
+      local status_file=$1 corr=$2 scanned_line
       printf '%s\t%s\n' "$status_file" "$corr" >> "$scan_log"
       [ -f "$status_file" ] || return 0
-      while IFS= read -r line || [ -n "$line" ]; do
-        fm_pending_reply_line_resolves "$line" "$corr" || continue
-        printf '%s' "$line"
+      while IFS= read -r scanned_line || [ -n "$scanned_line" ]; do
+        fm_pending_reply_line_resolves "$scanned_line" "$corr" || continue
+        printf '%s' "$scanned_line"
         return 0
       done < "$status_file"
       return 0
@@ -1992,8 +1992,108 @@ test_escalated_undelivered_correlation_stays_retryable() {
   pass "an escalated correlation stays retryable only while undelivered"
 }
 
+test_record_reader_preserves_last_literal_value() {
+  local home rec out
+  home=$(setup_parent record-reader)
+  rec="$home/record"
+  printf 'other=x\nfield=first\nfield= spaces = \\literal\nfield=last=\\value' > "$rec"
+  [ "$(fm_pending_reply_get "$rec" field)" = 'last=\value' ] \
+    || fail "record reader changed the final unterminated literal value"
+  [ -z "$(fm_pending_reply_get "$rec" absent)" ] \
+    || fail "record reader invented a missing field"
+  printf '\nfield=\n' >> "$rec"
+  [ -z "$(fm_pending_reply_get "$rec" field)" ] \
+    || fail "record reader did not preserve an empty last value"
+  chmod 000 "$rec"
+  if [ ! -r "$rec" ]; then
+    # shellcheck disable=SC2016 # Exercise the reader in a fresh errexit shell.
+    out=$(bash -c 'set -e; . "$1"; fm_pending_reply_get "$2" field; printf reader-survived' \
+      _ "$ROOT/bin/fm-pending-reply-lib.sh" "$rec" 2>&1) \
+      || fail "an unreadable record aborted an errexit caller"
+    [ "$out" = reader-survived ] || fail "unreadable record handling was not silent: $out"
+  else
+    printf 'skip - privileged user can still read the mode-000 record\n'
+  fi
+  chmod 600 "$rec"
+  pass "record reader preserves literal values and silent read failure"
+}
+
+test_resolved_escalation_retries_missing_close_on_tick() (
+  local home state corr rec status close round
+  home=$(setup_parent resolved-close-retry)
+  state="$home/state"
+  status="$state/hibit.status"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  export FM_PENDING_REPLY_NOW=9800 FM_PENDING_REPLY_SEND_HOOK=true
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "retry missing close")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  fm_pending_reply_mark_delivered "$state" "$corr" || fail "mark delivered failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  fm_pending_reply_send_recovery "$state" "$corr" || fail "recovery send failed"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" recovery
+  fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation should fire"
+  [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ] \
+    || fail "fixture must have a durable escalation"
+
+  # Persist the state left by interruption after resolution but before its close.
+  printf 'done [corr=%s]: delayed reply\n' "$corr" >> "$status"
+  fm_pending_reply_set "$rec" phase resolved || fail "could not seed resolved phase"
+  fm_pending_reply_set "$rec" resolved_epoch 9800 || fail "could not seed resolution time"
+  fm_pending_reply_set "$rec" resolved_via status || fail "could not seed resolution source"
+  [ -z "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+    || fail "fixture must start without a closing receipt"
+  [ "$(status_open_decisions "$status" | cut -f1)" = "pending-reply-$corr" ] \
+    || fail "fixture must leave its escalation decision open"
+  close="resolved [key=pending-reply-$corr]: pending-reply-resolved: task=hibit pending-reply-id=$corr via=status"
+  assert_no_grep "pending-reply-resolved:" "$status" "fixture must start without a close"
+
+  for round in 1 2; do
+    export FM_PENDING_REPLY_NOW=$((9800 + round))
+    fm_pending_reply_tick "$state" || fail "close reconciliation tick failed"
+    [ "$(phase_of "$state" "$corr")" = resolved ] || fail "tick changed resolved phase"
+    [ "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" = 9801 ] \
+      || fail "tick must write the missing closing receipt once"
+    [ "$(sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fxc "$close")" = 1 ] \
+      || fail "tick must publish exactly one matching resolution"
+    [ -z "$(status_open_decisions "$status")" ] \
+      || fail "tick left the escalation decision open"
+  done
+  pass "resolved escalations retry missing closes on tick without duplicates"
+)
+
+test_settled_history_does_not_wait_for_correlation_locks() (
+  local home state corr lock
+  home=$(setup_parent settled-history)
+  state="$home/state"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state"
+  export FM_HOME FM_STATE_OVERRIDE
+  . "$ROOT/bin/fm-wake-lib.sh"
+  . "$ROOT/bin/fm-timeout-lib.sh"
+  mkdir -p "$state/pending-replies"
+  for corr in 0000000000000001 0000000000000002; do
+    printf 'corr_id=%s\ntask_id=mate\nphase=resolved\n' "$corr" > "$state/pending-replies/$corr"
+    if [ "$corr" = 0000000000000002 ]; then
+      printf 'escalated_epoch=1\nescalation_closed_epoch=2\n' >> "$state/pending-replies/$corr"
+    fi
+    lock="$state/.pending-reply-$corr.lock"
+    fm_lock_acquire_wait "$lock" || fail "could not hold fixture lock"
+  done
+  # shellcheck disable=SC2016 # The child expands its positional arguments.
+  fm_run_timed 5 bash -c '. "$1/bin/fm-pending-reply-lib.sh"; fm_pending_reply_tick "$2"' \
+    _ "$ROOT" "$state" || fail "settled history waited for an unnecessary correlation lock"
+  for corr in 0000000000000001 0000000000000002; do
+    fm_lock_release "$state/.pending-reply-$corr.lock"
+    [ -f "$state/pending-replies/$corr" ] || fail "tick discarded settled history"
+  done
+  pass "settled records do not block notification scanning on correlation locks"
+)
+
 # --- run --------------------------------------------------------------------
 
+test_record_reader_preserves_last_literal_value
+test_resolved_escalation_retries_missing_close_on_tick || exit 1
+test_settled_history_does_not_wait_for_correlation_locks
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
 test_recovery_waits_while_the_mate_has_an_open_decision
