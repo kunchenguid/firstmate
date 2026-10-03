@@ -92,6 +92,8 @@ If two metadata records derive the same per-window marker key, including two rec
 A `kind=secondmate` task's status stream doubles as its parent-directed reply channel, so its lines new since the last classification are read before busy evidence counts: a decision, blocker, terminal outcome, `note:`, correlation-marked line, or unknown verb always surfaces, while unmarked routine `working:` and `paused:` progress is absorbed only by the same provably-working proof an ordinary crewmate gets.
 Its bare turn-ended signal is absorbed only by the ordinary authoritative working proof because an active secondmate does not enter the staleness backbone that would resurface deferred pane-churn evidence.
 A crew that declares `paused:` for a known external wait, or carries a verified `captain-held` transfer, is separately absorbed while idle and re-surfaced only on the longer pause cadence, rather than being treated as a possible wedge, except that a captain-held transfer is not rechecked while the away-posture record exists.
+An exact `worker-state` record written by `fm-control stand-down` excludes a dead endpoint from pane-stale polling and wedge escalation while the held task has intentionally no worker, but a live endpoint at that record immediately returns to ordinary stale and wedge detection.
+The exemption stops there: the steering-inbox re-ring ladder keeps running for a held task, so a steer that lands on the other side of the record - `stand-down` refuses while an instruction is unacknowledged and `fm-send` refuses to enqueue one afterwards, but those two guards take different locks - is still surfaced rather than waiting silently for a relaunch.
 For an ordinary crew that has stopped, the normal-mode watcher first surfaces one stale wake, then applies that same cadence to an unchanged `paused:` or durable `captain-held` endpoint while attended; the pause classification itself is recovered only when the backend confidently reports its agent dead.
 Live or inconclusive liveness remains fail-open at that initial surface, so a worker genuinely waiting on a decision is never silenced.
 Its later sights are still held to that same bounded cadence rather than re-alarming on every pane-hash change, because the throttle is keyed to the declaration and not to the pane an idle parked worker keeps ticking.
@@ -227,7 +229,7 @@ Its local-only typed plane - harness-native invocations and explicit backend tar
 
 Text for a worker to read and commands that drive a worker's process are separate planes.
 `fm-send.sh` is the data plane and always routing-marks a `kind=secondmate` target, which is right for a message and wrong for a lifecycle command, because a marked exit command arrives as chat the agent reasons about instead of executing.
-`bin/fm-control.sh` is the control plane: an allowlisted `interrupt`, `exit`, and transactional `relaunch` addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
+`bin/fm-control.sh` is the control plane: a closed allowlist of lifecycle and worker-state verbs addressed to an exact task id, with per-harness mechanics owned by `bin/fm-control-lib.sh`, a verified postcondition per verb, and no arbitrary-text or raw-key entry point.
 [`docs/agent-control.md`](agent-control.md) owns the verb contract, the capability matrix, the relaunch transaction, and the fail-closed boundaries.
 
 ## Busy state is semantic, per adapter
