@@ -1215,10 +1215,14 @@ FM_OPEN_DECISIONS_FOLD_VERSION=9
 # The one owner of the persisted cursor version string; every cursor writer and
 # reader, including the legacy presented-offset reader, compares against it.
 _fm_open_decisions_fold_version() {  # <kind> <resolve-verb> <held-verb>
+  local prefixes=${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}
   printf '%s:%s' "$FM_OPEN_DECISIONS_FOLD_VERSION" "$1"
   if [ "$2" != "$FM_CLASSIFY_RESOLVE_VERB_DEFAULT" ] \
     || [ "$3" != "$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT" ]; then
     printf ':resolve=%q:held=%q' "$2" "$3"
+  fi
+  if [ "$prefixes" != "$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT" ]; then
+    printf ':reserved=%q' "$prefixes"
   fi
 }
 
