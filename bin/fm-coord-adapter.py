@@ -152,6 +152,9 @@ class Adapter:
 
     def reset_session(self):
         self.state["requests"].pop("session", None)
+        # A coordinator reboot revokes every claim, so queued releases have nothing left to release.
+        for key in [k for k, v in self.state["requests"].items() if v["op"] == "release"]:
+            del self.state["requests"][key]
         for task_id in self.state["tasks"]:
             self.reset_task(task_id)
 
@@ -189,6 +192,8 @@ class Adapter:
             return task
         if not task["declared"]:
             warn(f"{task_id}: brief declares no coordination resources; intent recorded locally as unclaimed")
+            return task
+        if not self.settle_release(task_id):
             return task
         generation = self.setup()
         if generation is None:
@@ -334,11 +339,12 @@ class Adapter:
         for key, item in list(self.state["requests"].items()):
             if self.reset:
                 return
-            if "reply" not in item and item["op"] != "publish-head":
+            if "reply" not in item and item["op"] not in {"publish-head", "release"}:
                 self.send(key, item["op"], {k: v for k, v in item["payload"].items() if k != "request_id"})
         for task_id, task in list(self.state["tasks"].items()):
             if self.reset:
                 return
+            self.settle_release(task_id)
             if task.get("pending_dispatch"):
                 self.ensure_task(task_id)
             if "claim" not in task:
@@ -371,13 +377,32 @@ class Adapter:
         if not task:
             return
         claim = task.get("claim")
-        if claim and self.call("release", {"request_id": str(uuid.uuid4()), "home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}) is None:
-            warn(f"{task_id}: aborted spawn claim not released; it lapses at lease expiry")
+        if claim:
+            # Journal the release and link it to the task in the same save that drops the old attempt.
+            key = f"release:{claim['claim_id']}"
+            self.state["requests"][key] = {"op": "release", "payload": {"request_id": str(uuid.uuid4()), "home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}}
+            task["releasing"] = key
         self.reset_task(task_id)
         for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths"):
             task.pop(flag, None)
         self.save()
         self.reset = False
+        self.settle_release(task_id)
+
+    def settle_release(self, task_id):
+        """Send the prior attempt's queued claim release; False while it is still unrecorded centrally."""
+        task = self.state["tasks"][task_id]
+        key = task.get("releasing")
+        item = self.state["requests"].get(key)
+        if item and "reply" not in item and self.send(key, "release", {k: v for k, v in item["payload"].items() if k != "request_id"}) is None:
+            if key in self.state["requests"] and "claim is not active" not in self.last_error:
+                warn(f"{task_id}: prior claim release queued; replay resends it before any new attempt is submitted")
+                return False
+        if key:
+            self.state["requests"].pop(key, None)
+            task.pop("releasing", None)
+            self.save()
+        return True
 
     def view(self):
         central = self.call("view", {})

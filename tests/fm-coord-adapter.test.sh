@@ -368,6 +368,30 @@ live=[i for i in json.loads(sys.argv[3])['intents'] if i['task_id']=='nobase' an
 assert [i['intent_id'] for i in live]==[task['intent_id']], live
 PY
 pass 'a fresh retry refreshes the intent base to the retried worktree HEAD'
+old_claim=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["nobase"]["claim"]["claim_id"])' "$tmp/nobase/state/fm-coord-adapter.json")
+printf '{"mode":"shadow","home_id":"nobase","repos":["owner/repo"],"remote":{"host":"coord.example","command":"%s/bin/fm-coord.sh","db":"%s"},"project_repos":{"%s":"owner/repo"}}\n' "$ROOT" "$db" "$(cd "$tmp/nobase" && pwd -P)" > "$tmp/nobase/config/coordination.json"
+git -C "$tmp/nobase" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m offline-retry
+git -C "$tmp/nobase" update-ref refs/remotes/origin/main HEAD
+PATH="$tmp/sshdown:$PATH" adapter "$tmp/nobase" dispatch nobase "$tmp/nobase" "$tmp/nobase" "$tmp/nobase.brief" branch/nobase codex > /dev/null 2> "$tmp/nobase-offline.err" || fail "offline retry must stay advisory: $(cat "$tmp/nobase-offline.err")"
+python3 - "$tmp/nobase/state/fm-coord-adapter.json" "$old_claim" <<'PY' || fail 'an offline retry must journal the prior claim release and hold the new attempt until it replays'
+import json,sys
+state=json.load(open(sys.argv[1]))
+task=state['tasks']['nobase']
+release=state['requests'][task['releasing']]
+assert release['op']=='release' and release['payload']['claim_id']==sys.argv[2] and 'reply' not in release, release
+assert not any(k.startswith('nobase:') for k in state['requests']), state['requests']
+PY
+PATH="$tmp/sshbin:$PATH" adapter "$tmp/nobase" replay > /dev/null 2> "$tmp/nobase-replay.err" || fail "replay after offline retry must complete: $(cat "$tmp/nobase-replay.err")"
+python3 - "$tmp/nobase/state/fm-coord-adapter.json" "$(git -C "$tmp/nobase" rev-parse HEAD)" "$(coord view)" "$db" "$old_claim" <<'PY' || fail "replay must release the prior attempt and claim the offline retry: $(cat "$tmp/nobase-replay.err")"
+import json,sqlite3,sys
+state=json.load(open(sys.argv[1]))
+task=state['tasks']['nobase']
+assert task['base_oid']==sys.argv[2] and task['claim']['ok'] is True and 'releasing' not in task, task
+live=[i for i in json.loads(sys.argv[3])['intents'] if i['task_id']=='nobase' and i['state']=='claimed']
+assert [i['intent_id'] for i in live]==[task['intent_id']], live
+assert sqlite3.connect(sys.argv[4]).execute("SELECT state FROM claims WHERE claim_id=?", (sys.argv[5],)).fetchone()[0]!='active'
+PY
+pass 'an offline retry queues the prior claim release and claims the retry once it replays'
 
 make_home scaffold
 mkdir -p "$tmp/scaffold/data"
