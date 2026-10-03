@@ -59,6 +59,8 @@
 # reported as a terminal outcome. In a secondmate home that wait is published
 # once per opener on the parent channel instead, through the same receipt store:
 #   blocked [key=decision-waiting-<fp12>]: waiting on decision <key> for <age>: child=<child>
+# and, on every poll, closed with a matching resolved line once that opener is
+# no longer open.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -487,6 +489,50 @@ ledger_pass() {
   done
 }
 
+# Close each published decision wait whose opener is no longer open: the
+# child answered, was respawned, or was torn down. The resolution line is
+# fixed per receipt, so a retry after a lost closed= write is absorbed by the
+# channel's append-once.
+waiting_close_pass() {
+  local record id fingerprint meta lock open key verb origin incarnation still rc
+  for record in "$OUTCOME_DIR"/*.reported; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    [ "$(record_value "$record" state)" = waiting ] || continue
+    [ "$(record_value "$record" closed)" != 1 ] || continue
+    id=$(record_value "$record" task_id)
+    valid_id "$id" || continue
+    fingerprint=$(record_value "$record" fingerprint)
+    meta="$STATE/$id.meta"
+    lock=
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      lock=$(fm_meta_lock_path "$meta") || continue
+      fm_lock_try_acquire "$lock" || continue
+    fi
+    still=0
+    if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+      incarnation=$(meta_incarnation "$meta")
+      open=$(status_open_decisions "$STATE/$id.status" "$(meta_field "$meta" kind)")
+      while IFS=$'\t' read -r key verb _; do
+        [ "$verb" = needs-decision ] || continue
+        origin=$(status_open_decision_origin "$STATE/$id.status" "$key") || origin=
+        if [ "$(sha256_text "$incarnation|$id|waiting|$key|$origin")" = "$fingerprint" ]; then
+          still=1
+          break
+        fi
+      done <<EOF
+$open
+EOF
+    fi
+    if [ "$still" -eq 0 ]; then
+      rc=0
+      fm_parent_channel_report "$FM_HOME" "$STATE" \
+        "resolved [key=decision-waiting-${fingerprint:0:12}]: child=$id decision no longer open" || rc=$?
+      [ "$rc" -gt 1 ] || record_field_set "$record" closed 1 || true
+    fi
+    [ -z "$lock" ] || fm_lock_release "$lock"
+  done
+}
+
 # The `report <task-id>` entry point: the caller holds the child's meta lock.
 report_child() { # <id>
   local id=$1 meta rc=0
@@ -642,6 +688,7 @@ scan() {
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
     ledger_pass
+    waiting_close_pass
   else
     marker_rc=$?
     self=''

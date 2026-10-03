@@ -90,7 +90,9 @@
 #                          the default threshold, until a matching resolution;
 #                          in a secondmate home the second re-raise also
 #                          publishes one parent-channel line
-#                          needs-decision [key=decision-unanswered-<id>]
+#                          needs-decision [key=decision-unanswered-<id>],
+#                          closed by a matching resolved line once that
+#                          opener is no longer open
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -1064,8 +1066,23 @@ EOF
 # twice. In a secondmate home the second re-raise of one opener also goes to
 # the parent channel once: its age is the due time, so a retry after a lost
 # marker write repeats the same line and the channel's append-once drops it.
-# Markers for keys no longer open on a live task are removed every tick, and a
-# failure on one key is logged and skipped so supervision keeps running.
+# Markers for keys no longer open on a live task are removed every tick, after
+# the parent escalation they carried, if any, is closed with a matching
+# resolution; a failure on one key is logged and skipped so supervision keeps
+# running.
+decision_age_close_escalation() { # <marker>
+  local marker=$1 identity count rc=0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  read -r identity _ _ count < "$marker" 2>/dev/null || return 0
+  case "$count" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$count" -ge 2 ] || return 0
+  fm_parent_channel_report "$FM_HOME" "$STATE" \
+    "resolved [key=decision-unanswered-${identity:0:12}]: decision no longer open" || rc=$?
+  [ "$rc" -le 1 ] && return 0
+  triage_log "decision-age: closing parent escalation ${identity:0:12} failed (rc=$rc); retrying next tick"
+  return 1
+}
+
 decision_age_tick() {
   local now threshold cap open task key verb note origin epoch position age meta generation identity marker queue_key
   local recorded next interval next_interval count queued tmp current current_key current_verb still_open
@@ -1084,7 +1101,7 @@ $open
 EOF
   for f in "$STATE"/.decision-age-*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
-    case "$live" in *" ${f##*/} "*) ;; *) rm -f "$f" ;; esac
+    case "$live" in *" ${f##*/} "*) ;; *) decision_age_close_escalation "$f" && rm -f "$f" ;; esac
   done
   while IFS=$'\t' read -r task key verb note; do
     marker="$STATE/.decision-age-$(printf '%s' "$task|$key" | hash_pane)"
@@ -1104,6 +1121,9 @@ EOF
       continue
     fi
     recorded=$(cat "$marker" 2>/dev/null || true)
+    if [ -n "$recorded" ] && [ "${recorded%% *}" != "$identity" ]; then
+      decision_age_close_escalation "$marker" || continue
+    fi
     next=0
     interval=$threshold
     count=0

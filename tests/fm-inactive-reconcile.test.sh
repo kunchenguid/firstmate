@@ -1111,7 +1111,14 @@ test_secondmate_decision_wait_reaches_parent_once() {
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup 2>/dev/null
   [ "$(grep -c 'waiting on decision publication for ' "$MAIN/state/mate.status")" = 1 ] \
     || fail "decision wait was published to the parent twice"
-  pass "a secondmate child's decision wait reaches the parent channel once"
+  printf 'resolved [key=publication] [at=%s]: approved\n' "$(date +%s)" >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='working' run_reconcile "$MATE" 2>/dev/null
+  FM_FAKE_CREW_STATE='working' run_reconcile "$MATE" 2>/dev/null
+  [ "$(grep -c '^resolved \[key=decision-waiting-' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the parent decision wait was not closed exactly once: $(cat "$MAIN/state/mate.status")"
+  [ -z "$(bash -c '. "$1" && status_open_decisions "$2" secondmate' _ "$ROOT/bin/fm-classify-lib.sh" "$MAIN/state/mate.status")" ] \
+    || fail "the parent still holds the answered decision wait open"
+  pass "a secondmate child's decision wait reaches the parent once and closes there once when answered"
 }
 test_secondmate_decision_wait_reaches_parent_once
 

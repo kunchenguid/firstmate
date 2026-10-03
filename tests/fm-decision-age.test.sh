@@ -149,7 +149,17 @@ test_secondmate_second_reraise_escalates_to_parent_once() {
   wait "$pid" 2>/dev/null || true
   [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a resolved decision escalated again"
   ! ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "the resolved decision kept its age marker"
-  pass "the second unanswered re-raise escalates to the parent once and resolution silences it"
+  [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
+    || fail "the parent escalation was not closed exactly once: $(cat "$channel")"
+  [ -z "$(bash -c '. "$1" && status_open_decisions "$2" secondmate' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")" ] \
+    || fail "the parent still holds an open decision after the child's was answered: $(cat "$channel")"
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 3
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
+    || fail "the parent escalation closure was duplicated"
+  pass "the second unanswered re-raise escalates to the parent once and resolution closes it there once"
 }
 
 test_unreadable_marker_does_not_stop_supervision() {
