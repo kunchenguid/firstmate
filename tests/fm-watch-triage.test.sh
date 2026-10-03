@@ -3254,6 +3254,133 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
 }
 
+# The task-hold line bin/fm-captain-hold.sh writes (bin/fm-classify-lib.sh owns
+# its read) is a verified captain hold, so a held live lane goes quiet at the
+# wedge threshold exactly as a declared wait does, keeps that quiet across the
+# worker's routine lines, and surfaces again on any genuine new event or release.
+# The unchanged watcher keeps its deliberate FIRST-sight alert for a live lane
+# (surface_nonterminal_stale), so this pins the repeats, not that first look.
+test_task_hold_line_quiets_the_wedge_ladder_until_a_real_event() {
+  local dir state fakebin out capture window key n spec name log timer mode
+  local working='state: working · source: run-step · ci running'
+  local done_line='done: PR https://example.invalid/pull/1 checks green'
+  local hold='captain-held [key=task-hold-wedge]: held for the captain: merge call needed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Contrast: the same delivered lane with NO hold line escalates at the threshold.
+  # Each spec is name|timer|mode|status log, with \n for line breaks.
+  for spec in \
+    "unheld-delivery|2000|exit|$done_line" \
+    "unheld-blocker|2000|exit|blocked: cannot reach the release host" \
+    "held-then-decision|2000|exit|$done_line\n$hold\nneeds-decision: which branch should ship" \
+    "held-then-failure|2000|exit|$done_line\n$hold\nworking: tidying\nfailed: build broke" \
+    "held-then-new-delivery|2000|exit|$done_line\n$hold\ndone: PR https://example.invalid/pull/2 checks green" \
+    "held-then-released|2000|exit|$done_line\n$hold\nworking: tidying\nresolved [key=task-hold-wedge]: hold ended" \
+    "held-quiet|2000|absorb|$done_line\n$hold" \
+    "held-routine-line|0|absorb|$done_line\n$hold\nworking: closed the old PR\nnote: nothing else to do"
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    timer=${spec%%|*}; spec=${spec#*|}
+    mode=${spec%%|*}; log=${spec#*|}
+    dir=$(wedge_threshold_fixture "task-hold-$name" "$(printf '%b' "$log")" 0 "$timer")
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    if [ "$mode" = exit ]; then
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+        || fail "[$name] the lane did not surface at the wedge threshold: $(cat "$out")"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the surfaced lane"
+    else
+      n=1
+      while [ "$n" -le 3 ]; do
+        wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+          || fail "[$name] a held lane surfaced at threshold $n: $(cat "$out")"
+        n=$((n + 1))
+      done
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+        || fail "[$name] a held lane queued a wedge wake: $(cat "$state/.wake-queue")"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "[$name] a held lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+    fi
+  done
+
+  # While the away-posture record exists the held lane is fully silent, routine
+  # lines included.
+  dir=$(wedge_threshold_fixture task-hold-away "$(printf '%b' "$done_line\n$hold\nworking: closed the old PR")" 2000 2000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  write_away_record "$state"
+  n=1
+  while [ "$n" -le 3 ]; do
+    FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+      || fail "a held lane surfaced at threshold $n while the away-posture record existed: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] && [ ! -s "$out" ] \
+    || fail "a held lane woke the away captain: $(cat "$state/.wake-queue") $(cat "$out")"
+  pass "a task-hold line quiets the wedge ladder across routine lines and ends on a real event or release"
+}
+
+# The transition the wedge fixture above cannot show: a LIVE agent parked behind
+# a task-hold line firstmate wrote after verifying the backlog hold is not an
+# inconclusive pane to inspect, so its first sighting is quiet. Only that exact
+# identity is admitted: the same pane with the hold only in the backlog, with
+# the line but no backlog hold (a forged line or a raw unhold), after a release,
+# or with no hold at all keeps the ordinary first-sight alert.
+live_hold_watch_launch() {  # <dir> <out> <capture>
+  local dir=$1 out=$2 capture=$3
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=grok \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  HOLD_WATCH_PID=$!
+}
+
+test_task_hold_line_silences_the_first_sight_of_a_live_lane() {
+  local spec name hold kind log dir state out capture c wakes
+  local done_line='done: PR https://example.invalid/pull/1 checks green'
+  local line='captain-held [key=task-hold-held-merge]: held for the captain: merge call needed'
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (task-hold first sight)"; return 0; }
+  for spec in \
+    "verified|hold|quiet|$done_line\n$line" \
+    "verified-routine-line|hold|quiet|$done_line\n$line\nworking: closed the old PR" \
+    "backlog-only|hold|alert|$done_line" \
+    "line-only-no-backlog-hold|nohold|alert|$done_line\n$line" \
+    "released|nohold|alert|$done_line\n$line\nresolved [key=task-hold-held-merge]: hold ended" \
+    "unheld|nohold|alert|$done_line"
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    hold=${spec%%|*}; spec=${spec#*|}
+    kind=${spec%%|*}; log=${spec#*|}
+    dir=$(make_hold_home "task-hold-first-$name" "$(printf '%b' "$log")" "$hold") \
+      || fail "[$name] could not build the fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    printf 'idle, elapsed 1s\n' > "$capture"
+    live_hold_watch_launch "$dir" "$out" "$capture"
+    if [ "$kind" = alert ]; then
+      wait_for_exit "$HOLD_WATCH_PID" 100 \
+        || { reap "$HOLD_WATCH_PID"; fail "[$name] the first sight of this live lane did not alert: $(cat "$out")"; }
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] || fail "[$name] first sight produced $wakes wakes instead of one"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first sight"
+    else
+      c=0
+      while [ "$c" -lt 5 ]; do
+        wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300 \
+          || { reap "$HOLD_WATCH_PID"; fail "[$name] the watcher exited on a quiet verified hold: $(cat "$out")"; }
+        c=$((c + 1))
+      done
+      reap "$HOLD_WATCH_PID"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 0 ] || fail "[$name] a verified task hold still alerted on first sight ($wakes wakes): $(cat "$state/.wake-queue")"
+      [ -e "$state/.paused-$(hold_key)" ] || fail "[$name] the quiet first sight did not record the declared hold"
+    fi
+  done
+  pass "a verified task hold silences a live lane's first sight; any other first sight still alerts"
+}
+
 # --- the wedge threshold reads the crew's own parked-gate state --------------
 # Upstream kunchenguid/firstmate#3055: a lane parked at a validation gate that is
 # waiting on a HUMAN is correctly quiet, but nothing in the status LINE says so -
@@ -6706,6 +6833,8 @@ test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_keeps_a_wait_past_a_default_key_answer
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
+test_task_hold_line_quiets_the_wedge_ladder_until_a_real_event
+test_task_hold_line_silences_the_first_sight_of_a_live_lane
 test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed

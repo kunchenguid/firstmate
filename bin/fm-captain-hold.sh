@@ -231,6 +231,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
@@ -238,10 +241,65 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
+# A task held for the captain that has a live endpoint keeps its own idle pane
+# quiet through ONE self-announced status line in its own stream, in the
+# FM_CLASSIFY_HOLD_KEY_PREFIX namespace; bin/fm-classify-lib.sh
+# (status_declared_wait_line) owns how that line is read. The backlog hold stays
+# the authority: an answer, release, or reconcile close ends the quiet with the
+# matching resolved line, and a hold on a task whose recorded endpoint is gone
+# (no metadata, or a pane the backend no longer finds) writes none.
+# A failed append never fails the hold or the close; it leaves the idle-pane
+# noise this fixes, so it is reported rather than hidden.
+# Known limit: lifting the backlog hold with a raw `tasks-axi unhold` instead of
+# this script's answer, release, or reconcile close writes no resolved line, so
+# the status reader still returns the held line. The watcher's first-sight check
+# re-reads the backlog and alerts normally, but its wedge-ladder deferral reads
+# only the line, so that deferral lasts until the worker's next non-routine
+# status line or the watcher's bounded captain-held recheck, never silently
+# forever.
+hold_quiet_key() { printf '%s%s' "${FM_CLASSIFY_HOLD_KEY_PREFIX:-$FM_CLASSIFY_HOLD_KEY_PREFIX_DEFAULT}" "$1"; }
+
+hold_quiet_active() {  # <status-file> <key>
+  local declared
+  declared=$(status_declared_wait_line "$1")
+  status_is_captain_held "$declared" && [ "$(_fm_decision_key "$declared" 2>/dev/null)" = "$2" ]
+}
+
+hold_quiet_append() {  # <task-id> <line>
+  local rc=0
+  fm_wake_status_append_self_announced "$STATE" "$STATE/$1.status" "$2" || rc=$?
+  [ "$rc" -ne 2 ] || printf 'actionable: could not write the quiet-hold status line for %s; its idle pane may raise stale wakes\n' "$1" >&2
+}
+
+hold_endpoint_live() {  # <task-id>
+  local meta="$STATE/$1.meta" target
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  target=$(fm_backend_target_of_meta "$meta") && [ -n "$target" ] || return 1
+  fm_backend_target_exists "$(fm_backend_of_meta "$meta")" "$target"
+}
+
+begin_hold_quiet() {  # <task-id> <reason>
+  local id=$1 key
+  hold_endpoint_live "$id" || return 0
+  key=$(hold_quiet_key "$id")
+  hold_quiet_active "$STATE/$id.status" "$key" && return 0
+  hold_quiet_append "$id" "captain-held [key=$key]: ${FM_CLASSIFY_HOLD_NOTE:-$FM_CLASSIFY_HOLD_NOTE_DEFAULT} $(fm_parent_channel_clean_note "$2" | cut -c1-200)"
+}
+
+end_hold_quiet() {  # <task-id>
+  local id=$1 key
+  [ -f "$STATE/$id.status" ] || return 0
+  key=$(hold_quiet_key "$id")
+  hold_quiet_active "$STATE/$id.status" "$key" || return 0
+  hold_quiet_append "$id" "resolved [key=$key]: hold ended"
+}
+
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
   local id=$1 occurrence=$2 verb=$3 note=$4 rc=0
   PARENT_HOLD_PUBLISHED=0
+  # Every answer, release, and reconcile close publishes its resolution here.
+  [ "$verb" != resolved ] || end_hold_quiet "$id"
   fm_parent_channel_report "$FM_HOME" "$STATE" \
     "$verb [key=captain-hold-$id-$occurrence]: captain hold $id: $(fm_parent_channel_clean_note "$note")" || rc=$?
   case "$rc" in
@@ -1008,6 +1066,7 @@ command_hold() {
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  begin_hold_quiet "$id" "$reason"
   printf '%s\n' "$id"
 }
 

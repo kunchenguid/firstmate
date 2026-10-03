@@ -558,6 +558,75 @@ test_declared_wait_survives_answers_past_the_event_window() {
   pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
 }
 
+# A task hold (the task-hold-<id> key namespace) keeps its quiet across later
+# routine worker lines, but any other later event, or a resolved line for its own
+# key, ends it. A transfer line and a pause keep their latest-event semantics.
+test_task_hold_quiet_survives_only_routine_lines() {
+  local dir f verb i held
+  held='captain-held [key=task-hold-job]: held for the captain: merge call'
+  dir=$(case_dir task-hold-quiet)
+  f="$dir/held.status"
+  printf 'done: PR ready\n%s\n' "$held" > "$f"
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "a task hold was not the declared wait as the latest event: '$(status_declared_wait_line "$f")'"
+  printf 'working: closed the old PR\nnote: nothing else to do\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "routine working and note lines dropped a task hold's quiet: '$(status_declared_wait_line "$f")'"
+  printf 'resolved [key=some-other-call]: answered\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "a resolved line for another key ended a task hold"
+  printf 'working: one more line\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "a routine line after another key's answer dropped a task hold"
+  for verb in 'needs-decision: which branch' 'blocked: cannot reach the host' 'failed: build broke' 'done: PR https://example.invalid/pull/2 checks green'; do
+    printf 'done: PR ready\n%s\nworking: tidying\n%s\n' "$held" "$verb" > "$f"
+    [ -z "$(status_declared_wait_line "$f")" ] \
+      || fail "a later '${verb%%:*}' did not end the task hold's quiet: '$(status_declared_wait_line "$f")'"
+  done
+  printf '%s\nworking: tidying\nresolved [key=task-hold-job]: hold ended\n' "$held" > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a resolved line for the hold's own key did not end the quiet"
+  printf 'working: tidying\n' >> "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a routine line revived an ended task hold"
+  printf '%s\n' "$held" >> "$f"
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "a re-hold after a release did not start a new quiet"
+  printf '%s\n' "$held" > "$f"
+  i=0
+  while [ "$i" -le "$FM_CLASSIFY_EVENT_WINDOW_LINES" ]; do
+    printf 'working: step %s\n' "$i" >> "$f"
+    i=$((i + 1))
+  done
+  [ "$(status_declared_wait_line "$f")" = "$held" ] \
+    || fail "routine lines past the event window dropped a task hold"
+  printf 'paused: waiting on the vendor release\nworking: still waiting\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a routine line after a pause stopped retracting it"
+  printf 'captain-held [key=route]: tracked by task-decision-route\nworking: still here\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a routine line after a transfer line kept its quiet"
+  printf 'done: PR ready\nworking: still here\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a file with no hold declared a wait"
+  # Sharing the namespace prefix, or the parent channel's per-occurrence key, is
+  # not enough: a transfer line without the hold's own note vocabulary, and a
+  # captain-hold-<id>-<n> line, keep the latest-event semantics.
+  printf 'captain-held [key=task-hold-other]: tracked by held-decision-route\nworking: still here\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "a transfer line sharing the task-hold prefix inherited the held quiet"
+  printf 'captain-held [key=captain-hold-job-1]: held for the captain: merge call\nworking: still here\n' > "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "the parent channel's captain-hold-<id>-<n> key inherited the held quiet"
+  # Task job-1's own hold survives the parent-channel resolution of task job's
+  # first hold, whose key is captain-hold-job-1.
+  printf 'captain-held [key=task-hold-job-1]: held for the captain: merge call\nresolved [key=captain-hold-job-1]: answered\nworking: still here\n' > "$f"
+  [ -n "$(status_declared_wait_line "$f")" ] \
+    || fail "another task's occurrence key ended task job-1's held quiet"
+  pass "a task hold's quiet survives routine lines only; any other event or its own resolved line ends it"
+}
+
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
+test_task_hold_quiet_survives_only_routine_lines

@@ -146,6 +146,18 @@ fm_utc_iso_to_epoch() {  # <timestamp>
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
 FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
+# Key namespace of the `captain-held` line bin/fm-captain-hold.sh hold writes
+# into a held task's own status stream (key = prefix + task id) and of the
+# `resolved` line its answer, release, and reconcile close write. Unlike a
+# transfer line, which counts only while it is the latest event, a line in this
+# namespace whose note opens with FM_CLASSIFY_HOLD_NOTE keeps its quiet across
+# later routine `working` and `note` lines (status_declared_wait_line); any other
+# later event, or a resolved line for the same key, ends it. The prefix is
+# deliberately not `captain-hold-`, the parent channel's per-occurrence key
+# (`captain-hold-<id>-<n>`), which a task id such as `job-1` would collide with.
+FM_CLASSIFY_HOLD_KEY_PREFIX_DEFAULT='task-hold-'
+FM_CLASSIFY_HOLD_NOTE_DEFAULT='held for the captain:'
+
 # How many trailing lines the latest-event read parses before it widens to the
 # whole file. A status record and its continuation prose sit within a few lines
 # of the log's end, so this bounds the watcher's per-poll read on a long-lived
@@ -343,6 +355,22 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line is the task-hold line bin/fm-captain-hold.sh hold writes
+# into a held task's own stream: the captain-held verb, a key in the
+# FM_CLASSIFY_HOLD_KEY_PREFIX namespace, and the FM_CLASSIFY_HOLD_NOTE
+# vocabulary. All three are required, so a transfer line that merely shares the
+# prefix, or the parent channel's captain-hold-<id>-<n> key, never matches.
+status_is_task_hold_line() {  # <status-line>
+  local line=$1 key
+  status_is_captain_held "$line" || return 1
+  key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || return 1
+  case "$key" in "${FM_CLASSIFY_HOLD_KEY_PREFIX:-$FM_CLASSIFY_HOLD_KEY_PREFIX_DEFAULT}"*) ;; *) return 1 ;; esac
+  case "$(status_line_note "$line")" in
+    "${FM_CLASSIFY_HOLD_NOTE:-$FM_CLASSIFY_HOLD_NOTE_DEFAULT}"*) return 0 ;;
+  esac
+  return 1
+}
+
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
@@ -362,8 +390,10 @@ status_is_paused_or_captain_held() {  # <status-line>
 # including the stated default key a keyless decision shares - does not end the
 # pause. Only a resolved line for the pause's own phase key (the keyed
 # activity fold's key, where a keyless line is its own phase) retracts it, as
-# does any other later event. A captain-held line counts only while it is the
-# latest event. Bounded like last_status_line: only a tail window made wholly of
+# does any other later event. A captain-held transfer line counts only while it
+# is the latest event; a task-hold line (FM_CLASSIFY_HOLD_KEY_PREFIX) also
+# survives later routine working and note lines and ends on any other event or
+# a resolved line for its own key. Bounded like last_status_line: only a tail window made wholly of
 # resolved events widens the read to the whole file.
 status_declared_wait_line() {  # <status-file>
   local f=$1 last verb resolve legacy_re
@@ -374,7 +404,16 @@ status_declared_wait_line() {  # <status-file>
   fi
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   status_line_verb "$last" verb
-  [ "$verb" = "$resolve" ] || return 0
+  case "$verb" in
+    "$resolve") ;;
+    # A routine worker line after a task hold keeps the hold's quiet, so the
+    # read looks past it, but only a file that ever recorded a task hold pays
+    # for the scan.
+    working|note)
+      grep -qF "[key=${FM_CLASSIFY_HOLD_KEY_PREFIX:-$FM_CLASSIFY_HOLD_KEY_PREFIX_DEFAULT}" "$f" 2>/dev/null || return 0
+      ;;
+    *) return 0 ;;
+  esac
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
     | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
@@ -386,7 +425,8 @@ status_declared_wait_line() {  # <status-file>
 # resolved lines share a phase key with. Returns 1 when every event is a
 # resolved line, so a caller reading a bounded window knows to widen it.
 _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
-  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0 routine=0
+  local held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
     lines[i]=$line
@@ -400,7 +440,19 @@ _fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
     status_line_verb "$line" verb
     case "$verb" in
       "$resolve") ;;
-      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
+      # Routine worker lines never end a task hold's quiet, but any other
+      # later event ends a pause, which a later line always retracted.
+      working|note) routine=1; continue ;;
+      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}")
+        [ "$routine" = 0 ] || return 0
+        ;;
+      "$held")
+        key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
+        status_is_task_hold_line "$line" || return 0
+        case "$keys" in *$'\n'"$key"$'\n'*) return 0 ;; esac
+        printf '%s\n' "$line"
+        return 0
+        ;;
       *) return 0 ;;
     esac
     key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=

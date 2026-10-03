@@ -1729,7 +1729,7 @@ clear_pause_tracking() {  # <window-key>
 # recovered only for a confidently dead ordinary crew, or for a secondmate, whose
 # endpoint liveness this function deliberately never reads.
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class agent_alive kind
+  local win=$1 task=$2 key last recheck_file class agent_alive kind held
   key=$(window_key "$win")
   last=$(status_declared_wait_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
@@ -1742,10 +1742,19 @@ pause_state_class() {  # <window> <task>
   # so a mate's stale poll costs one metadata scan rather than one per gate, and the
   # far more common no-declaration path above still costs none.
   kind=$(window_kind "$win")
+  # A task-hold line is firstmate's own record of a captain hold it verified, not
+  # a wait the worker claims, so a live agent under it is not a decision gate
+  # being silenced. The backlog stays the authority: only a hold the backlog
+  # still carries admits it, and a forged line or a raw unhold falls through to
+  # the ordinary first-sight alert below.
+  held=0
+  if [ "$kind" != secondmate ] && status_is_task_hold_line "$last" && task_captain_call_open "$task"; then
+    held=1
+  fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
     if [ "$kind" != secondmate ]; then
       agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
+      if [ "$agent_alive" != dead ] && [ "$held" -eq 0 ]; then
         rm -f "$recheck_file"
         printf 'none'
         return
@@ -1762,7 +1771,7 @@ pause_state_class() {  # <window> <task>
   fi
   if [ "$kind" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
+    if [ "$agent_alive" != dead ] && [ "$held" -eq 0 ]; then
       rm -f "$recheck_file"
       printf 'none'
       return

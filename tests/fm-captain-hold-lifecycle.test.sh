@@ -970,6 +970,126 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# A held task with a live endpoint keeps its own idle pane quiet through one
+# status line in its own stream (bin/fm-classify-lib.sh owns the read), and its
+# answer or release ends that quiet. The backlog hold stays the authority: a task
+# with no endpoint gets no status line.
+declared_wait() {  # <status-file>
+  bash -c '. "$1/bin/fm-classify-lib.sh"; status_declared_wait_line "$2"' _ "$ROOT" "$1"
+}
+
+# A fake tmux that finds a pane only for the targets named in <home>/live-targets,
+# and otherwise answers the way tmux 3.7 does for an absent target: exit 0, no output.
+live_endpoint_tmux() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then
+  while [ "$#" -gt 0 ] && [ "$1" != -t ]; do shift; done
+  target=${2:-}
+  if grep -qxF "$target" "$FM_TEST_LIVE_TARGETS" 2>/dev/null; then printf '%%9\n'; fi
+fi
+exit 0
+SH
+  chmod +x "$home/fakebin/tmux"
+  : > "$home/live-targets"
+}
+
+test_hold_quiets_a_live_task_until_it_is_released() {
+  local home status key held n i pid
+  home=$(make_home hold-quiet)
+  live_endpoint_tmux "$home"
+  export FM_TEST_LIVE_TARGETS="$home/live-targets"
+  printf 'test:fm-quiet-job\ntest:fm-close-job\ntest:fm-race-job\n' > "$home/live-targets"
+  status="$home/state/quiet-job.status"
+  key=task-hold-quiet-job
+  tasks_in "$home" add quiet-job "Delivered work awaiting the merge call" --kind ship --repo sample >/dev/null \
+    || fail "could not create the held work item"
+  printf 'window=test:fm-quiet-job\nkind=ship\nharness=grok\nbackend=tmux\n' > "$home/state/quiet-job.meta"
+  printf 'done: PR https://example.invalid/pull/1 checks green\n' > "$status"
+  run_captain "$home" hold quiet-job --reason "captain merge call needed" >/dev/null \
+    || fail "could not hold the live work item"
+  held=$(declared_wait "$status")
+  assert_contains "$held" "captain-held [key=$key]" "holding a live task wrote no quiet-hold status line"
+  assert_contains "$held" "captain merge call needed" "the quiet-hold line lost the hold reason"
+  n=$(grep -c "captain-held \[key=$key\]" "$status")
+  [ "$n" -eq 1 ] || fail "the hold wrote $n quiet-hold lines"
+
+  printf 'working: closed the old PR\n' >> "$status"
+  [ -n "$(declared_wait "$status")" ] || fail "a routine worker line dropped the held quiet"
+  run_captain "$home" hold quiet-job --reason "captain merge call needed" >/dev/null \
+    || fail "an identical re-hold failed"
+  n=$(grep -c "captain-held \[key=$key\]" "$status")
+  [ "$n" -eq 1 ] || fail "a re-hold while quiet wrote a second quiet-hold line ($n)"
+
+  printf 'needs-decision: which branch should ship\n' >> "$status"
+  [ -z "$(declared_wait "$status")" ] || fail "a genuine new needs-decision stayed behind the held quiet"
+  run_captain "$home" hold quiet-job --reason "captain branch call" >/dev/null \
+    || fail "could not re-hold after a new decision"
+  [ -n "$(declared_wait "$status")" ] || fail "re-holding did not restore the quiet"
+
+  printf 'Ship it.\n' > "$home/go.txt"
+  run_captain "$home" answer quiet-job --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed on the quiet task"
+  [ -z "$(declared_wait "$status")" ] || fail "releasing the hold left the pane quiet"
+  assert_contains "$(tail -1 "$status")" "resolved [key=$key]" "the release wrote no resolved line"
+  n=$(grep -c "resolved \[key=$key\]" "$status")
+  run_captain "$home" answer quiet-job --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "an identical release retry failed"
+  [ "$(grep -c "resolved \[key=$key\]" "$status")" -eq "$n" ] || fail "a release retry wrote another resolved line"
+  printf 'working: back to work\n' >> "$status"
+  [ -z "$(declared_wait "$status")" ] || fail "a routine line revived a released quiet"
+
+  tasks_in "$home" add close-job "Work closed by the captain's answer" --kind ship --repo sample >/dev/null
+  printf 'window=test:fm-close-job\nkind=ship\nharness=grok\nbackend=tmux\n' > "$home/state/close-job.meta"
+  printf 'done: PR ready\n' > "$home/state/close-job.status"
+  run_captain "$home" hold close-job --reason "captain call" >/dev/null || fail "could not hold close-job"
+  run_captain "$home" answer close-job --decision-file "$home/go.txt" >/dev/null \
+    || fail "a closing answer failed on a quiet task"
+  [ -z "$(declared_wait "$home/state/close-job.status")" ] || fail "a closing answer left the pane quiet"
+
+  tasks_in "$home" add bare-job "Held work with no endpoint" --kind ship --repo sample >/dev/null
+  run_captain "$home" hold bare-job --reason "captain call" >/dev/null || fail "could not hold bare-job"
+  [ ! -e "$home/state/bare-job.status" ] || fail "holding a task with no endpoint created a status stream"
+
+  # Stale metadata: the recorded pane no longer exists on the backend, so the
+  # hold is real but writes no quiet line (there is no pane left to nag about).
+  tasks_in "$home" add dead-job "Held work whose pane is gone" --kind ship --repo sample >/dev/null
+  printf 'window=test:fm-dead-job\nkind=ship\nharness=grok\nbackend=tmux\n' > "$home/state/dead-job.meta"
+  printf 'done: PR ready\n' > "$home/state/dead-job.status"
+  run_captain "$home" hold dead-job --reason "captain call" >/dev/null || fail "could not hold dead-job"
+  [ "$(cat "$home/state/dead-job.status")" = 'done: PR ready' ] \
+    || fail "a hold with stale endpoint metadata wrote a quiet line"
+  tasks_in "$home" show dead-job --full | grep -q 'held: yes' || fail "the stale-endpoint hold did not reach the backlog"
+
+  # A raw tasks-axi unhold bypasses this script, so the backlog is authoritative
+  # (held: no) while the quiet line stays until the next non-routine line.
+  tasks_in "$home" add raw-job "Held work lifted outside the script" --kind ship --repo sample >/dev/null
+  printf 'test:fm-raw-job\n' >> "$home/live-targets"
+  printf 'window=test:fm-raw-job\nkind=ship\nharness=grok\nbackend=tmux\n' > "$home/state/raw-job.meta"
+  printf 'done: PR ready\n' > "$home/state/raw-job.status"
+  run_captain "$home" hold raw-job --reason "captain call" >/dev/null || fail "could not hold raw-job"
+  tasks_in "$home" unhold raw-job >/dev/null || fail "raw unhold failed"
+  tasks_in "$home" show raw-job --full | grep -q 'held: no' || fail "raw unhold did not lift the backlog hold"
+  [ -n "$(declared_wait "$home/state/raw-job.status")" ] \
+    || fail "the documented raw-unhold limit changed: the quiet line should stand until the next non-routine line"
+  printf 'blocked: cannot reach the host\n' >> "$home/state/raw-job.status"
+  [ -z "$(declared_wait "$home/state/raw-job.status")" ] || fail "a later blocked line did not end the raw-unhold quiet"
+
+  tasks_in "$home" add race-job "Held while its worker appends" --kind ship --repo sample >/dev/null
+  printf 'window=test:fm-race-job\nkind=ship\nharness=grok\nbackend=tmux\n' > "$home/state/race-job.meta"
+  printf 'done: PR ready\n' > "$home/state/race-job.status"
+  (i=0; while [ "$i" -lt 40 ]; do printf 'working: step %s\n' "$i" >> "$home/state/race-job.status"; i=$((i + 1)); done) &
+  pid=$!
+  run_captain "$home" hold race-job --reason "captain call" >/dev/null || fail "could not hold race-job during appends"
+  wait "$pid"
+  [ "$(grep -c '^working: step ' "$home/state/race-job.status")" -eq 40 ] \
+    || fail "a concurrent hold lost a worker line"
+  [ "$(grep -c 'captain-held \[key=task-hold-race-job\]' "$home/state/race-job.status")" -eq 1 ] \
+    || fail "a concurrent worker append lost the hold line"
+  pass "a held live task stays quiet through routine lines, a new decision or release ends it, and concurrent appends keep both lines"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4641,6 +4761,7 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_hold_quiets_a_live_task_until_it_is_released
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
