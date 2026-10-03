@@ -82,6 +82,7 @@
 # and a `## Captain's intent` line opening with a Captain label or address
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
+# This file is also the one owner of the ship evidence contract: what counts as verification for a claimed fix.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
@@ -350,6 +351,19 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
+# The ship evidence contract, written once and rendered into every no-mistakes definition of done.
+# It states what counts as verification for a claimed fix, so an all-zero sample cannot pass as evidence.
+fm_evidence_contract_block() {
+  cat <<'EOF'
+
+A claimed fix names the reproduction artifact or command that demonstrably fails before the change and passes after it, exercised through the same path a user hits.
+Every failure-mode row in a validation table carries at least one non-zero pre-change observation, or is explicitly marked as not exercised by the sample.
+A table whose rows are all zero proves nothing and is described as such, never presented as verification.
+State the sample size and the number of cases that exhibited the defect alongside any such table, so prevalence is visible.
+A sample that cannot exhibit the defect is not evidence.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
   local mode=$1 id=$2 forge=${4:-none}
   local branch=${3:-fm/$id}
@@ -385,6 +399,7 @@ That first \`done:\` is the handoff that starts the pipeline; it is not a reques
 
 EOF
       fm_nm_driving_block "$forge"
+      fm_evidence_contract_block
       cat <<EOF
 
 Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout: each fix round commits onto a branch inside no-mistakes' own local gate repository, and with no push nothing carries those commits back to you.
@@ -443,6 +458,7 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 
 EOF
       fm_nm_driving_block "$forge"
+      fm_evidence_contract_block
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh-axi pr view <number>\` must print \`draft: no\`, where <number> is the PR number from your PR URL); if it is a draft, mark it ready with \`gh-axi pr ready <number>\`.
