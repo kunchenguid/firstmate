@@ -70,7 +70,18 @@ if [ -s "$file" ]; then
   printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation fixture-generation\n' "$sequence" >&2
 fi
 SH
-  chmod +x "$dir/bin/"*.sh
+  # The cost line uses the same worker count as the spawn cap.
+  for f in "$ROOT/bin"/*; do
+    [ ! -e "$dir/bin/${f##*/}" ] || continue
+    if [ -d "$f" ]; then
+      ln -s "$f" "$dir/bin/${f##*/}"
+    else
+      cp "$f" "$dir/bin/${f##*/}"
+    fi
+  done
+  for f in "$dir/bin/"*.sh; do
+    [ -L "$f" ] || chmod +x "$f"
+  done
 }
 
 run_return() {  # <case-dir> <mode>
@@ -381,6 +392,15 @@ test_return_brief_composes_from_record_store_and_held_set() {
   local dir out rc gate health_line words_line waiting_line failed_line second
   dir="$TMP_ROOT/brief"
   install_runner "$dir"
+  mkdir -p "$dir/fakebin"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$1" in
+  list-windows) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
   (cd "$dir/home" && tasks-axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
     && tasks-axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
     || fail "could not seed the held backlog"
@@ -420,7 +440,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   : > "$dir/home/state/.fake-drain"
 
   set +e
-  out=$(run_return "$dir" begin)
+  out=$(PATH="$dir/fakebin:$PATH" run_return "$dir" begin)
   rc=$?
   set -e
   [ "$rc" -eq 3 ] || fail "the unreached blocker should still gate the return (rc=$rc): $out"
@@ -453,7 +473,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
   assert_contains "$out" '4 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 6 supervision outcome(s) recorded (4 routine, 2 captain); 3 task(s) live at return.' "the cost line dropped workers whose absence is unproven"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
@@ -463,7 +483,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   # archived record and clears.
   printf 'resolved [key=dep]: the upstream dependency landed\n' >> "$dir/home/state/other.status"
   printf 'resolved [key=token]: the token was refreshed\n' >> "$dir/home/state/fix-windows.status"
-  second=$(run_return "$dir" check) || fail "the remediated return did not clear: $second"
+  second=$(PATH="$dir/fakebin:$PATH" run_return "$dir" check) || fail "the remediated return did not clear: $second"
   assert_contains "$second" $'  your words at entry:\n    merge the windows fix when green, then cut a prerelease' "check did not re-render the words from the archived record"
   assert_contains "$second" 'fix-windows: per your away instructions: merged the windows fix PR' "check did not re-render the session account"
   assert_contains "$second" 'supervision ran through the away window with no detected gap' "check lost the health snapshot taken at begin"
