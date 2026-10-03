@@ -162,6 +162,71 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
 
+# A refresh folds only the status bytes the wake drain's cursor has not covered,
+# and publishes exactly what the whole-log fold publishes.
+FOLD_HOME="$TMP_ROOT/fold-home"
+mkdir -p "$FOLD_HOME/state" "$FOLD_HOME/data" "$FOLD_HOME/config" \
+  "$FOLD_HOME/projects" "$FOLD_HOME/mate"
+FOLD_HOME=$(cd "$FOLD_HOME" && pwd -P)
+printf '# Seeded Firstmate home\n' > "$FOLD_HOME/AGENTS.md"
+printf 'fold\n' > "$FOLD_HOME/.fm-secondmate-home"
+printf '## In flight\n\n## Queued\n\n## Done\n' > "$FOLD_HOME/data/backlog.md"
+fm_write_meta "$FOLD_HOME/state/fold-mate.meta" \
+  "window=fmtest:fm-fold-mate" \
+  "harness=claude" \
+  "kind=secondmate" \
+  "mode=secondmate" \
+  "home=$FOLD_HOME/mate"
+fold_status="$FOLD_HOME/state/fold-mate.status"
+{
+  printf 'needs-decision [key=buried-call]: pick REST or RPC\n'
+  printf 'blocked [key=old-blocker]: waiting on credentials\n'
+  i=0
+  while [ "$i" -lt 400 ]; do
+    printf 'working: routine filler padding line %04d of a long status log\n' "$i"
+    i=$((i + 1))
+  done
+} > "$fold_status"
+FM_STATE_OVERRIDE="$FOLD_HOME/state" "$ROOT/bin/fm-wake-drain.sh" > /dev/null \
+  || fail "the wake drain could not fold the fixture status log"
+fold_covered=$(wc -c < "$fold_status" | tr -d '[:space:]')
+printf 'resolved [key=old-blocker]: credentials arrived\n' >> "$fold_status"
+printf 'needs-decision [key=tail-call]: choose the rollout window\n' >> "$fold_status"
+fold_tail=$(( $(wc -c < "$fold_status" | tr -d '[:space:]') - fold_covered ))
+: > "$TMP_ROOT/fold-probe.tsv"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FOLD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_OPEN_DECISIONS_READ_PROBE="$TMP_ROOT/fold-probe.tsv" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/fold-seeded.json" \
+  || fail "home-summary production failed over a drained status log"
+jq -e '[.decisions_open[] | select(.source == "status" and .id == "fold-mate") | .key]
+  == ["buried-call", "tail-call"]' "$TMP_ROOT/fold-seeded.json" >/dev/null \
+  || fail "the summary lost a buried decision or kept a resolved one: $(jq -c .decisions_open "$TMP_ROOT/fold-seeded.json")"
+fold_reads=$(grep -F '/fold-mate.status' "$TMP_ROOT/fold-probe.tsv" | cut -f2 | sort -u)
+[ "$fold_reads" = "$fold_tail" ] \
+  || fail "the summary folded [$fold_reads] bytes of the status log, expected only the $fold_tail-byte tail"
+rm -f "$FOLD_HOME/state/.fold-mate.open-decisions-cursor"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FOLD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/fold-whole.json" \
+  || fail "home-summary production failed without a drain cursor"
+cmp -s "$TMP_ROOT/fold-seeded.json" "$TMP_ROOT/fold-whole.json" \
+  || fail "the cursor-seeded summary differed from the whole-log summary"
+# A cursor left from a replaced log must not seed the new one, even when the new
+# log is the same size and differs only inside the covered prefix.
+FM_STATE_OVERRIDE="$FOLD_HOME/state" "$ROOT/bin/fm-wake-drain.sh" > /dev/null \
+  || fail "the wake drain could not refold the fixture status log"
+sed 's/buried-call/renamed-key/' "$fold_status" > "$fold_status.new"
+mv -f "$fold_status.new" "$fold_status"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FOLD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/fold-replaced.json" \
+  || fail "home-summary production failed over a replaced status log"
+jq -e '[.decisions_open[] | select(.source == "status" and .id == "fold-mate") | .key]
+  == ["renamed-key", "tail-call"]' "$TMP_ROOT/fold-replaced.json" >/dev/null \
+  || fail "a stale cursor seeded a replaced status log: $(jq -c .decisions_open "$TMP_ROOT/fold-replaced.json")"
+pass "home summary folds only status appended since the drain cursor"
+
 # A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
 # publishable through both fleet snapshot modes and the real home-summary writer.
 mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
