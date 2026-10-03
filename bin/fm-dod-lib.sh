@@ -472,11 +472,15 @@ fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
 # 0 when a done: note reports the no-mistakes CI-ready PR (`PR <url> checks
 # green`, with any surrounding text). bin/fm-crew-state.sh takes its CI-ready
 # path on this same test, so every CI-ready line it acts on is gated.
+# The note must carry a real PR reference - a word-bounded `PR #N`, a GitHub
+# `/pull/N` URL, or a GitLab `/merge_requests/N` URL - so an uppercase "PR"
+# inside a word such as PROD or PROPERTIES never counts.
 fm_dod_note_reports_ci_ready() {  # <note>
+  local re='(^|[^[:alnum:]_])PR #[0-9]+|/pull/[0-9]+|/merge_requests/[0-9]+'
   case "$1" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
+    *"checks green"*) [[ $1 =~ $re ]] ;;
+    *) return 1 ;;
   esac
-  return 1
 }
 
 # 0 when a done: note reports a change published to a Gerrit review server

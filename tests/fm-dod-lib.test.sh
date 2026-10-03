@@ -271,6 +271,25 @@ test_ci_ready_variants_are_gated() {
   pass "no-mistakes CI-ready done: with extra text is gated"
 }
 
+test_ci_ready_needs_a_real_pr_reference() {
+  local note
+  for note in \
+    'PROD deploy watch, checks green on TEST' \
+    'PROPERTIES table migration, checks green' \
+    'checks green, PR pending'; do
+    ! fm_dod_note_reports_ci_ready "$note" \
+      || fail "note without a PR reference counted as CI-ready: $note"
+  done
+  for note in \
+    'PR #12 checks green' \
+    'PR https://github.com/o/r/pull/12 checks green' \
+    'PR https://gitlab.example.test/g/s/p/-/merge_requests/7 checks green'; do
+    fm_dod_note_reports_ci_ready "$note" \
+      || fail "note with a PR reference was not CI-ready: $note"
+  done
+  pass "a CI-ready note needs checks green and a real PR reference"
+}
+
 test_keyed_and_spaced_done_lines_are_gated() {
   local repo wt line mode rc
   repo="$TMP_ROOT/keyed-repo"
@@ -393,6 +412,7 @@ test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
+test_ci_ready_needs_a_real_pr_reference
 test_keyed_and_spaced_done_lines_are_gated
 test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
