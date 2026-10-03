@@ -520,6 +520,66 @@ test_relaunch_keeps_pr_poll_meta_identity_order() {
   pass "fm-control relaunch: an armed merge poll keeps its task record parseable by the PR poll identity contract"
 }
 
+# A record whose pr= line is followed by a non-tolerated line (here a
+# captain-hold attestation) no longer satisfies the PR poll identity contract.
+# When a poll is actually ARMED (state/<id>.check.sh present), the watcher WOULD
+# consult that contract, so the relaunch must fail loudly rather than publish a
+# record it knows the watcher will refuse on every sweep.
+test_relaunch_refuses_loudly_when_an_armed_poll_record_breaks_the_identity_contract() {
+  local dir out rc state
+  dir=$(new_case armed-broken-identity rl46)
+  add_ship_task "$dir" rl46 claude
+  state="$dir/home/state"
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/46'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+    printf '%s\n' 'decision_keys=nm-example-review'
+  } >> "$state/rl46.meta"
+  # Arm the merge poll so the watcher would consult the identity contract.
+  : > "$state/rl46.check.sh"
+  ! fm_pr_metadata_identity_parse "$state/rl46.meta" \
+    || fail "the armed-poll fixture record was still identity-valid"
+
+  out=$(run_control "$dir" rl46 relaunch --note "continue the merge watch"); rc=$?
+  expect_code 1 "$rc" "a relaunch of an armed poll whose record breaks the identity contract must refuse"$'\n'"$out"
+  assert_contains "$out" "breaks the PR poll metadata identity contract after publication" \
+    "the refusal should name the identity-contract break"
+  grep -q '^pr=' "$state/rl46.meta" \
+    || fail "the published record lost its pr= line"
+  grep -q '^decision_keys=' "$state/rl46.meta" \
+    || fail "the non-tolerated line must remain in the published record (the guard refused, it did not rewrite)"
+  pass "fm-spawn relaunch: an armed poll whose record breaks the identity contract refuses loudly"
+}
+
+# The same broken record with NO poll armed: the watcher never consults such a
+# record, so the identity guard must not refuse the relaunch. A task whose PR is
+# long done but whose record later gained a non-tolerated line must stay
+# relaunchable rather than becoming permanently un-relaunchable.
+test_relaunch_succeeds_when_no_poll_is_armed_even_with_a_broken_record() {
+  local dir out rc state
+  dir=$(new_case unarmed-broken-identity rl47)
+  add_ship_task "$dir" rl47 claude
+  state="$dir/home/state"
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/47'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+    printf '%s\n' 'decision_keys=nm-example-review'
+  } >> "$state/rl47.meta"
+  ! fm_pr_metadata_identity_parse "$state/rl47.meta" \
+    || fail "the unarmed fixture record was still identity-valid"
+  [ ! -e "$state/rl47.check.sh" ] && [ ! -e "$state/rl47.pr-poll-registration" ] \
+    || fail "the unarmed fixture must have no armed poll artifacts"
+
+  out=$(run_control "$dir" rl47 relaunch --note "continue after the PR landed"); rc=$?
+  expect_code 0 "$rc" "a relaunch with no armed poll must succeed even when the record is not identity-parseable"$'\n'"$out"
+  assert_contains "$out" "relaunched rl47" "the relaunch should report success"
+  grep -q '^pr=' "$state/rl47.meta" \
+    || fail "the published record lost its pr= line"
+  grep -q '^decision_keys=' "$state/rl47.meta" \
+    || fail "the non-tolerated line must remain (the guard skipped, it did not rewrite)"
+  pass "fm-spawn relaunch: no armed poll leaves a non-identity-parseable record relaunchable"
+}
+
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
   local dir control_pid link_pid rc i=0 traceparent prepare launch_release waiting ready release
   dir=$(new_case metadata-race rl28)
@@ -2524,6 +2584,8 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_keeps_pr_poll_meta_identity_order
+test_relaunch_refuses_loudly_when_an_armed_poll_record_breaks_the_identity_contract
+test_relaunch_succeeds_when_no_poll_is_armed_even_with_a_broken_record
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

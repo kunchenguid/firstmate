@@ -5211,8 +5211,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # A silently broken poll identity would make the watcher refuse the armed
   # merge poll on every sweep, so fail the relaunch loudly when the published
   # record still carries a pr= line but no longer satisfies the identity
-  # contract the watcher's trusted path validates.
+  # contract the watcher's trusted path validates. Only refuse for a task that
+  # actually has a poll armed - the watcher consults the identity contract for
+  # exactly those records (an armed poll leaves state/<id>.check.sh or the
+  # .pr-poll-registration behind). A pr= line with no armed poll is never read
+  # by the watcher, so refusing there would make a task whose PR is long done
+  # but whose record later gained a non-tolerated line permanently
+  # un-relaunchable.
   if grep -q '^pr=' "$STATE/$ID.meta" \
+    && { [ -e "$STATE/$ID.check.sh" ] || [ -e "$STATE/$ID.pr-poll-registration" ]; } \
     && ! fm_pr_metadata_identity_parse "$STATE/$ID.meta"; then
     echo "error: replacement task record for $ID breaks the PR poll metadata identity contract after publication; the armed merge poll would be refused by the watcher" >&2
     exit 1
