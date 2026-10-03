@@ -81,15 +81,23 @@
 #
 # Milestone fields are all OPTIONAL, and an absent field renders nothing, so
 # older payloads stay valid. Health is always "G", "Y", or "R"; dates use the
-# `filed` format; URLs must be https; counts are non-negative integers; every
-# other field is a non-empty string.
+# `filed` format; board_url is http or https (home boards are served on the
+# tailnet over http); evidence_url is http, https, or a relative path under
+# evidence/ (no leading slash, no dot-led segment such as ..), which Lavish
+# serves from the evidence/ directory beside the board file; counts are
+# non-negative integers; every other field is a non-empty string.
 #   projects[]     top strip, one row per repo: repo (required), release_goal,
 #                  release_date, health, merges_today, last_release,
-#                  next_release, wip_count.
+#                  next_release, wip_count, board_url (that home's own live
+#                  board, linked from the card).
 #   underway[]     target, range, age, health, evidence_url.
+#   landed[]       evidence_url.
 #   captains_call  default_if_silent (must name one of the card's own option
 #                  values), decide_by, asked_at, reversible (boolean),
 #                  evidence_url.
+# An evidence_url whose path ends in .png, .jpg, .jpeg, .webp, or .gif renders
+# as a lazy-loaded thumbnail that opens the full image; any other renders as a
+# plain evidence link.
 # The composer supplies these values; the board never computes health or
 # targets.
 #
@@ -147,6 +155,14 @@ validate_payload() {  # <data.json>
       or (.[$name]
         | type == "string"
           and test("^https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def optional_web_url($name):
+      (has($name) | not)
+      or (.[$name]
+        | type == "string"
+          and test("^https?://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?(?:[/?#][^[:space:]]*)?$"));
+    def optional_evidence_url:
+      optional_web_url("evidence_url")
+      or (.evidence_url | type == "string" and test("^evidence(/[A-Za-z0-9_-][A-Za-z0-9._-]*)+$"));
     def optional($name; check): (has($name) | not) or (.[$name] | check);
     def health: . == "G" or . == "Y" or . == "R";
     def count: type == "number" and . >= 0 and floor == .;
@@ -190,24 +206,24 @@ validate_payload() {  # <data.json>
       and optional("decide_by"; valid_filed)
       and optional("asked_at"; valid_filed)
       and optional("reversible"; type == "boolean")
-      and optional_https_url("evidence_url")
+      and optional_evidence_url
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
       type == "object" and repo_marker and name_marker and (.id | nonempty_string)
       and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string)
       and optional("target"; nonempty_string) and optional("range"; nonempty_string)
       and optional("age"; nonempty_string) and optional("health"; health)
-      and optional_https_url("evidence_url");
+      and optional_evidence_url;
     def project_item:
       type == "object" and (.repo | nonempty_string)
       and optional("release_goal"; nonempty_string) and optional("release_date"; valid_filed)
       and optional("health"; health) and optional("merges_today"; count)
       and optional("last_release"; nonempty_string) and optional("next_release"; nonempty_string)
-      and optional("wip_count"; count);
+      and optional("wip_count"; count) and optional_web_url("board_url");
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
       and (.what | nonempty_string) and (.owner | nonempty_string)
-      and optional_https_url("pr_url")
+      and optional_https_url("pr_url") and optional_evidence_url
       and optional_subject;
     def charted_item:
       type == "object" and repo_marker and (.id | slug(128))
