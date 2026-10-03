@@ -289,6 +289,141 @@ Ctrl+c:cancel'
   pass "converted adapters never classify busy from rendered footer text"
 }
 
+# --- launch-prompt backstop (a launch pinned at fm-spawn, parked on a
+# recognized interactive prompt, must classify unknown rather than busy) ------
+
+test_launch_prompt_claude_trust_dialog() {
+  local state out
+  state=$(new_state_dir launch-prompt-claude)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Accessing workspace: /tmp/wt-a
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'"'"'ll be able to read, edit, and execute files here.
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's trust dialog must classify unknown launch-prompt, got '$out'"
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" 'Allow external CLAUDE.md file imports?
+This project'"'"'s CLAUDE.md imports files outside the current working directory.
+> No, disable external imports
+  Yes, allow external imports')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a launch pinned at fm-spawn parked on Claude's external-imports dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Claude launch parked on its trust or external-imports dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_trust_dialog() {
+  local state out h
+  for h in pi pi-signed omp; do
+    state=$(new_state_dir "launch-prompt-$h")
+    "$EV" arm "$state" t1 >/dev/null
+    out=$(fm_busy_classify tmux w1 "$h" t1 "$state" ' Trust project folder?
+ /tmp/fm-pi-trust-check/wt
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ > Trust
+   Trust parent folder (/tmp/fm-pi-trust-check)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ up/down navigate  enter select  escape/ctrl+c cancel')
+    [ "$out" = "unknown launch-prompt" ] \
+      || fail "a $h launch pinned at fm-spawn parked on the project-trust dialog must classify unknown launch-prompt, got '$out'"
+  done
+  pass "a Pi-family launch (pi, pi-signed, omp) parked on the project-trust dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_pi_requires_both_markers() {
+  local state out
+  state=$(new_state_dir launch-prompt-pi-partial)
+  "$EV" arm "$state" t1 >/dev/null
+  # "trust" alone, with neither the dialog heading nor its decline option, must
+  # not be read as the dialog - it is an ordinary word a worker's own output
+  # could easily contain.
+  out=$(fm_busy_classify tmux w1 pi t1 "$state" 'I trust this approach and will proceed.')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "ordinary prose containing 'trust' must not classify as a parked launch, got '$out'"
+  pass "the Pi signature requires both the dialog heading and its decline option, not the bare word trust"
+}
+
+test_launch_prompt_gemini_dialogs() {
+  local state out
+  state=$(new_state_dir launch-prompt-gemini-trust)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Do you trust the files in this folder?
+● 1. Trust folder (worktree)
+  2. Trust parent folder (project)
+  3. Don'"'"'t trust')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the workspace-trust dialog must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-auth)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'How would you like to authenticate for this project?
+● 2. Use Gemini API Key')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the auth-method picker must classify unknown launch-prompt, got '$out'"
+
+  state=$(new_state_dir launch-prompt-gemini-apikey)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 gemini t1 "$state" 'Enter Gemini API Key
+> ')
+  [ "$out" = "unknown launch-prompt" ] \
+    || fail "a Gemini launch parked on the API-key entry dialog must classify unknown launch-prompt, got '$out'"
+  pass "a Gemini launch parked on its trust, auth-picker, or API-key dialog classifies unknown launch-prompt"
+}
+
+test_launch_prompt_never_shortens_a_working_launch() {
+  local state out
+  state=$(new_state_dir launch-prompt-working)
+  "$EV" arm "$state" t1 >/dev/null
+  # A genuinely working launch (Claude's ordinary busy footer, rendered before
+  # its own hook has posted a single event yet) must keep the normal busy
+  # bound rather than being shortened by this backstop.
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" '• Working (6s • esc to interrupt)')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "a genuinely busy launch must not be reclassified, got '$out'"
+  pass "the launch-prompt backstop never reclassifies a genuinely working launch"
+}
+
+test_launch_prompt_scoped_to_armed_harnesses() {
+  local state out
+  # opencode ships no trust dialog (fm-busy-lib.sh header), so it has no
+  # signature at all: even Claude's own dialog text must not reclassify it.
+  state=$(new_state_dir launch-prompt-opencode)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 opencode t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "opencode has no launch-prompt signature and must stay busy fm-spawn, got '$out'"
+  pass "the launch-prompt backstop is scoped to harnesses with a verified signature"
+}
+
+test_launch_prompt_never_reclassifies_an_advanced_record() {
+  local state gen out
+  state=$(new_state_dir launch-prompt-advanced)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event user-prompt-submit
+  out=$(fm_busy_classify tmux w1 claude t1 "$state" \
+    'Quick safety check: Is this a project you created or one you trust?')
+  [ "$out" = "busy claude-hook" ] \
+    || fail "a record that has advanced past fm-spawn must never be reclassified by pane text, got '$out'"
+  pass "the launch-prompt backstop only ever touches the untouched fm-spawn seed"
+}
+
+test_launch_prompt_requires_a_captured_tail() {
+  local state out
+  state=$(new_state_dir launch-prompt-no-tail)
+  "$EV" arm "$state" t1 >/dev/null
+  out=$(fm_busy_classify tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "with no captured tail the record's own state must stand, got '$out'"
+  pass "the launch-prompt backstop never runs without a captured tail"
+}
+
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
@@ -439,6 +574,27 @@ test_boolean_view_never_promotes_unknown() {
   pass "the boolean view reports busy only on an exact busy verdict"
 }
 
+test_progress_is_generation_bound_and_not_semantic_state() {
+  local state gen replacement before
+  state=$(new_state_dir native-progress)
+  gen=$("$EV" arm "$state" t1)
+  before=$(cat "$state/t1.busy-state")
+  "$EV" progress "$state" t1 --gen "$gen" || fail "current progress was refused"
+  [ -f "$state/t1.progress" ] || fail "progress marker missing"
+  [ ! -e "$state/t1.turn-ended" ] || fail "progress emitted a completed turn"
+  [ "$(cat "$state/t1.busy-state")" = "$before" ] || fail "progress changed semantic state"
+  replacement=$("$EV" arm "$state" t1)
+  [ ! -e "$state/t1.progress" ] || fail "arm retained the previous incarnation's progress"
+  if "$EV" progress "$state" t1 --gen "$gen" 2>/dev/null; then fail "stale progress was accepted"; fi
+  [ ! -e "$state/t1.progress" ] || fail "stale progress wrote a marker"
+  "$EV" progress "$state" t1 --gen "$replacement" || fail "replacement progress was refused"
+  "$EV" retire "$state" t1 --gen "$replacement" || fail "retire failed"
+  [ ! -e "$state/t1.progress" ] || fail "retire retained progress"
+  pass "native progress is generation-bound, separately recorded, and cleared on arm and retire"
+}
+
+test_progress_is_generation_bound_and_not_semantic_state
+
 test_arm_seeds_busy_spawn
 test_apply_advances_seq_and_source
 test_apply_current_gen_reset
@@ -453,6 +609,14 @@ test_malformed_record_unknown
 test_record_without_sidecar_unknown
 test_source_mismatch_cross_adapter
 test_converted_adapters_ignore_footer_text
+test_launch_prompt_claude_trust_dialog
+test_launch_prompt_pi_trust_dialog
+test_launch_prompt_pi_requires_both_markers
+test_launch_prompt_gemini_dialogs
+test_launch_prompt_never_shortens_a_working_launch
+test_launch_prompt_scoped_to_armed_harnesses
+test_launch_prompt_never_reclassifies_an_advanced_record
+test_launch_prompt_requires_a_captured_tail
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate

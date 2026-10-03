@@ -11,7 +11,20 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+cleanup() {
+  local pid
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    pid=$(cat "$TMP_ROOT/remote-jobs/worker.pid")
+    # Stop the detached Linux supervisor's whole process group and wait for its
+    # cleanup before removing the fixture tree.
+    # shellcheck source=bin/fm-remote-job-lib.sh
+    . "$ROOT/bin/fm-remote-job-lib.sh"
+    FM_REMOTE_JOB_STATE="$TMP_ROOT/remote-jobs"
+    fm_remote_job_stop_worker_tree "$pid" 2>/dev/null || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
@@ -49,13 +62,13 @@ cat > "$REMOTE_ROOT/bin/tasks-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\${FM_REMOTE_JOB_ACTIVE:-absent}" >> "$TOOL_PROBE_LOG"
 case "\${1:-}:\${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.2.6\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
@@ -119,7 +132,8 @@ fm_on() {
 
 # The pre-feature user path had no executable transport at all. The regression
 # exercises the adopted public surface end to end through a deterministic SSH
-# process boundary rather than checking script source.
+# process boundary rather than checking script source. A payload caller passes
+# --stdin explicitly; without it the remote command's stdin is /dev/null.
 ARGV_ACTUAL="$REMOTE_HOME/argv.bin"
 ARGV_EXPECTED="$TMP_ROOT/argv-expected.bin"
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
@@ -127,7 +141,7 @@ printf '%s\0' 'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\n
 printf 'payload one\npayload two\n' > "$TMP_ROOT/stdin"
 set +e
 # shellcheck disable=SC2016 # Literal shell-looking argv is the injection probe.
-fm_on ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
+fm_on --stdin ios fm-probe-one.sh "$ARGV_ACTUAL" 23 \
   'plain' 'two words' '$(touch /tmp/fm-on-injected)' '' $'line one\nline two' \
   < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout" 2> "$TMP_ROOT/stderr"
 rc=$?
@@ -139,7 +153,21 @@ assert_grep 'stdin: payload one' "$TMP_ROOT/stdout" "remote stdin was not preser
 assert_grep 'stdin: payload two' "$TMP_ROOT/stdout" "remote stdin lost its second line"
 assert_grep 'stderr: separate' "$TMP_ROOT/stderr" "remote stderr was not preserved separately"
 assert_absent /tmp/fm-on-injected "shell-looking argv was interpreted"
-pass "fm-on preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+pass "fm-on --stdin preserves argv, stdin, stdout, stderr, and exit status without shell interpretation"
+
+# Without --stdin the remote command must see EOF even when the caller's own
+# stdin holds bytes: staging captures stdin to EOF, so an open caller stream
+# must never reach it by default.
+set +e
+fm_on ios fm-probe-one.sh "$REMOTE_HOME/argv-default.bin" 0 'default-closed' \
+  < "$TMP_ROOT/stdin" > "$TMP_ROOT/stdout-default" 2> "$TMP_ROOT/stderr-default"
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "the default-closed invocation did not preserve exit status (got $rc)"
+if grep -q 'stdin:' "$TMP_ROOT/stdout-default"; then
+  fail "caller stdin crossed the transport without --stdin: $(cat "$TMP_ROOT/stdout-default")"
+fi
+pass "fm-on defaults the remote command's stdin to /dev/null"
 
 # A vanished remote peer must become a bounded ssh failure instead of an
 # indefinite hang on a half-open TCP connection, so the existing no-result ->
@@ -201,13 +229,51 @@ MANAGER_DIRS=(
   "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
   "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
-OPTIONAL_DIRS=(
+RESOLVED_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
   /run/current-system/sw/bin
+)
+PREFIX_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
+DISCOVERED_DIRS=()
+OMITTED_DIRS=()
+PRESENT_CHECKED=0
+ABSENT_CHECKED=0
+# fm_remote_job_path_append_if_dir omits a symlinked directory outright, while
+# fm_remote_job_path_append_resolved_dir substitutes its physical target and
+# still omits the symlink path itself, so each group carries its own helper's
+# rule. The loops run in production's append order, because PATH is ordered.
+classify_plain_dir() {
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+  else
+    OMITTED_DIRS+=("$1")
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
+  fi
+}
+classify_resolved_dir() {
+  local physical
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+    return 0
+  fi
+  OMITTED_DIRS+=("$1")
+  physical=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || physical=
+  if [ -d "$physical" ]; then
+    DISCOVERED_DIRS+=("$physical")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+  else
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
+  fi
+}
+for candidate in "${MANAGER_DIRS[@]}"; do classify_plain_dir "$candidate"; done
+for candidate in "${RESOLVED_DIRS[@]}"; do classify_resolved_dir "$candidate"; done
+for candidate in "${PREFIX_DIRS[@]}"; do classify_plain_dir "$candidate"; done
 EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
@@ -225,12 +291,7 @@ if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; the
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
-for candidate in "${MANAGER_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
-for candidate in "${OPTIONAL_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
+for candidate in "${DISCOVERED_DIRS[@]}"; do expect_dir "$candidate"; done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
@@ -246,16 +307,11 @@ fi
 case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
-PRESENT_CHECKED=0
-ABSENT_CHECKED=0
-for candidate in "${MANAGER_DIRS[@]}" "${OPTIONAL_DIRS[@]}"; do
-  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
-    path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
-    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
-  else
-    path_has "$CHILD_PATH" "$candidate" && fail "an absent or symlinked PATH directory was added: $candidate"
-    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
-  fi
+for candidate in "${DISCOVERED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
+done
+for candidate in "${OMITTED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" && fail "an absent or unresolved PATH directory was added: $candidate"
 done
 pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 
@@ -326,7 +382,7 @@ printf '#!/usr/bin/env bash\nprintf "{\\\"server\\\":{\\\"running\\\":false}}\\n
 cat > "$DOCTOR_BIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}:${2:-}" in
-  --version:*) printf '0.2.4\n' ;;
+  --version:*) printf '0.2.6\n' ;;
   update:--help) printf '%s\n' --archive-body ;;
   mv:--help) printf '%s\n' 'usage: tasks-axi mv <id> [<id>...]' ;;
 esac

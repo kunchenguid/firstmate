@@ -270,9 +270,13 @@ wait_daemon_started() {
   fail "$label did not record backend=herdr after 6s: $new_log"
 }
 
+# The fixture pane is no real harness; pinning "unknown" keeps the typed U+2063
+# envelope whatever harness runs this test (a claude ancestry would select the
+# record-backed doorbell, which tests/fm-afk-inject-e2e.test.sh covers).
 start_daemon() {
   local log_start=0
   [ ! -f "$STATE_DIR/.supervise-daemon.log" ] || log_start=$(wc -l < "$STATE_DIR/.supervise-daemon.log")
+  FM_DAEMON_PRIMARY_HARNESS=unknown \
   PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \
@@ -484,6 +488,7 @@ test_scenario_d_max_defer() {
   fm_backend_herdr_send_literal "$SUPERVISOR_TARGET" "stuck-in-the-box"
   sleep 0.5
 
+  FM_DAEMON_PRIMARY_HARNESS=unknown \
   PATH="$HERDR_SHIM_DIR:$PATH" \
   HERDR_SESSION="$SESSION" \
   FM_STATE_OVERRIDE="$STATE_DIR" \

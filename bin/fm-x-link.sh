@@ -177,7 +177,7 @@ if [ ! -f "$META" ]; then
       ''|*' '*) ;;
       *) ROUTE_HOME_ARG="secondmate:$ROUTE_MATCHES" ;;
     esac
-    printf 'fm-x-link: bind the public promise through the promised-final path instead: tasks-axi public-followup add + bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home %s --work-id %s --generation <n>, and put the bin/fm-public-followup.sh brief <obligation-id> command into the routed worker instructions.\n' \
+    printf 'fm-x-link: bind the public promise through the promised-final path instead: bin/fm-tasks-axi.sh public-followup add + bind-work, then bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home %s --work-id %s --generation <n>, and put the bin/fm-public-followup.sh brief <obligation-id> command into the routed worker instructions.\n' \
       "$ROUTE_HOME_ARG" "$ID" >&2
   fi
   exit 1

@@ -1,0 +1,4 @@
+{
+  "description": "Firstmate Calm hooks module: may load through CLAUDE_CODE_ENABLE_FUNCTION_HOOKS or tengu_plugin_hooks_modules, but activates only when CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is exactly 1 and is otherwise a complete no-op",
+  "modules": ["./register.ts"]
+}

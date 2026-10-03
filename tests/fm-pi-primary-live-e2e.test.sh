@@ -4,10 +4,10 @@
 # copying credentials and pins the captain-approved openai-codex model.
 set -u
 
-if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_PI_LIVE_E2E=1 to run the isolated interactive Pi regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_PI_LIVE_E2E pi tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -17,9 +17,6 @@ fail() {
   exit 1
 }
 
-command -v pi >/dev/null 2>&1 || fail "pi not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
-
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
 SESSION=pi-live-e2e
@@ -28,6 +25,8 @@ PROJECT="$LAB/project"
 AHOY_PROJECT="$LAB/ahoy-project"
 HOME_DIR="$LAB/fmhome"
 PI_VERSION=$(pi --version)
+WATCH_ONLY=${FM_PI_LIVE_WATCH_ONLY:-0}
+case "$WATCH_ONLY" in 0|1) ;; *) fail "FM_PI_LIVE_WATCH_ONLY must be 0 or 1" ;; esac
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 # shellcheck disable=SC2016 # Backticks are literal prompt markup.
@@ -246,16 +245,22 @@ run_native_ahoy_regressions() {
 
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
-run_ahoy_transcript_regressions
-run_native_ahoy_regressions
+if [ "$WATCH_ONLY" -eq 0 ]; then
+  run_ahoy_transcript_regressions
+  run_native_ahoy_regressions
+fi
 mkdir -p "$PROJECT/.pi/extensions/lib"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$PROJECT/.pi/extensions/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-pending-operational-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.pi/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$PROJECT/.pi/extensions/lib/fm-native-contract.ts"
+cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$PROJECT/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
@@ -278,46 +283,67 @@ done
 wait_for_text "(openai-codex)" 120 || fail "Pi did not reach its ready composer"
 sleep 1
 
-send_prompt "/calm"
-sleep 0.2
-send_prompt "Reply exactly CALM_LIVE_WORKING_VISIBLE"
-i=0
-while [ "$i" -lt 240 ]; do
+if [ "$WATCH_ONLY" -eq 0 ]; then
+  send_prompt "/calm"
+  sleep 0.2
+  send_prompt "Reply exactly CALM_LIVE_WORKING_VISIBLE"
+  i=0
+  while [ "$i" -lt 240 ]; do
+    pane=$(capture)
+    if printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱'; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱' \
+    || fail "Calm did not show the working ship on the credentialed provider path"
+  printf '%s\n' "$pane" | grep -Fq "Working..." \
+    && fail "Calm left Pi's stock working row visible on the credentialed provider path"
+  wait_for_exact_line "CALM_LIVE_WORKING_VISIBLE" 120 \
+    || fail "Pi did not settle the Calm working-ship provider probe"
   pane=$(capture)
-  if printf '%s\n' "$pane" | grep -Fq '\__/'; then
-    break
-  fi
-  sleep 0.05
-  i=$((i + 1))
-done
-printf '%s\n' "$pane" | grep -Fq '\__/' \
-  || fail "Calm did not show the working ship on the credentialed provider path"
-printf '%s\n' "$pane" | grep -Fq "Working..." \
-  && fail "Calm left Pi's stock working row visible on the credentialed provider path"
-wait_for_exact_line "CALM_LIVE_WORKING_VISIBLE" 120 \
-  || fail "Pi did not settle the Calm working-ship provider probe"
-pane=$(capture)
-printf '%s\n' "$pane" | grep -Fq '\__/' \
-  && fail "Calm left the working ship on screen after the run settled"
-printf '%s\n' "$pane" | grep -Fq "calm transcript" \
-  && fail "Calm added a persistent Calm status row on the credentialed provider path"
-send_prompt "/calm"
-sleep 0.2
+  printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱' \
+    && fail "Calm left the working ship on screen after the run settled"
+  printf '%s\n' "$pane" | grep -Fq "calm transcript" \
+    && fail "Calm added a persistent Calm status row on the credentialed provider path"
+  send_prompt "/calm"
+  sleep 0.2
+fi
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
-
-printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
+send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. Three watcher notifications will name LIVE_WAKE_1 through LIVE_WAKE_3. After each one, run bin/fm-wake-drain.sh, handle and acknowledge it, then reply exactly HANDLED_1, HANDLED_2, or HANDLED_3 to match that notification."
 i=0
-while [ "$i" -lt 240 ]; do
-  grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
+while [ "$i" -lt 120 ]; do
+  pane=$(capture)
+  if printf '%s\n' "$pane" | grep -Eq 'watcher: started Pi extension arm child|Pi extension already owns an arm child'; then
+    break
+  fi
   sleep 0.5
   i=$((i + 1))
 done
-grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null \
-  || fail "Pi extension did not start and ledger-link a successor after the actionable close"
-wait_for_exact_line "HANDLED" 120 || fail "Pi did not drain and settle after its extension-owned successor started"
+printf '%s\n' "$pane" | grep -Eq 'watcher: started Pi extension arm child|Pi extension already owns an arm child' \
+  || fail "Pi did not render the initial watcher ownership result"
+
+wake_number=1
+while [ "$wake_number" -le 3 ]; do
+  printf 'done: pi live e2e LIVE_WAKE_%s\n' "$wake_number" >> "$HOME_DIR/state/pi-e2e.status"
+  i=0
+  cycle_count=0
+  while [ "$i" -lt 240 ]; do
+    if [ -f "$HOME_DIR/state/.watch-cycle-exits.log" ]; then
+      cycle_count=$(grep -Ec 'reason=actionable-signal.*successor=started:[0-9]+' "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null || true)
+    fi
+    [ "$cycle_count" -ge "$wake_number" ] && break
+    sleep 0.5
+    i=$((i + 1))
+  done
+  [ "$cycle_count" -ge "$wake_number" ] \
+    || fail "Pi extension did not ledger-link successor $wake_number after its actionable close"
+  wait_for_exact_line "HANDLED_$wake_number" 120 \
+    || fail "Pi did not drain and settle notification $wake_number after its extension-owned successor started"
+  wake_number=$((wake_number + 1))
+done
 
 pane=$(capture)
 guard_count=$(printf '%s\n' "$pane" | grep -Fc "TURN WOULD END BLIND - supervision is off." || true)
@@ -334,6 +360,20 @@ pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
 watcher_pid=$(sed -n '1p' "$pid_file")
 arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
 [ -n "$arm_pid" ] || fail "re-armed watcher parent was not live"
+lab_pid_is_safe "$watcher_pid" || fail "refusing to stop watcher outside the isolated live-Pi lab"
+lab_pid_is_safe "$arm_pid" || fail "refusing to stop arm outside the isolated live-Pi lab"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo "watcher: FAILED - intentional isolated live-E2E stop"' \
+  'exit 1' > "$PROJECT/bin/fm-watch-arm.sh"
+chmod +x "$PROJECT/bin/fm-watch-arm.sh"
+kill -TERM "$arm_pid" 2>/dev/null || fail "could not intentionally stop the isolated arm chain"
+wait_pid_dead "$watcher_pid" || fail "intentionally stopped watcher stayed alive"
+wait_pid_dead "$arm_pid" || fail "intentionally stopped arm stayed alive"
+sleep 2
+alarm=$(FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$PROJECT" FM_GUARD_GRACE=1 \
+  FM_SUPERVISION_MODEL=extension "$PROJECT/bin/fm-guard.sh" 2>&1)
+printf '%s\n' "$alarm" | grep -Fq 'WATCHER DOWN - SUPERVISION IS OFF' \
+  || fail "an intentionally stopped live Pi chain did not raise the genuine outage alarm: $alarm"
 
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l '/quit'
 sleep 1
@@ -342,4 +382,8 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+if [ "$WATCH_ONLY" -eq 1 ]; then
+  printf 'ok - Pi %s live E2E covered repeated successor handoffs and a genuine stopped-chain alarm\n' "$PI_VERSION"
+else
+  printf 'ok - Pi %s live E2E covered repeated successor handoffs and a genuine stopped-chain alarm, plus Calm and Ahoy regressions\n' "$PI_VERSION"
+fi

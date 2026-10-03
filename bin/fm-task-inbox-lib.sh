@@ -13,12 +13,14 @@
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only
-# a short constant doorbell line, which does not need to be reliable because
-# ringing it again is free. A duplicated doorbell is a no-op by construction
-# (the worker finds the inbox empty or already handled), a swallowed doorbell
-# is detected by the absence of the worker's acknowledgement and re-rung on a
-# bounded schedule, and a worker that never acknowledges surfaces through the
-# ordinary stale wake into stuck-crewmate-recovery.
+# a short constant doorbell line. While the endpoint remains available, that
+# line does not need to be reliable because ringing it again is free. A
+# duplicated doorbell is a no-op by construction (the worker finds the inbox
+# empty or already handled), and a swallowed doorbell is detected by the
+# absence of the worker's acknowledgement and re-rung on a bounded schedule.
+# A positively dead or missing endpoint bypasses that schedule without being
+# typed into, and its unhandled record surfaces through the ordinary stale wake
+# into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
 #   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
@@ -28,10 +30,14 @@
 #   <task>.inbox/.ring-state   watcher re-ring ladder: "<msg>\t<count>\t<epoch>"
 #   <task>.inbox/.escalated    oldest-message name already surfaced as stale,
 #                              so later polls suppress another escalation
+#   <task>.inbox/.retry-ring   name of a fire-and-forget record still owed its
+#                              one retry ring (fm_task_inbox_mark_retry)
 #
 # Record format (fm_task_inbox_write / fm_task_inbox_body):
 #   schema=fm-task-inbox.v1
 #   at=<utc timestamp>
+#   delivery=fire-and-forget   present only when the re-ring ladder must ignore it
+#                              (it still gets one retry ring; see below)
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
@@ -43,16 +49,34 @@
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
+# attempt may ring or be skipped to protect another draft in a proven pending
+# composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
-# caller owns the busy check (a busy pane just waits - the record is durable and
-# the worker reaches a turn boundary) and the wake emission; this library owns
-# only the schedule. If attempt bookkeeping cannot be persisted while the record
-# remains unhandled, the caller surfaces that failure instead of retrying
-# silently; a concurrently removed inbox is a quiet no-op. Escalation
-# deliberately queues the wake before writing the
-# deduplication marker: normal polls surface a message once, while a crash or
-# marker failure may produce a rare duplicate rather than silently lose a wake.
+# caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
+# while a positively dead or missing endpoint skips delivery and the ladder and
+# escalates directly. This library owns only the schedule and escalation marker.
+# If attempt bookkeeping cannot be persisted while the record remains unhandled,
+# the caller surfaces that failure instead of retrying silently; a concurrently
+# removed inbox is a quiet no-op. Escalation deliberately queues the wake before
+# writing the deduplication marker: normal polls surface a message once, while a
+# crash or marker failure may produce a rare duplicate rather than silently lose
+# a wake.
+#
+# Retry ring (fm_task_inbox_mark_retry): only while config/wait-no-turns is
+# present. A fire-and-forget record never enters the ladder, but when
+# fm-send's ring at enqueue did not land
+# (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
+# the due action is `retry`: once the worker has no open decision of its own,
+# the watcher rings once more and spends the mark
+# whatever the result, so the record never rings a third time and never
+# escalates. A waiting worker does not poll its inbox (bin/fm-brief.sh), so
+# without this retry the record could sit unread until a checkpoint. A pending ordinary record's
+# ladder rings the same inbox, so the retry waits behind it, and an
+# acknowledged record drops its mark. The remote steer leg has no watcher
+# ladder and owes no retry.
+#
+# Inbox names containing bytes outside printable ASCII are unsupported. The
+# doorbell refuses them rather than sending terminal control bytes to a pane.
 #
 # fm_task_inbox_ring requires bin/fm-backend.sh's dispatch (sourced below); the
 # other helpers are dependency-light. Sourced by bin/fm-send.sh, bin/fm-watch.sh,
@@ -126,7 +150,6 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   rm -f "$probe" || return 1
   if [ ! -e "$lock" ] && [ ! -L "$lock" ]; then
     fm_lock_try_create "$lock" && return 0
-    [ -e "$lock" ] || [ -L "$lock" ] || return 1
   fi
   deadline=$(( $(date +%s) + wait ))
   while ! fm_lock_try_acquire "$lock"; do
@@ -137,14 +160,15 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
 
 # Write one record into the next sequence slot: temp-write, then atomic
 # rename. Prints the record path. Caller must hold .seq.lock.
-_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text>
-  local dir=$1 text=$2 seq tmp rec status=0
+_fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode]
+  local dir=$1 text=$2 delivery_mode=${3:-} seq tmp rec status=0
   seq=$(fm_task_inbox_next_seq "$dir")
   rec="$dir/$seq.msg"
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     printf -- '--\n'
     printf '%s' "$text"
   } > "$tmp" && mv "$tmp" "$rec" || status=1
@@ -154,13 +178,13 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text>
 
 # Durably enqueue one steer: temp-write, then atomic rename into the next
 # sequence slot. Prints the record path. Fails without a partial record.
-fm_task_inbox_write() {  # <state-dir> <task-id> <text>
-  local state=$1 task=$2 text=$3 dir lock rec status=0
+fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock rec status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
-  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text") || status=1
+  rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
   printf '%s' "$rec"
@@ -177,8 +201,8 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text>
 # secondmate request embeds a per-request correlation token in its body. The
 # local plane keeps plain fm_task_inbox_write: its outcome is synchronous, so
 # a repeated identical local steer is a deliberate new instruction.
-fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text>
-  local state=$1 task=$2 text=$3 dir lock want have f rec='' status=0
+fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   mkdir -p "$dir/handled" || return 1
   lock="$dir/.seq.lock"
@@ -194,6 +218,11 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text>
               ;;
             *) continue ;;
           esac
+        fi
+        if [ "$delivery_mode" = fire-and-forget ]; then
+          fm_task_inbox_is_fire_and_forget "$f" || continue
+        elif fm_task_inbox_is_fire_and_forget "$f"; then
+          continue
         fi
         if ! fm_task_inbox_body "$f" > "$have" 2>/dev/null; then
           case "$f" in
@@ -218,7 +247,7 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text>
     status=1
   fi
   if [ "$status" -eq 0 ] && [ -z "$rec" ]; then
-    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text") || status=1
+    rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
@@ -239,34 +268,76 @@ fm_task_inbox_body() {  # <record-path>
 }
 
 # The constant self-describing doorbell line for the inbox containing a record.
-# Self-describing on purpose: a worker whose brief predates the inbox contract
-# still receives the complete instruction in the line itself.
+# It names the inbox by the literal "$FM_TASK_INBOX", which bin/fm-spawn.sh
+# exports into every launch as the inbox's absolute path, so the worker can
+# resolve it from its own environment even after losing its brief context.
+# The short `<task>.inbox` name follows as the fallback for a worker launched
+# before that export, whose brief carries the full path (bin/fm-dod-lib.sh
+# role contract, bin/fm-brief.sh inbox section). No absolute path is printed,
+# so the line's length never grows with the home's depth: a long line wraps
+# past what a harness composer read can prove, and a Herdr submit then reports
+# it did not reach the pane on every re-ring. The leading `: ` is the POSIX
+# shell no-op, so the same line typed into a pane whose agent has exited (a
+# bare shell) runs nothing; see the dead-pane note in the header. A
+# non-printable inbox name fails without output so terminal controls never
+# reach the pane's line discipline.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs name quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  abs=${abs%/handled}
+  name=${abs##*/}
+  case "$name" in
+    ''|*[![:print:]]*) return 1 ;;
+  esac
+  quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
+  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
+    "$quoted"
 }
 
-# Ring the doorbell, best-effort: one advisory composer pre-check, then the
-# backend's submit machinery with a minimal retry budget, verdict discarded.
+# Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
+# composer pre-check, then the backend's submit machinery with a minimal retry
+# budget, verdict discarded.
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed. No return value is
-# delivery proof; the acknowledgement move is the only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
+# other than our own doorbell (the watcher re-rings later), 2 the backend send
+# failed, 3 skipped because the endpoint is positively dead or missing (nothing
+# typed; recovery owns the record). No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
+# The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
+# A pending composer holding exactly our own doorbell line is a previous ring
+# whose Enter never landed, so on an agent not reported busy it is submitted
+# rather than skipped; skipping it would block every later ring. On both paths
+# a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
-  line=$(fm_task_inbox_doorbell_line "$rec")
+  case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
+    dead|missing) return 3 ;;
+  esac
+  if ! line=$(fm_task_inbox_doorbell_line "$rec"); then
+    return 2
+  fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
+        && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
+        || return 1
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      sleep 0.3
+      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      return 0
+      ;;
   esac
-  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
+  # Accepted residual race: terminal input and Enter are separate delivery
+  # steps, so an agent exiting after the liveness check could leave a bare
+  # shell only a suffix; the `: ` prefix protects complete lines only. Do not
+  # add process-bound atomic delivery here unless an incident reopens this.
+  if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 2 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
   # The verdict is read only to report a failed keystroke; every other value
@@ -275,12 +346,35 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   return 0
 }
 
-# Oldest unhandled record by sequence, or fail when the inbox is empty.
+# Whether the composer's content, ignoring line wrapping, is exactly <line>.
+fm_task_inbox_composer_holds() {  # <backend> <target> <line> [expected-label]
+  local cap held
+  fm_backend_source "$1" || return 1
+  cap=$(fm_backend_capture "$1" "$2" "$FM_COMPOSER_CAPTURE_LINES" "${4:-}" 2>/dev/null) || return 1
+  held=$(fm_composer_extract_selected_content styled=0 "$cap") || return 1
+  [ -n "$held" ] && [ "$(printf '%s' "$held" | tr -d '[:space:]')" = "$(printf '%s' "$3" | tr -d '[:space:]')" ]
+}
+
+fm_task_inbox_is_fire_and_forget() {  # <record-path>
+  local rec=$1
+  if [ ! -f "$rec" ]; then
+    rec="${rec%/*}/handled/${rec##*/}"
+    [ -f "$rec" ] || return 1
+  fi
+  awk '
+    $0 == "--" { exit }
+    $0 == "delivery=fire-and-forget" { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' "$rec"
+}
+
+# Oldest escalation-tracked unhandled record, or fail when none is due.
 fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   local dir best='' best_n=0 f n
   dir=$(fm_task_inbox_dir "$1" "$2")
   for f in "$dir"/*.msg; do
     [ -e "$f" ] || continue
+    fm_task_inbox_is_fire_and_forget "$f" && continue
     n=$(fm_task_inbox_seq_of "${f##*/}") || continue
     if [ -z "$best" ] || [ "$n" -lt "$best_n" ]; then
       best=$f
@@ -291,11 +385,30 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
+# Owe a fire-and-forget record its one retry ring (see the header). A newer
+# mark replaces an older one: a ring names the whole inbox, not one record.
+fm_task_inbox_mark_retry() {  # <state-dir> <task-id> <record-path>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  { printf '%s\n' "${3##*/}" > "$dir/.retry-ring"; } 2>/dev/null
+}
+
+# Spend the retry mark after its ring, only while it still names that record:
+# a newer mark written meanwhile is owed its own retry and survives. Fails only
+# when the processed record's mark stays behind.
+fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
+  local dir
+  dir=$(fm_task_inbox_dir "$1" "$2")
+  [ "$(cat "$dir/.retry-ring" 2>/dev/null)" = "${3##*/}" ] || return 0
+  rm -f "$dir/.retry-ring" 2>/dev/null
+}
+
 # The re-ring ladder decision for one task. Prints exactly one of:
 #   quiet                     nothing due (healthy, within grace or spacing,
 #                             or already escalated for the current oldest)
 #   ring <record-path>        one doorbell re-ring is due
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
+#   retry <record-path>       a fire-and-forget record's one retry ring is due
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
@@ -303,6 +416,17 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
+    # The one retry ring exists only while config/wait-no-turns is present.
+    # Absent, a mark is left untouched and the inbox stays quiet, as before.
+    if [ -e "${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}/wait-no-turns" ]; then
+      base=$(cat "$dir/.retry-ring" 2>/dev/null || true)
+      if ! fm_task_inbox_seq_of "$base" >/dev/null || [ ! -f "$dir/$base" ]; then
+        rm -f "$dir/.retry-ring" 2>/dev/null || true
+      elif [ "$(fm_path_age "$dir/.retry-ring")" -ge "$(fm_task_inbox_grace_secs)" ]; then
+        printf 'retry %s' "$dir/$base"
+        return 0
+      fi
+    fi
     printf 'quiet'
     return 0
   fi
@@ -318,8 +442,11 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
   IFS=$(printf '\t') read -r rec_base count last <<EOF
 $ladder
 EOF
-  if [ "$rec_base" != "$base" ]; then
-    # A different (or first) oldest message: the previous ladder is stale.
+  if [ -n "$rec_base" ] && [ "$rec_base" != "$base" ]; then
+    # A different oldest message: the previous ladder is stale. An absent
+    # ladder is left alone so a dead-pane escalation, which never rings and so
+    # never writes one, keeps its marker (the marker check below still ignores
+    # a marker naming some other message).
     count=0
     last=0
     rm -f "$dir/.escalated" 2>/dev/null || true
@@ -344,10 +471,12 @@ EOF
 }
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
-# protected skip still consumes budget so neither a dead pane nor permanently
-# blocked composer can retry silently forever. A concurrently removed inbox is
-# a successful no-op; otherwise failure means the caller must surface the
-# unwritable ladder while the record remains unhandled.
+# protected skip still consumes budget so neither an unreadable pane nor a
+# permanently blocked composer can retry silently forever. A positively dead or
+# missing endpoint never enters the ladder: the watcher escalates it directly.
+# A concurrently removed inbox is a successful no-op; otherwise failure means
+# the caller must surface the unwritable ladder while the record remains
+# unhandled.
 fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
   local dir base ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")

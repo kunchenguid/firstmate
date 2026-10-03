@@ -34,7 +34,8 @@
 # public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded private binding
 #                              (obligation, relation, work ref and canonical
-#                              secondmate path, generation, platform, request id)
+#                              secondmate path, generation, platform,
+#                              request id)
 #                              plus the loop fields that survive delivery (state,
 #                              delivered_at, followup_expires_at,
 #                              request_context_b64). Presence means the public
@@ -44,13 +45,28 @@
 #                              tasks-axi truth.
 #   events/<event-id>.json     inbound typed terminal events awaiting
 #                              reconciliation, one file per event id.
+#   outbox/<event-id>.json     OUTBOUND typed terminal events a worker in THIS
+#                              home produced for an owning home on another
+#                              machine, which no local path can reach. Same file
+#                              shape as events/, staged here until that owning
+#                              home collects them over the route's transport
+#                              (bin/fm-public-followup-emit.sh --stage-in,
+#                              bin/fm-public-followup-collect.sh). A home whose
+#                              work is only ever local never has this directory.
 #   consumed/<event-id>        idempotency ledger: an accepted event id is never
 #                              replayed, so duplicate emits and restart replay
 #                              are no-ops.
 #   rejected/<event-id>.json   events tasks-axi refused, kept with a
 #   rejected/<event-id>.reason one-line reason so a refusal is inspectable and
 #                              never retried in a loop.
-#   surfaced                   last surfaced pending-event signature, so the
+#   rejection-wakes/<event-id> one pending wake line per refusal not yet
+#                              surfaced; the relay poll prints it and removes it
+#                              only after that line is written, so a refusal
+#                              wakes this home instead of sitting silently in
+#                              rejected/ or vanishing unheard. Delivery is
+#                              at-least-once: a repeat is keyed by the same
+#                              event id and carries the same reason.
+#   surfaced                  last surfaced pending-event signature, so the
 #                              existing relay poll wakes once per new event set
 #                              instead of every cycle.
 #   retired/<obligation-id>    private retirement receipt containing the bounded
@@ -103,8 +119,10 @@ fm_pf_relay_active() {
 fm_pf_root()       { printf '%s\n' "$1/$FM_PF_DIRNAME"; }
 fm_pf_registry_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/registry"; }
 fm_pf_events_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/events"; }
+fm_pf_outbox_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/outbox"; }
 fm_pf_consumed_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/consumed"; }
 fm_pf_rejected_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejected"; }
+fm_pf_rejection_wakes_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejection-wakes"; }
 fm_pf_retired_dir()  { printf '%s\n' "$1/$FM_PF_DIRNAME/retired"; }
 
 fm_pf_retirement_receipt_exists() {
@@ -206,6 +224,189 @@ fm_pf_clean_outcome_text() {
 # as a quarantined event's one-line refusal reason.
 fm_pf_bound_bytes() {
   LC_ALL=C cut -b "1-$1"
+}
+
+# --- deliverable rules ------------------------------------------------------
+#
+# tasks-axi is the authority on deliverables, but it exposes no validation-only
+# command, and its refusal of a bad value names none of it. These helpers mirror
+# the rules its work-event consumer applies - EXPECTED_DELIVERABLES,
+# eventMatchesExpected, failureDeliverablesAreSafe, REPORT_PATH_RE,
+# COMMIT_SHA_RE, and SAFE_CODE_RE in tasks-axi's public-followup.js, and isPrUrl
+# in tasks-axi's pr-url.js, which is the seam public-followup.js classifies
+# pr_url through - so a bad value is refused where it is written and a refusal
+# can say which value was wrong. Every rule here is keyed on the promise's
+# expected final and the event's outcome together, because that is the pair
+# tasks-axi keys them on.
+# tasks-axi still re-validates at consume; tests/fm-public-followup.test.sh pins
+# these rules against the real consumer, so re-pin both together when tasks-axi
+# changes them.
+
+# fm_pf_deliverable_format <key>: the format tasks-axi accepts for <key>, as one
+# line for a brief or a refusal. Exit 1 for a key with no known format rule.
+fm_pf_deliverable_format() {
+  case "$1" in
+    pr_url) printf '%s\n' 'a canonical pull request URL: https://github.com/<owner>/<repo>/pull/<n> (GitHub) or https://<host>/<owner>/<repo>/pulls/<n> (Forgejo), with <n> a positive number without leading zeros and no trailing slash, query, fragment, credentials, or port' ;;
+    report_path) printf '%s\n' 'data/<task-id>/report.md, relative to the work home, never an absolute path' ;;
+    commit_sha) printf '%s\n' 'a lowercase hex commit SHA of 7 to 64 characters' ;;
+    error_code) printf '%s\n' 'a lowercase code of at most 64 characters: a letter, then letters, digits, ".", "_", or "-"' ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_deliverable_key_valid <key>: 0 when <key> is a deliverable name tasks-axi
+# accepts (DELIVERABLE_NAME_RE in its public-followup.js): a lowercase letter,
+# then at most 63 more of [a-z0-9_].
+fm_pf_deliverable_key_valid() {
+  case "$1" in
+    ''|[!a-z]*|*[!a-z0-9_]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+# fm_pf_expected_outcome <expected-final>: the one outcome_type that satisfies
+# that expected final (eventMatchesExpected in tasks-axi's public-followup.js).
+# A promise is also answerable with 'failed', which reports that it could not be
+# kept as promised rather than satisfying it. Exit 1 for an unknown type.
+fm_pf_expected_outcome() {
+  case "$1" in
+    failure-outcome) printf 'failed\n' ;;
+    explicit-answer) printf 'local-main\n' ;;
+    pr-merged|report-ready|local-main) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_deliverable_keys <expected-final> <outcome>: the deliverable keys
+# tasks-axi lets an event with <outcome> carry against a promise whose expected
+# final is <expected-final>, space-separated (empty for none). That is
+# EXPECTED_DELIVERABLES[expected] for the outcome the promise expects, the
+# error_code of failureDeliverablesAreSafe for a failure reported against any
+# other promise, and nothing for superseded. With no <expected-final> - a staged
+# emit cannot read one - the outcome stands in for it, which is the same set
+# whenever the event is the one the promise expects. Exit 1 when neither names a
+# final tasks-axi defines, which it refuses on its own.
+fm_pf_deliverable_keys() {
+  local expected=${1:-$2}
+  case "$2" in
+    superseded) printf '\n'; return 0 ;;
+    failed) [ "$expected" = failure-outcome ] || { printf 'error_code\n'; return 0; } ;;
+  esac
+  case "$expected" in
+    pr-merged) printf 'pr_url\n' ;;
+    report-ready) printf 'report_path\n' ;;
+    local-main) printf 'commit_sha\n' ;;
+    failure-outcome) printf 'error_code\n' ;;
+    explicit-answer) printf '\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_pr_url_valid <url>: 0 when <url> is byte-for-byte a canonical pull
+# request URL. Mirrors isPrUrl in tasks-axi's pr-url.js: exactly
+# https://github.com/<owner>/<repo>/pull/<n> on github.com, or
+# https://<lowercase-dns-host>/<owner>/<repo>/pulls/<n> on any other host, with
+# <n> positive and without leading zeros. The route and the host decide each
+# other, so a singular route off github.com and a plural route on it are both
+# refused, as are an owner or repo of "." or "..".
+fm_pf_pr_url_valid() {
+  local url=$1 rest host owner repo route
+  local label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+  local segment='[A-Za-z0-9._-]+'
+  printf '%s\n' "$url" | LC_ALL=C grep -Eq \
+    "^https://${label}(\\.${label})*/${segment}/${segment}/(pull|pulls)/[1-9][0-9]*\$" \
+    || return 1
+  rest=${url#https://}
+  host=${rest%%/*}; rest=${rest#*/}
+  owner=${rest%%/*}; rest=${rest#*/}
+  repo=${rest%%/*}; rest=${rest#*/}
+  route=${rest%%/*}
+  case "$owner" in .|..) return 1 ;; esac
+  case "$repo" in .|..) return 1 ;; esac
+  if [ "$route" = pull ]; then
+    [ "$host" = github.com ]
+  else
+    [ "$host" != github.com ]
+  fi
+}
+
+# fm_pf_deliverable_problem <expected-final> <outcome> <key> <value>: silent exit
+# 0 when tasks-axi would accept <key>=<value> on a work event with <outcome>
+# against a promise whose expected final is <expected-final> (empty when the
+# caller cannot read one); otherwise print one line naming the key, the specific
+# problem, and the applicable correction, and exit 1. The 500-character bound
+# and single-line rule are safeText's, which tasks-axi applies to every deliverable
+# value whatever its key; the per-key formats follow it.
+fm_pf_deliverable_problem() {
+  local expected=$1 outcome=$2 key=$3 value=$4 allowed format re=''
+  if allowed=$(fm_pf_deliverable_keys "$expected" "$outcome"); then
+    case " $allowed " in
+      *" $key "*) ;;
+      *)
+        if [ -n "$allowed" ]; then
+          printf "deliverable '%s' is not one this promise accepts on a %s outcome; expected %s\n" "$key" "$outcome" "$allowed"
+        else
+          printf "deliverable '%s' is not allowed: this promise accepts no deliverable on a %s outcome\n" "$key" "$outcome"
+        fi
+        return 1
+        ;;
+    esac
+  fi
+  case "$value" in
+    '')
+      printf "deliverable '%s' has no value; tasks-axi accepts no empty deliverable\n" "$key"
+      return 1
+      ;;
+    ' '*|*' ')
+      printf "deliverable '%s' is not valid: it has leading or trailing whitespace\n" "$key"
+      return 1
+      ;;
+    *[[:cntrl:]]*)
+      printf "deliverable '%s' is not valid: it must be single-line text with no control characters\n" "$key"
+      return 1
+      ;;
+  esac
+  if [ "${#value}" -gt 500 ]; then
+    printf "deliverable '%s' is %s characters long; tasks-axi accepts at most 500\n" "$key" "${#value}"
+    return 1
+  fi
+  case "$key" in
+    pr_url|report_path|commit_sha|error_code) ;;
+    *) return 0 ;;
+  esac
+  format=$(fm_pf_deliverable_format "$key")
+  case "$key" in
+    pr_url) fm_pf_pr_url_valid "$value" && return 0 ;;
+    report_path) re='^data/[A-Za-z0-9][A-Za-z0-9._-]*/report\.md$' ;;
+    commit_sha) re='^[a-f0-9]{7,64}$' ;;
+    error_code) re='^[a-z][a-z0-9._-]{0,63}$' ;;
+  esac
+  if [ -n "$re" ] && printf '%s\n' "$value" | LC_ALL=C grep -Eq "$re"; then
+    return 0
+  fi
+  printf "deliverable '%s' value '%s' is not valid; expected %s\n" "$key" "$value" "$format"
+  return 1
+}
+
+# --- the promised contract --------------------------------------------------
+
+# fm_pf_obligation_json <home> <obligation-id>: the complete typed obligation
+# payload on stdout, empty when that home's backlog simply has no such
+# public-followup item, and a non-zero exit ONLY when the backlog could not be
+# read at all. Callers depend on that distinction to report the right thing, so
+# jq runs without -e here. tasks-axi is the single source of truth for what a
+# promise expects, so every reader of that contract comes through this one call
+# rather than a copy of it. An inherited FM_DATA_OVERRIDE is cleared because a
+# caller such as bound work names the owning home in the argument while its own
+# data override is still in the environment.
+fm_pf_obligation_json() {
+  local home=$1 id=$2 out
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE='' "$_FM_PF_LIB_DIR/fm-tasks-axi.sh" \
+    public-followup list --json 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | jq -c --arg id "$id" \
+    '(.public_followups // []) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null \
+    || return 1
 }
 
 # --- registry records -------------------------------------------------------
@@ -385,14 +586,14 @@ FM_PF_SURFACED_BASENAME=surfaced
 # The relay poll compares it against the surfaced record so an unconsumed event
 # wakes firstmate once per new event, not once per poll cycle.
 fm_pf_events_signature() {
-  local dir entry names=
+  local dir entry pending_names=
   dir=$(fm_pf_events_dir "$1")
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   for entry in "$dir"/*.json; do
     [ -f "$entry" ] && [ ! -L "$entry" ] || continue
-    names="$names$(basename "$entry")
+    pending_names="$pending_names$(basename "$entry")
 "
   done
-  [ -n "$names" ] || return 1
-  printf '%s' "$names" | LC_ALL=C sort | fm_pf_sha256
+  [ -n "$pending_names" ] || return 1
+  printf '%s' "$pending_names" | LC_ALL=C sort | fm_pf_sha256
 }
