@@ -40,7 +40,7 @@ test_concurrent_append_and_drain() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out2" 2> "$dir/drain-two.err" || fail "final drain failed"
   count=$(awk -F '\t' 'NF == 5 { count++ } END { print count + 0 }' "$out2")
   [ "$count" -eq 40 ] || fail "expected final replay of 40 durable records, got $count"
-  malformed=$(awk -F '\t' 'NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
+  malformed=$(awk -F '\t' '!/^ready=([0-9]+|unknown)$/ && NF && NF != 5 { bad++ } END { print bad + 0 }' "$out2")
   [ "$malformed" -eq 0 ] || fail "drained records had malformed fields"
   unique=$(awk -F '\t' 'NF == 5 { keys[$4] = 1 } END { for (k in keys) count++; print count + 0 }' "$out2")
   [ "$unique" -eq 40 ] || fail "expected 40 unique keys, got $unique"
@@ -220,7 +220,7 @@ test_drain_dedupes_obvious_duplicates() {
   append_wake "$state" heartbeat heartbeat heartbeat || fail "second heartbeat append failed"
   append_wake "$state" signal task.status "signal: $state/task.status $state/task.turn-ended" || fail "second signal append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "dedupe drain failed"
-  count=$(awk 'NF { count++ } END { print count + 0 }' "$out")
+  count=$(awk '!/^ready=([0-9]+|unknown)$/ && NF { count++ } END { print count + 0 }' "$out")
   [ "$count" -eq 2 ] || fail "expected 2 deduped records, got $count"
   grep "$(printf '\theartbeat\theartbeat\theartbeat')" "$out" >/dev/null || fail "heartbeat was not preserved"
   grep "$(printf '\tsignal\ttask.status\t')" "$out" | grep -F "$state/task.turn-ended" >/dev/null || fail "latest signal payload was not preserved"
