@@ -533,7 +533,7 @@ On 2026-09-24 with codex-cli 0.154.0, `bash tests/fm-codex-idle-continuity.test.
 That run predates the test's queued-close assertion, so it proves the re-arm only.
 On 2026-10-03 on Linux with codex-cli 0.157.1, the same command ran the current test, which also requires the close to arrive as a prompt in the idle thread through `codex queue --thread <session_id>`, and printed `ok - codex-cli 0.157.1 Stop re-armed an ownerless source and queued its close into the idle thread`.
 A one-shot `codex exec` cannot show this, because the supervisor exits with its Codex owner and `codex exec` exits as soon as the Stop hook returns.
-Codex's hook documentation for that version parses `async` and does not run asynchronous command hooks, so the supervisor is detached with a perl fork and `setsid`, which also runs on macOS where util-linux `setsid` is absent, and the Stop hook returns.
+Codex's hook documentation for codex-cli 0.154.0 parses `async` and does not run asynchronous command hooks, so the supervisor is detached with a perl fork and `setsid`, which also runs on macOS where util-linux `setsid` is absent, and the Stop hook returns.
 `bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` from the session that owns the lock stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
 A checkpoint whose process was not in that session left the supervisor running and exited as a quiet bounded checkpoint.
 An arm that printed `watcher: started` and then `cycle ended without an actionable reason` stopped after three closes and queued one give-up check.
