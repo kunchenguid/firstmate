@@ -46,6 +46,8 @@ Every path that provisions or launches one refuses a host that is not ready for 
 
 Its [script header](../bin/fm-on.sh) owns the keepalive defaults and environment overrides.
 
+When [`config/ssh-launch-stagger-host`](configuration.md#ssh-launch-stagger-host-configssh-launch-stagger-host) names a remote host, session start spaces out the launches it sends to that host at the same instant, so that a batch of cold connections does not hit its SSH connection-rate limit together; [`bin/fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact spacing, and every other alias keeps its unspaced launch.
+
 ### Remote clone and entrypoint
 
 1. Clone Firstmate on the remote host at an absolute code-root path.
