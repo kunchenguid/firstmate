@@ -35,22 +35,36 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
-#              proof (fm_control_endpoint_absence_verdict) before anything is
-#              claimed about it, because `missing` also covers an endpoint that
-#              is merely unreachable from this seat. That proof exists only on
-#              HERDR, whose reads are scoped to the session the record names:
-#              proven gone reports `endpoint-gone` rather than
-#              `already-stopped`, because the endpoint this verb normally
-#              preserves did not survive; a pane that turns out to be there and
-#              idle is the ordinary `already-stopped`; one whose agent is back
-#              takes the ordinary interrupt-then-exit path. A tmux `missing`
-#              always REFUSES: a task record carries no socket identity for its
-#              endpoint, so this verb cannot tell a destroyed window from one on
-#              a tmux server it cannot address, and it will not claim a stop it
-#              cannot see.
+#              the backend's recovery-grade classifier reports the agent gone,
+#              or the recorded endpoint authoritatively absent (a seat that
+#              closed itself on exit is a stronger stop, never a failure).
+#              Already-stopped is success (idempotent). An entry-time
+#              `missing` is put through the control plane's one absence proof
+#              (fm_control_endpoint_absence_verdict) before anything is
+#              claimed about it, because `missing` also covers an endpoint
+#              that is merely unreachable from this seat: proven gone reports
+#              `endpoint-gone`, because the endpoint this verb normally
+#              preserves did not survive; a pane that turns out to be there
+#              and idle is the ordinary `already-stopped`; a tmux `missing`
+#              always REFUSES, because a task record carries no socket
+#              identity for its endpoint, so this verb cannot tell a
+#              destroyed window from one on a tmux server it cannot address,
+#              and it will not claim a stop it cannot see. The same proof
+#              routes a `missing` read after a delivered interrupt: proven
+#              gone reports `endpoint-gone`, an unprovable one falls to the
+#              staged waits below rather than claiming a stop.
+#
+#              Verification is keyed on that POSITIVE stop state with two
+#              bounded waits: the primary exit window, then a shorter confirm
+#              window that catches a stop landing just after the first window
+#              expires. A window's expiry is NOT evidence the action failed -
+#              it only means the stop state was not observed yet - so expiry
+#              reports exit=unconfirmed with the observed state and never a
+#              definite "did not stop" failure claim. Only a definite refusal
+#              before or during delivery reports the action as failed. Reading
+#              a succeeded action as failed is the dangerous direction for
+#              lifecycle control: it aims recovery at a seat that already did
+#              exactly what it was told.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -116,8 +130,10 @@
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind.
-#   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#   - An ambiguous or unreadable endpoint state is never sent a lifecycle
+#     command; only a positively classified state receives one. For exit after
+#     a delivered interrupt, such a read is not a refusal: the exit command is
+#     withheld and the same staged positive-stop waits decide the outcome.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
@@ -126,7 +142,9 @@
 #   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
 #   FM_CONTROL_ARM_WAIT          wait for an armed interrupt's rendered proof
 #                                after the press gap (1.5)
-#   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
+#   FM_CONTROL_EXIT_WAIT         positive-stop wait after the exit command (30)
+#   FM_CONTROL_EXIT_CONFIRM_WAIT second bounded wait for the same positive stop
+#                                state after the exit window expires (10)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
@@ -181,6 +199,7 @@ POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
+EXIT_CONFIRM_WAIT=${FM_CONTROL_EXIT_CONFIRM_WAIT:-10}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
@@ -364,22 +383,43 @@ busy_verdict() {
   fm_busy_classify_meta "$META" "$ID" "$STATE"
 }
 
+# fm_epoch_now: the wall clock in seconds, fractional when the shell provides
+# it - the staged waits bound themselves against real time with it.
+fm_epoch_now() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    printf '%s' "$EPOCHREALTIME"
+  else
+    date +%s
+  fi
+}
+
 # wait_agent_state <wanted...> <timeout>: poll until agent_state prints one of
-# the wanted values. Prints the final observed state; returns 0 on a match.
+# the wanted values. A wanted `missing` matches only when the shared absence
+# proof (fm_control_endpoint_absence_verdict) establishes the recorded endpoint
+# is actually gone: the raw verdict also covers an endpoint merely unreachable
+# from this seat, which is not the stop state. The timeout is wall-clock: every
+# second a poll iteration's own work takes - a slow read, a slow proof - is
+# charged to it, so the window a caller reports is the window that elapsed.
+# Prints the final observed state; returns 0 on a match.
 wait_agent_state() {  # <timeout> <wanted>...
-  local timeout=$1 state want elapsed=0
+  local timeout=$1 state want start now absence
   shift
+  start=$(fm_epoch_now)
   while :; do
     state=$(agent_state)
     for want in "$@"; do
       if [ "$state" = "$want" ]; then
+        if [ "$state" = missing ]; then
+          absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+          [ "${absence%%$'\t'*}" = gone ] || break
+        fi
         printf '%s' "$state"
         return 0
       fi
     done
-    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    now=$(fm_epoch_now)
+    awk -v s="$start" -v n="$now" -v t="$timeout" 'BEGIN{exit !((n - s) < t)}' || break
     sleep "$POLL"
-    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
   done
   printf '%s' "$state"
   return 1
@@ -554,10 +594,33 @@ retire_busy_incarnation() {
   fi
 }
 
+# await_positive_stop: run the staged positive-stop waits - the primary exit
+# window, then the shorter confirm window - and report their combined expiry.
+# Window expiry is not evidence the agent kept running, so the report is
+# unconfirmed with the last observed state, never a definite failure claim.
+# On success `state` carries the matched stop state - `dead`, or `missing`
+# whose absence the proof established - so each caller labels the outcome the
+# way the immediate-read sibling labels the same physical event.
+# An optional epoch-seconds <origin> predates work already charged to the
+# primary window (an absence proof run before these waits), so the windows the
+# report names are the windows that actually elapsed.
+await_positive_stop() {  # <outcome prefix> [origin]
+  local origin=${2-} budget=$EXIT_WAIT
+  if [ -n "$origin" ]; then
+    budget=$(awk -v b="$EXIT_WAIT" -v s="$origin" -v n="$(fm_epoch_now)" \
+      'BEGIN{ r = b - (n - s); if (r < 0) r = 0; printf "%.3f", r }')
+  fi
+  state=$(wait_agent_state "$budget" dead missing) || {
+    state=$(wait_agent_state "$EXIT_CONFIRM_WAIT" dead missing) || {
+      die "$1 agent-state=$state exit=unconfirmed; the stop state was not observed within the ${budget}s exit window and its ${EXIT_CONFIRM_WAIT}s confirm window - a window's expiry is not evidence the agent kept running, so this is unconfirmed rather than failed; read the seat's current state before any recovery action"
+    }
+  }
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed
+  local state cmd hazard verdict composer_state cancel absence interrupt_result=not-needed stop_clock_origin=
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -607,6 +670,27 @@ do_exit() {
     busy*)
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
+      if [ "$state" = missing ]; then
+        # A raw `missing` is not a finding about the endpoint: it conflates
+        # "destroyed" with "unreachable from this seat". Route it through the
+        # control plane's one absence proof - the same one the entry path and
+        # the relaunch gate use - so this verb answers for that state the way
+        # the next `exit` on it would, never more than the proof established.
+        stop_clock_origin=$(fm_epoch_now)
+        absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+        case "${absence%%$'\t'*}" in
+          gone)
+            # Proven gone: the agent went with the endpoint, so there is
+            # nothing left to send, and the endpoint's own outcome rather
+            # than `stopped` at an address that no longer exists.
+            retire_busy_incarnation
+            printf 'endpoint-gone'
+            return 0
+            ;;
+          dead) state=dead ;;
+          alive) state=alive ;;
+        esac
+      fi
       case "$state" in
         dead)
           retire_busy_incarnation
@@ -614,8 +698,23 @@ do_exit() {
           return 0
           ;;
         alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
-        missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
-        *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
+        *)
+          # The interrupt landed but the seat cannot be positively attributed
+          # right now. That is neither a refusal nor stop evidence, so the exit
+          # command is withheld (an unattributed endpoint takes no lifecycle
+          # command) and the same staged positive-state waits decide the
+          # outcome: a positively observed stop is success, their expiry is
+          # unconfirmed.
+          interrupt_result="delivered verified=unattributed cancel=$cancel"
+          await_positive_stop "exit-interrupted $ID interrupt=$interrupt_result exit-command=not-sent" ${stop_clock_origin:+"$stop_clock_origin"}
+          retire_busy_incarnation
+          if [ "$state" = missing ]; then
+            printf 'endpoint-gone'
+          else
+            printf 'stopped'
+          fi
+          return 0
+          ;;
       esac
       ;;
   esac
@@ -645,13 +744,26 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  # The postcondition is the POSITIVE stop state: the classifier confidently
+  # reads no agent (dead), or the recorded endpoint is authoritatively absent
+  # because the seat closed itself on exit (missing). Window expiry is a
+  # different thing entirely, so the waits are staged: the primary window,
+  # then a shorter confirm window for a stop that lands just late. Both key on
+  # the same positive state, and only their combined expiry reports unconfirmed
+  # - with the observed state, never a definite "did not stop" failure claim.
+  # The exit window is the wait AFTER this delivery: re-anchor the charged
+  # origin here so a pre-delivery absence proof never eats into the window
+  # the report names.
+  stop_clock_origin=$(fm_epoch_now)
+  await_positive_stop "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered" "$stop_clock_origin"
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
-  printf 'stopped'
+  if [ "$state" = missing ]; then
+    printf 'endpoint-gone'
+  else
+    printf 'stopped'
+  fi
 }
 
 # --- transactional relaunch -------------------------------------------------
