@@ -95,7 +95,9 @@
 #      disagreement reports unknown with available candidate ids.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
-#      awaiting_approval/fix_review -> parked (with gate findings), terminal
+#      awaiting_approval/fix_review -> parked (with gate findings, and with a
+#      finding that reports a configured check could not run named as the
+#      environment fault it is rather than an approvable decision), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
 #      failed -> failed, cancelled -> unknown (no verdict unless the green
 #      delivery safeguard below applies). A cancelled outcome takes precedence
@@ -1117,6 +1119,11 @@ if [ "$HAVE_RUN" = 1 ]; then
       # later note happens to contain can mint it.
       if nm_gate_awaits_human_decision; then
         RUN_DETAIL="$RUN_DETAIL${SEP}$FM_GATE_HUMAN_DECISION"
+      fi
+      # fm_nm_unrunnable_check_finding is the ONE detector; decision policy is
+      # owned by .agents/skills/ask-user-authority/SKILL.md.
+      if fm_nm_unrunnable_check_finding "$RUN_OUT" >/dev/null; then
+        RUN_DETAIL="$RUN_DETAIL (environment fault: a configured check did not run - validation is incomplete; not approvable)"
       fi
     else
       case "$status" in
