@@ -115,9 +115,12 @@
 # status, records, checks, backlog - while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
-# never the other task's claim. Skipping the inspection discards nothing of this
-# task's: whatever unlanded work it had in that slot was already destroyed when
-# the pool handed the slot on. Refusing instead would strand the record, because
+# never the other task's claim. For a ship record, its recorded branch must
+# still resolve to a commit in the separate project clone before records-only
+# cleanup: that ref preserves committed work without reading the reused slot,
+# and its absence refuses even with --force. Uncommitted work already lost at
+# slot reassignment cannot be reconstructed by inspecting the new claimant's
+# copy. Refusing every reassigned record would strand it, because
 # bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
@@ -2458,6 +2461,22 @@ require_owned_task_worktree_slot() {
   return 1
 }
 
+# A stale ship's committed work must have a ref outside the reassigned slot.
+# The project clone shares its object store but retains branch refs independently
+# of Treehouse's worktree return. The task record alone is not a work receipt.
+require_reassigned_ship_branch() {
+  local branch
+  [ "$TEARDOWN_SLOT_REASSIGNED" = 1 ] && [ "$KIND" = ship ] || return 0
+  branch=$(fm_meta_get "$META" branch)
+  if [ -n "$branch" ] \
+     && git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 \
+     && git -C "$PROJ" rev-parse --verify "refs/heads/$branch^{commit}" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "REFUSED: reassigned ship task $ID has no preserved recorded branch in $PROJ; retaining its task record - not even --force can remove this custody evidence." >&2
+  return 1
+}
+
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
 }
@@ -3334,6 +3353,7 @@ remove_secondmate_registry_entry() {
 
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
+require_reassigned_ship_branch || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

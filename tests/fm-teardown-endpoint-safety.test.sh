@@ -941,7 +941,9 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
     || fail "clean-slot fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "branch=fm/$id" "kind=ship"
+  git -C "$dir/project" branch "fm/$id"
   claim_pool_slot "$dir" "$other" "$dir/other-home"
   ( cd "$dir/worktree" && exec sleep 30 ) &
   worker=$!
@@ -980,6 +982,19 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   assert_contains "$(cat "$dir/stderr")" "$dir/pool/1/.fm-slot-owner" \
     "unreadable-claim refusal should name the claim file to inspect"
 
+  # Two task lines are contradictory custody evidence, even when both happen
+  # to name the same other task. A permissive last-line-wins reader would turn
+  # this into a positive reassignment and retire the stale record under --force.
+  printf 'task=%s\nhome=%s\ntask=%s\n' "$other" "$dir/other-home" "$other" \
+    > "$dir/pool/1/.fm-slot-owner"
+  rc=0
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown accepted contradictory slot-owner claim lines"
+  assert_present "$dir/home/state/$id.meta" "teardown removed the task record under contradictory claims"
+  assert_present "$dir/pool/1/.fm-slot-owner" "teardown removed contradictory slot-owner evidence"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime under contradictory claims: $(cat "$dir/runtime.log")"
+
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
@@ -994,20 +1009,54 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   mark_case_as_treehouse_pool "$dir"
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "branch=fm/$id" "kind=ship"
   fm_write_meta "$dir/home/state/$other.meta" \
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other"
+  git -C "$dir/project" branch "fm/$id"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$other" > "$dir/stdout" 2> "$dir/stderr" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "claimant teardown bypassed the stale record"
+  assert_contains "$(cat "$dir/stderr")" "also task $id" \
+    "claimant-first refusal did not identify the conflicting stale record"
+  run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "claimant teardown bypassed the stale record under --force"
+  assert_contains "$(cat "$dir/stderr")" "also task $id" \
+    "forced claimant-first refusal did not identify the conflicting stale record"
+  assert_present "$dir/home/state/$id.meta" "claimant-first teardown removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "claimant-first teardown removed its own record"
+  assert_present "$dir/pool/1/.fm-slot-owner" "claimant-first teardown removed the slot claim"
+  [ ! -s "$dir/runtime.log" ] || fail "claimant-first refusal reached the runtime: $(cat "$dir/runtime.log")"
+
+  rm "$dir/pool/1/.fm-slot-owner"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale teardown bypassed an absent claim under --force"
+  assert_present "$dir/home/state/$id.meta" "absent-claim refusal removed the stale record"
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" && rc=0 || rc=$?
+  [ "$rc" -ne 0 ] || fail "stale teardown bypassed an unsafe claim under --force"
+  assert_present "$dir/home/state/$id.meta" "unsafe-claim refusal removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "claim refusals removed the claimant record"
+  assert_present "$dir/worktree/sentinel" "claim refusals reset the claimant's slot"
+  [ ! -s "$dir/runtime.log" ] || fail "claim refusals reached the runtime: $(cat "$dir/runtime.log")"
+  claim_pool_slot "$dir" "$other"
 
   set +e
-  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr"
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "records-only teardown of a stale record on a claimed slot failed: $(cat "$dir/stderr")"
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "stale record beside the claimant's record"
   assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
   assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
+  git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "records-only teardown removed the stale task's preserved branch"
 
   : > "$dir/runtime.log"
   run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
@@ -1018,6 +1067,37 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
     || fail "claimant teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: a stale record on a claimed slot retires, then the claimant tears down"
+}
+
+test_reassigned_ship_without_preserved_branch_refuses_even_with_force() {
+  local dir id=stale-task other=live-task rc flag
+  dir=$(make_case reassigned-ship-unpreserved)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "branch=fm/$id" "kind=ship"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+
+  for flag in plain --force; do
+    rc=0
+    if [ "$flag" = plain ]; then
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+      FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+        "$TEARDOWN" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    else
+      run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+    fi
+    [ "$rc" -ne 0 ] || fail "$flag retired a ship with no preserved branch"
+    assert_present "$dir/home/state/$id.meta" "$flag removed the unpreserved ship record"
+    assert_present "$dir/home/state/$other.meta" "$flag removed the claimant record"
+    assert_present "$dir/pool/1/.fm-slot-owner" "$flag removed the claimant's claim"
+    [ ! -s "$dir/runtime.log" ] || fail "$flag reached the runtime: $(cat "$dir/runtime.log")"
+  done
+  pass "fm-teardown: a reassigned ship needs an independent branch ref even under --force"
 }
 
 # The two states that must never become a false refusal: the task's own claim,
@@ -1441,6 +1521,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
+test_reassigned_ship_without_preserved_branch_refuses_even_with_force
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
