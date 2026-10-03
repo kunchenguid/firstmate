@@ -537,6 +537,153 @@ EOF
   pass "Pi dispatcher branch offer owns accepted wakes and falls back to main"
 }
 
+test_pi_task_tools_do_not_admit_wakes_and_bypass_ordinary_branch_settlement() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-continuation-branch-bypass-root"
+  home="$TMP_ROOT/pi-continuation-branch-bypass-home"
+  log="$TMP_ROOT/pi-continuation-branch-bypass.log"
+  stop="$TMP_ROOT/pi-continuation-branch-bypass.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/unrelated"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: unrelated branch turn\n'
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" REAL_ROOT="$ROOT" \
+    FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const order = [];
+let branchSettled = false;
+let branchAccepted = false;
+let releaseBranch = () => {};
+const branchSettlement = new Promise((resolve) => {
+  releaseBranch = () => {
+    branchSettled = true;
+    resolve();
+  };
+});
+const busHandlers = new Map();
+const bus = {
+  on(channel, handler) {
+    busHandlers.set(channel, [...(busHandlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of busHandlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  branchAccepted = true;
+  order.push("ordinary-branch-accepted");
+  offer.accept(branchSettlement);
+});
+let watchTool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") watchTool = candidate;
+  },
+  sendUserMessage: async () => {},
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+mkdirSync(`${process.env.FM_HOME}/data/target`, { recursive: true });
+writeFileSync(`${process.env.FM_HOME}/data/backlog.md`, "## In flight\n\n## Queued\n\n## Done\n");
+writeFileSync(`${process.env.FM_HOME}/.tasks.toml`, "backend=\"markdown\"\n[markdown]\npath=\"data/backlog.md\"\n");
+const commandEnv = { ...process.env, FM_DATA_OVERRIDE: `${process.env.FM_HOME}/data`,
+  FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state` };
+const added = spawnSync(`${process.env.REAL_ROOT}/bin/fm-tasks-axi.sh`,
+  ["add", "target", "Read target progress", "--kind", "ship", "--body", "Keep this task independent.", "--start"],
+  { env: commandEnv, encoding: "utf8" });
+if (added.status !== 0) throw new Error(`target fixture failed: ${added.stderr}`);
+writeFileSync(`${process.env.FM_HOME}/data/target/brief.md`, "Target task intent.\n");
+writeFileSync(`${process.env.FM_HOME}/state/target.meta`, "spawn_gen=target-g1\n");
+writeFileSync(`${process.env.FM_HOME}/state/unrelated.meta`, "project=/projects/unrelated\nwindow=fm-unrelated\n");
+writeFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "1\t1\tsignal\tunrelated.status\tsignal: unrelated branch turn\n");
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if ((handlers.get("tool_call") ?? []).length !== 0) {
+  throw new Error("watcher registered a task-tool boundary hook");
+}
+if (!watchTool) throw new Error("watch tool was not registered");
+await watchTool.execute("arm-for-ordinary-wake", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && !branchAccepted; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (!branchAccepted) throw new Error("ordinary watcher delivery did not admit the unrelated wake");
+
+const invokeContinuation = async () => {
+  order.push("before-tool");
+  for (const handler of handlers.get("tool_call") ?? []) {
+    await handler({ type: "tool_call", toolCallId: "continuation-read", toolName: "fm_task_continuation",
+      input: { action: "read", task: "target" } }, {});
+  }
+  order.push("continuation-read");
+  const read = spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`, ["progress", "target"],
+    { env: commandEnv, encoding: "utf8" });
+  if (read.status !== 0) throw new Error(`continuation read failed: ${read.stderr}`);
+  const current = JSON.parse(read.stdout);
+  order.push("continuation-update");
+  const update = spawnSync(`${process.env.REAL_ROOT}/bin/fm-task-state.sh`,
+    ["update-progress", "target", "--expected-token", current.record_token, "--progress",
+      JSON.stringify({ acceptance: "read and update complete", current_state: "verified",
+        remaining_gap: "ordinary branch still pending", next_step: "release fixture branch" })],
+    { env: commandEnv, encoding: "utf8" });
+  if (update.status !== 0) throw new Error(`continuation update failed: ${update.stderr}`);
+  return JSON.parse(update.stdout);
+};
+const operation = invokeContinuation();
+const observed = await Promise.race([
+  operation.then((result) => ({ kind: "result", result })),
+  new Promise((resolve) => setTimeout(() => resolve({ kind: "deadline" }), 1500)),
+]);
+if (observed.kind !== "result") {
+  releaseBranch();
+  await operation;
+  throw new Error(`continuation remained behind the unrelated branch: ${order.join(" -> ")}`);
+}
+if (observed.result.task_id !== "target" || observed.result.current_state !== "verified" ||
+    !/^[a-f0-9]{64}$/.test(observed.result.record_token)) {
+  throw new Error(`continuation result was lost: ${JSON.stringify(observed.result)}`);
+}
+if (branchSettled) throw new Error("fixture branch settled before the continuation read/update");
+if (order.join(",") !== "ordinary-branch-accepted,before-tool,continuation-read,continuation-update") {
+  throw new Error(`unexpected event order: ${order.join(" -> ")}`);
+}
+releaseBranch();
+await branchSettlement;
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi task tools must not admit wakes and must bypass an ordinary unrelated pending branch turn"
+  [ -z "$out" ] || fail "Pi continuation branch-bypass test printed output: $out"
+  pass "Pi task tools register no watcher admission hook and read/update while ordinary branch work remains pending"
+}
+
 test_pi_retired_row_does_not_veto_an_unrelated_live_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-retired-row-local-root"
@@ -3338,6 +3485,7 @@ test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
+test_pi_task_tools_do_not_admit_wakes_and_bypass_ordinary_branch_settlement
 test_pi_retired_row_does_not_veto_an_unrelated_live_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
