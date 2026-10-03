@@ -280,18 +280,23 @@ first_pr_url_in_file() {  # <file>
 }
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
+  local backlog=${1:-$BACKLOG} canonical_json='' legacy_json
   if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
-    python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
-      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" '{path:$path,present:true,
-        records:[.tasks[] | {
+    canonical_json=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
+      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" '
+      .tasks as $tasks
+      | (reduce $tasks[] as $task ({};
+          .[$task.id] = ($task.state == "done" or $task.state == "archived"))) as $resolved
+      | {path:$path,present:true,
+        records:[$tasks[] | ([.blocked_by[] | select($resolved[.] != true)]) as $unresolved | {
           order:0,state:(if .state == "archived" then "done" else .state end),structured:true,
           id:.id,checked:(.state == "done" or .state == "archived"),title:.title,
           repo:(if .repo == "" then null else .repo end),kind:.kind,
           priority:(if .priority == "" then null else .priority end),
-          hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),hold_until:(.hold.until // null),
+          hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),
+          hold_until:(.hold.until // .deferred_until // null),
           hold_set:null,blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
-          unresolved_blocker_ids:.blocked_by,blocked_reason:null,since:.created,merged:null,reported:null,
+          unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
           done:.closed,completion:{verb:(if .closed then "done" else null end),date:.closed},
           links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
           local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
@@ -301,18 +306,24 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                         elif .state == "in_flight" then "worker"
                         elif .state == "queued" then "queued" else "done" end),
           requires_child_metadata:(.state == "in_flight" and .hold == null and .kind != "program"),
-          hold_age_days:null,hold_bucket:(if .hold.kind == "captain" then "live" else null end),
-          captain_actionable:(.hold.kind == "captain")
-        }]}'
-    return $?
+          hold_age_days:null,
+          hold_bucket:(if .hold.kind != "captain" then null
+                       elif ($unresolved|length) > 0 then "blocked"
+                       elif (.hold.until // .deferred_until // null) > $today then "dated"
+                       else "live" end),
+          captain_actionable:(.hold.kind == "captain" and ($unresolved|length) == 0
+                              and ((.hold.until // .deferred_until // null) <= $today))
+        }]}') || return 1
   fi
   if [ ! -f "$backlog" ]; then
-    jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
+    if [ -n "$canonical_json" ]; then printf '%s\n' "$canonical_json"
+    else jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
+    fi
     return 0
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
+  legacy_json=$(jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
@@ -503,7 +514,16 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable = (.hold_bucket == "live")
         else . end)
     | del(.section,.order)
-  ' < "$backlog"
+  ' < "$backlog") || return 1
+  if [ -z "$canonical_json" ]; then
+    printf '%s\n' "$legacy_json"
+  else
+    jq -cn --argjson canonical "$canonical_json" --argjson legacy "$legacy_json" '
+      (reduce $canonical.records[] as $record ({}; .[$record.id] = true)) as $canonical_ids
+      | $canonical + {records:($canonical.records +
+          [$legacy.records[] |
+            select(.structured != true or ($canonical_ids[.id] // false) != true)])}'
+  fi
 }
 
 SNAPSHOT_TASK_DIR=
@@ -946,7 +966,7 @@ if [ "$UNFINISHED_ONLY" = 1 ]; then
   UNFINISHED_TASK_IDS=$(printf '%s' "$BACKLOG_JSON" | jq -r \
     '.records[] | select(.structured and (.state == "queued" or .state == "in_flight")) | .id') || exit 1
   BACKLOG_JSON=$(printf '%s' "$BACKLOG_JSON" | jq -c \
-    '.records |= map(select(.structured and (.state == "queued" or .state == "in_flight")))') || exit 1
+    '.records |= map(select(.structured != true or .state == "queued" or .state == "in_flight"))') || exit 1
   TASK_DISPOSITIONS=$(printf '%s' "$BACKLOG_JSON" | jq -r '.records[] | [.id,.state] | @tsv') || exit 1
 else
   TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)

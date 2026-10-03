@@ -30,6 +30,15 @@ assert_not_contains "$listed" "second," "filtered list included a queued task"
 inventory=$(python3 "$ROOT/bin/fm-task-record.py" --data "$HOME_DIR/data" inventory) || fail "unified inventory read failed"
 assert_equals $'first\nsecond' "$(printf '%s' "$inventory" | jq -r '.tasks[].id')" "inventory did not aggregate both task records"
 
+# Empty progress is absence of semantic acceptance, never permission to clean up.
+# shellcheck source=bin/fm-task-progress-lib.sh
+. "$ROOT/bin/fm-task-progress-lib.sh"
+rc=0
+fm_task_progress_completion_guard first >/dev/null 2>"$TMP_ROOT/blank-acceptance.err" || rc=$?
+expect_code 6 "$rc" "blank progress completion guard"
+assert_grep 'not MAIN-accepted' "$TMP_ROOT/blank-acceptance.err" \
+  "blank progress authorized cleanup without semantic acceptance"
+
 record='{"acceptance":"The requested behavior passes","current_state":"Implementation exists","remaining_gap":"Review remains","next_step":"Run review"}'
 second_before=$(sha256sum "$second" | awk '{print $1}')
 updated=$("$STATE" update-progress first --progress "$record") || fail "progress update failed"
@@ -85,6 +94,17 @@ printf '%s' "$blocked" | jq -e '.task_blocked=="yes" and .recorded==false' >/dev
 snapshot=$("$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed"
 printf '%s' "$snapshot" | jq -e '.backlog.records|length==2 and any(.[];.id=="first" and .compact_progress.next_step=="Run final review")' >/dev/null \
   || fail "fleet snapshot did not derive its view from task records"
+
+DEP_DATA="$TMP_ROOT/dependencies/data"
+mkdir -p "$DEP_DATA"
+FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" add blocker "Dependency blocker" --kind ship >/dev/null
+FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" add dependent "Dependent work" --kind ship >/dev/null
+FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" block dependent --by blocker >/dev/null
+assert_not_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent," \
+  "unresolved dependency was dispatchable"
+FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" "done" blocker >/dev/null
+assert_contains "$(FM_DATA_OVERRIDE="$DEP_DATA" "$TASKS" ready)" "dependent,queued,ship" \
+  "completed dependency did not release queued work"
 
 done_record='{"acceptance":"The requested behavior passes","current_state":"The outcome is accepted","remaining_gap":"","next_step":""}'
 "$STATE" update-progress first --progress "$done_record" >/dev/null || fail "acceptance update failed"

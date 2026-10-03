@@ -174,12 +174,24 @@ def show(record: dict[str, Any]) -> None:
         print(f"  {key}: {shown(value)}")
 
 
-def list_records(items: list[dict[str, Any]], state: str | None, limit: int) -> None:
+def list_records(items: list[dict[str, Any]], state: str | None, limit: int,
+                 fields: str | None = None, label: str = "tasks") -> None:
     selected = [item for item in items if state is None or item["state"] == state][:limit]
     print(f"count: {len(selected)}")
-    print(f"tasks[{len(selected)}]{{id,state,kind,repo,title}}:")
+    extra = [name for name in (fields or "").split(",") if name]
+    print(f"{label}[{len(selected)}]{{id,state,kind,repo,title" +
+          ("," + ",".join(extra) if extra else "") + "}:")
     for item in selected:
         values = [item["id"], item["state"], item["kind"], item["repo"] or '"-"', item["title"]]
+        for name in extra:
+            if name == "blocked_by":
+                values.append("|".join(item["blocked_by"]) or "none")
+            elif name == "hold_kind":
+                values.append(item["hold"]["kind"] if item["hold"] else "none")
+            elif name == "hold_reason":
+                values.append(item["hold"]["reason"] if item["hold"] else "none")
+            else:
+                raise Refusal(f"unsupported list field: {name}")
         print("  " + ",".join(values))
 
 
@@ -242,6 +254,7 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--queue", action="store_true")
     show_parser = sub.add_parser("show"); show_parser.add_argument("id"); show_parser.add_argument("--full", action="store_true")
     listing = sub.add_parser("list"); listing.add_argument("--state"); listing.add_argument("--limit", type=int, default=10000)
+    listing.add_argument("--blocked", action="store_true"); listing.add_argument("--fields")
     ready = sub.add_parser("ready"); ready.add_argument("--limit", type=int, default=10000)
     for command in ("start", "done", "reopen", "archive", "unhold"):
         item = sub.add_parser(command); item.add_argument("id")
@@ -287,9 +300,15 @@ def import_snapshot(data: Path, snapshot_path: Path, archived: bool) -> int:
             progress = {name: "" for name in PROGRESS_FIELDS}
         else:
             progress = {name: progress[name] for name in PROGRESS_FIELDS}
-        links = {}
+        links: dict[str, str] = {}
         if isinstance(row.get("pr_url"), str): links["pr"] = row["pr_url"]
         if isinstance(row.get("report_path"), str): links["report"] = row["report_path"]
+        artifact_index = 0
+        for value in row.get("links", []) if isinstance(row.get("links"), list) else []:
+            if not isinstance(value, str) or value in links.values():
+                continue
+            artifact_index += 1
+            links[f"artifact_{artifact_index}"] = value
         state = "archived" if archived else row.get("state")
         if state not in STATES:
             raise Refusal(f"legacy task {task_id} has unsupported state {state}")
@@ -343,8 +362,16 @@ def main() -> int:
                 print(json.dumps({"tasks": ids}, separators=(",", ":"))); return 0
             state = getattr(args, "state", None)
             if args.command == "ready":
-                items = [item for item in items if item["state"] == "queued" and not item["hold"] and not item["blocked_by"]]
-            list_records(items, state, args.limit); return 0
+                dispositions = {item["id"]: item["state"] for item in items}
+                items = [item for item in items if item["state"] == "queued" and not item["hold"] and
+                         all(dispositions.get(blocker) in ("done", "archived") for blocker in item["blocked_by"])]
+                list_records(items, None, args.limit, label="ready"); return 0
+            if args.blocked:
+                items = [item for item in items if item["blocked_by"]]
+            if state == "held":
+                items = [item for item in items if item["hold"] is not None]
+                state = None
+            list_records(items, state, args.limit, args.fields); return 0
         record, raw = read(data, args.id)
         if args.command == "show": show(record); return 0
         if args.command == "progress":

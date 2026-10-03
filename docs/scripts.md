@@ -80,7 +80,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
-| `fm-tasks-axi.sh`        | Compatibility task CRUD entrypoint over canonical per-task records                    |
+| `fm-tasks-axi.sh`        | Compatibility task CRUD entrypoint over canonical records, plus the explicit non-task public-followup bridge |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector, markdown archive resolver, and `tasks-axi` compatibility probe |
 | `fm-task-disposition-lib.sh` | Guard effects with canonical dispositions and retained legacy markdown evidence |
 | `fm-backlog-transition-lib.sh` | Apply canonical task transitions and replay interrupted operation-owned closes |

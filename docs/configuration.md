@@ -269,7 +269,8 @@ Cancelling only the effort picker keeps the standing effort choice and still app
 Each task has one canonical business record at `data/<task>/task.json`.
 That record owns the task ID, goal/title, body, phase, kind, repository, priority, hold/defer/dependency facts, artifact links, retained notes, completion/archive disposition, and the four goal-progress fields.
 [`fm-task-record.py`](../bin/fm-task-record.py) owns validation, same-directory atomic publication, single-task reads, and one-process list/filter aggregation.
-[`fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) is retained as the thin compatibility command used by existing task CRUD and lifecycle callers; it no longer runs tasks-axi or writes a shared backlog.
+[`fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh) is retained as the thin compatibility command used by existing task CRUD and lifecycle callers; task commands no longer run tasks-axi or write a shared backlog.
+Its established `public-followup` family remains an explicit passthrough to the independent typed-obligation owner; those obligations are not task business/progress records.
 [`fm-fleet-snapshot.sh`](../bin/fm-fleet-snapshot.sh) derives its business-task view from the canonical records and adds runtime observations on demand without persisting an aggregate index.
 
 Dispatch, completion, archive, hold, dependency and artifact transitions update only the named task record.
@@ -278,6 +279,7 @@ A semantically accepted or explicitly archived task may retain cleanup-only meta
 
 Existing `data/backlog.md` and `data/done-archive.md` files are legacy recovery evidence, not live storage.
 [`fm-task-import.sh`](../bin/fm-task-import.sh) explicitly imports their structured task inventory through the fleet snapshot parser, refuses unstructured or conflicting input, writes one canonical task record per identity, and leaves both source files unchanged.
+During a partial import, derived fleet views retain unimported legacy identities while canonical records win for identities already imported.
 Activation and real-home import are operator-coordinated steps after a candidate is accepted; ordinary reads and writes never auto-import, dual-write, delete or rewrite legacy sources.
 
 ## Runtime backend (config/backend / FM_BACKEND)

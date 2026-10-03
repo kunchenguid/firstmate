@@ -504,6 +504,7 @@ teardown_completed_bookkeeping() {
     BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
     fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
   fi
+  rm -f "$STATE/.$ID.branch-outcome-index"
   teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
   facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
   fm_cleanup_receipt completion-record "$ID" "$generation" --facts "$facts" >/dev/null || {
@@ -689,6 +690,13 @@ fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$SCRIPT_DIR/fm-task-progress-lib.sh"
 fm_task_progress_completion_guard "$ID" || exit $?
+TEARDOWN_CANONICAL_RECORD=1
+if fm_task_progress_current_absent "$ID"; then
+  TEARDOWN_CANONICAL_RECORD=0
+else
+  progress_record_status=$?
+  [ "$progress_record_status" -eq 1 ] || exit "$progress_record_status"
+fi
 ENDPOINT_PHASE_DONE=0
 if [ "$ENDPOINT_ONLY" = 1 ]; then
   # This branch is before all worktree, slot, branch and record retirement
@@ -727,7 +735,9 @@ TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
-if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
+if [ "$TEARDOWN_CANONICAL_RECORD" = 0 ]; then
+  TEARDOWN_BACKLOG_SKIP_REASON="historical task has no canonical business record"
+elif fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
   TEARDOWN_BACKLOG_APPLIES=1
 else
   TEARDOWN_BACKLOG_GATE_STATUS=$?
@@ -737,7 +747,7 @@ else
   fi
   TEARDOWN_BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
 fi
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+if [ "$TEARDOWN_META_KIND" != secondmate ]; then
   if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
     TEARDOWN_LEGACY_GEN_COUNT=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$META" 2>/dev/null || printf '0\n')
     if [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] && [ "$LEGACY_RECORD_GIVEN" = 1 ]; then

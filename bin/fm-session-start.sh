@@ -423,7 +423,7 @@ print_file_or_absent() {
 }
 
 print_backlog_pointer() {
-  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+  printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full; retained legacy evidence remains in data/backlog.md when present.\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -513,15 +513,28 @@ print_ready_queued_bounded() {
 
 print_backlog_tasks_axi_compact() {
   local path=$1 in_flight held blocked ready err
-  if ! in_flight=$(tasks-axi list --file "$path" --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$in_flight
-  elif ! held=$(tasks-axi list --file "$path" --state held --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$held
-  elif ! blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
-    err=$blocked
-  elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
-    err=$ready
+  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
+    if ! in_flight=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$in_flight
+    elif ! held=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state held --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$held
+    elif ! blocked=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" list --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$blocked
+    elif ! ready=$(FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" ready 2>&1); then
+      err=$ready
+    fi
   else
+    if ! in_flight=$(tasks-axi list --file "$path" --state in_flight --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$in_flight
+    elif ! held=$(tasks-axi list --file "$path" --state held --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$held
+    elif ! blocked=$(tasks-axi list --file "$path" --state queued --blocked --fields "$BACKLOG_FIELDS" 2>&1); then
+      err=$blocked
+    elif ! ready=$(tasks-axi ready --file "$path" 2>&1); then
+      err=$ready
+    fi
+  fi
+  if [ -z "${err:-}" ]; then
     printf 'compact backlog inventory (tasks-axi; done rows omitted; in-flight, held, and blocked membership de-duplicated; ready queued bounded to %s; task bodies omitted)\n' \
       "$QUEUED_LIMIT"
     printf '\nactive, held, and blocked (one row per task):\n'
@@ -568,6 +581,11 @@ print_backlog_tasks_axi_compact() {
 print_backlog_compact() {
   local path=$1 label=$2
   subsection "$label"
+  if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
+    print_backlog_tasks_axi_compact "$path"
+    print_backlog_pointer
+    return
+  fi
   if [ -f "$path" ]; then
     if [ -s "$path" ]; then
       if fm_tasks_axi_backend_available "$CONFIG"; then
