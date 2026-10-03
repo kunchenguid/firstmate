@@ -213,7 +213,7 @@ if [ -n "$TASK_ID" ]; then
         backlog_path:.backlog.path, backlog_row:($record.raw // null),
         backlog_body:(($record.body_lines // []) | map({line:.})),
         status_path:($task.paths.status_log.path // null), report_path:($task.paths.report.path // null),
-        lifecycle_path:(.roots.data + "/" + $id + "/lifecycle.json"),
+        progress_source:.backlog.path,
         omitted:[{surface:"other fleet tasks and history",reveal:"run the default snapshot"}]
       }
     end

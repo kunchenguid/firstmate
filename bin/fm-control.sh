@@ -8,10 +8,8 @@
 #                                         [--effort <level>]
 #                                         (--note <text> | --note-file <path>)
 #
-# Automatic relaunch additionally takes --action-id ID --expected-generation GEN.
-# The note bytes must match the prepared lifecycle payload; a published action
-# reuses its receipt without another exit/launch. --expect-spawn-gen GEN also
-# binds an exact interrupt/exit, including independent endpoint cleanup.
+# --expect-spawn-gen GEN binds an exact interrupt/exit or relaunch to the
+# current executor generation, including independent endpoint cleanup.
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
 # DATA plane for conversational text. This script is the control plane:
@@ -194,7 +192,6 @@ EFFORT_SET=0
 NOTE=
 NOTE_SET=0
 EXPECT_SPAWN_GEN=
-LIFECYCLE_ACTION_ID=
 control_want_value=
 for control_arg in "$@"; do
   if [ -n "$control_want_value" ]; then
@@ -207,7 +204,6 @@ for control_arg in "$@"; do
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       expect_spawn_gen) EXPECT_SPAWN_GEN=$control_arg ;;
-      action_id) LIFECYCLE_ACTION_ID=$control_arg ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
         NOTE=$(cat "$control_arg")
@@ -220,8 +216,6 @@ for control_arg in "$@"; do
   case "$control_arg" in
     --harness) control_want_value=harness ;;
     --expect-spawn-gen) control_want_value=expect_spawn_gen ;;
-    --expected-generation) control_want_value=expect_spawn_gen ;;
-    --action-id) control_want_value=action_id ;;
     --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
     --model) control_want_value=model ;;
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
@@ -270,22 +264,11 @@ ID=$RAW_ID
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_guard "$ID" "lifecycle control (fm-control)"
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-fm_task_lifecycle_forbid_delegated_control "$ID" || { fm_lease_guard_release; exit 6; }
-if [ "$VERB" = relaunch ]; then
-  fm_task_lifecycle_execution_allowed "$ID" || exit 1
-fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
   || die "another lifecycle action is already running for task $ID"
 CONTROL_LOCK_HELD=1
-if [ "$VERB" = relaunch ]; then
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  fm_task_lifecycle_execution_guard "$ID" || exit 1
-fi
 META="$STATE/$ID.meta"
 if [ ! -f "$META" ]; then
   case "$RAW_ID" in
@@ -305,13 +288,6 @@ if [ "$(fm_meta_get "$META" kind)" = secondmate ]; then
 fi
 
 fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
-if [ -n "$LIFECYCLE_ACTION_ID" ] && [ "$(fm_meta_get "$META" launch_action_id)" = "$LIFECYCLE_ACTION_ID" ]; then
-  [ "$VERB" = relaunch ] || die 'action kind conflict'
-  printf '%s' "$NOTE" | fm_task_lifecycle_under_meta authorize "$ID" --action-id "$LIFECYCLE_ACTION_ID" \
-    --kind relaunch --expected-generation "$EXPECT_SPAWN_GEN" >/dev/null || exit 1
-  echo "relaunch already published for action $LIFECYCLE_ACTION_ID"
-  exit 0
-fi
 [ -z "$EXPECT_SPAWN_GEN" ] || [ "$(fm_meta_get "$META" spawn_gen)" = "$EXPECT_SPAWN_GEN" ] || die 'execution generation changed before control'
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
@@ -549,10 +525,6 @@ journal_write() {  # <phase> [extra-line]...
 restore_relaunch_instructions() {
   [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ] || return 0
   cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" || return 1
-  if [ "$KIND" != secondmate ] && [ -f "$DATA/$ID/lifecycle.json" ]; then
-    fm_task_lifecycle_under_meta refresh-brief "$ID" \
-      --expected-generation "$(fm_meta_get "$META" spawn_gen)" >/dev/null || return 1
-  fi
 }
 
 relaunch_rollback() {
@@ -569,7 +541,7 @@ relaunch_rollback() {
         echo "error: relaunch of $ID was refused before its agent was touched; nothing changed" >&2
       else
         journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restore-incomplete" || true
-        echo "error: relaunch of $ID was refused before its agent was touched, but its instructions and lifecycle binding could not both be restored; reconcile the retained records" >&2
+        echo "error: relaunch of $ID was refused before its agent was touched, but its instructions could not be restored; inspect the retained records" >&2
       fi
       ;;
     stopping)
@@ -581,7 +553,7 @@ relaunch_rollback() {
             echo "error: relaunch of $ID failed while stopping the old agent, which is still running; its original instructions were restored" >&2
           else
             journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restore-incomplete-agent-alive" || true
-            echo "error: relaunch of $ID failed while stopping the old agent, which is still running, but its instructions and lifecycle binding could not both be restored; reconcile the retained records" >&2
+            echo "error: relaunch of $ID failed while stopping the old agent, which is still running, but its instructions could not be restored; inspect the retained records" >&2
           fi
           ;;
         dead)
@@ -748,17 +720,16 @@ do_relaunch() {
       ;;
   esac
 
+  # Interrupt and exit remain available for residual cleanup, but retained
+  # terminal resources can never authorize a replacement worker.
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "$DATA" "$ID" relaunch || exit $?
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else
     note_line="note=none"
-  fi
-  if [ -n "$LIFECYCLE_ACTION_ID" ]; then
-    [ -n "$EXPECT_SPAWN_GEN" ] || die 'automatic relaunch requires expected generation'
-    action_record=$(fm_task_lifecycle read "$ID") || exit 1
-    [ "$(printf '%s' "$action_record" | jq -r '.next_action.phase')" = prepared ] || die 'relaunch action is uncertain; inspect its control journal before any new launch'
-    printf '%s' "$NOTE" | fm_task_lifecycle_under_meta authorize "$ID" --action-id "$LIFECYCLE_ACTION_ID" \
-      --kind relaunch --expected-generation "$EXPECT_SPAWN_GEN" >/dev/null || exit 1
   fi
   safe_checkpoint
   cp -p "$META" "$META_PRIOR" || die "could not preserve task $ID's durable record before relaunching"
@@ -766,9 +737,6 @@ do_relaunch() {
   journal_write checkpoint "${CHECKPOINT_LINES[@]}" "$note_line"
 
   record_note
-  if [ "$KIND" != secondmate ]; then
-    fm_task_lifecycle_under_meta refresh-brief "$ID" --expected-generation "$(fm_meta_get "$META" spawn_gen)" >/dev/null || exit 1
-  fi
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
@@ -782,7 +750,7 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
-  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" FM_CONTROL_ACTION_ID="$LIFECYCLE_ACTION_ID" \
+  if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
   else

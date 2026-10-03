@@ -55,18 +55,10 @@ cat > "$HOME_FIXTURE/data/done-archive.md" <<'MARKDOWN'
 ## Archived 2026-09
 - [x] archived-task - Archived historical task (repo: viewer) (kind: ship)
 MARKDOWN
-mkdir -p "$HOME_FIXTURE/data/cancelled-task"
-printf 'outcome: retained cancelled task\n' > "$HOME_FIXTURE/data/cancelled-task/brief.md"
-printf 'Explicitly stop this task\n' > "$HOME_FIXTURE/data/cancelled-task/stop.txt"
-printf 'spawn_gen=cancelled-generation\nkind=secondmate\n' > "$HOME_FIXTURE/state/cancelled-task.meta"
-FM_HOME="$HOME_FIXTURE" python3 "$ROOT/bin/fm-task-lifecycle.py" init cancelled-task >/dev/null
-FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" lifecycle cancelled-task \
-  | jq --arg ref "$HOME_FIXTURE/data/cancelled-task/stop.txt" '.disposition="archived" | .assessment.authority_ref=$ref' \
-  > "$TMP_ROOT/cancelled-lifecycle.json"
-chmod 600 "$TMP_ROOT/cancelled-lifecycle.json"
-FM_HOME="$HOME_FIXTURE" "$ROOT/bin/fm-task-state.sh" reconcile cancelled-task --expected-revision 1 --record "$TMP_ROOT/cancelled-lifecycle.json" >/dev/null
-rm "$HOME_FIXTURE/state/cancelled-task.meta"
-mkdir -p "$HOME_FIXTURE/data/invalid-lifecycle-task"
+mkdir -p "$HOME_FIXTURE/data/cancelled-task" "$HOME_FIXTURE/data/invalid-lifecycle-task"
+cat > "$HOME_FIXTURE/data/cancelled-task/lifecycle.json" <<'JSON'
+{"schema":"fm-task-lifecycle.v2","task_id":"cancelled-task","disposition":"archived","assessment":{"authority_ref":"retained explicit stop"}}
+JSON
 printf '{"disposition":"archived"}\n' > "$HOME_FIXTURE/data/invalid-lifecycle-task/lifecycle.json"
 printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 chmod 600 "$TOKEN_FILE"
@@ -202,13 +194,15 @@ cat <<'JSON'
 {"structured":true,"id":"accepted-working","title":"Accepted while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
 {"structured":true,"id":"record-archive-working","title":"Record archive while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
 {"structured":true,"id":"invalid-archive","title":"Invalid archive authority","state":"in_flight","kind":"ship","repo":"viewer"},
-{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"}]},"tasks":[
-{"id":"archive-working","record_disposition":"active","lifecycle_disposition":"archived","current_state":{"state":"working"}},
-{"id":"archive-ambiguous","record_disposition":"active","lifecycle_disposition":"archived","current_state":{"state":"unknown"}},
-{"id":"accepted-working","record_disposition":"active","lifecycle_disposition":"accepted","current_state":{"state":"working"}},
-{"id":"record-archive-working","record_disposition":"archive_done","lifecycle_disposition":"legacy","current_state":{"state":"working"}},
-{"id":"invalid-archive","record_disposition":"active","lifecycle_disposition":"unknown","current_state":{"state":"working"}},
-{"id":"active-working","record_disposition":"active","lifecycle_disposition":"open","current_state":{"state":"working"}}]}
+{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"done-open-gap","title":"Done with unfinished goal","state":"done","kind":"ship","repo":"viewer","compact_progress":{"remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}}]},"tasks":[
+{"id":"archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
+{"id":"archive-ambiguous","record_disposition":"archive_done","current_state":{"state":"unknown"}},
+{"id":"accepted-working","record_disposition":"done","current_state":{"state":"working"}},
+{"id":"record-archive-working","record_disposition":"archive_done","current_state":{"state":"working"}},
+{"id":"invalid-archive","record_disposition":"active","current_state":{"state":"working"}},
+{"id":"active-working","record_disposition":"active","current_state":{"state":"working"}},
+{"id":"done-open-gap","record_disposition":"done","current_state":{"state":"unknown"}}]}
 JSON
 SH
 chmod +x "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh"
@@ -227,14 +221,15 @@ done
 CANDIDATE_BASE="http://127.0.0.1:$CANDIDATE_PORT"
 curl -sS -H "Authorization: Bearer $TOKEN" "$CANDIDATE_BASE/api/tasks" > "$TMP_ROOT/candidate-tasks.json"
 jq -e '
-  (.tasks | any(.id == "archive-working" and .category == "history" and .status == "Cancelled"
+  (.tasks | any(.id == "archive-working" and .category == "history" and .status == "Archived"
     and .warning == "Remote status unconfirmed; archive reflects business disposition only."))
   and (.tasks | any(.id == "archive-ambiguous" and .category == "history" and (.warning | contains("Remote status unconfirmed"))))
   and (.tasks | any(.id == "accepted-working" and .category == "held" and .status == "Completion conflict" and .warning == null))
-  and (.tasks | any(.id == "record-archive-working" and .category == "held" and .status == "Completion conflict"))
+  and (.tasks | any(.id == "record-archive-working" and .category == "history" and .status == "Archived"))
   and (.tasks | any(.id == "invalid-archive" and .category == "processing" and .warning == null))
   and (.tasks | any(.id == "active-working" and .category == "processing"))
-  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:2,history:2,processing:2})
+  and (.tasks | any(.id == "done-open-gap" and .category == "held" and .status == "Unresolved goal gap"))
+  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:2,history:3,processing:2})
 ' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "candidate archive classification or controls were incorrect"
 kill "$CANDIDATE_SERVER_PID" 2>/dev/null || true
 wait "$CANDIDATE_SERVER_PID" 2>/dev/null || true
@@ -273,14 +268,14 @@ jq -e '.reports | any(.source == "report" and .id == "_task-two" and .label == "
 jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/sessions.json" >/dev/null || fail "symlinked report path was discovered"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
-# Keep a lifecycle-only task visible while the viewer reads lifecycle records without spawning one state reader per data directory.
+# Explicit archived rows remain visible without consulting a second task record.
 jq -e '
   (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report" and .documentTypes == ["report","brief"]))
     and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
     and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
-    and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled"))
-    and (.tasks | any(.id == "invalid-lifecycle-task" and .category == "held" and .status == "Needs reconciliation"))
+    and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled" and (.warning | contains("Remote status unconfirmed"))))
+    and (.tasks | all(.id != "invalid-lifecycle-task"))
     and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 

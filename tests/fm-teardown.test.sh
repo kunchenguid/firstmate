@@ -697,7 +697,7 @@ make_path_without_lsof() {  # <case-dir>
   local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
   mkdir -p "$path_dir"
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id jq ln \
-    mkdir mktemp mv perl ps readlink realpath rm sed sh sha256sum shasum sleep sort stat tail timeout tr uname wc xargs; do
+    mkdir mktemp mv perl ps python3 readlink realpath rm sed sh sha256sum shasum sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
     case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
   done
@@ -748,17 +748,6 @@ test_teardown_closes_the_backlog_item_itself() {
 
   mkdir -p "$case_dir/data/task-x1"
   printf 'Check the requested outcome independently of cleanup.\n' > "$case_dir/data/task-x1/brief.md"
-  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-task-state.sh" enroll task-x1 >/dev/null || fail "cleanup lifecycle enrollment failed"
-  if run_teardown "$case_dir" > "$case_dir/open.out" 2>&1; then
-    fail "cleanup admitted an enrolled open goal"
-  fi
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail "open goal changed the backlog"
-  assert_present "$case_dir/state/task-x1.meta" "open goal lost its resource record"
-  jq -e '.disposition == "open"' "$case_dir/data/task-x1/lifecycle.json" >/dev/null || fail "cleanup auto-accepted the goal"
-  # Reset only this fixture to an unenrolled legacy record, whose ordinary
-  # teardown still owns the backlog transition exercised by this test.
-  mv "$case_dir/data/task-x1/lifecycle.json" "$case_dir/open-lifecycle-evidence.json"
   out=$(run_teardown "$case_dir") || fail "legacy teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
@@ -776,7 +765,7 @@ test_teardown_closes_the_backlog_item_itself() {
 }
 
 test_compact_progress_requires_main_acceptance_before_teardown() {
-  local case_dir initial open fresh accepted out rc malformed
+  local case_dir initial open fresh accepted out rc malformed head
   case_dir=$(make_case compact-acceptance)
   write_meta "$case_dir" local-only ship
   seed_backlog_in_flight "$case_dir"
@@ -784,6 +773,11 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
   printf 'Complete the compact task before cleanup.\n' > "$case_dir/data/task-x1/brief.md"
   wt_commit "$case_dir" "landed compact work"
   add_fork_with_pushed_branch "$case_dir"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD) || fail 'compact cleanup fixture head read failed'
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" bash -c \
+    '. "$1"; fm_merge_receipt_record task-x1 teardown-test-task-x1 local:main "$2"' \
+    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$head" >/dev/null \
+    || fail 'compact cleanup fixture merge receipt failed'
 
   initial=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture read failed'

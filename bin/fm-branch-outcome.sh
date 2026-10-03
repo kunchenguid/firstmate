@@ -11,12 +11,8 @@
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted.
-#     Lifecycle rows additionally carry evidenceKey, taskGeneration and
-#     lifecycleRevision.
-#     Append reuses the original sequence only for the exact task, generation,
-#     evidence key, lifecycle revision, wake, verdict, summary, and silent value;
-#     neither delivery nor processed cursors move on reuse. A caller without these options
-#     inherits the current lifecycle binding when one exists.
+#     Historical rows with rich-lifecycle identity fields remain readable, but
+#     append never creates or reuses that retired shape.
 #     The read state lives
 #     entirely in the cursor sidecar so marking outcomes read cannot disturb
 #     the log. Retention: the log is small (one line per handled fleet event)
@@ -92,11 +88,6 @@
 #     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
-#   fm-branch-outcome.sh covers-lifecycle --task <id> --task-generation <id>
-#       --lifecycle-revision <n> --evidence-key <sha256> --after-seq <n>
-#     Verify that a routine branch outcome durably covers that exact unchanged
-#     lifecycle observation. This is the inactive-wake acknowledgement owner;
-#     it does not advance an outcome cursor or alter task state.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -123,7 +114,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--once-task] | covers-lifecycle --task <id> --task-generation <id> --lifecycle-revision <n> --evidence-key <sha256> --after-seq <n> | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] [--once-task] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -451,8 +442,6 @@ case "$CMD" in
     SUMMARY=''
     WAKE=''
     SILENT=false
-    EVIDENCE_KEY=''
-    TASK_GENERATION=''
     ONCE_TASK=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -462,8 +451,6 @@ case "$CMD" in
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
-        --evidence-key) EVIDENCE_KEY=${2:-}; shift 2 || usage ;;
-        --task-generation) TASK_GENERATION=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
     done
@@ -472,27 +459,6 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    # All semantic dedup keys come from the shared, validated reader. A stale
-    # caller cannot attach a completion to a newer goal or execution generation.
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-    LIFECYCLE_LOCK=$(fm_meta_lock_path "$STATE/$TASK.meta") || exit 1
-    fm_lock_acquire_wait "$LIFECYCLE_LOCK" || exit 1
-    trap 'fm_lock_release "$LIFECYCLE_LOCK"' EXIT
-    LIFECYCLE_MODE=$(fm_task_lifecycle mode "$TASK") || exit 1
-    if [ "$LIFECYCLE_MODE" != legacy ]; then
-      LIFECYCLE_RECORD=$(fm_task_lifecycle read "$TASK") || exit 1
-      CURRENT_KEY=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.assessment.evidence_key')
-      CURRENT_GENERATION=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.execution_generation')
-      CURRENT_REVISION=$(printf '%s' "$LIFECYCLE_RECORD" | jq -r '.revision')
-      [ -z "$EVIDENCE_KEY" ] || [ "$EVIDENCE_KEY" = "$CURRENT_KEY" ] || exit 1
-      [ -z "$TASK_GENERATION" ] || [ "$TASK_GENERATION" = "$CURRENT_GENERATION" ] || exit 1
-      EVIDENCE_KEY=$CURRENT_KEY
-      TASK_GENERATION=$CURRENT_GENERATION
-    elif [ -n "$EVIDENCE_KEY$TASK_GENERATION" ]; then
-      echo 'error: lifecycle evidence key requires a validated task record' >&2
-      exit 1
-    fi
     if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
       echo "error: silent outcomes must be routine fleet outcomes" >&2
       exit 2
@@ -507,19 +473,6 @@ case "$CMD" in
       fm_lock_release "$LOCK"
       echo "error: refusing append because the outcome cursor is invalid or ahead of the store" >&2
       exit 1
-    fi
-    if [ -n "$EVIDENCE_KEY" ] && [ -s "$STORE" ]; then
-      EXISTING_SEQ=$(jq -rs --arg task "$TASK" --arg generation "$TASK_GENERATION" --arg key "$EVIDENCE_KEY" \
-        --argjson revision "$CURRENT_REVISION" \
-        --arg wake "$WAKE" --arg verdict "$VERDICT" --arg summary "$SUMMARY" --argjson silent "$SILENT" \
-        '[.[] | select(.task==$task and .taskGeneration==$generation and .evidenceKey==$key and
-          .lifecycleRevision==$revision and .wake==$wake and .verdict==$verdict and
-          .summary==$summary and .silent==$silent)] | last | .seq // empty' "$STORE")
-      if [ -n "$EXISTING_SEQ" ]; then
-        fm_lock_release "$LOCK"
-        printf '%s\n' "$EXISTING_SEQ"
-        exit 0
-      fi
     fi
     if [ "$ONCE_TASK" = true ] && [ -s "$STORE" ]; then
       EXISTING=$(jq -c --arg task "$TASK" 'select(.task == $task)' "$STORE")
@@ -539,14 +492,10 @@ case "$CMD" in
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    LIFECYCLE_FIELDS=''
-    if [ -n "$EVIDENCE_KEY" ]; then
-      LIFECYCLE_FIELDS=",\"evidenceKey\":\"$EVIDENCE_KEY\",\"taskGeneration\":\"$TASK_GENERATION\",\"lifecycleRevision\":$CURRENT_REVISION"
-    fi
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"%s}\n' \
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
       "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" "$LIFECYCLE_FIELDS" >> "$STORE"
+      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still
@@ -570,36 +519,6 @@ case "$CMD" in
     fm_lock_acquire_wait "$LOCK"
     print_unread
     fm_lock_release "$LOCK"
-    ;;
-  covers-lifecycle)
-    TASK=''; TASK_GENERATION=''; LIFECYCLE_REVISION=''; EVIDENCE_KEY=''; AFTER_SEQ=''
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
-        --task) TASK=${2:-}; shift 2 || usage ;;
-        --task-generation) TASK_GENERATION=${2:-}; shift 2 || usage ;;
-        --lifecycle-revision) LIFECYCLE_REVISION=${2:-}; shift 2 || usage ;;
-        --evidence-key) EVIDENCE_KEY=${2:-}; shift 2 || usage ;;
-        --after-seq) AFTER_SEQ=${2:-}; shift 2 || usage ;;
-        *) usage ;;
-      esac
-    done
-    outcome_index_path "$TASK" >/dev/null || usage
-    case "$TASK_GENERATION" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
-    bounded_uint "$LIFECYCLE_REVISION" || usage
-    case "$EVIDENCE_KEY" in *[!a-f0-9]*|'') usage ;; esac
-    [ "${#EVIDENCE_KEY}" -eq 64 ] || usage
-    bounded_uint "$AFTER_SEQ" || usage
-    fm_lock_acquire_wait "$LOCK"
-    if ! last_seq >/dev/null; then fm_lock_release "$LOCK"; exit 1; fi
-    if jq -es --arg task "$TASK" --arg generation "$TASK_GENERATION" --arg key "$EVIDENCE_KEY" \
-        --argjson revision "$LIFECYCLE_REVISION" --argjson after "$AFTER_SEQ" \
-        'any(.[]; .task==$task and .verdict=="routine" and .taskGeneration==$generation and
-          .evidenceKey==$key and .lifecycleRevision==$revision and .seq > $after)' "$STORE" >/dev/null; then
-      fm_lock_release "$LOCK"
-      exit 0
-    fi
-    fm_lock_release "$LOCK"
-    exit 1
     ;;
   mark-read)
     [ "${1:-}" = --through ] || usage
@@ -681,14 +600,6 @@ case "$CMD" in
       echo "error: refusing processed advancement because seq $THROUGH is not an unprocessed captain outcome" >&2
       exit 1
     fi
-    # Presentation is independent of the retained semantic obligation. Do not
-    # acquire task locks while holding the outcome lock.
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-    while IFS= read -r task; do
-      fm_task_lifecycle_ack_guard "$task" || { fm_lock_release "$LOCK"; exit 1; }
-    done < <(jq -r --argjson after "$PROCESSED_SEQ" --argjson through "$THROUGH" \
-      'select(.seq > $after and .seq <= $through and .verdict == "captain") | .task' "$STORE" | sort -u)
     write_processed "$THROUGH"
     fm_lock_release "$LOCK"
     ;;

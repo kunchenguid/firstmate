@@ -50,6 +50,7 @@ session.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'Fixt
 
 let tools;
 let hooks;
+let offerHandler;
 function context() { return { sessionManager: session, hasPendingMessages: () => false,
   isIdle: () => true, hasUI: false, ui: { getEditorText: () => '' } }; }
 async function fire(name, event = {}) {
@@ -69,7 +70,8 @@ async function install() {
   watch(pi);
   periodic(pi);
   const continuation = installTaskContinuation(pi, { root: process.env.FM_ROOT_OVERRIDE, home,
-    state: home + '/state', owns: () => true });
+    state: home + '/state', owns: () => true,
+    offer: offer => offerHandler ? offerHandler(offer) : false });
   await fire('session_start');
   return continuation;
 }
@@ -138,6 +140,38 @@ assert.match(reminder.content, /task: goal: Deliver compact continuation/);
 assert.match(reminder.content, /acceptance: The public fixture passes/);
 assert.doesNotMatch(reminder.content, /backend-endpoint-not-task-id/);
 
+// A delivered reminder is pacing evidence, never a finite admission budget.
+// Keep advancing the public receiver clock without changing the task row and
+// prove that reminders beyond the former two-attempt boundary remain routable.
+const firstAdmission = reminder.details.admissions[0];
+session.appendCustomEntry('fm-continuation-branch-delivery', {
+  admissions: [firstAdmission], sessionFile: session.getSessionFile(), entryId: 'fixture-first', generation: 1,
+});
+const offered = [];
+offerHandler = offer => {
+  offered.push(offer.admission);
+  offer.delivered({ sessionFile: session.getSessionFile(), entryId: `fixture-${offered.length + 1}`, generation: 1 });
+  return true;
+};
+const realDateNow = Date.now;
+let fixtureNow = realDateNow();
+Date.now = () => fixtureNow;
+try {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    fixtureNow += 60 * 60 * 1000;
+    const result = await fire('agent_before_settle');
+    assert.equal(result.some(value => value?.entries?.some(entry =>
+      entry.customType === 'fm-task-continuation-escalation')), false,
+    'unchanged open progress exhausted a finite continuation budget');
+  }
+} finally {
+  Date.now = realDateNow;
+  offerHandler = undefined;
+}
+assert.equal(offered.length, 4, 'open progress stopped routing after a finite number of reminders');
+assert.equal(new Set(offered).size, offered.length, 'continued reminders reused an admission identity');
+assert.ok(offered.at(-1).endsWith('.5'), 'continued reminders did not advance past the former attempt limit');
+
 const finalProgress = { ...progress, current_state: 'Requested behavior verified', remaining_gap: '', next_step: '' };
 const completed = await tool({ action: 'update', task: 'task', record_token: unchanged.record_token,
   progress: finalProgress });
@@ -176,9 +210,12 @@ const correctedRead = await tool({ action: 'read', task: 'task' });
 assert.notEqual(correctedRead.record_token, completed.record_token,
   'authenticated intent change did not invalidate the old progress scope');
 assert.equal(correctedRead.recorded, false, 'authenticated intent change left old progress active');
+assert.equal(correctedRead.context_relation, 'mismatch',
+  'authenticated intent change did not expose the stale compact scope');
 assert.deepEqual({ acceptance: correctedRead.acceptance, current_state: correctedRead.current_state,
   remaining_gap: correctedRead.remaining_gap, next_step: correctedRead.next_step },
-{ acceptance: '', current_state: '', remaining_gap: '', next_step: '' });
+{ acceptance: finalProgress.acceptance, current_state: finalProgress.current_state,
+  remaining_gap: '', next_step: '' });
 const staleScope = await rawTool({ action: 'update', task: 'task', record_token: completed.record_token,
   progress: { ...progress, current_state: 'Old scope attempted to continue',
     remaining_gap: 'Old scope must remain refused', next_step: 'Do not execute this stale step' } });
@@ -191,26 +228,19 @@ const repermitted = await tool({ action: 'update', task: 'task', record_token: c
 assert.equal(repermitted.next_step, correctedProgress.next_step,
   'fresh MAIN scope did not permit the revised next step');
 
-command('fm-task-state.sh', ['enroll', 'task']);
-const historical = JSON.parse(command('fm-task-state.sh', ['lifecycle', 'task']).stdout);
-assert.equal(historical.task_id, 'task');
-assert.ok(existsSync(home + '/data/task/lifecycle.json'));
-assert.equal((await tool({ action: 'read', task: 'task' })).current_state, correctedProgress.current_state,
-  'historical rich record replaced active progress');
-
-const oldInspect = command('fm-task-state.sh', ['inspect', 'task']);
 const compactRead = await rawTool({ action: 'read', task: 'task' });
-const oldResponseBytes = Buffer.byteLength(oldInspect.stdout);
 const compactResponseBytes = Buffer.byteLength(compactRead.content[0].text);
-assert.ok(compactResponseBytes < oldResponseBytes,
-  `compact response ${compactResponseBytes} was not smaller than historical inspect ${oldResponseBytes}`);
+assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
+  'fresh compact continuation created rich lifecycle state');
+assert.equal((await tool({ action: 'read', task: 'task' })).current_state, correctedProgress.current_state,
+  'final compact read lost the active progress');
 
 await fire('session_shutdown', { reason: 'quit' });
 console.log('evidence - task continuation IO ' + JSON.stringify({
-  historicalRoutineCalls: 2,
+  richLifecycleCalls: 0,
   compactResumeCalls: 1,
-  historicalInspectResponseBytes: oldResponseBytes,
   compactReadResponseBytes: compactResponseBytes,
+  continuedReminderAdmissions: offered.length + 1,
   progressWritesForThreeOrdinaryChatTurns: 0,
   progressWritesForUnchangedUpdate: 0,
 }));

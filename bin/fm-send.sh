@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Steer an ordinary task through its durable inbox or a verified local backend.
-# Usage: fm-send.sh <target> [--action-id <prepared-lifecycle-id> --expected-generation <spawn-gen>] [--idempotent] [--resolve-key <key>]... <text...>
+# Usage: fm-send.sh <target> [--idempotent] [--resolve-key <key>]... <text...>
 # Special key form: fm-send.sh <target> --key Enter
 # Recorded historical secondmate or remote-home targets refuse before delivery.
 # Text addressed by task selector uses the durable inbox except harness-native
@@ -200,15 +200,9 @@ RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
 shift
-ACTION_ID=
 IDEMPOTENT=0
 COMPACT_PROGRESS_TOKEN=
 COMPACT_PROGRESS_PAYLOAD_SHA=
-if [ "${1:-}" = --action-id ]; then
-  [ $# -ge 3 ] || { echo 'error: --action-id needs an id and body' >&2; exit 2; }
-  ACTION_ID=$2
-  shift 2
-fi
 
 # Supervision lease guard: a steer is overlap territory between the two Pi
 # supervision actors, so refuse while the OTHER actor holds this task's live
@@ -222,19 +216,7 @@ if [ -n "$TARGET_META" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
     send_exit_status=0
     trap 'send_exit_status=$?; fm_lease_guard_release; exit "$send_exit_status"' EXIT
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-    if [ -z "$ACTION_ID" ]; then
-      if ! fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK"; then
-        if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ] &&
-          printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -e --arg task "$LEASE_GUARD_TASK" \
-            'type == "object" and (.[$task] | type == "string" and length > 0)' >/dev/null 2>&1; then
-          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: lifecycle effect requires exact readback or MAIN reconciliation" >&2
-          exit 6
-        fi
-        exit 1
-      fi
-      if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
+    if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
         branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
         printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
           'type == "array" and (index("*") != null or index($task) != null)' >/dev/null 2>&1 || {
@@ -258,17 +240,6 @@ if [ -n "$TARGET_META" ]; then
         COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
           'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
         FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-      fi
-      if [ "$(fm_lease_actor)" = branch ] &&
-        [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
-        branch_lifecycle=$(fm_task_lifecycle read "$LEASE_GUARD_TASK") || exit 1
-        if printf '%s' "$branch_lifecycle" | jq -e \
-          '.schema == "fm-task-lifecycle.v2" and (.next_action.phase == "prepared" or
-           .next_action.phase == "attempted" or .next_action.phase == "uncertain")' >/dev/null; then
-          echo 'REFUSED: delegated steer with an active lifecycle action requires --action-id' >&2
-          exit 6
-        fi
-      fi
     fi
   fi
 fi
@@ -278,7 +249,6 @@ fi
 # message exactly as before, so ordinary sends are byte-identical.
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
-EXPECTED_GENERATION=
 fm_send_add_resolve_key() { # <key>
   local k=$1
   case "$k" in
@@ -297,13 +267,9 @@ fm_send_add_resolve_key() { # <key>
 }
 while :; do
   case "${1:-}" in
-  --action-id|--expected-generation)
-    [ $# -ge 2 ] || exit 2
-    case "$1" in
-      --action-id) [ -z "$ACTION_ID" ] || exit 2; ACTION_ID=$2 ;;
-      --expected-generation) [ -z "$EXPECTED_GENERATION" ] || exit 2; EXPECTED_GENERATION=$2 ;;
-    esac
-    shift 2
+  --action-id|--action-id=*|--expected-generation|--expected-generation=*)
+    echo 'REFUSED: --action-id and --expected-generation belonged to the removed rich task lifecycle; use compact MAIN-authored continuation or an existing operation owner' >&2
+    exit 6
     ;;
   --idempotent)
     IDEMPOTENT=1
@@ -329,22 +295,9 @@ while :; do
   esac
 done
 
-if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$ACTION_ID$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
+if [ "$IDEMPOTENT" = 1 ] && { [ "$(fm_lease_actor)" != branch ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
   echo 'REFUSED: --idempotent is only for an ordinary Branch continuation to its admitted task' >&2
   exit 6
-fi
-
-if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
-  [ -n "$ACTION_ID" ] && [ -n "$EXPECTED_GENERATION" ] && [ -n "$TARGET_META" ] || exit 2
-  [ "$TARGET_BACKEND" != remote ] && [ -z "$FIRE_AND_FORGET_ID$RESOLVE_KEYS" ] || exit 2
-  [ "$(fm_meta_get "$TARGET_META" kind)" != secondmate ] || exit 2
-  [ "${1-}" != --key ] || exit 2
-  FM_SEND_EXPECTED_SPAWN_GEN=$EXPECTED_GENERATION
-fi
-if [ -n "$TARGET_META" ] && [ -z "$RESOLVE_KEYS" ]; then
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  fm_task_lifecycle_execution_allowed "$(fm_send_id_from_meta "$TARGET_META")" || exit 1
 fi
 
 if [ "$TARGET_BACKEND" != remote ]; then
@@ -401,11 +354,7 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
     exit 1
   fi
-  if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
-  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
-  exit 6
-fi
-if [ "${1:-}" = "--key" ]; then
+  if [ "${1:-}" = "--key" ]; then
     echo "error: --resolve-key cannot accompany --key; answering a decision requires a text answer" >&2
     exit 1
   fi
@@ -507,10 +456,50 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # failure is surfaced below with the attempted resolution attached, while a
 # timeout-like result stays uncertain and forbids blind replay.
 
-if [ -n "$ACTION_ID" ] && { [ "${1:-}" = --key ] || [ -n "$RESOLVE_KEYS" ] || [ -z "$TARGET_SELECTOR" ]; }; then
-  echo 'REFUSED: lifecycle actions require ordinary task inbox text' >&2
-  exit 6
-fi
+TASK_EFFECT_META_LOCK=
+fm_send_task_effect_lock() { # task-selector native request boundary; leaves lock held
+  local task current_target current_backend current_generation disposition_rc=0
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || return 0
+  task=$(fm_send_id_from_meta "$TARGET_META")
+  TASK_EFFECT_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || return 1
+  if ! fm_task_inbox_lock_acquire "$TASK_EFFECT_META_LOCK"; then
+    echo "error: steer not sent to $task: its task metadata could not be locked for final delivery validation" >&2
+    TASK_EFFECT_META_LOCK=
+    return 1
+  fi
+  current_target=
+  current_backend=
+  current_generation=
+  if [ -f "$TARGET_META" ] && [ ! -L "$TARGET_META" ]; then
+    current_target=$(fm_backend_target_of_meta "$TARGET_META")
+    current_backend=$(fm_backend_of_meta "$TARGET_META")
+    current_generation=$(fm_meta_get "$TARGET_META" spawn_gen)
+  fi
+  if [ "$current_target" != "$T" ] || [ "$current_backend" != "$TARGET_BACKEND" ] || \
+    { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] && \
+      [ "$current_generation" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } || \
+    [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+    fm_lock_release "$TASK_EFFECT_META_LOCK"
+    TASK_EFFECT_META_LOCK=
+    echo "error: steer not sent to $task: the task retired or changed endpoint during target resolution" >&2
+    return 1
+  fi
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$task" steer \
+    || disposition_rc=$?
+  if [ "$disposition_rc" -ne 0 ]; then
+    fm_lock_release "$TASK_EFFECT_META_LOCK"
+    TASK_EFFECT_META_LOCK=
+    return "$disposition_rc"
+  fi
+}
+
+fm_send_task_effect_unlock() {
+  [ -z "$TASK_EFFECT_META_LOCK" ] || fm_lock_release "$TASK_EFFECT_META_LOCK"
+  TASK_EFFECT_META_LOCK=
+}
+
 if [ -n "$COMPACT_PROGRESS_TOKEN" ] && [ "${1:-}" = --key ]; then
   echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation authorizes only its exact MAIN-authored text next_step" >&2
   exit 6
@@ -524,10 +513,13 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_task_effect_lock || exit $?
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+    fm_send_task_effect_unlock
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  fm_send_task_effect_unlock
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
@@ -555,9 +547,6 @@ else
     \$*) [ "$TARGET_HARNESS" = codex ] || INBOX_PLANE=1 ;;
     *) INBOX_PLANE=1 ;;
     esac
-  fi
-  if [ -n "$ACTION_ID" ] && [ "$INBOX_PLANE" != 1 ]; then
-    echo 'REFUSED: lifecycle actions cannot use the direct native-prompt plane' >&2; exit 6
   fi
   if [ "$IDEMPOTENT" = 1 ] && [ "$INBOX_PLANE" != 1 ]; then
     echo 'REFUSED: --idempotent requires ordinary task inbox text' >&2; exit 6
@@ -590,6 +579,18 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    # Resources may intentionally outlive business completion. Revalidate the
+    # configured disposition while the target metadata lock is held so a new
+    # steer cannot silently resume a Done or explicitly archived task.
+    # shellcheck source=bin/fm-task-disposition-lib.sh
+    . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+    disposition_rc=0
+    fm_task_disposition_effect_guard "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$INBOX_TASK_ID" steer \
+      || disposition_rc=$?
+    if [ "$disposition_rc" -ne 0 ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      exit "$disposition_rc"
+    fi
     if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
       branch_locked_progress=$(fm_task_progress_read "$INBOX_TASK_ID") || {
         fm_lock_release "$INBOX_META_LOCK"
@@ -608,21 +609,7 @@ else
         exit 6
       fi
     fi
-    if [ -n "$ACTION_ID" ]; then
-      BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-      EFFECT_RESULT=$(fm_task_lifecycle effect "$INBOX_TASK_ID" --action-id "$ACTION_ID" --payload-sha256 "$BODY_SHA") || {
-        fm_lock_release "$INBOX_META_LOCK"
-        exit 6
-      }
-      if [ "$(printf '%s' "$EFFECT_RESULT" | jq -r '.next_action.phase')" = confirmed ]; then
-        fm_lock_release "$INBOX_META_LOCK"
-        exit 0
-      fi
-      INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID" "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
-      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
-        fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
-      fi
-    elif [ "$IDEMPOTENT" = 1 ]; then
+    if [ "$IDEMPOTENT" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' \
         "$CURRENT_INBOX_SPAWN_GEN" "$COMPACT_PROGRESS_TOKEN") || inbox_write_rc=$?
       case "$INBOX_RECORD" in
@@ -669,12 +656,14 @@ else
   fi
   # Submit once through the native backend API. API success means submitted,
   # not read or completed; uncertainty is loud and is never retried here.
+  fm_send_task_effect_lock || exit $?
   send_rc=0
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" 0 0 0 "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
   fi
+  fm_send_task_effect_unlock
   if [ "$send_rc" -ne 0 ]; then
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1

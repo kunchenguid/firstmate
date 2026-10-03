@@ -22,14 +22,7 @@
 # an unbounded wait (for example a live-held wake-queue lock), so the clean
 # deadline path is not racing its own backstop.
 #
-# Structured open goals use assessment revisions and fresh artifact fingerprints.
-# Terminal goals use stable resource/release facts and the first reached time
-# bound, never unrelated assessment or presentation bookkeeping. They publish
-# cleanup/evidence observations, never permission to resume business execution.
-# Pending lifecycle_revision binds open-goal acknowledgement to reconciliation;
-# terminal reconciliation_key permits exact validated readback without rewriting
-# an unchanged assessment. Presentation never confirms an unfinished effect.
-# Legacy records consider only a direct ordinary crewmate whose newest meta, status, or
+# Direct ordinary crewmates whose newest meta, status, or
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. It then uses
 # fm-crew-state.sh as the sole current-state source.
@@ -71,8 +64,6 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -305,42 +296,6 @@ reconcile_direct_child_locked() { # <id> <meta> <timeout>
   [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
-  # Lifecycle obligations share this scan's cursor, deadline, durable queue
-  # and post-handling acknowledgement. They never execute actions here.
-  local lifecycle_mode lifecycle_due lifecycle_revision lifecycle_expired reconciliation_key lifecycle_evidence_key lifecycle_generation outcome_seq_floor
-  lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
-  if [ "$lifecycle_mode" != legacy ]; then
-    lifecycle_due=$(fm_task_lifecycle due "$id" 2>/dev/null) || lifecycle_due='{"due":true,"record":null}'
-    [ "$(printf '%s' "$lifecycle_due" | jq -r '.due')" = true ] || return 0
-    lifecycle_revision=$(printf '%s' "$lifecycle_due" | jq -r '.record.revision // "unknown"')
-    lifecycle_evidence_key=$(printf '%s' "$lifecycle_due" | jq -r '.record.assessment.evidence_key // empty')
-    lifecycle_generation=$(printf '%s' "$lifecycle_due" | jq -r '.record.execution_generation // empty')
-    lifecycle_expired=$(printf '%s' "$lifecycle_due" | jq -r '.expired // false')
-    if [ -f "$meta" ]; then incarnation=$(meta_incarnation "$meta"); else incarnation=unassigned; fi
-    reconciliation_key=$(printf '%s' "$lifecycle_due" | jq -r '.reconciliation_key // empty')
-    if [ -n "$reconciliation_key" ]; then
-      fingerprint=$(sha256_text "$incarnation|$id|cleanup|$reconciliation_key")
-    else
-      fingerprint=$(sha256_text "$incarnation|$id|lifecycle|$lifecycle_revision|$lifecycle_expired|$(printf '%s' "$lifecycle_due" | jq -r '.observed_evidence_key // "unknown"')")
-    fi
-    outcome_key="inactive-outcome-lifecycle-$id"
-    ensure_record "$fingerprint" "$id" "$incarnation" lifecycle "$outcome_key" direct upstream '' '' || return 1
-    [ -n "$RECORD_PENDING" ] || return 0
-    if [ -z "$(record_value "$RECORD_PENDING" lifecycle_revision)" ]; then
-      record_field_set "$RECORD_PENDING" lifecycle_revision "$lifecycle_revision" || return 1
-    fi
-    [ -z "$lifecycle_evidence_key" ] || record_field_set "$RECORD_PENDING" lifecycle_evidence_key "$lifecycle_evidence_key" || return 1
-    [ -z "$lifecycle_generation" ] || record_field_set "$RECORD_PENDING" lifecycle_generation "$lifecycle_generation" || return 1
-    if [ -z "$(record_value "$RECORD_PENDING" outcome_seq_floor)" ]; then
-      outcome_seq_floor=$("$SCRIPT_DIR/fm-branch-outcome.sh" list --recent 1 | jq -sr 'last.seq // 0') || return 1
-      record_field_set "$RECORD_PENDING" outcome_seq_floor "$outcome_seq_floor" || return 1
-    fi
-    [ -z "$reconciliation_key" ] || record_field_set "$RECORD_PENDING" reconciliation_key "$reconciliation_key" || return 1
-    record_phase_set "$RECORD_PENDING" presentation || return 1
-    queue_presentation "$RECORD_PENDING" "$fingerprint" \
-      "task goal requires reconciliation: child=$id disposition=$lifecycle_mode revision=$lifecycle_revision deadline_reached=$lifecycle_expired; read fm-task-state.sh lifecycle; preserve unconfirmed actions" || true
-    return 0
-  fi
   [ -f "$meta" ] || return 0
   status="$STATE/$id.status"
   turn="$STATE/$id.turn-ended"
@@ -464,7 +419,7 @@ scan() {
 }
 
 acknowledge() { # <fingerprint>
-  local fingerprint=$1 pending presented phase observed current task key readback evidence_key generation outcome_seq_floor
+  local fingerprint=$1 pending presented phase
   case "$fingerprint" in ''|*[!A-Fa-f0-9]*) return 2 ;; esac
   [ -d "$OUTCOME_DIR" ] && [ ! -L "$OUTCOME_DIR" ] || return 1
   pending=$(record_path "$fingerprint" pending)
@@ -472,48 +427,6 @@ acknowledge() { # <fingerprint>
   [ -f "$pending" ] && [ ! -L "$pending" ] || return 0
   phase=$(record_value "$pending" phase)
   [ "$phase" = presentation ] || return 0
-  observed=$(record_value "$pending" lifecycle_revision)
-  case "$observed" in
-    '') ;;
-    unknown)
-      task=$(record_value "$pending" task_id)
-      current=$(fm_task_lifecycle read "$task" 2>/dev/null) || current=null
-      if ! printf '%s\n' "$current" | jq -e 'type == "object"' >/dev/null 2>&1; then
-        printf 'REFUSED: repair task %s lifecycle state before acknowledging its unknown goal wake\n' "$task" >&2
-        return 1
-      fi
-      ;;
-    *)
-      task=$(record_value "$pending" task_id)
-      key=$(record_value "$pending" reconciliation_key)
-      if [ -n "$key" ]; then
-        readback=$(fm_task_lifecycle due "$task") || return 1
-        if printf '%s' "$readback" | jq -e --arg key "$key" \
-          '(.record.disposition=="accepted" or .record.disposition=="archived") and .reconciliation_key==$key' >/dev/null; then
-          # Presentation acknowledges this exact retained observation, not an
-          # effect or acceptance. Its receipt stays independently unfinished.
-          mv -f "$pending" "$presented"
-          return $?
-        fi
-      fi
-      current=$(fm_task_lifecycle read "$task" 2>/dev/null | jq -r '.revision // 0') || return 1
-      if [ "$current" -le "$observed" ]; then
-        evidence_key=$(record_value "$pending" lifecycle_evidence_key)
-        generation=$(record_value "$pending" lifecycle_generation)
-        outcome_seq_floor=$(record_value "$pending" outcome_seq_floor)
-        if [ "$current" = "$observed" ] && [ -n "$evidence_key" ] && [ -n "$generation" ] \
-          && [ -n "$outcome_seq_floor" ] \
-          && "$SCRIPT_DIR/fm-branch-outcome.sh" covers-lifecycle --task "$task" \
-            --task-generation "$generation" --lifecycle-revision "$observed" \
-            --evidence-key "$evidence_key" --after-seq "$outcome_seq_floor"; then
-          mv -f "$pending" "$presented"
-          return $?
-        fi
-        printf 'REFUSED: reconcile task %s revision %s before acknowledging its goal wake\n' "$task" "$observed" >&2
-        return 1
-      fi
-      ;;
-  esac
   mv -f "$pending" "$presented"
 }
 

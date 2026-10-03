@@ -16,7 +16,7 @@ bash tests/fm-task-handoff.test.sh
 bash tests/fm-pi-branch-extension.test.sh
 bash tests/fm-periodic-stow.test.sh
 bash tests/fm-pi-primary-types.test.sh
-FM_PERIODIC_STOW_HERDR_LIVE=1 bash tests/fm-periodic-stow-herdr-live-e2e.test.sh
+# The former rich-lifecycle Herdr matrix was removed with that subsystem.
 ```
 
 The live guard's terminal assertion is:

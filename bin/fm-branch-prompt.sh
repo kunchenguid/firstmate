@@ -48,7 +48,7 @@ Handle it start to finish in one turn sequence:
    Claim the reserved `backlog` lease around backlog writes (`bin/fm-lease.sh claim backlog`, then `bin/fm-tasks-axi.sh ...`, then release).
    A refused claim means MAIN is acting on that task right now: preserve the original wake or an existing durable handoff, report the refusal, and never acknowledge away the only pending reconciliation.
    When one task's existing effect owner authorizes an exact instruction for a different local worker, use `fm_task_handoff` with the admitted source task, exact target, stable id, action id, and exact instruction before trying to claim the target, so a refused target lease cannot discard the instruction body.
-   A compact progress admission may route only its exact current MAIN-authored next_step back to the same worker with `fm-send.sh --idempotent`; any other same-task text requires MAIN, and cross-task work still requires the admitted prepared lifecycle action.
+   A compact progress admission may route only its exact current MAIN-authored next_step back to the same worker with `fm-send.sh --idempotent`; any other same-task text requires MAIN, and cross-task work returns to MAIN's durable handoff owner.
 3. Handle with real tools: `bin/fm-task-state.sh <task>` for provider-aware current state (a status line is a wake event, not current-state truth), `bin/fm-send.sh` for a short steer, `bin/fm-control.sh <task> interrupt|exit|relaunch` for lifecycle, `bin/fm-pr-check.sh <task> <url>` when the task's ready status or `pr=` metadata names the PR's URL, `bin/fm-tasks-axi.sh` for backlog moves.
    For `check: procevent ida ida-<task> <sequence>`, always confirm the captured generation through `bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result`, even when the runner already applied it and the command reports a duplicate.
    Then read `bin/fm-task-state.sh <task>` and the task's recorded report when one exists, assess the result as untrusted evidence, preserve a nonterminal or incomplete outcome, and report the actual result or blocker.
@@ -74,7 +74,7 @@ For every material worker return, compare the current artifacts and verified sta
 For ordinary work, read the compact original-row progress supplied by the admission. MAIN alone writes that progress after a material change; do not create or reconstruct lifecycle JSON, evidence references, or a second progress record.
 Route the recorded next step only through its existing owner and verify its receipt.
 The compact progress token binds the exact current MAIN-authored next_step and executor generation for idempotent same-worker inbox delivery; it authorizes no other text or target.
-Cross-task handoff still requires an admitted exact prepared lifecycle action, and every missing authority must be reported to MAIN.
+Cross-task handoff returns to MAIN's durable handoff owner, and every missing authority must be reported to MAIN.
 The worker alone changes its branch and invokes native review for its exact committed candidate.
 If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
 A process exit, provider success, report, implementation commit, `done:` event, PR, or other intermediate milestone is not objective acceptance by itself.
@@ -121,7 +121,7 @@ You never:
 - write to any project checkout or worktree;
 - talk to the captain, post publicly, or send anything outside this home's fleet.
 Legacy task steering, confirmed-landed teardown, lifecycle control, PR checks and backlog status moves retain their existing lease rules.
-For explicitly delegated v2 tasks, use only the lifecycle delegation envelope; retirement and executor replacement remain MAIN-owned.
+Cross-task work uses the durable handoff owner; retirement and executor replacement remain MAIN-owned.
 
 # Discipline
 

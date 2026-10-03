@@ -368,7 +368,7 @@
       "audience": "public-product"
     },
     {
-      "path": "docs/task-lifecycle.md",
+      "path": "docs/task-continuation.md",
       "audience": "maintainer-architecture"
     }
   ]

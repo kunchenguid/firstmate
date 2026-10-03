@@ -317,7 +317,9 @@ validate_worktree_teardown_safety() {
 # owner. No endpoint, process, backlog, metadata or business effects occur here.
 teardown_completed_copy() { # <canonical-copy> <project> <generation>
   local copy=$1 project=$2 generation=$3 candidate other field dirty copy_readback managed_copy=$1
-  copy_readback=$(fm_task_lifecycle cleanup-copy-read "$ID") || return 1
+  # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+  . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+  copy_readback=$(fm_cleanup_receipt copy-read "$ID" "$generation") || return 1
   if [ "$(printf '%s' "$copy_readback" | jq -r '.phase.state')" = pending ]; then
     echo 'REFUSED: copy disposal may have happened; exact effect readback required' >&2; return 1
   fi
@@ -374,7 +376,7 @@ teardown_completed_copy() { # <canonical-copy> <project> <generation>
     managed_copy=$TREEHOUSE_MANAGED_RETURN_PATH
   fi
   # Revalidate inode/path identity immediately before the first disposal effect.
-  fm_task_lifecycle cleanup-copy-read "$ID" >/dev/null || { COPY_REASON="copy-identity-changed"; return 0; }
+  fm_cleanup_receipt copy-read "$ID" "$generation" >/dev/null || { COPY_REASON="copy-identity-changed"; return 0; }
   teardown_endpoint_receipt directory_return pending copy-disposal-attempt || return 1
   COPY_REASON="copy-disposal-uncertain"
   if fm_treehouse_pool_slot "$project" "$copy"; then

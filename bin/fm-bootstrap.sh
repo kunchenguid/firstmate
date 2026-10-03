@@ -28,8 +28,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
@@ -188,7 +186,7 @@ missing_tool_diagnostic() {
 # no verified dependency set is reported before the universal checks continue.
 COMMON_TOOLS="node git gh gh-axi chrome-devtools-axi tasks-axi python3 jq"
 if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
-  echo 'INCOMPATIBLE: python3 (task lifecycle requires Python 3.9 or newer)'
+  echo 'INCOMPATIBLE: python3 (Firstmate requires Python 3.9 or newer)'
 fi
 BACKEND=$(fm_backend_name)
 BACKEND_VALID=1
@@ -599,14 +597,6 @@ backlog_record_reconcile() {
     fi
     if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
        && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
-      local lifecycle_mode
-      lifecycle_mode=$(fm_task_lifecycle mode "$id" 2>/dev/null) || lifecycle_mode=unknown
-      case "$lifecycle_mode" in
-        accepted|archived|unknown)
-          fm_lock_release "$meta_lock"
-          continue
-          ;;
-      esac
       row=
       if fm_backlog_row_probe "$DATA" "$id"; then
         row=$FM_BACKLOG_ROW_STATE

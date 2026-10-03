@@ -48,7 +48,6 @@ chmod +x "$LAB/herdrbin/herdr"
 export PATH="$LAB/herdrbin:$PATH" HERDR_SESSION="$HERDR_LAB_SESSION" FM_SHORT_CLEANUP_TARGET="$LAB/cleanup-target.json"
 node "$ROOT/tests/fm-short-operations-cases.mjs" "$ROOT" "$LAB" > "$LAB/result.log" 2>&1 || { cat "$LAB/result.log"; exit 1; }
 cat "$LAB/result.log"
-node "$ROOT/tests/short-cleanup-recovery.mjs" "$ROOT" "$LAB/cleanup-recovery" live
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane list --workspace "$WS" > "$LAB/after.json"
 jq -e --arg pane "$PANE" 'all(.result.panes[]; .pane_id != $pane)' "$LAB/after.json"
 printf 'cleanup-evidence=%s\n' "$LAB"

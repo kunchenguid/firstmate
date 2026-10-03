@@ -35,9 +35,8 @@ case "$id" in
     ;;
 esac
 [ -n "$id" ] || { printf 'usage: fm-task-retire.sh <task-id> [fm-teardown arguments...]\n' >&2; exit 2; }
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-fm_task_lifecycle_forbid_delegated_control "$id" || exit 6
+# shellcheck source=bin/fm-cleanup-receipt-lib.sh
+. "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
 meta="$STATE/$id.meta"
 
 if [ "${2:-}" = --complete-only ]; then
@@ -62,12 +61,13 @@ if [ "${2:-}" = --complete-only ]; then
   lock=$(fm_meta_lock_path "$meta") || exit 1
   trap 'retire_rc=$?; fm_lock_release "$lock"; fm_lease_guard_release; exit "$retire_rc"' EXIT
   fm_lock_acquire_wait "$lock" || exit 1
-  lifecycle=$(fm_task_lifecycle completion-read "$id") || exit 1
   DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
   CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
   ID=$id
-  ENDPOINT_GENERATION=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
-  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  ENDPOINT_GENERATION=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  [ -n "$ENDPOINT_GENERATION" ] || exit 1
+  fm_cleanup_completion_guard "$id" "$ENDPOINT_GENERATION" || exit $?
+  fm_cleanup_delivery_guard "$id" "$ENDPOINT_GENERATION" "$meta" || exit $?
   ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
   fm_backlog_transition_applies "$CONFIG" "$DATA" "$(grep '^kind=' "$meta" | tail -1 | cut -d= -f2-)" || {
     echo "REFUSED: automatic business completion unavailable: ${FM_BACKLOG_TRANSITION_ERROR:-$FM_BACKLOG_TRANSITION_SKIP}" >&2
@@ -77,12 +77,16 @@ if [ "${2:-}" = --complete-only ]; then
   if [ ! -e "$ENDPOINT_RECEIPT" ] && [ ! -L "$ENDPOINT_RECEIPT" ]; then
     teardown_endpoint_receipt directory_return retained business-complete-resources-retained || exit 1
   fi
-  fm_task_lifecycle cleanup-read "$ID" >/dev/null || exit 1
-  fm_task_lifecycle link-cleanup "$ID" >/dev/null || exit 1
+  fm_cleanup_receipt read "$ID" "$ENDPOINT_GENERATION" >/dev/null || exit 1
   args=()
   report="$DATA/$ID/report.md"
   if [ -f "$report" ] && [ ! -L "$report" ]; then args=(--report "data/$ID/report.md"); fi
-  delivery=$(printf '%s' "$lifecycle" | jq -r '.completion_delivery.facts.url // empty')
+  delivery=$(sed -n 's/^pr=//p' "$meta" | tail -1)
+  if [ -z "$delivery" ]; then
+    # shellcheck source=bin/fm-merge-receipt-lib.sh
+    . "$SCRIPT_DIR/fm-merge-receipt-lib.sh"
+    delivery=$(fm_merge_receipt_current "$ID" "$ENDPOINT_GENERATION" 2>/dev/null | jq -r '.url // empty' || true)
+  fi
   case "$delivery" in
     https://*) args=(--pr "$delivery") ;;
     local:*) args=(--note 'local main') ;;

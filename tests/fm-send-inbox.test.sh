@@ -443,6 +443,115 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_terminal_task_refuses_new_steer() {
+  local dir err rc
+  dir=$(setup_case terminal-task)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
+    '- [x] t1 - Explicitly terminal fixture (kind: ship)' >"$dir/home/data/backlog.md"
+
+  run_send "$dir" "$err" -- t1 "must not resume terminal work"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "terminal steer exited $rc instead of 6: $(cat "$err")"
+  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+    "terminal steer refusal did not name the authoritative disposition"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "terminal steer created an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "terminal steer reached the endpoint"
+  pass "fm-send: retained terminal resources reject new steers before enqueue"
+}
+
+test_terminal_task_refuses_native_task_sends() {
+  local variant dir err rc
+  for variant in slash key; do
+    dir=$(setup_case "terminal-native-$variant")
+    err="$dir/send.err"
+    mkdir -p "$dir/home/data"
+    printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+    printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
+      '- [x] t1 - Explicitly terminal native fixture (kind: ship)' >"$dir/home/data/backlog.md"
+
+    rc=0
+    if [ "$variant" = slash ]; then
+      run_send "$dir" "$err" -- t1 "/help" || rc=$?
+    else
+      run_send "$dir" "$err" -- t1 --key Enter || rc=$?
+    fi
+    [ "$rc" -eq 6 ] || fail "terminal $variant send exited $rc instead of 6: $(cat "$err")"
+    assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+      "terminal $variant refusal did not name the authoritative disposition"
+    [ ! -d "$dir/home/state/t1.inbox" ] || fail "terminal $variant send created an inbox record"
+    [ ! -s "$dir/send.log" ] || fail "terminal $variant send reached the retained endpoint"
+  done
+  pass "fm-send: terminal task selectors reject native prompts and keys at the request boundary"
+}
+
+test_removed_lifecycle_action_flags_refuse() {
+  local dir err rc
+  dir=$(setup_case removed-action-flags)
+  err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --action-id old-action --expected-generation old-generation "unauthorized payload"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "removed lifecycle action flags exited $rc instead of 6"
+  assert_contains "$(cat "$err")" 'belonged to the removed rich task lifecycle' \
+    "removed lifecycle action flags did not explain their refusal"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "removed lifecycle action flags created an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "removed lifecycle action flags reached the endpoint"
+  pass "fm-send: removed lifecycle action flags cannot bypass compact continuation"
+}
+
+test_done_row_with_open_gap_allows_repair_steer() {
+  local dir err
+  dir=$(setup_case done-open-gap)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+  cat >"$dir/home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+- [x] t1 - Prematurely closed fixture (kind: ship)
+  <!-- firstmate-progress:v1 context=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
+  acceptance: "MAIN verifies the complete outcome"
+  current_state: "Only a partial result exists"
+  remaining_gap: "Acceptance is not met"
+  next_step: "Continue the authorized work"
+  <!-- /firstmate-progress -->
+EOF
+  run_send "$dir" "$err" -- t1 "repair the unfinished goal" \
+    || fail "Done row with an open compact gap rejected its repair steer: $(cat "$err")"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
+    || fail "Done row with an open compact gap did not retain its repair steer"
+  pass "fm-send: Done cannot hide a nonempty compact gap"
+}
+
+test_non_markdown_terminal_read_refuses_steer() {
+  local dir err rc
+  dir=$(setup_case non-markdown-terminal)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="beads"\n[beads]\npath=".beads"\n' >"$dir/home/.tasks.toml"
+  cat >"$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = show ] && [ "$2" = t1 ]; then
+  printf '%s\n' '  title: "Terminal external row"' '  state: done' '  held: no' '  blocked: no' '  body: "-"'
+  exit 0
+fi
+exit 2
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+  run_send "$dir" "$err" -- t1 "must not resume external terminal work"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "non-Markdown terminal steer exited $rc instead of 6: $(cat "$err")"
+  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+    "non-Markdown terminal steer did not use the backend-neutral exact read"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "non-Markdown terminal steer created an inbox record"
+  pass "fm-send: backend-neutral task reads preserve terminal effect guards"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -457,122 +566,8 @@ test_key_path_never_touches_inbox
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
-
-test_goal_action_replay() {
-  local dir payload
-  dir=$(setup_case goal-action)
-  mkdir -p "$dir/home/data/t1"
-  printf 'Deliver all requested artifacts' > "$dir/home/data/t1/brief.md"
-  printf 'spawn_gen=s1\n' >> "$dir/home/state/t1.meta"
-  payload='Please finish the remaining artifact'
-  printf '%s' "$payload" > "$dir/home/data/t1/next.txt"
-  FM_HOME="$dir/home" python3 "$ROOT/bin/fm-task-lifecycle.py" init t1 >/dev/null || fail 'init goal'
-  python3 - "$dir/home" <<'PY'
-import json,sys,hashlib,pathlib
-h=pathlib.Path(sys.argv[1]);d=json.loads((h/'data/t1/lifecycle.json').read_text())
-d['next_action']={'id':'t1.g1.a1','kind':'steer','phase':'prepared','expected_execution_generation':'s1',
-'payload_ref':'data/t1/next.txt','payload_sha256':hashlib.sha256((h/'data/t1/next.txt').read_bytes()).hexdigest(),
-'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
-d['next_action_seq']=2
-p=h/'candidate.json';p.write_text(json.dumps(d));p.chmod(0o600)
-PY
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile t1 --expected-revision 1 --record "$dir/home/candidate.json" >/dev/null || fail 'prepare action'
-  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "send goal: $(cat "$dir/error")"
-  grep -Fx 'execution_generation=s1' "$dir/home/state/t1.inbox/001.msg" >/dev/null || fail 'goal action receipt omitted its execution generation'
-  mv "$dir/home/state/t1.inbox/001.msg" "$dir/home/state/t1.inbox/handled/"
-  run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" || fail "replay confirmed goal: $(cat "$dir/error")"
-  [ ! -e "$dir/home/state/t1.inbox/002.msg" ] || fail 'duplicate action enqueued'
-  if run_send "$dir" "$dir/error" -- t1 --action-id t1.g1.a1 --expected-generation s1 changed; then fail 'action collision accepted'; fi
-  jq -e '.next_action.phase=="confirmed" and .next_action.attempts==1' "$dir/home/data/t1/lifecycle.json" >/dev/null || fail 'missing action receipt'
-  pass 'goal action replay finds handled receipt; changed body refuses; one actual enqueue'
-}
-test_goal_action_replay
-
-test_branch_progress_token_does_not_authorize_v2_effect() {
-  local dir payload token policy_sha binding revision rc executor_state
-  dir=$(setup_case branch-token-authority)
-  mkdir -p "$dir/home/data/t1" "$dir/home/config"
-  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' > "$dir/home/.tasks.toml"
-  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 "Continue the accepted validation" --kind ship \
-    --body "Keep the existing task identity." --start >/dev/null || fail 'compact task fixture failed'
-  printf 'Continue the accepted validation\n' > "$dir/home/data/t1/brief.md"
-  printf 'spawn_gen=s1\nworktree=%s\n' "$dir" >> "$dir/home/state/t1.meta"
-  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --expected-token "$token" \
-    --progress '{"acceptance":"The accepted checks pass","current_state":"A review gate is pending","remaining_gap":"The same run needs its authorized correction","next_step":"Continue the existing no-mistakes run"}' >/dev/null \
-    || fail 'compact progress fixture failed'
-
-  printf 'Standing routine continuation authority\n' > "$dir/home/data/policy-authority.md"
-  policy_sha=$(sha256sum "$dir/home/data/policy-authority.md" | awk '{print $1}')
-  jq -n --arg sha "$policy_sha" '{schema:"fm-task-continuation-policy.v1",revision:0,issuer:"main",enabled:true,
-    authority_ref:"data/policy-authority.md",authority_sha256:$sha,
-    allowed:["inspect","precheck","steer-same-intent","observe-receipt"],expires_at:"2099-01-01T00:00:00Z"}' \
-    > "$dir/home/policy.json"
-  chmod 600 "$dir/home/policy.json"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" continuation-policy --expected-revision 0 \
-    --record "$dir/home/policy.json" >/dev/null || fail 'continuation policy fixture failed'
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init t1 >/dev/null || fail 'lifecycle fixture failed'
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" refresh t1 >/dev/null || fail 'delegation fixture failed'
-  binding=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 | jq -c \
-    '{t1:{goal_revision:.goal_revision,brief_sha256:.brief_sha256,execution_generation:.execution_generation,delegation_revision:.delegation.revision}}')
-  printf '%s\n' "$$" > "$dir/home/state/.lock"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-wake-grant.sh" activate "$$" 1 >/dev/null \
-    || fail 'branch generation fixture failed'
-  printf '%s\n' '{"type":"session","version":3,"id":"branch-token-authority"}' > "$dir/home/main.jsonl"
-
-  token=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)
-  run_send "$dir" "$dir/error" \
-    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
-    "FM_BRANCH_TASK_BINDINGS=$binding" "FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}" \
-    "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 "Continue the existing no-mistakes run"
-  rc=$?
-  expect_code 6 "$rc" "a progress token must not authorize a v2 steer"
-  assert_contains "$(cat "$dir/error")" "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:t1" \
-    "non-idempotent compact text did not preserve the delegated action owner"
-  [ ! -d "$dir/home/state/t1.inbox" ] || fail 'token-only effect wrote an inbox record'
-
-  payload='Continue the existing no-mistakes run'
-  printf '%s' "$payload" > "$dir/home/data/t1/next.txt"
-  revision=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 | jq -r .revision)
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 > "$dir/home/candidate.json"
-  python3 - "$dir/home/candidate.json" "$dir/home/data/t1/next.txt" <<'PY'
-import hashlib,json,pathlib,sys
-p=pathlib.Path(sys.argv[1]); payload=pathlib.Path(sys.argv[2]); d=json.loads(p.read_text())
-d['next_action']={'id':'t1.g1.a1','kind':'steer','phase':'prepared','expected_execution_generation':'s1',
-'payload_ref':'data/t1/next.txt','payload_sha256':hashlib.sha256(payload.read_bytes()).hexdigest(),
-'receipt_ref':None,'attempts':0,'attempt_limit':2,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
-d['next_action_seq']=2
-p.write_text(json.dumps(d))
-PY
-  chmod 600 "$dir/home/candidate.json"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile t1 --expected-revision "$revision" \
-    --record "$dir/home/candidate.json" >/dev/null || fail 'delegated action fixture failed'
-  binding=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 | jq -c \
-    '{t1:{goal_revision:.goal_revision,brief_sha256:.brief_sha256,execution_generation:.execution_generation,delegation_revision:.delegation.revision}}')
-  printf 'working: continuing the accepted no-mistakes run\n' > "$dir/home/state/t1.status"
-  printf 's1\n' > "$dir/home/state/t1.busy-gen"
-  printf 'v1 gen=s1 seq=1 state=idle source=pi-ext event=turn-end ts=1\n' > "$dir/home/state/t1.busy-state"
-  executor_state=$(env PATH="$dir/fakebin:$PATH" FM_ROOT_OVERRIDE="$dir/home" FM_HOME="$dir/home" \
-    "$ROOT/bin/fm-task-state.sh" t1)
-  case "$executor_state" in state:\ working*) ;; *) fail "delegated action fixture is not runnable: $executor_state" ;; esac
-  run_send "$dir" "$dir/error" \
-    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
-    "FM_BRANCH_TASK_BINDINGS=$binding" "FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}" \
-    "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 --idempotent "$payload"
-  rc=$?
-  expect_code 6 "$rc" "compact send while a v2 action is active"
-  assert_contains "$(cat "$dir/error")" "active lifecycle action requires --action-id" \
-    "compact idempotency bypassed the delegated action receipt owner"
-  [ "$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle t1 | jq -r .next_action.phase)" = prepared ] \
-    || fail 'refused compact send changed the active lifecycle action phase'
-  [ ! -d "$dir/home/state/t1.inbox" ] || fail 'refused compact send wrote an inbox record'
-  run_send "$dir" "$dir/error" \
-    "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
-    "FM_BRANCH_TASK_BINDINGS=$binding" "FM_BRANCH_PROGRESS_BINDINGS={\"t1\":\"$token\"}" \
-    "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- t1 --action-id t1.g1.a1 --expected-generation s1 "$payload" \
-    || fail "explicit delegated steer failed: $(cat "$dir/error")"
-  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail 'explicit delegated steer did not reach the inbox owner'
-  pass 'compact progress stays bounded while the existing delegated action authorizes its exact effect'
-}
-test_branch_progress_token_does_not_authorize_v2_effect
+test_terminal_task_refuses_new_steer
+test_terminal_task_refuses_native_task_sends
+test_removed_lifecycle_action_flags_refuse
+test_done_row_with_open_gap_allows_repair_steer
+test_non_markdown_terminal_read_refuses_steer

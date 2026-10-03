@@ -155,8 +155,6 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 RELAUNCH=0
-LIFECYCLE_ACTION_ID=${FM_CONTROL_ACTION_ID:-}
-LIFECYCLE_EXPECTED_GEN=
 POS=()
 want_value=
 for a in "$@"; do
@@ -168,8 +166,6 @@ for a in "$@"; do
       ;;
     esac
     case "$want_value" in
-    action-id) LIFECYCLE_ACTION_ID=$a ;;
-    expected-generation) LIFECYCLE_EXPECTED_GEN=$a ;;
     harness)
       HARNESS_ARG=$a
       HARNESS_SET=1
@@ -203,8 +199,6 @@ for a in "$@"; do
     continue
   fi
   case "$a" in
-  --action-id) want_value=action-id ;;
-  --expected-generation) want_value='expected-generation' ;;
   --scout)
     KIND=scout
     KIND_SET=1
@@ -1411,29 +1405,6 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-fm_task_lifecycle_execution_allowed "$ID" || exit 1
-LIFECYCLE_OLD_GENERATION=
-if [ -f "$DATA/$ID/lifecycle.json" ]; then
-  LIFECYCLE_BEFORE=$(fm_task_lifecycle read "$ID") || exit 1
-  LIFECYCLE_OLD_GENERATION=$(printf '%s' "$LIFECYCLE_BEFORE" | jq -r '.execution_generation')
-fi
-if [ "$RELAUNCH" = 0 ] && [ -n "$LIFECYCLE_ACTION_ID$LIFECYCLE_EXPECTED_GEN" ]; then
-  [ -n "$LIFECYCLE_ACTION_ID" ] && [ -n "$LIFECYCLE_EXPECTED_GEN" ] && [ "$RELAUNCH" = 0 ] || exit 2
-  if [ "$(fm_meta_get "$STATE/$ID.meta" launch_action_id)" = "$LIFECYCLE_ACTION_ID" ]; then
-    fm_task_lifecycle authorize "$ID" --action-id "$LIFECYCLE_ACTION_ID" --kind spawn \
-      --expected-generation "$LIFECYCLE_EXPECTED_GEN" < "$DATA/$ID/brief.md" >/dev/null || exit 1
-    echo "spawn already published for action $LIFECYCLE_ACTION_ID; reconcile the existing execution"
-    exit 0
-  fi
-  [ "$(printf '%s' "$LIFECYCLE_BEFORE" | jq -r '.next_action.phase')" = prepared ] || {
-    echo 'REFUSED: launch submission is uncertain; recover its recorded endpoint, never allocate a second one' >&2
-    exit 1
-  }
-  fm_task_lifecycle authorize "$ID" --action-id "$LIFECYCLE_ACTION_ID" --kind spawn \
-    --expected-generation "$LIFECYCLE_EXPECTED_GEN" < "$DATA/$ID/brief.md" >/dev/null || exit 1
-fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
@@ -1908,7 +1879,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen launch_state launch_action_id traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen launch_state traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -1929,7 +1900,6 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   echo "launch_state=prepared"
-  [ -z "$LIFECYCLE_ACTION_ID" ] || echo "launch_action_id=$LIFECYCLE_ACTION_ID"
   # Default-off writes no traceparent= line.
   # Always publish the explicit terminal identity for new records.
   echo "backend=$BACKEND"
@@ -1957,11 +1927,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
   SPAWN_META_TMP=
 fi
 
-# The lifecycle binding is committed only after launch delivery succeeds below.
-# Metadata published before a failed launch remains an unknown execution that
-# recovery must inspect; it is never promoted to a confirmed action receipt.
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+# The cleanup owner binds the launch identity only after launch delivery
+# succeeds. Metadata published before a failed launch remains an unknown
+# execution that recovery must inspect.
 if [ "$RELAUNCH" = 0 ] && [ "$BACKEND" = herdr ] && [ -f "$STATE/$ID.herdr-presentation" ]; then
   fm_backend_herdr_projection_bind_execution "$STATE/$ID.herdr-presentation" "$ID" "$SPAWN_GEN" || \
     echo "warning: launch identity could not be bound; cleanup will rely on independently sufficient structural evidence or retain this endpoint safely" >&2
@@ -2246,10 +2214,6 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
 fi
 spawn_record_launch_state confirmed
-if [ "$KIND" != secondmate ] && [ "$RELAUNCH" = 0 ]; then
-  FM_HOME="$FM_HOME" fm_task_lifecycle bind-execution "$ID" \
-    --expected-generation "$LIFECYCLE_OLD_GENERATION" --action-id "$LIFECYCLE_ACTION_ID" >/dev/null || exit 1
-fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
   HUP) SPAWN_DEFERRED_SIGNAL_STATUS=129 ;;
@@ -2273,8 +2237,6 @@ if [ "$KIND" != secondmate ] && [ "$RELAUNCH" = 1 ]; then
       exit 1
     }
   fi
-  FM_HOME="$FM_HOME" fm_task_lifecycle bind-execution "$ID" \
-    --expected-generation "$LIFECYCLE_OLD_GENERATION" --action-id "$LIFECYCLE_ACTION_ID" >/dev/null || exit 1
 fi
 if [ "$RELAUNCH" = 1 ] && [ "$BACKEND" = herdr ] && [ -f "$STATE/$ID.herdr-presentation" ]; then
   fm_backend_herdr_projection_bind_execution "$STATE/$ID.herdr-presentation" "$ID" "$SPAWN_GEN" || \

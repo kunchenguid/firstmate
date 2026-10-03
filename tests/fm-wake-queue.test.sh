@@ -1559,9 +1559,8 @@ test_pi_ack_retains_exact_task_obligation() {
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" PI_CODING_AGENT=true FM_SUPERVISION_ACTOR=main \
     "$DRAIN" --ack-through "$seq" --recovery-generation "$generation" || fail "Pi acknowledgement failed"
   [ ! -s "$state/.wake-queue" ] || fail "ack did not consume its own event"
-  FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" observe task-a | jq -e '.state=="pending"' >/dev/null \
-    || fail "wake acknowledgement erased the operational successor"
-  [ "$(FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" lifecycle task-a | jq -r '.revision')" = 1 ] || fail "ack fabricated semantic progress"
+  assert_absent "$dir/data/task-a/lifecycle.json" \
+    "wake acknowledgement fabricated rich lifecycle progress"
   pass "Pi wake acknowledgement consumes only presentation and durably retains the exact unfinished task"
 }
 

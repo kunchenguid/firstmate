@@ -35,8 +35,7 @@ $ FM_PI_PACKAGE_DIR=<isolated-pi-0.84.4> tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
 $ tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.87.1
-$ FM_PERIODIC_STOW_HERDR_LIVE=1 tests/fm-periodic-stow-herdr-live-e2e.test.sh
-ok - real Pi 0.87.1 with pi-openai-codex-compat 0.0.16 accepted stable periodic-stow run <uuid> in Herdr session <named-non-default-session>
+$ # Historical rich-lifecycle live matrix removed; retain the portable periodic-stow and Pi type checks above.
 ```
 
 The live guard provisions, addresses, stops, and deletes only through `bin/fm-herdr-lab.sh`; that helper verifies the default Herdr fleet before and after the run.

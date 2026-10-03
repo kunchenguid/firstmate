@@ -17,7 +17,7 @@ The script headers and `--help` output own exact commands, flags, configuration 
 
 ## Intake and provider selection
 
-Classify and schedule the work through the ordinary Firstmate task lifecycle before choosing its executor.
+Classify and schedule the work through the ordinary Firstmate backlog workflow before choosing its executor.
 A remote research task keeps the same task id, backlog item, `data/<id>/brief.md`, status-event history, supervision obligation, report location, decision gate, and completion handling as a local Scout.
 AIME and iDA are task executors, not harnesses or runtime backends, so do not resolve a harness, allocate a worktree, create a terminal endpoint, or route them through local-worker recovery.
 Use `bin/fm-task-dispatch.sh` as the executor boundary.
@@ -48,7 +48,7 @@ Do not block the conversational turn with provider polling or output readback.
 Keep ordinary supervision live because a registered process-event source is active work even though no local endpoint exists.
 
 Provider completion is an executor fact, not business-level acceptance of the research goal.
-Persist the assessment through the [task lifecycle owner](../../../docs/task-lifecycle.md) before retiring or preparing an automatic continuation.
+Persist the material result and remaining gap through the [compact continuation owner](../../../docs/task-continuation.md) before retiring or preparing an automatic continuation.
 On every provider-terminal observation, compare the bound report and artifacts with the intended outcome and acceptance evidence in the durable brief.
 If an authorized gap remains, keep the task unfinished and continue only through the recorded provider's existing supported lifecycle; never rewrite a terminal provider identity as running, create a duplicate session, bypass a one-create or adoption guard, or accept a provider compliance statement in place of observable evidence.
 If the provider has no supported continuation from that terminal state, record the exact remaining gap, the attempts and evidence, and the specific new authority or external change required instead of pretending the goal completed.

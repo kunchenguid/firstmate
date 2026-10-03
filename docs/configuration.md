@@ -158,7 +158,7 @@ It places that marker in the private first message because SG may automatically 
 It repeats that reconciliation after a timeout or ambiguous submission before deciding state.
 A unique match is adopted; multiple matches, a truncated listing, provider unavailability, or unresolved identity becomes a preserved unavailable or ambiguous state and never authorizes a silent duplicate create.
 Restart adoption and startup recovery use the durable marker and session id and re-arm the existing process-event source without pretending a local endpoint exists.
-An enrolled goal that remains incomplete after an iDA terminal report can continue only through the lifecycle-bound same-session followup described in the [task lifecycle](task-lifecycle.md); `bin/fm-remote-agent-ida.sh --help` owns the exact invocation.
+An incomplete task after an iDA terminal report continues from the original task's compact gap through the provider adapter's same-session followup described in [goal-directed continuation](task-continuation.md); `bin/fm-remote-agent-ida.sh --help` owns the exact invocation.
 That path never authorizes a fresh research session or provider switch, and unavailable or uncorrelatable provider support remains an explicit goal gap.
 
 `bin/fm-procevent-ida.sh` owns first submission, session readback, normalized state transitions, report creation, acknowledgement, and re-arming.
@@ -218,7 +218,8 @@ A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=
 
 Current ordinary continuation does not require or consult `config/task-continuation-policy.json`.
 MAIN records material progress in the existing backlog task, while the branch remains unable to author that progress or final acceptance.
-An old policy file and rich `data/<task>/lifecycle.json` records may remain on disk for historical readback and lower-level effect reconciliation, but neither is an active progress source and neither enrolls old work.
+An old policy file and rich `data/<task>/lifecycle.json` records may remain on disk unchanged, but neither is an active progress source and neither enrolls old work.
+Only the merge or cleanup operation owner may narrowly read an immutable historical receipt or terminal/archive fact needed for an already attempted or uncertain effect.
 Existing wake, lease, inbox, handoff, provider, merge and cleanup owners continue to enforce their own authority and receipts.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
@@ -270,7 +271,7 @@ A home may instead select another tasks-axi adapter such as Beads through its ow
 When the automatic transition gate applies, dispatch and completion are not separate operator actions: each moves its work item inside the same run that creates or removes the task's record, so the ordinary successful path cannot leave the backlog and live task set out of sync ([`bin/fm-backlog-transition-lib.sh`](../bin/fm-backlog-transition-lib.sh)).
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
-A validated terminal goal may retain cleanup-only metadata after its backlog row closes; the [task lifecycle](task-lifecycle.md) keeps that resource obligation separate from execution supervision.
+A semantically accepted or explicitly archived task may retain cleanup-only metadata after its backlog row closes; [goal-directed continuation](task-continuation.md#acceptance-archive-and-cleanup) keeps that resource obligation separate from execution supervision.
 Because tasks-axi reserves its structured pull-request field for GitHub-style `/pull/<number>` URLs, automatic completion preserves an exact `https://code.byted.org/<namespace>/<repo>/merge_requests/<n>` URL as a `Codebase MR ...` completion note; interrupted cleanup replays the conversion, while a row no longer addressable after archival leaves its close receipt pending rather than discarding the URL.
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
 Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
@@ -511,7 +512,7 @@ On session start the first mate detects what its required toolchain is missing o
 It installs automatically supported tools only after you say go; manual-only tools remain for you to install from the printed instructions.
 Required tools come in two parts: a universal toolchain every home needs regardless of backend, and a per-backend delta that follows the runtime backend actually resolved for this home.
 The essential universal toolchain is node, git, gh with GitHub auth via `gh auth login`, gh-axi, chrome-devtools-axi, compatible tasks-axi per "Backlog backend" above, Python 3.9 or newer, and jq.
-Python and jq validate the bounded durable task lifecycle records; no additional Python packages are required.
+Python and jq validate compact task progress and bounded operation receipts; no additional Python packages are required.
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) checks gh-axi presence and genuine API prerequisites; each gh-axi operation follows its installed help and verifies its result, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) owns the backlog capability probe.
 The gh-axi and tasks-axi release labels do not gate compatibility.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.

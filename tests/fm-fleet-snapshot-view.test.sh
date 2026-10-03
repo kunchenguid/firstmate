@@ -122,6 +122,12 @@ EOF
 
 ## Done
 - [x] done-task - Done Task (repo: alpha) (kind: ship)
+  <!-- firstmate-progress:v1 context=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
+  acceptance: "MAIN verifies the requested result"
+  current_state: "Only an intermediate result exists"
+  remaining_gap: "Acceptance is still unmet"
+  next_step: "Continue the authorized work"
+  <!-- /firstmate-progress -->
 - [x] closed-working - Closed But Working Task (repo: alpha) (kind: ship)
 EOF
   cat > "$home/data/done-archive.md" <<'EOF'
@@ -148,7 +154,8 @@ EOF
     (.tasks | any(.id == "active-task" and .record_disposition == "active"))
       and (.tasks | any(.id == "queued-task" and .record_disposition == "queued"))
       and (.tasks | any(.id == "parked-task" and .record_disposition == "parked"))
-      and (.tasks | any(.id == "done-task" and .record_disposition == "done" and .retained_record == true))
+      and (.tasks | any(.id == "done-task" and .record_disposition == "done" and .retained_record == true
+        and .backlog.compact_progress.remaining_gap == "Acceptance is still unmet"))
       and (.tasks | any(.id == "archived-task" and .record_disposition == "archive_done" and .retained_record == true))
       and (.tasks | any(.id == "ambiguous-task" and .record_disposition == "ambiguous"))
       and (.tasks | any(.id == "unknown-task" and .record_disposition == "unknown"))

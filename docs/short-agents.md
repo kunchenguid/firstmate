@@ -81,7 +81,7 @@ Unsupported actions refuse explicitly.
 Before handing off effects, the operation runner revalidates the request, grant expiry, revocation, exact arguments and structural target identity.
 Completed cleanup then uses the ordinary exact-pane owner without another ShortTask actor-binding admission check; its receipt records the actual window and copy outcomes.
 For example, cleanup of an accepted task with an uncommitted copy closes its recorded pane and archives its resource metadata while retaining that copy and its report.
-The [completed cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns copy preservation and endpoint identity requirements.
+The [completed cleanup contract](task-continuation.md#acceptance-archive-and-cleanup) owns copy preservation and endpoint identity requirements.
 Merge still binds the entire metadata audit record under the compatibility checks in [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs).
 Cleanup binds structural ownership fields instead: conflicting or repeated target fields refuse, while unrelated completion history and diagnostic metadata do not independently veto cleanup.
 Per-resource reservations and the existing owner locks coordinate MAIN, BRANCH, and short executors without serializing independent clones.
@@ -157,13 +157,9 @@ The command requires the original immutable grant and bindings, the preserved un
 It then performs only the official read-only Codebase status and detail reads, requires the exact repository, MR URL, registered source head, merged status, and exact independently supplied merge commit, publishes a distinct readback-settlement receipt, and releases only that step's matching reservations.
 It never issues a merge, runs later steps, changes the original terminal result, or reports the failed or timed-out model execution as successful.
 Repeated settlement converges on the same receipt and missing or ambiguous evidence leaves the reservations intact.
-For an attempted cleanup with an unmanaged Treehouse path refusal, or a separately judged current retirement that preserves historical uncertainty and every copy, exact MAIN recovery and invocation are owned by [`fm-short-agent.mjs`](../bin/fm-short-agent.mjs) and its `--help`.
-The unmanaged-path recovery requires the pane to be already absent and settles only the remaining bookkeeping, while the current-judgment path may close the exact still-present owned endpoint once before finishing that bookkeeping.
-Both preserve the failed result and every surviving copy; other uncertain effects remain reserved.
-A changed candidate, identity, or grant stops new writes.
-The archived/pruned current-judgment variant is bookkeeping-only for the narrower case where the configured Done archive and archived lifecycle still prove business authority, but the original task metadata, cleanup receipt and pending-close marker are all absent.
-It requires the exact immutable operation binding and reservation, unchanged failed files, dead runner and children, a structured absent endpoint read, and the current surviving copy/Git identity.
-It writes a distinct preservation and operation receipt, releases only the matching reservation, leaves the original attempt uncertain, and never calls teardown, recreates historical records, or changes backlog/history/copy content.
+An attempted cleanup has no ShortTask-owned settlement command.
+The reservation remains held until the existing cleanup owner supplies exact completion readback for the same task and executor generation; the short agent never reconstructs authority from a historical lifecycle judgment or replays the operation through a separate recovery path.
+A changed candidate, identity, or grant likewise leaves the reservation intact and stops new writes.
 The CLI `reconcile` retries missing notifications and reconciles ordinary receipts without inventing recovery authority.
 [`bin/fm-short-operations.mjs`](../bin/fm-short-operations.mjs) owns the action schema and durable receipt mechanics.
 

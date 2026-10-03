@@ -121,7 +121,7 @@ Firstmate does not retry, adopt, reuse, close, delete, or rename anything in res
 The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains required endpoint authority after creation.
-For accepted or archived lifecycle tasks, the [resource cleanup contract](task-lifecycle.md#remote-results-and-resource-cleanup) owns the completed path; presentation journals, process activity, focus and composer state are not additional admission gates.
+For semantically accepted or explicitly archived tasks, the [resource cleanup contract](task-continuation.md#acceptance-archive-and-cleanup) owns the completed path; presentation journals, process activity, focus and composer state are not additional admission gates.
 The detailed structural-journal and continuity rules below apply to legacy task records without that terminal lifecycle disposition.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace, while its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last; both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.

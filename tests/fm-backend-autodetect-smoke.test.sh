@@ -155,31 +155,6 @@ pass "real Herdr: raw command dispatch acted in the isolated pane"
 PATH="$CLEAN_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane close "$PANE" >/dev/null \
   || fail 'could not model the completed fixture endpoint disappearing through its exact lab pane'
 
-# The production cleanup boundary requires semantic acceptance independently
-# from endpoint identity. Reconcile the synthetic task to that terminal state.
-LIFECYCLE="$DATA/$ID/lifecycle.json"
-if [ ! -f "$LIFECYCLE" ]; then
-  FM_HOME="$TMP_ROOT" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-    "$ROOT/bin/fm-task-state.sh" init "$ID" >/dev/null || fail 'could not initialize lifecycle for cleanup round trip'
-fi
-GENERATION=$(sed -n 's/^spawn_gen=//p' "$META")
-HEAD=$(git -C "$WT" rev-parse HEAD)
-DELIVERY_URL='https://codebase.example.invalid/firstmate/merge_requests/autodetect-smoke'
-DELIVERY_FACTS=$(jq -cn --arg url "$DELIVERY_URL" --arg head "$HEAD" \
-  '{url:$url,head:$head}') || fail 'could not prepare the synthetic delivery receipt'
-FM_HOME="$TMP_ROOT" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-  python3 "$ROOT/bin/fm-task-lifecycle.py" owner-receipt "$ID" \
-    --kind merge --execution-generation "$GENERATION" \
-    --facts "$DELIVERY_FACTS" >/dev/null \
-  || fail 'could not record the synthetic delivery receipt'
-printf 'pr=%s\n' "$DELIVERY_URL" >> "$META"
-REVISION=$(jq -r '.revision' "$LIFECYCLE")
-jq '.disposition="accepted" | .assessment.remaining_gap=""' "$LIFECYCLE" > "$TMP_ROOT/accepted.json"
-chmod 600 "$TMP_ROOT/accepted.json"
-FM_HOME="$TMP_ROOT" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-  "$ROOT/bin/fm-task-state.sh" reconcile "$ID" --expected-revision "$REVISION" --record "$TMP_ROOT/accepted.json" >/dev/null \
-  || fail 'could not accept the synthetic completed task'
-
 # The ordinary cleanup path must consume the launch identity idempotently after
 # the exact lab pane has disappeared.
 . "$ROOT/bin/fm-backend.sh"

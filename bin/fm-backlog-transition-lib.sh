@@ -4,10 +4,10 @@
 # (this library reads that one's backend gate and never sources it itself, so a
 # caller that already sourced it keeps its memoised compatibility verdict).
 #
-# INVARIANT. In ordinary successful lifecycle state, `state/<id>.meta` exists
+# INVARIANT. During ordinary execution, `state/<id>.meta` exists
 # <=> this home's backlog row for <id> is In flight, except a validated terminal
-# lifecycle record may retain cleanup-only metadata without restarting work.
-# The lifecycle reader owns disposition/generation validation; the teardown crash
+# cleanup receipt may retain cleanup-only metadata without restarting work.
+# The cleanup owner owns generation validation; the teardown crash
 # window is represented by `state/<id>.backlog-close`. The script performing the
 # mechanical record change owns the paired backlog transition and runs it in the
 # same process, under the per-task meta lock it already holds, before it reports
@@ -91,7 +91,7 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 FM_BACKLOG_ROW_SHOW_WEDGED=0
 
 # Emit each byte of a value as a decimal number, locale-independently.
-# Deliberately perl rather than od: the spawn and teardown lifecycle runs under a
+# Deliberately perl rather than od: spawn and teardown run under a
 # curated PATH (tests/fm-teardown.test.sh make_path_without_lsof pins that set)
 # that excludes od, and a validator that cannot run must never wedge dispatch or
 # cleanup. perl is already in that curated set and is already used elsewhere in
@@ -1256,11 +1256,11 @@ fm_backlog_completed_cleanup_receipt() {
   [ -n "$disposition" ] || return 0
   facts=$(jq -cn --arg disposition "$disposition" \
     '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}') || return 1
-  if ! declare -F fm_task_lifecycle_owner_receipt >/dev/null 2>&1; then
-    . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle-lib.sh"
+  if ! declare -F fm_cleanup_receipt >/dev/null 2>&1; then
+    . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-cleanup-receipt-lib.sh"
   fi
   FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    fm_task_lifecycle_owner_receipt "$id" "$generation" cleanup "$facts" locked
+    fm_cleanup_receipt completion-record "$id" "$generation" --facts "$facts" >/dev/null
 }
 
 # A validated close may outlive tasks-axi prune. Reuse the disposition owner
@@ -1268,17 +1268,18 @@ fm_backlog_completed_cleanup_receipt() {
 # preserved artifact before acknowledging bookkeeping. Never recreate a row,
 # replay resource effects, or erase an unapplied delivery reference.
 fm_backlog_archived_done() {  # <data> <id> <state> <generation> [artifact-pair]
-  local data=$1 id=$2 state=$3 generation=$4 artifact=${6:-} lifecycle snapshot disposition
+  local data=$1 id=$2 state=$3 generation=$4 artifact=${6:-} snapshot disposition receipt
   [ "$FM_BACKLOG_ROW_RESULT" = not_found ] || return 1
   # shellcheck source=bin/fm-task-disposition-lib.sh
   . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-disposition-lib.sh"
   snapshot=$(fm_task_disposition_snapshot "$data" "$artifact") || return 1
   disposition=$(fm_task_disposition_for "$snapshot" "$id") || return 1
   [ "$disposition" = archive_done ] || return 1
-  lifecycle=$(FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-    python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" read "$id") || return 1
-  printf '%s' "$lifecycle" | jq -e --arg generation "$generation" \
-    '.execution_generation==$generation and (.disposition=="accepted" or .disposition=="archived")' >/dev/null
+  receipt="$state/$id.cleanup.json"
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] && \
+    jq -e --arg id "$id" --arg generation "$generation" \
+      '.schema=="fm-task-cleanup.v1" and .task_id==$id and .spawn_gen==$generation' "$receipt" >/dev/null
 }
 
 fm_backlog_replay_transition() {
@@ -1334,16 +1335,18 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
   if [ "$mode" = cleanup-only ] || [ "$mode" = complete-only ]; then
     # This paired transition closes the business row, never the resource
     # record. Restart recovery must not re-run endpoint/directory effects.
-    local lifecycle cleanup_kind receipt
-    lifecycle=$(FM_HOME="${FM_HOME:?}" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-      python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" read "$id") || return 1
-    printf '%s' "$lifecycle" | jq -e --arg generation "$marker_spawn_gen" \
-      '.execution_generation==$generation and (.disposition=="accepted" or .disposition=="archived") and .cleanup_ref!=null' >/dev/null || return 1
+    local cleanup_kind receipt
+    # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+    . "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-cleanup-receipt-lib.sh"
     receipt=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-      python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" cleanup-read "$id") || return 1
+      fm_cleanup_receipt read "$id" "$marker_spawn_gen") || return 1
     if [ "$mode" = complete-only ]; then
       FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
-        python3 "$FM_BACKLOG_TRANSITION_LIB_DIR/fm-task-lifecycle.py" completion-read "$id" >/dev/null || return 1
+        fm_cleanup_completion_guard "$id" "$marker_spawn_gen" || return 1
+      if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+        FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+          fm_cleanup_delivery_guard "$id" "$marker_spawn_gen" "$meta" || return 1
+      fi
     else
       printf '%s' "$receipt" | jq -e '.phases.pane_close.state=="confirmed"' >/dev/null || return 1
     fi
@@ -1383,6 +1386,21 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
+    fi
+    # A pruned row does not authorize retiring live execution metadata by
+    # itself. Before crossing the record-removal boundary, require the exact
+    # archived task plus this generation's cleanup receipt; otherwise retain
+    # both records for operation readback.
+    if ! fm_backlog_row_probe "$data" "$id"; then
+      if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+        FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+        return 1
+      fi
+      if ! fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" \
+          "${args[@]+"${args[@]}"}"; then
+        FM_BACKLOG_TRANSITION_ERROR="missing task $id has no matching generation-bound cleanup receipt and archived delivery evidence; preserving its task and pending-close records"
+        return 1
+      fi
     fi
     if [ -z "$cleanup_disposition" ]; then
       fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \

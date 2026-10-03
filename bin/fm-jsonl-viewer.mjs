@@ -280,43 +280,35 @@ function taskDispositions(codeRoot, dataRoot, environment) {
   return dispositions;
 }
 
-function lifecycleDispositions(codeRoot, dataRoot, environment) {
-  const values = new Map();
+// Retained rich records are not an active task source. Read only the one
+// immutable historical fact needed to preserve the viewer's explicit-stop
+// classification for already archived tasks; malformed or non-archived
+// records contribute nothing and never require repair.
+function historicalArchivedTasks(dataRoot) {
+  const archived = new Set();
   let ids = [];
-  try { ids = readdirSync(dataRoot).filter(name => /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(name)); } catch { return values; }
-  const lifecycleIds = [];
+  try { ids = readdirSync(dataRoot); } catch { return archived; }
   for (const id of ids) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(id)) continue;
     const directory = join(dataRoot, id);
-    const lifecycle = join(directory, "lifecycle.json");
+    const recordPath = join(directory, "lifecycle.json");
     try {
       const directoryInfo = lstatSync(directory);
-      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || !inside(dataRoot, realpathSync(directory))) continue;
-      if (!regularNoSymlink(lifecycle)) continue;
-      if (id.length <= 160) lifecycleIds.push(id);
-      else values.set(id, "unknown");
-    } catch {
-      values.set(id, "unknown");
-    }
-  }
-  for (let offset = 0; offset < lifecycleIds.length; offset += 1000) {
-    const batch = lifecycleIds.slice(offset, offset + 1000);
-    try {
-      const raw = execFileSync(join(codeRoot, "bin", "fm-task-state.sh"), ["modes", JSON.stringify(batch)], {
-        encoding: "utf8",
-        env: environment,
-        timeout: 3000,
-        maxBuffer: 2 * 1024 * 1024,
-      });
-      const dispositions = JSON.parse(raw);
-      for (const id of batch) {
-        const disposition = dispositions?.[id];
-        values.set(id, ["open", "accepted", "archived"].includes(disposition) ? disposition : "unknown");
+      const recordInfo = lstatSync(recordPath);
+      if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()
+        || !recordInfo.isFile() || recordInfo.isSymbolicLink() || recordInfo.size > 1024 * 1024
+        || !inside(dataRoot, realpathSync(directory))) continue;
+      const record = JSON.parse(readFileSync(recordPath, "utf8"));
+      if (["fm-task-lifecycle.v1", "fm-task-lifecycle.v2"].includes(record?.schema)
+        && record.task_id === id && record.disposition === "archived"
+        && typeof record.assessment?.authority_ref === "string" && record.assessment.authority_ref.length > 0) {
+        archived.add(id);
       }
     } catch {
-      for (const id of batch) values.set(id, "unknown");
+      // Historical compatibility is best effort and never an admission gate.
     }
   }
-  return values;
+  return archived;
 }
 
 function taskOverview(home, roots, codeRoot) {
@@ -333,7 +325,7 @@ function taskOverview(home, roots, codeRoot) {
     throw new Error("unsupported task snapshot");
   }
   const dispositions = taskDispositions(codeRoot, dataRoot, environment);
-  const lifecycles = lifecycleDispositions(codeRoot, dataRoot, environment);
+  const historicalArchives = historicalArchivedTasks(dataRoot);
   const documents = new Map(listTaskDocuments(roots.reports).map(document => [document.id, document]));
   const items = new Map();
   const ensure = id => {
@@ -349,6 +341,10 @@ function taskOverview(home, roots, codeRoot) {
       project: record.repo || null,
       holdKind: record.hold_kind || null,
       blockedBy: Array.isArray(record.unresolved_blocker_ids) ? record.unresolved_blocker_ids : [],
+      compactOpenGap: typeof record.compact_progress?.remaining_gap === "string"
+        && record.compact_progress.remaining_gap.length > 0
+        && typeof record.compact_progress?.next_step === "string"
+        && record.compact_progress.next_step.length > 0,
     });
   }
   for (const task of snapshot.tasks) {
@@ -360,7 +356,6 @@ function taskOverview(home, roots, codeRoot) {
       project: task.backlog?.repo || task.project || null,
       currentState: task.current_state?.state || "unknown",
       recordDisposition: task.record_disposition || dispositions.get(task.id) || "unknown",
-      lifecycleDisposition: task.lifecycle_disposition || lifecycles.get(task.id) || "legacy",
       openDecisionCount: Array.isArray(task.hints?.open_decisions) ? task.hints.open_decisions.length : 0,
       heldByDecision: Boolean(task.hints?.pending_decision || task.hints?.blocked_event),
       blockedBy: Array.isArray(task.backlog?.unresolved_blocker_ids) ? task.backlog.unresolved_blocker_ids : [],
@@ -368,7 +363,7 @@ function taskOverview(home, roots, codeRoot) {
     });
   }
   for (const [id, disposition] of dispositions) ensure(id).recordDisposition ||= disposition;
-  for (const [id, disposition] of lifecycles) ensure(id).lifecycleDisposition ||= disposition;
+  for (const id of historicalArchives) ensure(id).historicalArchive = true;
   for (const [id, document] of documents) {
     const item = ensure(id);
     item.hasDocument = true;
@@ -378,25 +373,25 @@ function taskOverview(home, roots, codeRoot) {
   }
   const tasks = [...items.values()].map(item => {
     const disposition = item.recordDisposition || "unknown";
-    const lifecycle = item.lifecycleDisposition || "legacy";
-    const terminalConflict = ["working", "blocked", "parked"].includes(item.currentState)
-      && (["done", "archive_done"].includes(disposition) || ["accepted", "archived"].includes(lifecycle));
-    const remoteStatusUnconfirmed = lifecycle === "archived"
+    const compactOpenGap = Boolean(item.compactOpenGap) && disposition === "done";
+    const terminalConflict = (["working", "blocked", "parked"].includes(item.currentState)
+      && (["done", "archive_done"].includes(disposition) || item.historicalArchive)) || compactOpenGap;
+    const remoteStatusUnconfirmed = (disposition === "archive_done" || item.historicalArchive)
       && !["done", "failed"].includes(item.currentState);
     const held = item.heldByDecision || item.openDecisionCount > 0 || item.currentState === "blocked" || item.currentState === "parked"
       || item.holdKind === "parked" || (item.blockedBy || []).length > 0 || terminalConflict;
     let category = "held";
     let status = "Needs reconciliation";
-    if (terminalConflict && lifecycle !== "archived") {
+    if (terminalConflict && disposition !== "archive_done" && !item.historicalArchive) {
       category = "held";
-      status = "Completion conflict";
-    } else if (lifecycle === "archived") {
+      status = compactOpenGap ? "Unresolved goal gap" : "Completion conflict";
+    } else if (item.historicalArchive) {
       category = "history";
       status = "Cancelled";
     } else if (disposition === "archive_done") {
       category = "history";
       status = "Archived";
-    } else if (!held && (lifecycle === "accepted" || disposition === "done")) {
+    } else if (!held && disposition === "done") {
       category = "completed";
       status = "Completed";
     } else if (held) {

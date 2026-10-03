@@ -40,7 +40,7 @@ The portable lifecycle suite verifies that identical additive cleanup receipts r
 Herdr 0.8.0 protocol 20 reports explicit JSON null in both session fields for `status --json --session default`, while `session list --json` identifies that same running socket as `name: "default"`.
 The default status was captured read-only by the session owner; the independent session-list observation used the authorized named lab helper and passed its default-session tripwire.
 These session-identity classifier observations remain distinct from completed-task cleanup admission: accepted/archived task retirement uses exact home-local endpoint metadata and confirmed pane absence, as described below.
-The earlier journal-based candidate passed `FM_HERDR_LIFECYCLE_E2E=1 bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh` through the authorized named lab helper, reporting `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`; this is historical evidence for that stricter path.
+The removed journal-based lifecycle fixture previously passed through an authorized named lab helper with `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=45340`; this is historical evidence only, not a current refresh command or admission contract.
 No live default cleanup was performed; the real default representation and the executable cleanup fixtures are distinct evidence.
 
 ## Delegated continuation on Pi
@@ -758,13 +758,7 @@ The Herdr refusal when a shell accepts the command but does not move is not exer
 ### Presentation-independent agent lifecycle
 
 Measured 2026-09-30 on Linux with Herdr client/server 0.8.0, protocol 20, TraeX 0.207.1, Codex 0.158.0 and Pi 0.87.1.
-The token-free live guard uses an explicitly authorized named lab helper for every Herdr operation and restores the default-session tripwire through that helper's teardown.
-Run it with the helper path and task label assigned to the verification lab:
-
-```sh
-FM_HERDR_LAB_HELPER="$HERDR_LAB_HELPER" FM_HERDR_LAB_TASK="$HERDR_LAB_TASK" \
-  bin/fm-test-run.sh tests/fm-teardown-lifecycle-herdr-e2e.test.sh
-```
+The historical token-free live guard used an explicitly authorized named lab helper for every Herdr operation and restored the default-session tripwire through that helper's teardown. The rich-lifecycle fixture was removed with its subsystem; current cleanup checks use the endpoint-safety and short-operation owner suites.
 
 Observed output from real installed TUIs, without `report-agent` overrides:
 
@@ -1207,43 +1201,14 @@ The current ordinary contract does not read that transcript: exact live process 
 
 ## Independent task workspace cleanup
 
-The 2026-09-30 completed-task candidate was exercised through the real ShortTask cleanup owner using `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`, Herdr 0.8.0 / protocol 20 and the required named non-default lab helper.
-The same accepted-task fixture with a live TraeX window reproduces the old `short actor lacks a current bound operation` refusal before effects; the candidate closes that exact window, retires resource metadata and preserves the report with an owner receipt.
-The installed guard retains dirty, unmerged, pushed-but-unmerged, shared and primary copies while closing their completed windows; it removes an exclusive clean integrated linked worktree and returns a clean landed Treehouse copy.
-Its helper verifies the default fleet session is unchanged after teardown.
-The same 2026-09-30 guard was extended and passed on Herdr 0.8.0 / protocol 20 and Treehouse 2.1.1 for a managed-path alias and exact retained-copy recovery.
-Refresh it with `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`; the portable counterpart is `bin/fm-test-run.sh tests/fm-short-operations.test.sh`.
-The added guard printed `PASS live: alias return, exact pending preservation, unchanged failure/content, identity/live-child/lease/project-owner refusals, idempotent settlement and lifecycle completion`.
-The same guard also printed `PASS live: pre-preservation cleanup observation, exact original generation and step 1, changed facts/acceptance refusals`.
-It verifies recovery with an observation digest recorded before preservation fields existed, alongside receipts recorded by the current owner, without rewriting the historical digest during readback.
-Changed cleanup identity, phase/reason, journal binding, newly present preservation fields and unrelated acceptance evidence still refuse through the public recovery command.
-It verifies no additional pane close, return, or sync on recovery, unchanged failed-result bytes and dirty/shared/unmerged content, interrupted bookkeeping convergence, and refusal of changed identity, live executor or orphan child, foreign lease, and concurrent recovery locks.
-The pending-return fixture injects the historical unmanaged-path refusal; the ordinary alias-return control uses real Treehouse allocation and return.
-Recovery uses Linux kernel identity and the existing primary lock ancestry, independent of Pi, Codex, or TraeX rendered output; it is the same owner CLI for all supported primary harnesses.
-No production task or remote research provider participates; the ShortTask model is a deterministic fixture and the worker window runs a real TraeX process.
-`tests/fm-teardown-endpoint-safety.test.sh` also exercises the public endpoint-only form: obsolete, missing and malformed journals do not block completed window cleanup, while a foreign task identity, stale explicit generation or shared endpoint refuses without closing the target.
-Its open-goal and legacy preservation checks remain separate.
+Completed-task cleanup is owned by the generation-bound cleanup receipt, exact Herdr endpoint metadata, and worktree preservation checks. It is independent from compact goal progress: semantic acceptance or explicit archive admits cleanup, but cleanup phases never accept a goal.
 
-On 2026-09-30 the separately judged current-retention candidate passed the same public recovery fixture on Herdr 0.8.0 / protocol 20 in a named non-default lab.
-Refresh with `FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh`; its portable public-interface cases run in `tests/fm-short-operations.test.sh`.
-It starts with the original generation `s1790772537.1906761.31007` and a metadata-digest refusal, then supplies independent current MAIN acceptance through `settle-cleanup --current-judgment`.
-The candidate retains the original unsuccessful request/result/intent/effect/output and all dirty/shared/unmerged copy content and directory/Git identity, while publishing a distinct current-retention receipt with `originalAttempt: uncertain`.
-It observes exact launch/session/terminal/kernel ownership before retiring a present endpoint, performs no close for an already absent endpoint, and resumes interrupted bookkeeping without another close or copy disposal.
-Wrong task/home/job/index/nonce/generation, changed intent/candidate/authority/evidence, a replaced copy, an identity-ambiguous journal, live executor/child and concurrent owner refuse.
-The portable fixture also refuses replay of a pending current close while the endpoint remains present; only independently verified absence permits bookkeeping convergence.
-The lab helper's teardown verifies unchanged default fleet state. No original operational home is mutated or used as a test fixture.
+The portable short-operation suite covers exact owner readback for completed cleanup and retains attempted or uncertain effects without replay. The endpoint-safety and retirement suites cover exact-pane routing, foreign-generation refusal, merge/report delivery guards, interrupted bookkeeping, and retention of dirty, shared, primary, unlanded, or identity-ambiguous copies.
 
-On 2026-10-01 the archived/pruned bookkeeping fixture passed the same public `settle-cleanup --current-judgment` interface on Herdr 0.8.0 / protocol 20 in a named non-default lab.
-The exact live command was `FM_SHORT_HERDR_E2E=1 FM_SHORT_HERDR_LAB_HELPER=/home/chengyuhang/firstmate/bin/fm-herdr-lab.sh FM_SHORT_HERDR_LAB_LABEL=fix-pruned-backlog-cleanup-settlement-20261001 bash tests/fm-short-operations-herdr.test.sh`.
-It printed `PASS live: archived/pruned bookkeeping settles once with distinct evidence, exact reservation release, retained copy/history/originals and no endpoint or copy effects`, followed by the helper tripwire result `true` and the suite result `ok - short cleanup closes completed windows, releases landed copies and retains unsafe copies and unrelated resources`.
-The portable command `bin/fm-test-run.sh tests/fm-short-operations.test.sh` printed the corresponding `PASS portable` line and completed with `FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0`.
-The fixture starts with a unique checked configured Done-history row, archived lifecycle authority, a pruned active row, absent task metadata/cleanup receipt/pending-close marker, an absent endpoint, a surviving dirty operation-bound copy, an intact reservation and the original blocked ShortTask files.
-Settlement publishes only a distinct archived-retention proof and operation receipt with `originalAttempt: uncertain`, then releases the exact reservation; it does not call teardown or change the copy, backlog, archive, lifecycle or original failed bytes.
-Changed or missing job/task/nonce/generation/evidence/authority/reservation identity, a live runner or child, a present or newly claimed endpoint, changed directory/Git ownership and concurrent recovery all refuse before that receipt.
-The named-lab helper verified identical default fleet state after teardown, and no original operational-home cleanup was issued.
+Earlier 2026-09-30 and 2026-10-01 evidence for `settle-cleanup --current-judgment` and lifecycle-assessed recovery describes the removed rich lifecycle subsystem. Those commands and fixtures are no longer current interfaces. Historical receipts and failed-operation bytes remain readable, but no new judgment, assessment, or recovery record is created from them.
 
-The [endpoint cleanup contract](../task-lifecycle.md#remote-results-and-resource-cleanup) owns current endpoint routing and copy preservation.
-Earlier `fm-teardown-lifecycle-herdr-e2e.test.sh` results tested the former journal/process/focus admission rules and do not establish those rules for the current completed path.
+The [endpoint cleanup contract](../task-continuation.md#acceptance-archive-and-cleanup) owns current endpoint routing and copy preservation.
+Earlier removed rich-lifecycle fixture results tested former journal/process/focus admission rules and do not establish those rules for the current completed path.
 Herdr has no atomic compare-and-close transaction, so concurrent external mutations can be detected and retained but cannot be excluded by a Firstmate lock alone.
 
 ## Pi headless short tasks
@@ -1304,7 +1269,8 @@ The portable read-only companion is `tests/fm-short-agent.test.sh`; [the operato
 
 On 2026-10-01 (Asia/Shanghai), Pi 0.99.1 and Node v22.22.2 passed the resident ShortTask consumer guard after the public owner was updated in place.
 Refresh its token-free real-SDK case with `FM_SHORT_NOTIFICATION_PI_E2E=1 bin/fm-test-run.sh tests/fm-short-operations.test.sh`; the same script always runs the portable tool/event boundary.
-The current-judgment fixture retains the original blocked result and uncertain attempt while status/result read the completed cleanup receipt, notification publishes once, and changed original evidence, judgment, nonce or primary ownership refuse.
+The former current-judgment cleanup fixture belonged to the removed rich lifecycle subsystem and is no longer a current interface.
+Current status/result handling reads only an exact completed cleanup-owner receipt; an attempted cleanup without that readback remains reserved and is never replayed by ShortTask.
 The named Herdr 0.8.0 / protocol 20 lab also passed with no additional endpoint calls during notification; `FM_SHORT_NOTIFICATION_PI_E2E=1 FM_SHORT_HERDR_E2E=1 bin/fm-test-run.sh tests/fm-short-operations-herdr.test.sh` refreshes that combined guard.
 Only Pi loads this resident extension; Codex and TraeX continue using the unchanged public CLI reader.
 

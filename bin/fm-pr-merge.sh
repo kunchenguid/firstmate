@@ -371,9 +371,6 @@ if [ "${FM_SUPERVISION_ACTOR:-}" = short ]; then
   fm_lease_forbid_branch "PR merge (fm-pr-merge)"
 fi
 fm_lease_guard "$ID" "PR merge (fm-pr-merge)"
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-fm_task_lifecycle_receipt_preflight "$ID" || exit 1
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
@@ -1428,9 +1425,10 @@ esac
 # outcome while its existing poll remains armed.
 fm_short_owner_receipt "{\"head\":\"${FM_PR_MERGE_HEAD:-}\"}" || exit 1
 # Bind the forge-confirmed effect to the execution inspected by this merge.
-fm_task_lifecycle_owner_receipt "$ID" "$MERGE_EXPECTED_SPAWN_GEN" merge \
-  "$(jq -cn --arg url "$URL" --arg head "${FM_PR_MERGE_HEAD:-}" '{url:$url,head:$head}')" || {
-  echo 'actionable: merge landed but lifecycle receipt recording failed; read back the exact merge' >&2
+# shellcheck source=bin/fm-merge-receipt-lib.sh
+. "$SCRIPT_DIR/fm-merge-receipt-lib.sh"
+fm_merge_receipt_record "$ID" "$MERGE_EXPECTED_SPAWN_GEN" "$URL" "${FM_PR_MERGE_HEAD:-}" || {
+  echo 'actionable: merge landed but merge-owner receipt recording failed; read back the exact merge' >&2
   exit 1
 }
 outcome_rc=0

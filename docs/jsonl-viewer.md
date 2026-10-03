@@ -1,7 +1,7 @@
 # Task, report, and agent journal viewer
 
 `fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
-Task discovery and classification use the structured fleet snapshot, task lifecycle disposition, current backlog, and configured Done archive rather than the last status-log line.
+Task discovery and classification use the structured fleet snapshot, current backlog, and configured Done archive rather than the last status-log line.
 The only content artifacts it exposes are `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
 It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
 
@@ -31,7 +31,9 @@ The dashboard summarizes processing, waiting or blocked, and archived or cancell
 Completed records remain available through the task list and report view without being relabelled as archived.
 An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
 `Processing` counts tasks marked active, in flight, or working only when no hold condition applies.
-`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or need lifecycle reconciliation, so they are excluded from `Processing` even if another current record still says working.
+`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or have conflicting current records, so they are excluded from `Processing` even if another current record still says working.
+
+The viewer does not use retained rich lifecycle records as an ordinary task source. It may read a valid historical `archived` fact only to keep an already explicit stop labelled `Cancelled`; malformed or non-archived legacy records are ignored and never require reconciliation.
 Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.
 The initial selection remains the canonical report when present and otherwise the canonical brief.
 Tasks with a canonical report also provide an explicit Open task report action that switches to the report view without changing the canonical task identity.
