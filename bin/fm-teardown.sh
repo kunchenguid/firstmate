@@ -2445,7 +2445,7 @@ require_exclusive_task_worktree_slot() {
 # or landed through a merged PR or default-branch content. A pruned branch ref
 # is landed only through a merged PR.
 duplicate_claim_branch_is_landed() {
-  local branch owner_branch owner_ref= remaining name
+  local branch owner_branch owner_ref='' remaining name
   branch=$(fm_meta_get "$META" branch)
   if [ -z "$branch" ] || ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
     echo "REFUSED: task $ID has no valid recorded branch ref; its work cannot be proved landed without reading the live owner's checkout." >&2
