@@ -2564,6 +2564,40 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   printf '%s\n' "$run"
 }
 
+# 0 if crew <id>'s authoritative current state is an attributed no-mistakes run
+# whose step is running or fixing: the pipeline itself is executing a round, and
+# the worker is correctly idle behind its own drive call.
+# Only the whole `validating (running)` or `validating (fixing)` component that
+# bin/fm-crew-state.sh mints for an id-addressed run step counts, together with
+# its whole `run: <id>` component. A parked, terminal, ci-monitoring, coarse
+# `validating (background run)`, runless or unreadable verdict is not this
+# evidence, because none of them proves a round is executing for a named run.
+# On success it prints `<run-id> <running|fixing>`.
+# Same cost and caveat as crew_absorb_class: one fm-crew-state.sh read.
+crew_run_is_validating() {  # <id> -> "<run-id> <step>" on stdout
+  local id=$1 line state src rest part step='' run=''
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    case "$part" in
+      'validating (running)') step=running ;;
+      'validating (fixing)') step=fixing ;;
+      "run: "?*) run=${part#run: } ;;
+    esac
+  done
+  [ -n "$step" ] && [ -n "$run" ] || return 1
+  case "$run" in *[[:space:]]*) return 1 ;; esac
+  printf '%s %s\n' "$run" "$step"
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
