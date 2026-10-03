@@ -20,7 +20,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_CODEX_LIVE_E2E codex tmux
+fm_live_gate opt-in FM_CODEX_LIVE_E2E codex tmux jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAB="$ROOT/.codex-idle-live.$$"
@@ -30,11 +30,28 @@ LAB_CODEX_HOME="$LAB/codex-home"
 LOG="$LAB/hits"
 SRC="$LAB/source.sh"
 SOCKET="fm-codex-idle-continuity-$$"
+# Claims are keyed by source id under one per-user root. Sharing it lets any
+# other home that holds `shot` there keep this lab's source from ever starting.
+export FM_PROCEVENT_CLAIM_ROOT="$LAB/claims"
 CODEX_VERSION=$(codex --version)
+
+# The lab holds a copy of the operator's auth and sits in the worktree, so it
+# is always removed. What a failure needs for diagnosis is copied out first.
+keep_evidence() {
+  local kept
+  [ -d "$LAB" ] || return 0
+  kept=$(mktemp -d "${TMPDIR:-/tmp}/fm-codex-idle-live-failed.XXXXXX") || return 0
+  tmux -L "$SOCKET" capture-pane -p -S - -t idle > "$kept/pane.txt" 2>/dev/null || true
+  rollouts | while IFS= read -r rollout; do cp "$rollout" "$kept/"; done
+  cp -R "$HOME_DIR/state" "$kept/state" 2>/dev/null || true
+  cp "$LOG" "$kept/hits" 2>/dev/null || true
+  printf '# evidence kept at %s\n' "$kept" >&2
+}
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   tmux -L "$SOCKET" capture-pane -p -t idle 2>/dev/null | grep '[^[:space:]]' | tail -12 | sed 's/^/#   /' >&2
+  keep_evidence
   exit 1
 }
 
@@ -60,18 +77,26 @@ supervisor_owner() {
   cat "$HOME_DIR/state/.codex-idle-continuity.lock/owner" 2>/dev/null || true
 }
 
-pane_text() {
-  tmux -L "$SOCKET" capture-pane -p -S -300 -t idle 2>/dev/null || true
+rollouts() {
+  find "$LAB_CODEX_HOME/sessions" -name 'rollout-*.jsonl' 2>/dev/null
 }
 
 supervisor_started_watcher() {
   grep -q '^watcher: started ' "$HOME_DIR/state/.codex-idle-continuity.lock/arm.out" 2>/dev/null
 }
 
-# A queued close arrives as a prompt line. Tool output of an in-turn
-# checkpoint can print the same text, and it does not count.
+# A queued close is recorded in the session rollout as a user message. Tool
+# output of an in-turn checkpoint can print the same text; it is recorded as a
+# tool result and does not count. The pane is not read for this: its prompt
+# lines come and go as Codex redraws, so a delivered close can be missed there.
+# `fromjson?` skips the line Codex is still writing.
 captures() {
-  pane_text | grep -c '^› check: process-event result captured' || true
+  rollouts | while IFS= read -r rollout; do cat "$rollout"; done | jq -R -r '
+    fromjson?
+    | select(.type == "response_item" and .payload.type == "message" and .payload.role == "user")
+    | .payload.content[]?.text // empty
+    | select(startswith("check: process-event result captured"))
+  ' | grep -c . || true
 }
 
 send_prompt() {
@@ -96,10 +121,11 @@ printf 'x\n' >> '$LOG'
 sleep 20
 EOF
 chmod +x "$SRC"
-fm_test_track_procevent_home "$HOME_DIR"
+fm_test_track_procevent_home "$HOME_DIR" "$FM_PROCEVENT_CLAIM_ROOT"
 
 tmux -L "$SOCKET" new-session -d -s idle -x 160 -y 45 -c "$PROJECT" -- env \
-  CODEX_HOME="$LAB_CODEX_HOME" FM_HOME="$HOME_DIR" FM_POLL=1 codex \
+  CODEX_HOME="$LAB_CODEX_HOME" FM_HOME="$HOME_DIR" FM_POLL=1 \
+  FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" codex \
   --dangerously-bypass-hook-trust \
   --dangerously-bypass-approvals-and-sandbox \
   -c 'model_reasoning_effort="low"' \

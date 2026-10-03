@@ -16,6 +16,9 @@ QUEUE="$TMP_ROOT/queue"
 SRC="$TMP_ROOT/source.sh"
 QUEUE_BIN="$TMP_ROOT/queue.sh"
 CONT="$ROOT/bin/fm-codex-idle-continuity.sh"
+# Claims are keyed by source id under one per-user root, so a second home that
+# registers the same id there finds it owned and never starts its source.
+export FM_PROCEVENT_CLAIM_ROOT="$TMP_ROOT/claims"
 
 fail() { [ -z "${owner:-}" ] || kill "$owner" 2>/dev/null; printf 'not ok - %s\n' "$1" >&2; exit 1; }
 
@@ -32,7 +35,7 @@ cat > "$QUEUE_BIN" <<EOF
 cat >> '$QUEUE'
 EOF
 chmod +x "$QUEUE_BIN"
-fm_test_track_procevent_home "$HOME_DIR"
+fm_test_track_procevent_home "$HOME_DIR" "$FM_PROCEVENT_CLAIM_ROOT"
 
 hits() { wc -l < "$LOG" | tr -d ' '; }
 
@@ -149,7 +152,7 @@ git init -q "$TURNS"
 : > "$TURNS/AGENTS.md"
 printf '#!/bin/sh\nexec sleep 600\n' > "$PERPETUAL"
 chmod +x "$PERPETUAL"
-fm_test_track_procevent_home "$TURNS"
+fm_test_track_procevent_home "$TURNS" "$FM_PROCEVENT_CLAIM_ROOT"
 FM_HOME="$TURNS" "$ROOT/bin/fm-procevent.sh" register lavish forever -- "$PERPETUAL" >/dev/null \
   || fail "could not register the perpetual source"
 
