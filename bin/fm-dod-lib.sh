@@ -38,6 +38,17 @@
 # also hold the result of a passed run. These live reads are the one check at the ready
 # decision; a later rebase or patch set on the server does not revoke an armed
 # task's done. Teardown's landed-work test remains the complete discard gate.
+# A gated done naming a canonical pull request the task's record does not carry
+# yet is a timing window, not lost work: the review gate pushes before
+# bin/fm-pr-check.sh, the separate step that writes pr= and pr_head=, can leave a
+# remote-tracking ref either copy could see, and the report is read whether or not
+# it carries a time tag. Such a report returns FM_DOD_RC_WAIT_PR_RECORD and is
+# re-read once that step lands. The wait states only what the reader can see, that
+# the record holds neither that pull request nor a refusal of it, and draws
+# nothing from elapsed time, because nothing here can tell a recording that never
+# ran from one not yet reached. The recording step's own recorded refusal
+# (state/<id>.pr-record-refused) restores the full alarm at once. A note that names
+# no canonical pull request keeps today's refusal.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against; a forge=gerrit block
 # appends " forge=gerrit shape=squash" to that line. The "Ship branch: <branch>"
@@ -628,19 +639,146 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
+# The verdict fm_dod_accept_ship_done returns for a gated ship done: naming a
+# pull request the task's record does not carry yet. Not accepted, and not the
+# lost-work alarm: callers treat 1 as the alarm and this as a wait that the next
+# read re-derives.
+FM_DOD_RC_WAIT_PR_RECORD=2
+
+# state/<id>.pr-record-refused: why bin/fm-pr-check.sh last refused to record this
+# task's pull request, so a refused recording reads as the alarm it is rather than
+# waiting. Six lines - format token, provider, host, path, number, reason - shaped
+# like bin/fm-merge-authority-lib.sh's marker and read with its strict six-read, but
+# deliberately taking none of that marker's guarantees: no .lock around the publish
+# and no single writer, so the last refused run wins and the text stays a
+# diagnostic. Its reason states the last observation, not the first: a later run that
+# reached the delivery gate refreshes it, and only a successful record clears it.
+# It is removed at teardown with the other per-task PR artifacts.
+fm_dod_pr_refusal_write() {  # <state> <id> <url> <reason>
+  local state=$1 id=$2 url=$3 reason=${4:-} marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  # One line and bounded: the reader quotes this text inside the captain-facing
+  # lost-work line, so it holds only the one cause this run stated and cannot grow.
+  reason=${reason//$'\n'/ }
+  [ ${#reason} -le 512 ] || reason=${reason:0:512}
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-record-refused"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  tmp=$(umask 077; mktemp "$state/.fm-pr-record-refused.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n' fm-pr-record-refused-v1 \
+      "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" \
+      > "$tmp" \
+    || ! printf '%s\n%s\n' "$FM_PR_NUMBER" "$reason" >> "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  return 0
+}
+
+# What this task's record says about one pull request, read case-folded the way a
+# forge resolves it.
+# Returns 0 with the one-line reason on stdout when the record names exactly this
+# pull request; 1 when the task has no record or none a reader can resolve, which
+# alarms nobody; and 2 when a readable record names a different pull request, which
+# is that other report's verdict rather than this pull request's.
+fm_dod_pr_refusal_reason() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3 marker state_device version provider host path number reason
+  fm_pr_task_id_valid "$id" || return 1
+  fm_pr_url_parse "$url" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-record-refused"
+  fm_pr_private_file_valid "$marker" 600 "$state_device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  IFS= read -r reason <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  # A record whose own identity fields are empty resolves to no pull request at all,
+  # so it is unreadable rather than another pull request's verdict.
+  [ -n "$provider" ] && [ -n "$host" ] && [ -n "$path" ] && [ -n "$number" ] \
+    || return 1
+  # A forge resolves an owner and repository without case, so the identity is
+  # compared case-folded: one pull request keeps one identity whichever spelling a
+  # report or a recording run arrived with.
+  if [ "$version" = fm-pr-record-refused-v1 ] \
+    && [ "$provider" = "$FM_PR_PROVIDER" ] \
+    && [ "${host,,}" = "${FM_PR_HOST,,}" ] \
+    && [ "${path,,}" = "${FM_PR_PATH,,}" ] \
+    && [ "$number" = "$FM_PR_NUMBER" ]; then
+    printf '%s\n' "$reason"
+    return 0
+  fi
+  return 2
+}
+
+# State what a later recording run observed about a pull request it is still
+# refusing, and leave the record itself standing: only a successful record clears
+# it. A run that reached the delivery gate passed every check that could have
+# stated the stored cause, so that cause is disproved whether or not this run
+# learned anything new about the pull request. Nothing is created here - a run
+# that refused no state of the pull request must not leave a record behind, since
+# that is what turns the recording window into the durable alarm.
+fm_dod_pr_refusal_refresh() {  # <state> <id> <url> <reason>
+  local state=$1 id=$2 url=$3 reason=$4
+  fm_dod_pr_refusal_reason "$state" "$id" "$url" >/dev/null || return 1
+  fm_dod_pr_refusal_write "$state" "$id" "$url" "$reason"
+}
+
+# Drop the record once a later run records the pull request it named, so a lane that
+# was refused and then fixed never reads as lost work again. The record names the
+# pull request it refused, so a run that recorded a different one leaves it
+# standing: a report naming the still-unrecorded pull request has to keep reading as
+# the refusal it was given. The identity comes from the record itself, since the
+# caller cannot see which pull request a stored line names.
+# Returns 0 when nothing names this pull request any more, 1 when a readable record
+# naming a different pull request stands, and 2 when the record's place holds
+# something this run could not clear.
+fm_dod_pr_refusal_remove() {  # <state> <id> <url>
+  local state=$1 id=$2 url=$3 marker reason_rc=0
+  fm_pr_task_id_valid "$id" || return 2
+  fm_pr_url_parse "$url" || return 2
+  marker="$state/$id.pr-record-refused"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 2
+  fm_dod_pr_refusal_reason "$state" "$id" "$url" >/dev/null || reason_rc=$?
+  case "$reason_rc" in
+    0) ;;
+    2) return 1 ;;
+    *) return 2 ;;
+  esac
+  rm -f -- "$marker" || return 2
+}
+
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
 # head - the worker copy's HEAD - is reachable outside that disposable copy. A
 # published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
-# not the named head. 1 when
-# the claim is refused; stdout then holds a one-line reason and no other
-# output. <state> <id> <meta> supply pr=,
-# pr_head=, and the merge-notified marker; <meta> may be a captured copy
-# (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
+# not the named head. 1 when the claim is refused; stdout
+# then holds a one-line reason and no other output. FM_DOD_RC_WAIT_PR_RECORD when
+# the unreachable head belongs to a canonical pull request the record does not
+# carry yet, which is the wait the header states rather than the alarm. <state>
+# <id> <meta> supply pr=, pr_head=, the merge-notified marker, and the recording
+# refusal; <meta> may be a captured copy (bin/fm-fleet-snapshot.sh), so the
+# marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
+  local refusal
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -678,6 +816,24 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     return 0
   fi
+  # The named head is nowhere but this copy, yet the report names a canonical
+  # pull request this task's record does not carry: the review gate's own push can
+  # outrun the refs either copy reads, and the step that writes pr= and pr_head= is
+  # a separate call, so this is a timing window, not lost work. Only that step's
+  # own recorded refusal makes the alarm. The wait itself claims nothing about
+  # elapsed time, because nothing here can tell a recording that never ran from
+  # one not yet reached.
+  if [ -n "$url" ] && fm_pr_url_parse "$url" \
+    && [ "$mode" != local-only ] \
+    && [ "$(fm_dod_meta_value "$meta" pr)" != "$url" ]; then
+    if refusal=$(fm_dod_pr_refusal_reason "$state" "$id" "$url"); then
+      printf '%s\n' "named head $sha is unreachable outside the worker copy, and recording $url was refused: $refusal"
+      return 1
+    fi
+    printf '%s\n' "waiting on the PR record for $url: the task's record carries no pr= or pr_head= for it, while named head $sha is not yet reachable outside the worker copy"
+    return "$FM_DOD_RC_WAIT_PR_RECORD"
+  fi
+
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1
 }

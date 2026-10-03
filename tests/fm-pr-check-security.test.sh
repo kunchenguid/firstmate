@@ -693,9 +693,53 @@ test_secondmate_record_refuses_a_pr_watch() {
     || fail "the refusal changed secondmate metadata"
   [ ! -e "$dir/home/state/domain.check.sh" ] || fail "the refusal armed a poll on a secondmate"
   [ ! -e "$dir/home/state/domain.pr-poll" ] || fail "the refusal wrote a poll sidecar on a secondmate"
+  [ ! -e "$dir/home/state/domain.pr-record-refused" ] \
+    || fail "the refusal recorded a refusal this reader can never consult"
   [ ! -s "$dir/gh.log" ] || fail "the refusal reached the forge"
   [ ! -s "$dir/guard.log" ] || fail "the refusal reached the guard"
   pass "fm-pr-check refuses to record a PR or arm a merge watch on a secondmate record"
+}
+
+# The recorded refusal has one reader - the gate's wait - and that wait exists only
+# for a ship lane whose pull request is on github or gitlab. A Gerrit refusal names
+# its reason and exits, leaving no state that reader can never reach.
+test_a_gerrit_tooling_refusal_records_nothing() {
+  local dir state out rc noaxi bindir entry name
+  dir=$(make_case gerrit-refusal-records-nothing)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-noaxi
+  noaxi="$dir/noaxi"
+  mkdir -p "$noaxi"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = gerrit-axi ] && continue
+      [ -e "$noaxi/$name" ] || ln -s "$entry" "$noaxi/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$noaxi" command -v gerrit-axi >/dev/null 2>&1 \
+    || fail "the gerrit-axi-free search path still resolved gerrit-axi"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+    PATH="$noaxi" "$PR_CHECK" task-noaxi \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming a Gerrit watch succeeded with gerrit-axi absent"
+  case "$out" in
+    *"requires gerrit-axi on PATH"*) ;;
+    *) fail "the Gerrit refusal did not report the missing CLI: $out" ;;
+  esac
+  [ ! -e "$state/task-noaxi.pr-record-refused" ] \
+    || fail "a refusal no reader consults left a recorded refusal behind"
+  [ ! -e "$state/task-noaxi.check.sh" ] || fail "the refused Gerrit arming left a poll armed"
+  pass "a Gerrit tooling refusal names its reason and records no refusal"
 }
 
 # With no forge-reported head (gh cannot supply one), the named head is the
@@ -708,12 +752,114 @@ test_unpushed_named_head_refuses_registration() {
   sha=$(git -C "$dir/wt" rev-parse HEAD)
   FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
     > "$dir/stdout" 2> "$dir/stderr" && fail "unpushed PR head was registered"
-  grep -Fq "named head $sha is unreachable outside the worker copy" "$dir/stderr" \
+  grep -Fq "named head $sha is not yet reachable outside the worker copy" "$dir/stderr" \
     || fail "refusal did not name the unreachable head: $(cat "$dir/stderr")"
   ! grep -q '^pr=' "$dir/home/state/task-a.meta" || fail "unpushed PR head still recorded pr="
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "unpushed PR head still armed a poll"
+  [ ! -e "$dir/home/state/task-a.pr-record-refused" ] \
+    || fail "the named-head verdict persisted a refusal this step cannot tell from its own window"
   pass "fm-pr-check refuses to register a PR whose named head is only in the worker copy"
 }
+
+# The status bin/fm-dod-lib.sh answers for a pull request whose record is missing,
+# read from the library that owns it so a caller-side test cannot drift from it.
+pr_check_wait_status() {
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-dod-lib.sh"
+    printf '%s\n' "$FM_DOD_RC_WAIT_PR_RECORD"
+  )
+}
+
+# The same named-head report is a wait while no record exists for the pull request
+# the report names, so it must not arrive with a failure's framing.
+test_a_wait_for_the_pr_record_is_not_printed_as_a_failure() {
+  local dir sha rc wait_rc
+  dir=$(make_case wait-not-failure)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  wait_rc=$(pr_check_wait_status)
+  rc=0
+  FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pull request with no record yet was registered"
+  # Read from the process rather than from a helper's return: this status is what
+  # a caller that runs the check has to work from.
+  [ "$rc" -eq "$wait_rc" ] \
+    || fail "the wait left status $rc, which a caller reads as a refused recording, not $wait_rc: $(cat "$dir/stderr")"
+  grep -Fq "waiting on the PR record for https://github.com/o/r/pull/4" "$dir/stderr" \
+    || fail "the wait did not report itself waiting: $(cat "$dir/stderr")"
+  grep -Fq "named head $sha is not yet reachable outside the worker copy" "$dir/stderr" \
+    || fail "the wait lost the head it is waiting on: $(cat "$dir/stderr")"
+  ! grep -q '^error: ' "$dir/stderr" \
+    || fail "the wait was printed with a failure's framing: $(cat "$dir/stderr")"
+  pass "fm-pr-check waits for a pull request that has no record yet"
+}
+
+# A stored refusal makes the same report the lost-work alarm, so it keeps the error
+# treatment and the cause it names.
+test_a_delivery_gate_refusal_is_printed_as_a_failure_naming_its_cause() {
+  local dir
+  dir=$(make_case gate-refusal-names-cause)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was registered"
+  FM_TEST_GH_DRAFT=false FM_TEST_GH_HEAD=unavailable \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a refused pull request was registered"
+  grep -Eq '^error: named head .+ is unreachable outside the worker copy' "$dir/stderr" \
+    || fail "the refusal was not printed as a failure: $(cat "$dir/stderr")"
+  grep -Eq 'and recording https://github.com/o/r/pull/4 was refused: .+' "$dir/stderr" \
+    || fail "the refusal named no cause: $(cat "$dir/stderr")"
+  pass "fm-pr-check prints a refusal as a failure naming its cause"
+}
+# A refusal nobody recorded reads to the next reader as a pull request still waiting
+# on its record, the very pause this step exists to tell apart from lost work. When
+# the record cannot be written, the run has to say so rather than leave that verdict
+# to a file that does not exist.
+test_a_refusal_that_cannot_be_recorded_names_the_missing_record() {
+  local dir
+  dir=$(make_case refusal-unrecordable)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  # The record's own destination is a directory, so no private write can land there.
+  mkdir -p "$dir/home/state/task-a.pr-record-refused"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was registered"
+  grep -qi 'draft' "$dir/stderr" \
+    || fail "the refusal lost the cause it stated: $(cat "$dir/stderr")"
+  grep -Fq 'could not record the refusal above for https://github.com/o/r/pull/4' "$dir/stderr" \
+    || fail "a refusal nobody can read back was reported as an ordinary failure: $(cat "$dir/stderr")"
+  pass "a refusal that cannot be recorded names the record a later reader needs"
+}
+
+# A refusal record exists to be read back later, so a successful record that cannot
+# clear the record it spent leaves an alarm nobody can resolve. The run says so
+# rather than register the pull request beside it.
+test_a_refusal_record_that_recording_cannot_clear_is_reported() {
+  local dir refusal
+  dir=$(make_case refusal-unclearable)
+  write_task_meta "$dir"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was registered"
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  [ -f "$refusal" ] || fail "the draft refusal left no record: $(cat "$dir/stderr")"
+  # The draft is resolved and the forge names the head, so this run records. The
+  # record's place is now held by a directory, so nothing can clear it.
+  rm -f -- "$refusal"
+  mkdir -p "$refusal"
+  FM_TEST_GH_DRAFT=false FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a run that cleared nothing reported success"
+  grep -Fq 'the refusal record for it could not be cleared' "$dir/stderr" \
+    || fail "a refusal record that outlived its cause was swallowed: $(cat "$dir/stderr")"
+  grep -Fq 'pr=https://github.com/o/r/pull/4' "$dir/home/state/task-a.meta" \
+    || fail "the pull request this run recorded is missing from the task's record"
+  pass "a refusal record that recording cannot clear is reported, not swallowed"
+}
+
 
 # A direct-PR worker pushes from its own copy: the forge still reports the
 # head pushed when the PR opened, but a later fix committed only in the copy
@@ -729,10 +875,150 @@ test_direct_pr_unpushed_commit_refuses_registration() {
   later=$(git -C "$dir/wt" rev-parse HEAD)
   FM_TEST_GH_HEAD=$pushed run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
     > "$dir/stdout" 2> "$dir/stderr" && fail "direct-PR head with an unpushed later commit was registered"
-  grep -Fq "named head $later is unreachable outside the worker copy" "$dir/stderr" \
+  grep -Fq "named head $later is not yet reachable outside the worker copy" "$dir/stderr" \
     || fail "direct-PR refusal did not name the unpushed commit: $(cat "$dir/stderr")"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "direct-PR unpushed commit still armed a poll"
   pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
+}
+
+# A refusal that names a state of the pull request itself is a verdict this step
+# reached on the forge, so it has to outlive the call that printed it and a later
+# successful record has to spend it. The reader's named-head verdict is the
+# exception: this step asked the reader about a report it built, so that verdict
+# cannot tell an unsaved head from the recording window and leaves nothing behind.
+test_recording_refusal_is_recorded_and_cleared() {
+  local dir sha refusal
+  dir=$(make_case refusal-recorded-and-cleared)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  sha=$(git -C "$dir/wt" rev-parse HEAD)
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "an unpushed PR head was recorded"
+  grep -Fq "named head $sha is not yet reachable outside the worker copy" "$dir/stderr" \
+    || fail "the named-head refusal did not name the head: $(cat "$dir/stderr")"
+  [ ! -e "$refusal" ] \
+    || fail "the named-head verdict persisted a refusal this step cannot tell from its own window"
+
+  dir=$(make_case pull-state-refusal-cleared)
+  write_task_meta "$dir"
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was recorded"
+  [ -f "$refusal" ] || fail "the refusal to record left nothing for a later read: $(cat "$dir/stderr")"
+  [ "$(file_mode "$refusal")" = 600 ] || fail "the recording refusal was not private"
+  grep -qi 'draft' "$refusal" \
+    || fail "the recording refusal lost the reason it gave: $(cat "$refusal")"
+  grep -qxF '4' "$refusal" || fail "the recording refusal did not bind the pull request number"
+  FM_TEST_GH_DRAFT=false FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "recording the PR after the refusal failed: $(cat "$dir/stderr")"
+  [ ! -e "$refusal" ] || fail "a successful record left the earlier refusal in place"
+  pass "fm-pr-check records a refusal of the pull request itself and clears it once recorded"
+}
+
+# The recorded refusal states the last observation, not the first. Only a
+# successful record clears it, so a run that reaches the delivery gate - and so
+# passed every check that could have stated the stored cause - keeps the record and
+# its alarm standing and says what it saw instead of still naming a tool or a state
+# this run disproved.
+read_refusal_verdict() {  # <dir> <id> <line>  stdout: verdict reason, rc: verdict
+  local dir=$1 id=$2 line=$3
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-dod-lib.sh"
+    fm_dod_accept_ship_done ship no-mistakes "$dir/wt" "$dir/project" "$line" \
+      "$dir/home/state" "$id" "$dir/home/state/$id.meta"
+  )
+}
+
+test_a_disproved_refusal_cause_states_what_the_rerun_saw() {
+  local dir refusal reason rc
+  dir=$(make_case refusal-cause-refreshed)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was recorded"
+  [ -f "$refusal" ] || fail "the draft refusal left no record: $(cat "$dir/stderr")"
+  grep -qi 'draft' "$refusal" \
+    || fail "the record lost the draft cause: $(cat "$refusal")"
+  # The draft is gone and the forge names no head, so this run reaches the delivery
+  # gate, which refuses while naming the cause it read from the stored record.
+  FM_TEST_GH_DRAFT=false FM_TEST_GH_HEAD=unavailable \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a run with no forge head recorded the pull request"
+  grep -Fq 'and recording https://github.com/o/r/pull/4 was refused:' "$dir/stderr" \
+    || fail "the rerun did not reach the delivery gate: $(cat "$dir/stderr")"
+  [ -f "$refusal" ] || fail "a run that recorded nothing cleared the earlier refusal"
+  [ "$(file_mode "$refusal")" = 600 ] || fail "the refreshed record was not private"
+  grep -qxF '4' "$refusal" || fail "the refreshed record lost its pull request binding"
+  if grep -qi 'draft' "$refusal"; then
+    fail "the alarm still names a cause this run disproved: $(cat "$refusal")"
+  fi
+  grep -q 'delivery gate' "$refusal" \
+    || fail "the record does not say what this run observed: $(cat "$refusal")"
+  reason=$(read_refusal_verdict "$dir" task-a 'done: PR https://github.com/o/r/pull/4 checks green') \
+    && rc=0 || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "the refreshed record stopped restoring the lost-work alarm (exit $rc)"
+  case "$reason" in
+    *'unreachable outside the worker copy, and recording https://github.com/o/r/pull/4 was refused: the delivery gate'*) ;;
+    *) fail "the alarm lost the cause the rerun observed: $reason" ;;
+  esac
+  pass "a rerun that disproved the stored cause leaves the alarm naming what it saw"
+}
+
+# What a refusing run reports is the cause its record carries once this run has
+# brought it up to date, so a run that passed the check that stated an earlier cause
+# reports its own instead of repeating one it disproved. The status stays a refusal,
+# never the wait a pull request with no record yet is given.
+test_the_rerun_reports_the_cause_it_observed_not_the_stored_one() {
+  local dir refusal rc
+  dir=$(make_case refusal-cause-reported)
+  write_task_meta "$dir"
+  git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was recorded"
+  [ -f "$refusal" ] || fail "the draft refusal left no record: $(cat "$dir/stderr")"
+  # The draft is resolved and the forge names no head, so this run reaches the
+  # delivery gate while the earlier cause is still the one on disk.
+  rc=0
+  FM_TEST_GH_DRAFT=false FM_TEST_GH_HEAD=unavailable \
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/rerun.stderr" || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a refused recording left status $rc rather than a refusal: $(cat "$dir/rerun.stderr")"
+  grep -Fq 'and recording https://github.com/o/r/pull/4 was refused: ' "$dir/rerun.stderr" \
+    || fail "the rerun did not reach the delivery gate: $(cat "$dir/rerun.stderr")"
+  if grep -qi 'draft' "$dir/rerun.stderr"; then
+    fail "the rerun reported the cause it disproved: $(cat "$dir/rerun.stderr")"
+  fi
+  grep -Fq "the delivery gate did not accept this run's ready report" "$dir/rerun.stderr" \
+    || fail "the rerun named no cause of its own: $(cat "$dir/rerun.stderr")"
+  [ -f "$refusal" ] \
+    || fail "a run that recorded nothing cleared the refusal a later read needs"
+  pass "a refusing run reports the cause it observed rather than the stored one"
+}
+
+# A run that fails the very same check again learned nothing, so the stored cause
+# is left exactly as it was: refreshing it is for a run that passed the check.
+test_a_run_that_failed_the_same_check_leaves_the_cause_alone() {
+  local dir refusal snapshot
+  dir=$(make_case refusal-cause-unchanged)
+  write_task_meta "$dir"
+  refusal="$dir/home/state/task-a.pr-record-refused"
+  snapshot="$dir/refusal.first"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "a draft pull request was recorded"
+  [ -f "$refusal" ] || fail "the draft refusal left no record: $(cat "$dir/stderr")"
+  cp "$refusal" "$snapshot"
+  FM_TEST_GH_DRAFT=true run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "the second draft refusal recorded the pull request"
+  cmp -s "$snapshot" "$refusal" \
+    || fail "a run that learned nothing changed the recorded cause: $(cat "$refusal")"
+  pass "a rerun that failed the same check leaves the recorded cause untouched"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -1459,6 +1745,7 @@ test_teardown_removes_poll_artifacts() {
   printf 'data\n' > "$dir/home/state/task-a.pr-poll"
   printf 'registration\n' > "$dir/home/state/task-a.pr-poll-registration"
   printf 'trust\n' > "$dir/home/state/task-a.check-trust"
+  printf 'refusal\n' > "$dir/home/state/task-a.pr-record-refused"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1473,6 +1760,7 @@ SH
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
   [ ! -e "$dir/home/state/task-a.pr-poll-registration" ] || fail "teardown left the PR poll registration"
   [ ! -e "$dir/home/state/task-a.check-trust" ] || fail "teardown left the custom check registration"
+  [ ! -e "$dir/home/state/task-a.pr-record-refused" ] || fail "teardown left the recorded PR refusal"
 
   dir=$(make_case teardown-retirement-receipt)
   fakebin="$dir/fakebin"
@@ -3466,8 +3754,17 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
 test_secondmate_record_refuses_a_pr_watch
+test_a_gerrit_tooling_refusal_records_nothing
 test_unpushed_named_head_refuses_registration
+test_a_wait_for_the_pr_record_is_not_printed_as_a_failure
+test_a_delivery_gate_refusal_is_printed_as_a_failure_naming_its_cause
+test_a_refusal_that_cannot_be_recorded_names_the_missing_record
+test_a_refusal_record_that_recording_cannot_clear_is_reported
 test_direct_pr_unpushed_commit_refuses_registration
+test_recording_refusal_is_recorded_and_cleared
+test_a_disproved_refusal_cause_states_what_the_rerun_saw
+test_the_rerun_reports_the_cause_it_observed_not_the_stored_one
+test_a_run_that_failed_the_same_check_leaves_the_cause_alone
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
