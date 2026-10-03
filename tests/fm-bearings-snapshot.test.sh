@@ -77,7 +77,15 @@ SH
 echo "curl $*" >> "$NET_LOG"
 exit 1
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl"
+  # Live host listeners must not leak into deterministic fixtures: the default
+  # stub reports no listeners, so servers[] stays empty unless a test installs
+  # its own talking lsof. Preview services are neutralized the same way by
+  # run(), which points FM_BEARINGS_PREVIEW_DIR at an empty dir.
+  cat > "$fb/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/gh" "$fb/gh-axi" "$fb/curl" "$fb/lsof"
   printf '%s\n' "$fb"
 }
 
@@ -209,11 +217,12 @@ refresh_local_secondmate_ledgers() {  # <parent-home>
 
 run() {  # <home> <fakebin> <args...>
   local home=$1 fakebin=$2; shift 2
+  mkdir -p "$home/no-previews"
   case " $* " in
     *" --all-landed "*) PATH="$fakebin:$PATH" FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME=0 refresh_local_secondmate_ledgers "$home" ;;
     *) PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home" ;;
   esac
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" "$BEARINGS" "$@"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" FM_BEARINGS_PREVIEW_DIR="${FM_BEARINGS_PREVIEW_DIR:-$home/no-previews}" "$BEARINGS" "$@"
 }
 
 run_captain() {  # <home> <fakebin> <command args...>
@@ -2915,6 +2924,172 @@ EOF
   pass "main and secondmate captain actionability use the same blocker readiness"
 }
 
+# Live servers + branch projections come from live state only: talking lsof/ps/
+# launchctl stubs, a fixture preview dir, and real git clones under the fixture
+# projects dir. The default fakebin lsof stays silent so every other fixture in
+# this file keeps its deterministic empty servers[].
+write_live_state_stubs() {  # <fakebin> <home>
+  local fakebin=$1 home=$2
+  cat > "$fakebin/lsof" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *-iTCP*)
+    printf 'p111\ncnodedev\nf11\nn127.0.0.1:3101 (LISTEN)\n'
+    printf 'p333\ncsystem\nf9\nn*:5000 (LISTEN)\n'
+    ;;
+  *-iUDP*)
+    printf 'p222\ncnodedev\nf12\nn*:5349\n'
+    ;;
+  *-p*111*) printf 'p111\nfcwd\nn$home/projects/alpha\n' ;;
+  *-p*222*) printf 'p222\nfcwd\nn$home/projects/beta\n' ;;
+  *-p*333*) printf 'p333\nfcwd\nn/tmp\n' ;;
+esac
+exit 0
+EOF
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+pids=${*: -1}
+pids=${pids//,/ }
+for p in $pids; do
+  case "$*" in
+    *pid=*) printf '  %s    01:02:03\n' "$p" ;;
+    *) printf '01:02:03\n' ;;
+  esac
+done
+exit 0
+SH
+  cat > "$fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+printf 'PID\tStatus\tLabel\n444\t0\tcom.firstmate.preview-gamma\n-\t0\tcom.firstmate.preview-alpha\n'
+exit 0
+SH
+  chmod +x "$fakebin/lsof" "$fakebin/ps" "$fakebin/launchctl"
+}
+
+write_preview_fixtures() {  # <dir> <alpha-workdir>
+  local dir=$1 alpha=$2
+  mkdir -p "$dir"
+  cat > "$dir/com.firstmate.preview-alpha.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.firstmate.preview-alpha</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>bun</string>
+    <string>run</string>
+    <string>dev</string>
+    <string>--port</string>
+    <string>3101</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$alpha</string>
+</dict>
+</plist>
+EOF
+  cat > "$dir/com.firstmate.preview-gamma.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.firstmate.preview-gamma</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>bun</string>
+    <string>run</string>
+    <string>dev</string>
+    <string>--port</string>
+    <string>3200</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/gamma</string>
+</dict>
+</plist>
+EOF
+}
+
+test_servers_and_branches_project_live_state() {
+  local home fakebin json toon previews
+  home=$(make_home live-servers)
+  mkdir -p "$home/projects/alpha" "$home/projects/beta"
+  fm_git_init_commit "$home/projects/alpha"
+  git -C "$home/projects/alpha" checkout -qb feature-alpha
+  printf 'dirty\n' > "$home/projects/alpha/work.txt"
+  fm_git_init_commit "$home/projects/beta"
+  : > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  write_live_state_stubs "$fakebin" "$home"
+  previews="$home/previews"
+  write_preview_fixtures "$previews" "$home/projects/alpha"
+  json=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg home "$home" '
+    (.servers | length) == 3
+      and (.servers | any(.project == "alpha" and .proto == "TCP" and .port == 3101 and .pid == 111
+        and .uptime == "01:02:03" and .dir == ($home + "/projects/alpha")))
+      and (.servers | any(.project == "beta" and .proto == "UDP" and .port == 5349 and .pid == 222))
+      and (.servers | any(.project == "gamma" and .port == 3200 and .pid == 444
+        and .dir == "/opt/gamma"))
+      and ([.servers[] | select(.port == 3101)] | length) == 1
+      and (.servers | any(.pid == 333) | not)
+      and (.project_branches | length) == 2
+      and (.project_branches | any(.project == "alpha" and .branch == "feature-alpha"
+        and .clean == false))
+      and (.project_branches | any(.project == "beta" and .branch == "main"
+        and .clean == true))
+  ' >/dev/null || fail "live servers or clone branches were not projected: $json"
+  toon=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin")
+  assert_contains "$toon" 'servers[3]{project,proto,port,pid,uptime,dir}:' "TOON must carry the servers table"
+  assert_contains "$toon" 'project_branches[2]{project,branch,clean}:' "TOON must carry the branches table"
+  assert_contains "$toon" 'alpha,TCP,3101,111' "TOON servers must match the JSON projection"
+  pass "live listeners, preview services, and clone branches are projected with TOON parity"
+}
+
+test_server_and_branch_bounds_are_disclosed() {
+  local home fakebin json previews
+  home=$(make_home live-bounds)
+  mkdir -p "$home/projects/alpha" "$home/projects/beta"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_init_commit "$home/projects/beta"
+  : > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  write_live_state_stubs "$fakebin" "$home"
+  previews="$home/previews"
+  write_preview_fixtures "$previews" "$home/projects/alpha"
+  json=$(FM_BEARINGS_PREVIEW_DIR="$previews" FM_BEARINGS_SERVERS=1 FM_BEARINGS_BRANCHES=1 \
+    run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.servers | length) == 1
+      and (.project_branches | length) == 1
+      and (.omitted | any(.surface == "servers showing 1 of 3" and .reveal == "raise FM_BEARINGS_SERVERS"))
+      and (.omitted | any(.surface == "project_branches showing 1 of 2" and .reveal == "raise FM_BEARINGS_BRANCHES"))
+  ' >/dev/null || fail "server or branch bounds were not disclosed: $json"
+  pass "server and branch bounds truncate with omitted disclosure"
+}
+
+test_servers_disclose_listener_failure_without_aborting() {
+  local home fakebin json previews
+  home=$(make_home live-degraded)
+  mkdir -p "$home/projects/alpha"
+  fm_git_init_commit "$home/projects/alpha"
+  : > "$home/data/backlog.md"
+  fakebin=$(make_fakebin "$home")
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/lsof"
+  previews="$home/previews"
+  write_preview_fixtures "$previews" "$home/projects/alpha"
+  json=$(FM_BEARINGS_PREVIEW_DIR="$previews" run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.servers | length) == 0
+      and (.omitted | any(.surface | contains("listener table incomplete")))
+      and (.project_branches | length) == 1
+  ' >/dev/null || fail "listener failure did not degrade to a disclosed empty servers table: $json"
+  pass "a failed listener table discloses the omission without aborting"
+}
+
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot() {
   local home fakebin real_cp output snapshot_pid i
   home=$(make_home metadata-teardown-race)
@@ -3354,6 +3529,9 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_servers_and_branches_project_live_state
+test_server_and_branch_bounds_are_disclosed
+test_servers_disclose_listener_failure_without_aborting
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
