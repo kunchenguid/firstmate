@@ -32,7 +32,7 @@ REGISTRY_PARSE_SH = (
     'source "$1" || exit 1\n'
     "while IFS= read -r line || [ -n \"$line\" ]; do\n"
     "  secondmate_registry_parse_line \"$line\" || continue\n"
-    '  printf \'%s\\t%s\\t%s\\n\' '
+    '  printf \'%s\\0%s\\0%s\\0\' '
     '"$SECONDMATE_REGISTRY_ID" "$SECONDMATE_REGISTRY_HOME" "$SECONDMATE_REGISTRY_SCOPE"\n'
     "done\n"
 )
@@ -129,12 +129,9 @@ def parse_registry_lines(reg_path: Path) -> list[tuple[str, str, str]]:
         return []
     if proc.returncode != 0:
         return []
-    rows = []
-    for out_line in proc.stdout.splitlines():
-        parts = out_line.split("\t")
-        if len(parts) == 3:
-            rows.append((parts[0], parts[1], parts[2]))
-    return rows
+    # NUL-separated: a shell value cannot contain NUL, so any field text survives.
+    parts = proc.stdout.split("\0")[:-1]
+    return [(parts[i], parts[i + 1], parts[i + 2]) for i in range(0, len(parts) - 2, 3)]
 
 
 def parse_registry(reg_path: Path, state_dir: Path) -> dict[str, str]:

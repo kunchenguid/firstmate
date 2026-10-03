@@ -207,6 +207,13 @@ assert_not_contains "$body" "zorbex" "never-send value straddling the scope cut 
 scope=$(last_request | python3 -c 'import json,sys; print(json.load(sys.stdin)["body"]["questions"]["route"]["criteria"]["long-ops"])')
 [ "${#scope}" -le 140 ] || fail "scope must still be capped at 140 characters: ${#scope}"
 
+# Tabs inside a registry home or scope keep the secondmate routable; malformed lines stay out.
+REG_TAB="$TDIR/tab.md"
+printf -- '- portal-ops - Tabbed. (home: /tmp/p\tx; scope: clinical\tops work; projects: p; added 2026-08-01)\n- seller-outreach - Plain. (home: /tmp/s; scope: seller leads; projects: s; added 2026-08-01)\n- spaced-ops - Malformed. (home: /tmp/sp; scope: no projects field; added 2026-08-01)\n' > "$REG_TAB"
+FM_CONFIG_OVERRIDE="$CFG" "$ROUTER" --registry "$REG_TAB" --task "seller leads" >/dev/null
+criteria=$(last_request | python3 -c 'import json,sys; c=json.load(sys.stdin)["body"]["questions"]["route"]["criteria"]; print("|".join(f"{k}={v}" for k, v in sorted(c.items()) if k not in ("new_domain", "captain_direct")))')
+[ "$criteria" = "portal-ops=clinical ops work|seller-outreach=seller leads" ] || fail "tab-bearing registry rows parsed wrong: $criteria"
+
 # A secondmate id matching the list fails closed with nothing sent.
 REG_ID="$TDIR/id.md"
 printf -- '- zorbex-ops - Client work. (home: /tmp/z; scope: client work; projects: z; added 2026-08-01)\n' > "$REG_ID"
