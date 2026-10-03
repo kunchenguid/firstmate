@@ -591,7 +591,12 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # carry a token, the documented before-colon one wins and the note-head token
 # stays note text. A token deeper inside the note is prose, never a stated key,
 # so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
-# A line with no token in either position uses the key "default", preserving
+# An unbracketed "key=<slug>" word in the tag region (before the colon) is a
+# third equivalent spelling, read after the bracketed one and before the note
+# head, because workers write "blocked [at=1] key=a: ..." and that stated key
+# must not collapse into "default" (issue #6399). It is recognised only with a
+# valid slug, so the arbitrary-token restriction below still holds.
+# A line with no token in any position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
 # folds skip the line), never rewritten to "default".
@@ -650,6 +655,27 @@ _fm_classify_is_corr_token() {  # <word>
   return 1
 }
 
+# 0 when <word> is, in whole, an unbracketed "key=<slug>" token with a valid
+# slug: the stated-key spelling workers write after a bracketed tag
+# ("blocked [at=1] key=a: ..."), read as the key rather than dropped into the
+# shared "default" bucket. An invalid slug is not recognised, so the line keeps
+# its extra word and stays a non-transition.
+_fm_classify_is_key_token() {  # <word>
+  case "$1" in
+    key=*) _fm_decision_slug_ok "${1#key=}" ;;
+    *) return 1 ;;
+  esac
+}
+# Raw slug of the first whole-word unbracketed "key=<slug>" token in the tag
+# region (everything before the first colon). Fails when there is none.
+_fm_key_unbracketed() {  # <unstamped-line> -> raw slug
+  local head=${1%%:*} word
+  case "$head" in *key=*) ;; *) return 1 ;; esac
+  for word in $head; do
+    case "$word" in key=*) printf '%s' "${word#key=}"; return 0 ;; esac
+  done
+  return 1
+}
 # Printed, or assigned to <out-var> when one is given, so a per-line caller on a
 # hot path can take the verb without forking a command substitution. Under bash's
 # dynamic scope an <out-var> named like one of this function's own locals (v, out,
@@ -663,7 +689,7 @@ status_line_verb() {  # <status-line> [<out-var>] -> leading verb word
   # contain a correlation token is returned byte-for-byte as before, so every
   # line without one keeps its exact historical verb, spacing included.
   case "$v" in
-    *corr=*)
+    *corr=*|*\ key=*|*$'\t'key=*)
       # Retain the first word, then drop only recognised tokens from the remaining
       # whole words. Anything unrecognised stays, so prose still matches no verb.
       word=${v%%[[:space:]]*}
@@ -675,6 +701,7 @@ status_line_verb() {  # <status-line> [<out-var>] -> leading verb word
         v=${v#"$word"}
         v=${v#"${v%%[![:space:]]*}"}
         _fm_classify_is_corr_token "$word" && continue
+        _fm_classify_is_key_token "$word" && continue
         out="$out $word"
       done
       ;;
@@ -728,7 +755,8 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
+  if ! _fm_key_before_colon "$unstamped" && ! _fm_key_unbracketed "$unstamped" >/dev/null \
+    && k=$(_fm_key_at_note_head "$unstamped") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
@@ -742,6 +770,8 @@ _fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (def
     k=${unstamped%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
+  elif k=$(_fm_key_unbracketed "$unstamped"); then
+    :
   else
     k=$(_fm_key_at_note_head "$unstamped") || { printf '%s' "${2-default}"; return 0; }
   fi
@@ -1037,7 +1067,7 @@ status_key_closing_verb() {  # <status-file> <key>
           *) continue ;;
         esac
         if [ "$want" != default ]; then
-          case "$line" in *"[key=$want]"*) ;; *) continue ;; esac
+          case "$line" in *"[key=$want]"*|*" key=$want"*|*$'\t'"key=$want"*) ;; *) continue ;; esac
         fi
         ;;
     esac
