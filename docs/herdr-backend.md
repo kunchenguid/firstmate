@@ -253,10 +253,12 @@ Creation proceeds in this order:
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
 2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
    That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+3. Firstmate then renames the bound workspace to its visible `└ <concise-task>` label, so the token leaves Herdr's sidebar.
 
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
-The token is visible in the workspace title, because Herdr exposes no verified hidden persistent field.
+The workspace is created with a `└ <concise-task> · p:<token>` title, because Herdr exposes no verified hidden persistent field and a lost create response leaves that title as the only correlation.
+Once bound, the exact workspace id is the correlation, and binding checks accept either title form, so a failed or interrupted rename only leaves the token visible.
 Neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
 ### Owning parent and tabs
@@ -284,6 +286,7 @@ Projected children are placed in one contiguous block immediately after their ow
 - `python3`.
 - The machine-private per-session lock.
 
+A human workspace whose label starts with `└ ` placed inside a parent child block is treated as a projected child for placement and binding position only, never for mutation.
 Existing legacy child labels may extend an already adjacent block read-only but are never renamed or migrated.
 A foreign, ambiguous, detached, or manually interleaved child makes ordering skip with a warning rather than rewriting the layout.
 
@@ -371,7 +374,7 @@ The replacement is allowed only when all of these agree:
 - The physical home.
 - The session.
 - The metadata endpoint.
-- The unique token match.
+- The exact bound workspace id, with no other workspace carrying the token.
 - The workspace shape and labels.
 - The parent identity and placement.
 - The non-target focus snapshot.
@@ -385,14 +388,14 @@ These cases fall back flat without mutating the old projection when duplicate-ag
 
 - Version 1 journals.
 - Dead or missing panes.
-- Duplicate or absent tokens.
+- Duplicate or absent token or bound-workspace matches.
 - Renamed or detached spaces.
 - Cross-home mismatches.
 - Inconsistent endpoint bindings.
 - Active target tabs.
 - Ambiguous identity or focus.
 
-A live or unknown recorded or token-matched endpoint refuses duplicate launch.
+A live or unknown recorded, bound, or token-matched endpoint refuses duplicate launch.
 
 ### Startup cleanup of restored projections
 
@@ -400,12 +403,13 @@ Locked session start has one narrower cleanup for a restored projected child tha
 It runs only when the current home has at least one ordinary presentation journal, and it considers only that home.
 A primary never recursively sweeps a secondmate home.
 
-Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
+Discovery starts from `└ ` titles, but a title or token alone is never mutation authority.
 A candidate must meet all of these conditions:
 
-- The title must contain exactly one token occurrence across the named-session snapshot.
-- The title must equal the title derived from exactly one valid presentation journal in this home's own `state/`.
-- A version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+- The title must match exactly one valid presentation journal in this home's own `state/`.
+  A version 1 journal matches only its exact `└ <concise-task> · p:<22-character-token>` title.
+  A version 2 journal must bind this exact physical home, named session, workspace, tab, and pane, and matches that token-bearing title or the visible `└ <concise-task>` title.
+- The token must occur exactly once across the named-session snapshot when the title carries it, and nowhere when it does not.
 - The task's ordinary metadata must be absent.
 - The candidate must have exactly one tab and exactly one pane.
 
@@ -413,10 +417,10 @@ Firstmate then cleans up the candidate in this order:
 
 1. Acquire the existing task-id spawn lock, and then the shared named-session presentation lock.
 2. Inside both locks, take one exact snapshot.
-3. Require one unambiguous non-target focus and the exact title, token, tab, and pane shape.
+3. Require one unambiguous non-target focus and the exact title, token count, tab, and pane shape.
 4. Positively confirm no registered agent.
 5. Read Herdr's process information for the exact named-session pane and apply the process proof below.
-6. Immediately revalidate the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
+6. Immediately revalidate the same journal, metadata absence, workspace title and token count, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus.
 7. Call the existing exact-pane focus-preserving close helper.
    It closes only that pane, never a workspace.
 8. Retire the matching journal only after the exact pane is positively confirmed gone.
@@ -438,7 +442,7 @@ A second run finds no matching title or journal and is a no-op.
 
 Any of these preserves the candidate and lets session startup continue with at most a concise warning:
 
-- A malformed or missing title or token.
+- A malformed title.
 - A duplicate token.
 - Zero or multiple journal matches.
 - A cross-home version 2 binding.
@@ -466,7 +470,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.
-- The visible token is only a restart-stable correlator and never substitutes for the exact binding.
+- The create-time token is only a correlator and never substitutes for the exact binding.
 
 ### Presentation tests
 

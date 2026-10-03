@@ -3724,6 +3724,7 @@ else
           else
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            HERDR_PROJECTION_VISIBLE_LABEL=$(fm_backend_herdr_projection_visible_label "$ID")
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
               "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
@@ -3755,8 +3756,12 @@ else
               fm_backend_herdr_projection_journal_bind \
                 "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_HOME_ID" "$HERDR_SES" \
                 "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-                "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
-              :
+                "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_VISIBLE_LABEL" "$W"; then
+              # The binding now holds the exact workspace id, so the visible
+              # label no longer needs the correlation token.
+              fm_backend_herdr_projection_hide_token \
+                "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PROJECTION_VISIBLE_LABEL" ||
+                echo "warning: herdr presentation could not hide its correlation token; the workspace keeps its token-bearing label" >&2
             else
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
             fi

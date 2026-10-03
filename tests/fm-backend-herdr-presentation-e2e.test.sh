@@ -133,6 +133,7 @@ case "${1:-} ${2:-}" in
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
+  "workspace rename") mutation=workspace-rename; mutation_target=${4:-} ;;
 esac
 refusal_probe=0
 if [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ] \
@@ -343,11 +344,11 @@ focus_audit_line_count() { wc -l < "$FOCUS_AUDIT_LOG" | tr -d '[:space:]'; }
 assert_raw_presentation_mutations_preserved_since() {  # <line-count> <case-name>
   local start=$1 case_name=$2 changed
   changed=$(sed -n "$((start + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' '
-    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "pane-close") && $2 != $3 {
+    ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || $1 == "workspace-rename" || $1 == "pane-close") && $2 != $3 {
       print $0
     }
   ')
-  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, or seeded cleanup: $changed"
+  [ -z "$changed" ] || fail "$case_name changed active workspace/tab inside a create, move, token hide, or seeded cleanup: $changed"
 }
 
 # The focus-safe emptying-close plan removes a last pane through Herdr's
@@ -468,13 +469,17 @@ normalize_meta() {  # <meta>
 
 log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
 
+# Prints each projected create's visible label, the create label without its
+# correlation token.
 projection_labels_from_log() {  # <start-line>
   local start=$1
   sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '
     $1 == "workspace" && $2 == "create" {
       for (i = 1; i < NF; i += 1) {
         if ($i == "--label" && $(i + 1) ~ /^└ /) {
-          print $(i + 1)
+          label = $(i + 1)
+          sub(/ · p:[A-Za-z0-9_-]+$/, "", label)
+          print label
         }
       }
     }
@@ -491,8 +496,14 @@ session_presentation_lock_path() {
 assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(close|rename)|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
-    fail "$name introduced a workspace/tab/session lifecycle or label mutation call"
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\tclose|tab\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+    fail "$name introduced a workspace/tab/session lifecycle call"
+  fi
+  # The only permitted rename is the bound projection's token hide to its
+  # visible label.
+  if printf '%s\n' "$calls" | grep -E $'^workspace\trename\t' | grep -vE $'^workspace\trename\t[^\t]+\t└ [^\t]+(\t--session\t[^\t]+)?$' >/dev/null 2>&1 \
+    || printf '%s\n' "$calls" | grep -E $'^workspace\trename\t.* · p:' >/dev/null 2>&1; then
+    fail "$name introduced a label mutation other than the token hide"
   fi
 }
 
@@ -591,11 +602,10 @@ DEFAULT_ON_WSID=$(grep '^herdr_workspace_id=' "$DEFAULT_ON_META" | cut -d= -f2-)
 if [ "$FLOOR_VERDICT" = 0 ]; then
   [ -f "$DEFAULT_ON_JOURNAL" ] \
     || fail "an unconfigured home did not publish a presentation journal on supported herdr $FLOOR_VERSION"
-  DEFAULT_ON_TOKEN=$(grep '^projection_id=' "$DEFAULT_ON_JOURNAL" | cut -d= -f2-)
   [ -n "$DEFAULT_ON_WSID" ] && [ "$DEFAULT_ON_WSID" != "$FIRSTMATE_WSID" ] \
     || fail "an unconfigured home reused the flat firstmate workspace instead of projecting"
   DEFAULT_ON_LABEL=$(lab workspace get "$DEFAULT_ON_WSID" | jq -r '.result.workspace.label // empty')
-  [ "$DEFAULT_ON_LABEL" = "└ default-on · p:$DEFAULT_ON_TOKEN" ] \
+  [ "$DEFAULT_ON_LABEL" = "└ default-on" ] \
     || fail "default-on projection used an unexpected workspace label: $DEFAULT_ON_LABEL"
   pass "real Herdr lab: a home that configured nothing is projected by default on herdr $FLOOR_VERSION"
 else
@@ -653,8 +663,10 @@ PROJECTED_TAB=$(grep '^herdr_tab_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_PANE=$(grep '^herdr_pane_id=' "$ON_META" | cut -d= -f2-)
 PROJECTED_INFO=$(lab workspace get "$PROJECTED_WSID") || fail "could not inspect the projected workspace"
 PROJECTED_LABEL=$(printf '%s' "$PROJECTED_INFO" | jq -r '.result.workspace.label // empty')
-[ "$PROJECTED_LABEL" = "└ shape · p:$TOKEN" ] \
-  || fail "projected workspace label did not use the corner format with full token: $PROJECTED_LABEL"
+[ "$PROJECTED_LABEL" = "└ shape" ] \
+  || fail "projected workspace label did not use the token-free corner format: $PROJECTED_LABEL"
+grep -qF -- "$TOKEN" "$HERDR_CALL_LOG" \
+  || fail "projected create did not correlate its workspace through the journal token"
 PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
@@ -1070,12 +1082,12 @@ A1_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/stat
 A2_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/a2.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 B1_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/b1.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 B2_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/b2.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$P1_LABEL" in $'└ p1 · p:'*) ;; *) fail "primary p1 label wrong: $P1_LABEL" ;; esac
-case "$P2_LABEL" in $'└ p2 · p:'*) ;; *) fail "primary p2 label wrong: $P2_LABEL" ;; esac
-case "$A1_LABEL" in $'└ a1 · p:'*) ;; *) fail "secondmate A a1 label wrong: $A1_LABEL" ;; esac
-case "$A2_LABEL" in $'└ a2 · p:'*) ;; *) fail "secondmate A a2 label wrong: $A2_LABEL" ;; esac
-case "$B1_LABEL" in $'└ b1 · p:'*) ;; *) fail "secondmate B b1 label wrong: $B1_LABEL" ;; esac
-case "$B2_LABEL" in $'└ b2 · p:'*) ;; *) fail "secondmate B b2 label wrong: $B2_LABEL" ;; esac
+case "$P1_LABEL" in $'└ p1') ;; *) fail "primary p1 label wrong: $P1_LABEL" ;; esac
+case "$P2_LABEL" in $'└ p2') ;; *) fail "primary p2 label wrong: $P2_LABEL" ;; esac
+case "$A1_LABEL" in $'└ a1') ;; *) fail "secondmate A a1 label wrong: $A1_LABEL" ;; esac
+case "$A2_LABEL" in $'└ a2') ;; *) fail "secondmate A a2 label wrong: $A2_LABEL" ;; esac
+case "$B1_LABEL" in $'└ b1') ;; *) fail "secondmate B b1 label wrong: $B1_LABEL" ;; esac
+case "$B2_LABEL" in $'└ b2') ;; *) fail "secondmate B b2 label wrong: $B2_LABEL" ;; esac
 
 MULTI_LIST=$(lab workspace list) || fail "could not list multi-home topology"
 MULTI_LABELS=$(printf '%s' "$MULTI_LIST" | jq -r '
@@ -1127,9 +1139,9 @@ printf '%s' "$CROSS_LIST" | jq -e '
 PCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$HOME_DIR/state/pcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 ACW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_A/state/acw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
 BCW_LABEL=$(lab workspace get "$(grep '^herdr_workspace_id=' "$SECOND_HOME_B/state/bcw.meta" | cut -d= -f2-)" | jq -r '.result.workspace.label')
-case "$PCW_LABEL" in $'└ pcw · p:'*|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
-case "$ACW_LABEL" in $'└ acw · p:'*|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
-case "$BCW_LABEL" in $'└ bcw · p:'*|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
+case "$PCW_LABEL" in $'└ pcw'|firstmate) ;; *) fail "cross-home primary label wrong: $PCW_LABEL" ;; esac
+case "$ACW_LABEL" in $'└ acw'|2ndmate-alpha) ;; *) fail "cross-home A label wrong: $ACW_LABEL" ;; esac
+case "$BCW_LABEL" in $'└ bcw'|2ndmate-bravo) ;; *) fail "cross-home B label wrong: $BCW_LABEL" ;; esac
 pass "real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus"
 
 # Hold the shared session lock from a different home and force flat fallback.
@@ -1192,7 +1204,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     || fail "$RESTART_ID fresh projection did not publish an exact restart binding"
   EXPECTED_CONCISE=${RESTART_ID#fm-}
   case "$OLD_RESTART_LABEL" in
-    "└ $EXPECTED_CONCISE · p:"*) ;;
+    "└ $EXPECTED_CONCISE") ;;
     *) fail "$RESTART_ID fresh projection label did not apply concise prefix handling: $OLD_RESTART_LABEL" ;;
   esac
   PATH="$HERDR_ORIGINAL_PATH" \

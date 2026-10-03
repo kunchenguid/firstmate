@@ -674,7 +674,10 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     && [ -n "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" ] || return 1
   expected_label=$(fm_backend_herdr_projection_workspace_label "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
   expected_task_label="fm-$id"
-  [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+  # A binding records the visible label, or the token-bearing label written
+  # before token hiding existed.
+  { [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$expected_label" ] \
+    || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" = "$(fm_backend_herdr_projection_visible_label "$id")" ]; } \
     && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$expected_task_label" ]
 }
 
@@ -765,12 +768,35 @@ fm_backend_herdr_projection_concise_task_label() {  # <task-id>
   printf '%s' "$task"
 }
 
-# fm_backend_herdr_projection_workspace_label: presentation-only child label.
-# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, the
-# concise task label, then the unchanged · p:<full-22-char-token> suffix.
+# fm_backend_herdr_projection_visible_label: presentation-only child label a
+# bound projection shows in Herdr's sidebar.
+# Format is literal U+2514 BOX DRAWINGS LIGHT UP AND RIGHT, one space, then the
+# concise task label.
+fm_backend_herdr_projection_visible_label() {  # <task-id>
+  printf '└ %s' "$(fm_backend_herdr_projection_concise_task_label "$1")"
+}
+
+# fm_backend_herdr_projection_workspace_label: create-time child label, the
+# visible label plus a · p:<full-22-char-token> suffix.
+# The token correlates a created workspace with its version 1 journal only
+# until the version 2 binding records the exact workspace id; spawn then
+# renames the workspace to the visible label.
 # Labels and tokens remain non-authoritative correlators only.
 fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
-  printf '└ %s · p:%s' "$(fm_backend_herdr_projection_concise_task_label "$1")" "$2"
+  printf '%s · p:%s' "$(fm_backend_herdr_projection_visible_label "$1")" "$2"
+}
+
+# fm_backend_herdr_projection_hide_token: rename one exact bound projection
+# workspace to its visible label and confirm the rename.
+# A failure leaves the token-bearing label, which every binding check still
+# accepts, so callers only warn.
+fm_backend_herdr_projection_hide_token() {  # <session> <workspace-id> <visible-label>
+  local session=$1 workspace=$2 label=$3 info
+  fm_backend_herdr_cli "$session" workspace rename "$workspace" "$label" >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$session" workspace get "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg label "$label" '
+    .result.workspace.workspace_id == $workspace and .result.workspace.label == $label
+  ' >/dev/null 2>&1
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
@@ -1464,7 +1490,7 @@ fm_backend_herdr_pane_idle_shell_sample() {  # <session> <pane-id>
 # longer make the whole layout ambiguous; when omitted the parent is located by
 # label exactly as before. With a unique label the two select the same
 # workspace, so ordering behavior is unchanged in the ordinary case.
-# New-format └ ... · p:<token> children and, for compatibility only, already
+# New-format └ ... children and, for compatibility only, already
 # adjacent old-format firstmate/... or 2ndmate-<id>/... projections may extend
 # the block read-only; they are never renamed or moved.
 #
@@ -1500,7 +1526,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       and ((.label == "firstmate") or (.label | test("^2ndmate-[^/]+$")));
     def is_new_child:
       (.label | type) == "string"
-      and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+      and (.label | test("^└ ."));
     def is_legacy_child:
       (.label | type) == "string"
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
@@ -2706,22 +2732,26 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
 }
 
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
-# workspace, its single task tab/pane, its unique token label, and its current
-# position inside the exact parent workspace's contiguous child block.
+# workspace, its single task tab/pane, its label, and its current position
+# inside the exact parent workspace's contiguous child block.
+# The label may be the visible or the token-bearing form of <workspace-label>,
+# so a binding survives an interrupted or failed token hide, and no other
+# workspace may carry the token.
 # This read-only predicate grants no mutation authority by itself.
 fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
-  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes
+  local parent_label=$7 workspace_label=$8 task_label=$9 list tabs panes visible_label
+  visible_label=${workspace_label% · p:"$token"}
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e \
     --arg token "$token" \
     --arg workspace "$workspace" \
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
-    --arg workspace_label "$workspace_label" '
+    --arg visible_label "$visible_label" '
       def is_new_child:
         (.label | type) == "string"
-        and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+        and (.label | test("^└ ."));
       def is_legacy_child_for($owner):
         (.label | type) == "string"
         and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
@@ -2729,9 +2759,9 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
-      | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
-      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
-      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
+      | select(([$spaces[]? | select(.workspace_id == $workspace
+          and (.label == $visible_label or .label == ($visible_label + " · p:" + $token)))] | length) == 1)
+      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id != $workspace)] | length) == 0)
       | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
       | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
@@ -2922,17 +2952,19 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 }
 
 # fm_backend_herdr_projection_recovery_allows_flat: inspect an existing
-# journal's exact token matches without adopting, reusing, renaming, closing,
-# or deleting anything.
+# journal's exact token matches, plus a version 2 binding's exact workspace id,
+# without adopting, reusing, renaming, closing, or deleting anything.
 # Missing matches safely degrade to the normal flat workspace.
 # One or more matches allow flat fallback only when every pane is positively
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
-  local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
+  local session=$1 journal=$2 id=$3 token bound list wsids count wsid panes pane_ids pane state
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
   }
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  bound=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
   fm_backend_herdr_server_ensure "$session" || {
     echo "error: could not inspect the quarantined herdr presentation for $id; refusing duplicate launch" >&2
     return 1
@@ -2945,15 +2977,18 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
     echo "error: could not parse herdr workspaces while inspecting the quarantined presentation for $id" >&2
     return 1
   fi
-  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" --arg bound "$bound" \
+    '.result.workspaces[]?
+      | select(((.label | type) == "string" and (.label | endswith($suffix)))
+          or ($bound != "" and .workspace_id == $bound))
+      | .workspace_id' 2>/dev/null)
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
   if [ "$count" -eq 0 ]; then
-    echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
+    echo "warning: no exact herdr presentation token or binding match for $id; leaving any stale space untouched and spawning flat" >&2
     return 0
   fi
   if [ "$count" -gt 1 ]; then
-    echo "warning: $count exact herdr presentation token matches for $id are quarantined; inspecting only for duplicate-agent risk" >&2
+    echo "warning: $count exact herdr presentation token or binding matches for $id are quarantined; inspecting only for duplicate-agent risk" >&2
   fi
   while IFS= read -r wsid; do
     [ -n "$wsid" ] || continue
@@ -2989,15 +3024,23 @@ EOF
 # fm_backend_herdr_projection_endpoint_matches_journal: read-only correlation
 # for retiring a successful projection journal after normal exact-pane
 # teardown.
-# Exactly one token-bearing workspace must match the endpoint workspace.
+# Exactly one workspace must match the endpoint workspace: the token-bearing
+# workspace, or a version 2 binding's exact workspace showing its visible label.
 # This verdict never authorizes a Herdr mutation.
 fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace-id> <journal> <task-id>
-  local session=$1 workspace_id=$2 journal=$3 id=$4 token list matches
-  token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || return 1
+  local session=$1 workspace_id=$2 journal=$3 id=$4 token list matches bound
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  bound=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
   printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
-    '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
+  matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" --arg bound "$bound" \
+    --arg visible "$(fm_backend_herdr_projection_visible_label "$id")" '
+    .result.workspaces[]?
+    | select((.label | type) == "string")
+    | select((.label | endswith($suffix))
+        or ($bound != "" and .workspace_id == $bound and .label == $visible))
+    | .workspace_id' 2>/dev/null)
   [ "$matches" = "$workspace_id" ]
 }
 
