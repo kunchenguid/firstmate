@@ -144,6 +144,34 @@ spawn_from_launcher() {
   return 0
 }
 
+# assert_project_worktree: the worker's recorded worktree must be an isolated
+# git worktree OF THE NAMED PROJECT, asserted end to end against a real backend.
+# Placement assertions alone never covered this: the task tab can land in
+# exactly the right workspace while the shell inside it sits in an entirely
+# different repository, and everything downstream then treats that repository
+# as the task's worktree. bin/fm-spawn.sh's spawn_worktree_isolated owns the
+# rule; tests/fm-spawn-worktree-settle.test.sh pins it portably.
+assert_project_worktree() {  # <meta> <project> <what>
+  local meta=$1 proj=$2 what=$3 wt wt_real wt_common wt_git_dir proj_common
+  wt=$(grep '^worktree=' "$meta" 2>/dev/null | cut -d= -f2-)
+  [ -n "$wt" ] || fail "$what recorded no worktree"
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) \
+    || fail "$what recorded a worktree that is not a readable directory: $wt"
+  wt_common=$(git -C "$wt_real" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || fail "$what recorded a worktree that is not inside a git repository: $wt_real"
+  proj_common=$(git -C "$proj" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+    || fail "could not resolve the git common dir of project $proj"
+  [ "$wt_common" = "$proj_common" ] \
+    || fail "$what was launched in a worktree of a DIFFERENT repository: $wt_real (repo '$wt_common', project's repo '$proj_common')"
+  wt_git_dir=$(git -C "$wt_real" rev-parse --absolute-git-dir 2>/dev/null)
+  [ "$wt_git_dir" != "$proj_common" ] \
+    || fail "$what was launched in the repository's primary checkout, not an isolated worktree: $wt_real"
+  [ "$wt_real" != "$(cd "$proj" && pwd -P)" ] \
+    || fail "$what was launched in the project itself, not an isolated worktree: $wt_real"
+  [ "$wt_real" != "$(cd "$ROOT" && pwd -P)" ] \
+    || fail "$what was launched in the launching firstmate checkout, not a worktree of its project: $wt_real"
+}
+
 record_worktree() {  # <meta>
   local wt
   wt=$(grep '^worktree=' "$1" 2>/dev/null | cut -d= -f2-)
@@ -228,6 +256,7 @@ spawn_from_launcher "" "$PRIMARY_HOME" uniqA "$PROJ" --mode no-mistakes --yolo o
 [ "$SPAWN_RC" -eq 0 ] || fail "a primary-shaped spawn with no herdr parent failed"$'\n'"$(cat "$SPAWN_ERR")"
 UNIQA_META="$PRIMARY_HOME/state/uniqA.meta"
 record_worktree "$UNIQA_META"
+assert_project_worktree "$UNIQA_META" "$PROJ" "a primary-shaped crewmate"
 UNIQA_PANE=$(grep '^herdr_pane_id=' "$UNIQA_META" | cut -d= -f2-)
 [ -n "$UNIQA_PANE" ] || fail "uniqA meta is missing herdr_pane_id"
 WS_PRIMARY=$(workspace_of_pane "$UNIQA_PANE")
@@ -406,6 +435,7 @@ spawn_from_launcher "$LAUNCH_SM_PANE" "$SM_HOME" smE "$PROJ" --mode no-mistakes 
 [ "$SPAWN_RC" -eq 0 ] || fail "a secondmate-owned crewmate spawn failed"$'\n'"$(cat "$SPAWN_ERR")"
 SME_META="$SM_HOME/state/smE.meta"
 record_worktree "$SME_META"
+assert_project_worktree "$SME_META" "$PROJ" "a secondmate's own crewmate"
 SME_PANE=$(grep '^herdr_pane_id=' "$SME_META" | cut -d= -f2-)
 SME_WS=$(workspace_of_pane "$SME_PANE")
 [ "$SME_WS" = "$WS_SM_LAUNCH" ] \
