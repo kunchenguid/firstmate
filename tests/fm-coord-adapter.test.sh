@@ -132,7 +132,7 @@ adapter "$tmp/challenger" dispatch challenger "$repo" "$repo" "$tmp/challenger.b
 case "$(cat "$tmp/conflict.err")" in *'held by offline'*) ;; *) fail 'conflict must name holder' ;; esac
 pass 'pre-dispatch conflict names current holder'
 adapter "$tmp/challenger" pre-push challenger "$repo" > /dev/null 2>&1 || fail 'refused task push checkpoint must stay advisory'
-adapter "$tmp/challenger" pre-ci challenger > /dev/null 2>&1 || fail 'refused task CI checkpoint must stay advisory'
+adapter "$tmp/challenger" pre-ci challenger "$repo" > /dev/null 2>&1 || fail 'refused task CI checkpoint must stay advisory'
 
 python3 - "$db" <<'PY'
 import sqlite3,sys
@@ -145,7 +145,7 @@ python3 - "$tmp/challenger/state/fm-coord-adapter.json" <<'PY' || fail 'replay m
 import json,sys
 assert 'claim' not in json.load(open(sys.argv[1]))['tasks']['challenger']
 PY
-adapter "$tmp/challenger" pre-ci challenger > /dev/null 2> "$tmp/retry.err" || fail 'refused claim retry must complete'
+adapter "$tmp/challenger" pre-ci challenger "$repo" > /dev/null 2> "$tmp/retry.err" || fail 'refused claim retry must complete'
 python3 - "$tmp/challenger/state/fm-coord-adapter.json" <<'PY' || fail 'refused claim must be retried after the holder lease expires'
 import json,sys
 assert json.load(open(sys.argv[1]))['tasks']['challenger']['claim']['ok'] is True
@@ -162,7 +162,7 @@ import json,sys
 view=json.loads(sys.argv[1])
 assert any(i['intent_id']=='codex:owner/repo:codex' and i['version']==2 for i in view['intents'])
 PY
-adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/ci.err" || fail 'current writer CI check must complete'
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/ci.err" || fail 'current writer CI check must complete'
 [ ! -s "$tmp/ci.err" ] || fail 'current writer CI check must not warn'
 adapter "$tmp/codex" heartbeat codex > /dev/null 2> "$tmp/heartbeat.err" || fail 'active worker heartbeat must complete'
 python3 - "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'heartbeat must renew the claim centrally'
@@ -179,7 +179,7 @@ config=json.load(open(path))
 config['db']=sys.argv[2]
 json.dump(config,open(path,'w'))
 PY
-adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/offline-ci.err" || fail 'offline CI checkpoint remains advisory'
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/offline-ci.err" || fail 'offline CI checkpoint remains advisory'
 adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2> "$tmp/offline-push.err" || fail 'offline push checkpoint remains advisory'
 python3 - "$(adapter "$tmp/codex" view)" <<'PY' || fail 'offline checkpoints must be journaled locally'
 import json,sys
@@ -240,6 +240,24 @@ assert view['local_tasks']['codex']['published_head']==sys.argv[2]
 PY
 pass 'a head republished after a rebase keeps the central head chain'
 
+printf 'h4\n' > "$repo/src/codex.py"
+git -C "$repo" commit -qam h4
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/unpublished-ci.err" || fail 'unpublished head CI checkpoint stays advisory'
+case "$(cat "$tmp/unpublished-ci.err")" in *'is not the published head'*) ;; *) fail 'CI checkpoint must refuse an unpublished head' ;; esac
+adapter "$tmp/codex" replay > /dev/null 2>&1 || fail 'replay with unpublished head must complete'
+python3 - "$(adapter "$tmp/codex" view)" <<'PY' || fail 'CI checkpoint for an unpublished head must stay pending'
+import json,sys
+assert 'pre-ci' in {p['operation'] for p in json.loads(sys.argv[1])['local_pending']}
+PY
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'h4 push checkpoint must complete'
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/published-ci.err" || fail 'published head CI checkpoint must complete'
+[ ! -s "$tmp/published-ci.err" ] || fail "published head CI check must not warn: $(cat "$tmp/published-ci.err")"
+python3 - "$(adapter "$tmp/codex" view)" <<'PY' || fail 'published head clears the CI checkpoint'
+import json,sys
+assert not json.loads(sys.argv[1])['local_pending']
+PY
+pass 'CI checkpoint refuses a worktree HEAD that differs from the published head'
+
 python3 - "$tmp/codex/state/fm-coord-adapter.json" <<'PY'
 import json,sys
 path=sys.argv[1]
@@ -247,7 +265,7 @@ state=json.load(open(path))
 state['tasks']['codex']['claim']['fence']+=1
 json.dump(state,open(path,'w'))
 PY
-adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/stale.err" || fail 'stale writer stays advisory'
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/stale.err" || fail 'stale writer stays advisory'
 case "$(cat "$tmp/stale.err")" in *'cannot be checked'*) ;; *) fail 'stale writer must warn' ;; esac
 pass 'stale branch writer generation warns before CI request'
 
@@ -436,8 +454,8 @@ db.commit()
 PY
 printf '## Firstmate spec\nCoordination resources: [{"type":"file","name":"src/claude-b.py"}]\n' > "$tmp/claude-b.brief"
 adapter "$tmp/claude" dispatch claude-b "$repo" "$repo" "$tmp/claude-b.brief" branch/claude-b claude > /dev/null 2> "$tmp/reboot.err" || fail 'post-reboot dispatch must complete'
-adapter "$tmp/claude" pre-ci claude > /dev/null 2>&1 || fail 'post-reboot checkpoint must complete'
-adapter "$tmp/claude" pre-ci claude > /dev/null 2> "$tmp/reboot-ci.err" || fail 'recovered checkpoint must complete'
+adapter "$tmp/claude" heartbeat claude > /dev/null 2>&1 || fail 'post-reboot checkpoint must complete'
+adapter "$tmp/claude" heartbeat claude > /dev/null 2> "$tmp/reboot-ci.err" || fail 'recovered checkpoint must complete'
 [ ! -s "$tmp/reboot-ci.err" ] || fail "recovered writer must check cleanly: $(cat "$tmp/reboot-ci.err")"
 python3 - "$tmp/claude/state/fm-coord-adapter.json" <<'PY' || fail 'coordinator reboot must recover through a fresh session'
 import json,sys

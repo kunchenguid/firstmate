@@ -265,6 +265,15 @@ class Adapter:
             return None
         return payload
 
+    def ci_ready(self, task_id, worktree):
+        if not self.live_claim(task_id):
+            return False
+        head = git(worktree, "rev-parse", "HEAD")
+        if head != self.state["tasks"][task_id].get("published_head"):
+            warn(f"{task_id}: HEAD {head} is not the published head; run pre-push before requesting CI")
+            return False
+        return True
+
     def changed_paths(self, task, worktree):
         output = subprocess.run(["git", "-C", str(worktree), "diff", "--name-only", "--no-renames", "-z", f"origin/{task['base']}...HEAD"], check=True, capture_output=True).stdout
         return sorted({x.decode("utf-8", "surrogateescape") for x in output.split(b"\0") if x})
@@ -351,7 +360,7 @@ class Adapter:
                 continue
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
                 self.scope(task_id, task["worktree"])
-            if task.get("pending_ci") and self.live_claim(task_id):
+            if task.get("pending_ci") and self.ci_ready(task_id, task["worktree"]):
                 task.pop("pending_ci", None)
                 self.save()
             if task.get("renew_key") and "reply" in self.state["requests"].get(task["renew_key"], {}):
@@ -423,12 +432,13 @@ def run(adapter, command):
         adapter.scope(sys.argv[2], sys.argv[3])
     elif command == "heartbeat" and len(sys.argv) == 3:
         adapter.heartbeat(sys.argv[2])
-    elif command == "pre-ci" and len(sys.argv) == 3:
+    elif command == "pre-ci" and len(sys.argv) == 4:
         task = adapter.state["tasks"].get(sys.argv[2])
         if task:
+            task["worktree"] = sys.argv[3]
             task["pending_ci"] = True
             adapter.save()
-        if adapter.live_claim(sys.argv[2]) and task:
+        if adapter.ci_ready(sys.argv[2], sys.argv[3]) and task:
             task.pop("pending_ci", None)
             adapter.save()
     elif command == "release" and len(sys.argv) == 3:
@@ -443,7 +453,7 @@ def run(adapter, command):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "release", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK WORKTREE|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
