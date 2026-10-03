@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$ROOT/bin/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$ROOT/bin/fm-pr-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -1285,6 +1287,52 @@ EOF
     (.decisions_open | any(.id | startswith("sample-resolved-review")) | not)
   ' >/dev/null || fail "resolved findings or decision-like prose created a false captain call: $json"
   pass "resolved findings and decision-like prose do not create captain-held tasks"
+}
+
+# A ship task with an ARMED merge poll keeps its pr=/pr_head= identity block as
+# the last lines of its record, and fm_pr_metadata_identity_parse refuses any
+# other line after pr=. A captain-hold completion written to that record must
+# therefore land before the identity block, or the watcher's trusted path would
+# reject the armed poll on every sweep (the same failure the relaunch writer
+# had). This test fails on the plain-append writer and passes on the fixed one.
+test_completion_keeps_an_armed_poll_record_identity_parseable() {
+  local home id meta url head
+  home=$(make_home armed-poll-completion)
+  id=sample-ship-armed-poll
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Ship the sample change" --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the ship backlog fixture"
+  write_origin_meta "$home" "$id" ship
+  meta="$home/state/$id.meta"
+  url=https://github.com/example/repo/pull/102
+  head=0123456789abcdef0123456789abcdef01234567
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$meta"
+  chmod 0600 "$meta"
+  : > "$home/state/$id.check.sh"
+  printf 'done: merge poll armed\n' > "$home/state/$id.status"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "the armed-poll fixture record was not identity-parseable before completion"
+
+  run_captain "$home" complete "$id" --none > "$home/complete.out" 2> "$home/complete.err" \
+    || fail "completion of an armed-poll ship task failed: $(cat "$home/complete.err")"
+  assert_grep "decisions_reviewed=1" "$meta" "completion attestation missing"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "the completion attestation broke the PR poll identity contract: $(cat "$meta")"
+  [ "$FM_PR_META_URL" = "$url" ] || fail "the identity block no longer names the armed PR: $FM_PR_META_URL"
+  [ "$(grep -c '^pr=' "$meta")" = 1 ] && [ "$(grep -c '^pr_head=' "$meta")" = 1 ] \
+    || fail "the identity block was rewritten rather than left in place: $(cat "$meta")"
+  [ "$(tail -n 1 "$meta")" = "pr_head=$head" ] \
+    || fail "the identity block is no longer the tail of the record: $(cat "$meta")"
+  [ "$(/usr/bin/stat -f %Lp "$meta" 2>/dev/null || stat -c %a "$meta")" = 600 ] \
+    || fail "the completion rewrite changed the record mode"
+
+  run_captain "$home" complete "$id" --none >/dev/null 2>&1 \
+    || fail "idempotent completion retry failed"
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "an idempotent completion retry broke the PR poll identity contract: $(cat "$meta")"
+  [ "$(grep -c '^decisions_reviewed=' "$meta")" = 1 ] \
+    || fail "an idempotent completion retry duplicated the attestation: $(cat "$meta")"
+  pass "captain-hold completion keeps an armed merge poll record parseable by the identity contract"
 }
 
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
@@ -4647,6 +4695,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
+test_completion_keeps_an_armed_poll_record_identity_parseable
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers

@@ -459,6 +459,36 @@ meta_value() {  # <meta> <key>
   grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
+write_completion_attestation() {  # <meta> <keys>
+  local meta=$1 keys=$2 tmp mode
+  if ! grep -q '^pr=' "$meta" 2>/dev/null; then
+    printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta" \
+      || fail "could not record the completion attestation in $meta"
+    return 0
+  fi
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(/usr/bin/stat -f %Lp "$meta" 2>/dev/null)
+  else
+    mode=$(stat -c %a "$meta" 2>/dev/null)
+  fi
+  tmp=$(umask 077; mktemp "$(dirname "$meta")/.fm-captain-meta.XXXXXX") \
+    || fail "could not stage the completion attestation for $meta"
+  if ! awk -v keys="$keys" '
+      /^decisions_reviewed=/ || /^decision_keys=/ { next }
+      !placed && /^pr=/ {
+        print "decisions_reviewed=1"
+        print "decision_keys=" keys
+        placed = 1
+      }
+      { print }
+    ' "$meta" > "$tmp" \
+    || ! chmod "${mode:-600}" "$tmp" \
+    || ! mv -f -- "$tmp" "$meta"; then
+    rm -f -- "$tmp"
+    fail "could not record the completion attestation in $meta"
+  fi
+}
+
 # A resolution record written by this script or by the retired
 # fm-decision-hold.sh. Both carry the same leader-then-captain-decision shape.
 body_has_resolution_record() {  # <task-body>
@@ -1786,7 +1816,7 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      write_completion_attestation "$meta" "$keys"
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0
