@@ -95,6 +95,10 @@ install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
+# The seed clones this repo right after the commit; a detached auto-maintenance
+# (gc / loose-object packing) racing that clone prunes objects mid-copy.
+git -C "$REMOTE_ROOT" config maintenance.auto false
+git -C "$REMOTE_ROOT" config gc.auto 0
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 

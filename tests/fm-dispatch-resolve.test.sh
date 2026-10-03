@@ -262,9 +262,7 @@ expect_withheld() {  # <label> <stderr fragment> [<value that must not print>...
   shift 2
   expect_code 0 "$code" "$label exits 0"
   assert_equals '' "$out" "$label prints nothing on stdout, so firstmate uses its existing intake"
-  assert_contains "$err" "dispatch-resolve: off ($fragment" "$label names why on stderr"
-  assert_contains "$err" 'nothing sent)' "$label says nothing was sent"
-  assert_equals '1' "$(grep -c . <<<"$err")" "$label prints one diagnostic line"
+  assert_equals "dispatch-resolve: off ($fragment; nothing sent)" "$err" "$label prints exactly one diagnostic line naming why and that nothing was sent"
   assert_absent "$LOG/argv" "$label never calls curl"
   assert_absent "$LOG/quota-axi.calls" "$label never reads quota"
   local value

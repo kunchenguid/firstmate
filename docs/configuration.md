@@ -723,7 +723,8 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 ## Harness support
 
-claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+claude, codex, opencode, pi, pi-signed, kimi, cursor, and omp are empirically verified for crewmate and secondmate launches; gemini is verified for crewmate and scout launches only, and [README requirements](../README.md#requirements) own the set supported for the primary session.
+Grok is reserved for the primary Firstmate session: the spawn refuses the standalone `grok` harness and every model whose id contains `grok` before creating a crewmate, scout, or secondmate, and every other locally launched profile runs the same `bin/fm-jev-quota-prober.py --auto-divert` preflight, which refuses a confirmed exhausted lane. When fresh quota evidence confirms positive usable runway for Cursor Composer, the refusal names it; the spawn diverts to it on its own only when the captain grants that by creating `config/spawn-quota-divert` (any content); a diverted spawn requested at `ultra` effort launches at the new lane's default effort when that lane has no native ultra. A lane whose quota is missing or could not be measured launches as requested with a warning and no diversion. A remote secondmate launches under its host's own logins, so it gets only the Grok refusal: this host's quota rows neither refuse nor divert it.
 
 ### Harness restrictions and credentials
 
@@ -796,7 +797,6 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 
 ### Installed hooks and launch details
 
-For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.

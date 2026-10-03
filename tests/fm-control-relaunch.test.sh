@@ -845,8 +845,8 @@ test_prior_harness_turnend_registry_entry_is_cleared() {
   auth="$dir/grokhome/hooks/fm-turn-end.d/fm.abcdefabcdef"
   printf '%s\n' "$dir/home/state/rl9.turn-ended" > "$auth"
   printf 'grok' > "$dir/fake/command"
-  printf 'grok' > "$dir/fake/becomes"
-  run_control "$dir" rl9 relaunch --note "restart on the same runtime" >/dev/null
+  printf 'claude' > "$dir/fake/becomes"
+  run_control "$dir" rl9 relaunch --harness claude --note "move off the reserved runtime" >/dev/null
   [ ! -e "$auth" ] \
     || fail "the previous incarnation's turn-end registry entry must not outlive it"
   pass "fm-control relaunch: the retired incarnation's global turn-end token is revoked"

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Behavior tests for Grok-harness hook authentication, teardown cleanup, and session-lock holder detection.
+# Behavior tests for the Grok crew-spawn refusal and session-lock holder detection.
 set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
-TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-grok-harness)
 
 make_spawn_case() {
@@ -31,65 +30,21 @@ run_grok_spawn() {
     "$id" "$proj" grok --mode no-mistakes --yolo off
 }
 
-test_grok_hook_requires_registered_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status hook token target evil evil_target
-  rec=$(make_spawn_case hook-auth)
+test_grok_crew_spawn_is_refused_before_wiring() {
+  local rec case_dir home proj wt fakebin grok_home id out status
+  rec=$(make_spawn_case refused)
   IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
 $rec
 EOF
-  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
+  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id" 2>&1)
   status=$?
-  expect_code 0 "$status" "grok spawn should succeed"
-  assert_contains "$out" "spawned $id harness=grok" "grok spawn did not report success"
-
-  hook="$grok_home/hooks/fm-turn-end.sh"
-  assert_present "$hook" "grok hook script was not installed"
-  assert_grep 'token=' "$wt/.fm-grok-turnend" "grok pointer did not contain a token"
-  target="$home/state/$id.turn-ended"
-  assert_no_grep "$target" "$wt/.fm-grok-turnend" "grok pointer exposed the turn-end path"
-  token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
-  assert_present "$grok_home/hooks/fm-turn-end.d/$token" "grok auth registry entry was not written"
-
-  evil="$case_dir/evil"
-  evil_target="$case_dir/evil-target.turn-ended"
-  mkdir -p "$evil"
-  printf '%s\n' "$evil_target" > "$evil/.fm-grok-turnend"
-  GROK_WORKSPACE_ROOT="$evil" bash "$hook"
-  assert_absent "$evil_target" "old-style grok pointer touched an arbitrary target"
-
-  {
-    printf '%s\n' 'ignored'
-    printf 'token=%s\n' "$token"
-  } > "$wt/.fm-grok-turnend"
-  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
-  assert_absent "$target" "grok pointer accepted token outside the first line"
-
-  printf 'token=%s\n' "$token" > "$wt/.fm-grok-turnend"
-  GROK_WORKSPACE_ROOT="$wt" bash "$hook"
-  assert_present "$target" "registered grok pointer did not touch the task turn-end file"
-  pass "grok global hook requires a firstmate registry token"
-}
-
-test_grok_teardown_removes_pointer_and_token() {
-  local rec case_dir home proj wt fakebin grok_home id out status token
-  rec=$(make_spawn_case teardown)
-  IFS='|' read -r case_dir home proj wt fakebin grok_home id <<EOF
-$rec
-EOF
-  out=$(run_grok_spawn "$home" "$proj" "$wt" "$fakebin" "$grok_home" "$id")
-  status=$?
-  expect_code 0 "$status" "grok spawn should succeed before teardown"
-  token=$(sed -n 's/^token=//p' "$wt/.fm-grok-turnend")
-
-  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-    GROK_HOME="$grok_home" PATH="$fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force >/dev/null 2>&1 \
-    || fail "grok teardown failed"
-
-  assert_absent "$wt/.fm-grok-turnend" "grok pointer survived teardown"
-  assert_absent "$grok_home/hooks/fm-turn-end.d/$token" "grok auth token survived teardown"
-  assert_absent "$home/state/$id.grok-turnend-token" "grok state token survived teardown"
-  pass "grok teardown removes pointer and token state"
+  expect_code 1 "$status" "grok crew spawn should be refused"
+  assert_contains "$out" "spawn quota preflight refused 'grok'" "grok refusal did not come from the quota preflight"
+  assert_absent "$grok_home/hooks/fm-turn-end.sh" "refused grok spawn installed the global turn-end hook"
+  assert_absent "$wt/.fm-grok-turnend" "refused grok spawn wrote a worktree pointer"
+  assert_absent "$home/state/$id.grok-turnend-token" "refused grok spawn wrote a state token"
+  assert_absent "$home/state/$id.meta" "refused grok spawn published task meta"
+  pass "grok crew spawn is refused before any hook or task wiring"
 }
 
 test_fm_lock_recognizes_grok_holder() {
@@ -112,6 +67,5 @@ SH
   pass "fm-lock recognizes grok harness processes"
 }
 
-test_grok_hook_requires_registered_token
-test_grok_teardown_removes_pointer_and_token
+test_grok_crew_spawn_is_refused_before_wiring
 test_fm_lock_recognizes_grok_holder

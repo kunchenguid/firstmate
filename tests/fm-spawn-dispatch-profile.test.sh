@@ -46,7 +46,7 @@ SH
 #!/usr/bin/env bash
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
-  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
+  printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ngpt-5.5-high - GPT 5.5 High}"
 fi
 exit 0
 SH
@@ -139,7 +139,7 @@ assert_meta_profile() {
 
 test_no_profile_keeps_claude_profile_defaults() {
   local rec id out status expected launch
-  id=profile-off-z1
+  id='profile-off-z1'
   rec=$(make_spawn_case profile-off claude "$id")
   read_case_record "$rec"
 
@@ -239,7 +239,7 @@ test_claude_spawn_refuses_when_the_brief_record_cannot_publish() {
 
 test_non_cursor_launch_clears_inherited_cursor_markers() {
   local rec id out status launch
-  id=profile-claude-cursor-markers-z1b
+  id='profile-claude-cursor-markers-z1b'
   rec=$(make_spawn_case profile-claude-cursor-markers claude "$id")
   read_case_record "$rec"
 
@@ -255,7 +255,7 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   local rec id out status launch home_real
-  id=profile-relative-paths-z1b
+  id='profile-relative-paths-z1b'
   rec=$(make_spawn_case profile-relative-paths pi "$id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
@@ -284,8 +284,8 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
 
 test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   local rec relative_id absolute_id out status launch home_real linked_home
-  relative_id=profile-relative-home-defaults-z1c
-  absolute_id=profile-absolute-home-defaults-z1d
+  relative_id='profile-relative-home-defaults-z1c'
+  absolute_id='profile-absolute-home-defaults-z1d'
   rec=$(make_spawn_case profile-home-defaults pi "$relative_id" "$absolute_id")
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
@@ -333,7 +333,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
 
 test_absolute_override_spelling_is_preserved_in_launch_paths() {
   local rec id out status launch linked_home
-  id=profile-absolute-paths-z1c
+  id='profile-absolute-paths-z1c'
   rec=$(make_spawn_case profile-absolute-paths pi "$id")
   read_case_record "$rec"
   linked_home="$CASE_DIR/home-link"
@@ -361,7 +361,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
 
 test_unresolvable_relative_overrides_fail_loudly() {
   local rec id out status
-  id=profile-unresolvable-paths-z1d
+  id='profile-unresolvable-paths-z1d'
   rec=$(make_spawn_case profile-unresolvable-paths pi "$id")
   read_case_record "$rec"
 
@@ -402,7 +402,7 @@ test_unresolvable_relative_overrides_fail_loudly() {
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
   local rec id out status
-  id=profile-required-ship-z11
+  id='profile-required-ship-z11'
   rec=$(make_spawn_case profile-required-ship claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -418,7 +418,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_ship() {
 
 test_active_dispatch_profile_requires_explicit_harness_for_scout() {
   local rec id out status
-  id=profile-required-scout-z12
+  id='profile-required-scout-z12'
   rec=$(make_spawn_case profile-required-scout claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -434,7 +434,7 @@ test_active_dispatch_profile_requires_explicit_harness_for_scout() {
 
 test_active_dispatch_profile_allows_explicit_harness() {
   local rec id out status launch
-  id=profile-explicit-z13
+  id='profile-explicit-z13'
   rec=$(make_spawn_case profile-explicit claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -453,7 +453,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
 
 test_active_dispatch_profile_allows_positional_harness() {
   local rec id out status
-  id=profile-positional-z14
+  id='profile-positional-z14'
   rec=$(make_spawn_case profile-positional claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -469,7 +469,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 
 test_active_dispatch_profile_allows_raw_launch_command() {
   local rec id out status launch
-  id=profile-raw-z15
+  id='profile-raw-z15'
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -513,7 +513,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step() {
 
 test_claude_threads_model_and_effort() {
   local rec id out status launch
-  id=profile-claude-z2
+  id='profile-claude-z2'
   rec=$(make_spawn_case profile-claude claude "$id")
   read_case_record "$rec"
 
@@ -530,7 +530,7 @@ test_claude_threads_model_and_effort() {
 
 test_codex_threads_model_and_effort() {
   local rec id out status launch
-  id=profile-codex-z3
+  id='profile-codex-z3'
   rec=$(make_spawn_case profile-codex codex "$id")
   read_case_record "$rec"
 
@@ -546,7 +546,7 @@ test_codex_threads_model_and_effort() {
 
 test_codex_threads_model_and_max_effort() {
   local rec id out status launch
-  id=profile-codex-max-z4
+  id='profile-codex-max-z4'
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
@@ -562,7 +562,7 @@ test_codex_threads_model_and_max_effort() {
 
 test_codex_omits_max_effort_for_unsupported_model() {
   local rec id out status launch
-  id=profile-codex-max-unsupported-z4b
+  id='profile-codex-max-unsupported-z4b'
   rec=$(make_spawn_case profile-codex-max-unsupported codex "$id")
   read_case_record "$rec"
 
@@ -583,7 +583,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
 # own primary-session turn-end guard and session-start digest.
 test_codex_crewmate_launch_disables_the_hook_layer() {
   local rec id out status launch
-  id=profile-codex-hooks-z4c
+  id='profile-codex-hooks-z4c'
   rec=$(make_spawn_case profile-codex-hooks codex "$id")
   read_case_record "$rec"
 
@@ -606,7 +606,7 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
   local rec id sm out status launch
-  id=profile-codex-secondmate-hooks-z4d
+  id='profile-codex-secondmate-hooks-z4d'
   rec=$(make_spawn_case profile-codex-secondmate-hooks codex "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -621,73 +621,164 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
-test_grok_threads_model_and_reasoning_effort() {
-  local rec id out status launch
-  id=profile-grok-z5
-  rec=$(make_spawn_case profile-grok grok "$id")
-  read_case_record "$rec"
+test_grok_crew_profiles_are_refused_before_launch() {
+  local rec id out status profile harness model
+  for profile in "grok grok-4" "cursor cursor-grok-4.5-high"; do
+    read -r harness model <<<"$profile"
+    set -- "$harness" "$model"
+    id="profile-refused-$1-z5"
+    rec=$(make_spawn_case "profile-refused-$1" "$1" "$id")
+    read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort high)
+    out=$(FM_TEST_CURSOR_MODELS='Available models\ncursor-grok-4.5-high - Grok 4.5 High' \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$2" --effort high)
+    status=$?
+    expect_code 1 "$status" "$1 spawn with model $2 should be refused"
+    assert_contains "$out" "spawn quota preflight refused" "$1 refusal did not come from the quota preflight"
+    assert_contains "$out" "reserved for Firstmate" "$1 refusal did not name the Grok reservation"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$1 Grok refusal must happen before launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$1 Grok refusal must not publish task meta"
+  done
+  id='profile-refused-raw-z5'
+  rec=$(make_spawn_case profile-refused-raw claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "cursor-agent --model cursor-grok-4.6-high --yolo")
   status=$?
-  expect_code 0 "$status" "grok spawn with profile flags should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 high
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' --reasoning-effort 'high'" \
-    "grok launch did not thread model and reasoning-effort flags"
-  assert_not_contains "$launch" "--effort" "grok launch must use --reasoning-effort, not --effort"
-  pass "grok receives --model and --reasoning-effort profile flags"
+  expect_code 1 "$status" "raw launch naming a Grok model should be refused"
+  assert_contains "$out" "spawn quota preflight refused" "raw Grok refusal did not come from the quota preflight"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw Grok refusal must happen before launch"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw Grok refusal must not publish task meta"
+  id='profile-refused-multiline-raw-z5'
+  rec=$(make_spawn_case profile-refused-multiline-raw claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "true
+cursor-agent --model cursor-grok-4.6-high --yolo")
+  status=$?
+  expect_code 1 "$status" "raw launch naming a Grok model on a later line should be refused"
+  assert_contains "$out" "spawn quota preflight refused" "multiline raw Grok refusal did not come from the quota preflight"
+  [ ! -s "$LAUNCH_LOG" ] || fail "multiline raw Grok refusal must happen before launch"
+  id='profile-grok-path-raw-z5'
+  rec=$(make_spawn_case profile-grok-path-raw claude "$id")
+  read_case_record "$rec"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "/opt/tools/grok-bridge/custom-agent --model sonnet")
+  status=$?
+  expect_code 0 "$status" "raw launch whose path merely contains grok should spawn: $out"
+  assert_not_contains "$out" "spawn quota preflight refused" "a grok directory name refused a non-Grok raw launch"
+  pass "Grok harness and Grok model crew profiles are refused before launch"
 }
 
-test_grok_omits_invalid_max_reasoning_effort() {
-  local rec id out status launch
-  id=profile-grok-max-z6
-  rec=$(make_spawn_case profile-grok-max grok "$id")
-  read_case_record "$rec"
-
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort max)
-  status=$?
-  expect_code 0 "$status" "grok spawn with unsupported max reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 max
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when max effort was omitted"
-  assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported max reasoning effort"
-  assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported max reasoning effort"
+quota_axi_rows() {  # <codex-remaining> <codex-runway> <cursor-remaining> <cursor-runway>
+  printf '{"schemaVersion":5,"providers":[{"provider":"codex","state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"%s"}}]}},{"provider":"cursor","state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":%s,"runway":{"status":"%s"}}]}}]}' "$@"
 }
 
-test_grok_omits_invalid_xhigh_reasoning_effort() {
-  local rec id out status launch
-  id=profile-grok-xhigh-z6b
-  rec=$(make_spawn_case profile-grok-xhigh grok "$id")
-  read_case_record "$rec"
+test_quota_preflight_diverts_doomed_profiles_to_confirmed_lane() {
+  local rec id out status launch profile harness model
+  for profile in "grok grok-4" "codex gpt-5"; do
+    read -r harness model <<<"$profile"
+    id="profile-undiverted-$harness-z5d"
+    rec=$(make_spawn_case "profile-undiverted-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(FM_FAKE_QUOTA_AXI_JSON=$(quota_axi_rows 0 exhausted_now 50 through_reset) \
+      FM_TEST_CURSOR_MODELS='Available models\ncomposer-2.5 - Composer 2.5' \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model")
+    status=$?
+    expect_code 1 "$status" "doomed $harness spawn without the divert grant should be refused"$'\n'"$out"
+    assert_contains "$out" "spawn quota preflight refused '$harness'" "$harness refusal did not come from the quota preflight"
+    assert_contains "$out" "'cursor' model 'composer-2.5' has confirmed runway" "$harness refusal did not name the confirmed lane"
+    [ ! -s "$LAUNCH_LOG" ] || fail "$harness spawn without the divert grant must not launch"
+    assert_absent "$HOME_DIR/state/$id.meta" "$harness spawn without the divert grant must not publish task meta"
 
-  # grok 0.2.99 rejects xhigh (accepted set is only low|medium|high).
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort xhigh)
+    id="profile-diverted-$harness-z5d"
+    rec=$(make_spawn_case "profile-diverted-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    : >"$HOME_DIR/config/spawn-quota-divert"
+    out=$(FM_FAKE_QUOTA_AXI_JSON=$(quota_axi_rows 0 exhausted_now 50 through_reset) \
+      FM_TEST_CURSOR_MODELS='Available models\ncomposer-2.5 - Composer 2.5' \
+      run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model "$model")
+    status=$?
+    expect_code 0 "$status" "doomed $harness spawn should divert to the confirmed lane"$'\n'"$out"
+    assert_contains "$out" "spawn quota preflight diverted '$harness'" "$harness diversion was not reported"
+    assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "$harness diversion did not record the cursor lane"
+    assert_grep 'model=composer-2.5' "$HOME_DIR/state/$id.meta" "$harness diversion did not record the composer model"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_contains "$launch" "--model 'composer-2.5'" "$harness diversion did not launch the composer model"
+  done
+
+  id='profile-diverted-ultra-z5h'
+  rec=$(make_spawn_case profile-diverted-ultra grok "$id")
+  read_case_record "$rec"
+  : >"$HOME_DIR/config/spawn-quota-divert"
+  out=$(FM_FAKE_QUOTA_AXI_JSON=$(quota_axi_rows 0 exhausted_now 50 through_reset) \
+    FM_TEST_CURSOR_MODELS='Available models\ncomposer-2.5 - Composer 2.5' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model grok-4 --effort ultra)
   status=$?
-  expect_code 0 "$status" "grok spawn with unsupported xhigh reasoning effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" grok grok-4 xhigh
-  launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "grok --always-approve --model 'grok-4' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < " \
-    "grok launch did not preserve the model flag and typed brief when xhigh effort was omitted"
-  assert_not_contains "$launch" "--reasoning-effort" "grok launch must omit unsupported xhigh reasoning effort"
-  assert_not_contains "$launch" "--effort" "grok launch must not fall back to --effort for reasoning effort"
-  pass "grok omits unsupported xhigh reasoning effort"
+  expect_code 0 "$status" "a diverted ultra spawn should launch the diverted lane"$'\n'"$out"
+  assert_contains "$out" "no native ultra effort" "dropping the unportable ultra effort was not reported"
+  assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "diverted ultra spawn did not record the cursor lane"
+
+  id='profile-exhausted-codex-z5e'
+  rec=$(make_spawn_case profile-exhausted-codex codex "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_QUOTA_AXI_JSON=$(quota_axi_rows 0 exhausted_now 0 exhausted_now) \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
+  status=$?
+  expect_code 1 "$status" "doomed codex spawn with no confirmed lane should be refused"
+  assert_contains "$out" "spawn quota preflight refused 'codex'" "exhausted codex refusal did not come from the quota preflight"
+  [ ! -s "$LAUNCH_LOG" ] || fail "exhausted codex refusal must happen before launch"
+  assert_absent "$HOME_DIR/state/$id.meta" "exhausted codex refusal must not publish task meta"
+
+  id='profile-healthy-codex-z5f'
+  rec=$(make_spawn_case profile-healthy-codex codex "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_QUOTA_AXI_JSON=$(quota_axi_rows 50 through_reset 50 through_reset) \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
+  status=$?
+  expect_code 0 "$status" "healthy codex spawn should launch as requested"$'\n'"$out"
+  assert_not_contains "$out" "diverted" "healthy codex spawn must not divert"
+  assert_grep 'harness=codex' "$HOME_DIR/state/$id.meta" "healthy codex spawn changed lane"
+  id='profile-quota-error-codex-z5g'
+  rec=$(make_spawn_case profile-quota-error-codex codex "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_QUOTA_AXI_JSON='{"schemaVersion":5,"providers":[{"provider":"codex","state":{"status":"fresh","stale":false,"error":"fetch timed out"}},{"provider":"cursor","state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"}}]}}]}' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5)
+  status=$?
+  expect_code 0 "$status" "codex spawn whose quota could not be measured should launch as requested"$'\n'"$out"
+  assert_contains "$out" "could not confirm runway for 'codex'" "unmeasured codex quota did not surface its uncertainty"
+  assert_not_contains "$out" "diverted" "unmeasured codex quota must not divert"
+  assert_grep 'harness=codex' "$HOME_DIR/state/$id.meta" "unmeasured codex quota changed lane"
+
+  # A raw launch names its model inside the command; a model-scoped exhaustion
+  # must refuse it even while the provider-wide quota still has runway.
+  id='profile-raw-model-exhausted-z5i'
+  rec=$(make_spawn_case profile-raw-model-exhausted codex "$id")
+  read_case_record "$rec"
+  out=$(FM_FAKE_QUOTA_AXI_JSON='{"schemaVersion":5,"providers":[{"provider":"codex","state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":50,"runway":{"status":"through_reset"}},{"scope":"model:gpt-5.6-luna","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},{"provider":"cursor","state":{"status":"fresh","stale":false},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}' \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "codex --model gpt-5.6-luna")
+  status=$?
+  expect_code 1 "$status" "raw launch into an exhausted model should be refused"$'\n'"$out"
+  assert_contains "$out" "spawn quota preflight refused 'codex' model 'gpt-5.6-luna'" "raw launch model was not judged by the quota preflight"
+  [ ! -s "$LAUNCH_LOG" ] || fail "raw launch into an exhausted model must not launch"
+  assert_absent "$HOME_DIR/state/$id.meta" "raw launch into an exhausted model must not publish task meta"
+  pass "the spawn quota preflight refuses doomed profiles and diverts only under the captain's config/spawn-quota-divert grant"
 }
 
 test_cursor_threads_model_workspace_and_omits_effort_axis() {
   local rec id out status launch
-  id=profile-cursor-z6c
+  id='profile-cursor-z6c'
   rec=$(make_spawn_case profile-cursor cursor "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5-high --effort high)
+    --model gpt-5.5-high --effort high)
   status=$?
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
+  assert_meta_profile "$HOME_DIR/state/$id.meta" cursor gpt-5.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  assert_contains "$launch" "--trust --yolo --model 'gpt-5.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
@@ -705,21 +796,21 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   assert_not_contains "$launch" "--effort" "cursor launch must not invent a separate effort flag"
   assert_not_contains "$launch" "--reasoning-effort" "cursor launch must not invent a separate reasoning-effort flag"
   assert_grep 'harness=cursor' "$HOME_DIR/state/$id.meta" "cursor harness was not recorded in meta"
-  assert_grep 'model=cursor-grok-4.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
+  assert_grep 'model=gpt-5.5-high' "$HOME_DIR/state/$id.meta" "cursor model was recorded as default"
   pass "cursor receives its model-qualified reasoning class and exact task workspace"
 }
 
 test_cursor_refuses_model_absent_from_live_catalog() {
   local rec id out status
-  id=profile-cursor-unsupported-z6d
+  id='profile-cursor-unsupported-z6d'
   rec=$(make_spawn_case profile-cursor-unsupported cursor "$id")
   read_case_record "$rec"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
-    --model cursor-grok-4.5)
+    --model gpt-5.5)
   status=$?
   expect_code 1 "$status" "cursor spawn should refuse a model absent from a successful catalog"
-  assert_contains "$out" "Cursor model 'cursor-grok-4.5' is not available" \
+  assert_contains "$out" "Cursor model 'gpt-5.5' is not available" \
     "cursor model refusal did not identify the unavailable model"
   assert_contains "$out" "--list-models" \
     "cursor model refusal did not tell the caller how to find valid ids"
@@ -729,7 +820,7 @@ test_cursor_refuses_model_absent_from_live_catalog() {
 
 test_cursor_failed_catalog_probe_does_not_block_spawn() {
   local rec id out status launch
-  id=profile-cursor-catalog-unreachable-z6e
+  id='profile-cursor-catalog-unreachable-z6e'
   rec=$(make_spawn_case profile-cursor-catalog-unreachable cursor "$id")
   read_case_record "$rec"
 
@@ -747,7 +838,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 
 test_opencode_threads_model_and_effort_variant() {
   local rec id out status launch
-  id=profile-opencode-z7
+  id='profile-opencode-z7'
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
 
@@ -771,7 +862,7 @@ test_opencode_threads_model_and_effort_variant() {
 
 test_opencode_without_effort_keeps_launch_config_unchanged() {
   local rec id out status launch
-  id=profile-opencode-noeffort-z7b
+  id='profile-opencode-noeffort-z7b'
   rec=$(make_spawn_case profile-opencode-noeffort opencode "$id")
   read_case_record "$rec"
 
@@ -789,7 +880,7 @@ test_opencode_without_effort_keeps_launch_config_unchanged() {
 
 test_opencode_emits_variant_for_openai_family_effort() {
   local rec id out status launch
-  id=profile-opencode-openai-z7c
+  id='profile-opencode-openai-z7c'
   rec=$(make_spawn_case profile-opencode-openai opencode "$id")
   read_case_record "$rec"
 
@@ -806,7 +897,7 @@ test_opencode_emits_variant_for_openai_family_effort() {
 
 test_opencode_omits_variant_when_model_family_lacks_effort() {
   local rec id out status launch
-  id=profile-opencode-omit-z7d
+  id='profile-opencode-omit-z7d'
   rec=$(make_spawn_case profile-opencode-omit opencode "$id")
   read_case_record "$rec"
 
@@ -892,7 +983,7 @@ test_batch_preserves_native_ultra() {
 
 test_pi_scout_launch_enters_recorded_worktree() {
   local rec id out status
-  id=profile-pi-scout-cwd-z1
+  id='profile-pi-scout-cwd-z1'
   rec=$(make_spawn_case profile-pi-scout-cwd pi "$id")
   read_case_record "$rec"
 
@@ -909,7 +1000,7 @@ test_pi_scout_launch_enters_recorded_worktree() {
 
 test_pi_threads_model_and_max_effort() {
   local rec id out status launch
-  id=profile-pi-z8
+  id='profile-pi-z8'
   rec=$(make_spawn_case profile-pi pi "$id")
   read_case_record "$rec"
 
@@ -930,7 +1021,7 @@ test_pi_threads_model_and_max_effort() {
 
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   local rec id out status launch
-  id=profile-pi-signed-z8b
+  id='profile-pi-signed-z8b'
   rec=$(make_spawn_case profile-pi-signed pi-signed "$id")
   read_case_record "$rec"
 
@@ -993,7 +1084,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
 
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
   local rec id out status
-  id=profile-pi-signed-missing-z8c
+  id='profile-pi-signed-missing-z8c'
   rec=$(make_spawn_case profile-pi-signed-missing pi-signed "$id")
   read_case_record "$rec"
   rm -f "$FAKEBIN_DIR/pi-signed"
@@ -1016,7 +1107,7 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata() {
 
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   local rec id sm out status launch
-  id=profile-pi-signed-secondmate-z8d
+  id='profile-pi-signed-secondmate-z8d'
   rec=$(make_spawn_case profile-pi-signed-secondmate codex "$id")
   read_case_record "$rec"
   printf '%s\n' pi-signed > "$HOME_DIR/config/secondmate-harness"
@@ -1118,8 +1209,8 @@ test_pi_approve_probe_omits_unsupported_flag() {
 
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
-  id1=profile-batch-a-z9
-  id2=profile-batch-b-z10
+  id1='profile-batch-a-z9'
+  id2='profile-batch-b-z10'
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -1137,7 +1228,7 @@ test_batch_forwards_shared_profile_flags() {
 
 test_claude_forwards_firstmate_config_dir_when_set() {
   local rec id out status launch
-  id=profile-claude-cfgdir-z17
+  id='profile-claude-cfgdir-z17'
   rec=$(make_spawn_case profile-claude-cfgdir claude "$id")
   read_case_record "$rec"
 
@@ -1156,7 +1247,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
 
 test_lavish_server_address_is_exported_to_worker_launch() {
   local rec id out status launch
-  id=profile-lavish-host-z18
+  id='profile-lavish-host-z18'
   rec=$(make_spawn_case profile-lavish-host claude "$id")
   read_case_record "$rec"
   printf '%s\n' '100.99.161.42' > "$HOME_DIR/config/lavish-axi-host"
@@ -1171,7 +1262,7 @@ test_lavish_server_address_is_exported_to_worker_launch() {
 
 test_lavish_absent_config_preserves_destination_ambient() {
   local rec id out status launch pane_log seen
-  id=profile-lavish-ambient-z18b
+  id='profile-lavish-ambient-z18b'
   rec=$(make_spawn_case profile-lavish-ambient claude "$id")
   read_case_record "$rec"
   pane_log="$CASE_DIR/pane.log"
@@ -1199,7 +1290,7 @@ SH
 
 test_claude_omits_config_dir_prefix_when_unset() {
   local rec id out status launch
-  id=profile-claude-nocfgdir-z18
+  id='profile-claude-nocfgdir-z18'
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
 
@@ -1216,7 +1307,7 @@ test_claude_omits_config_dir_prefix_when_unset() {
 
 test_non_claude_harness_ignores_config_dir() {
   local rec id out status launch
-  id=profile-codex-nocfgdir-z19
+  id='profile-codex-nocfgdir-z19'
   rec=$(make_spawn_case profile-codex-nocfgdir codex "$id")
   read_case_record "$rec"
 
@@ -1250,7 +1341,7 @@ assert_attribution_policy_absent() {  # <launch-command> <what>
 
 test_claude_task_launch_carries_control_channel_authority() {
   local rec id out status launch
-  id=profile-claude-control-channel-z21
+  id='profile-claude-control-channel-z21'
   rec=$(make_spawn_case profile-claude-control-channel claude "$id")
   read_case_record "$rec"
 
@@ -1273,7 +1364,7 @@ test_claude_task_launch_carries_control_channel_authority() {
 
 test_claude_secondmate_launch_omits_task_control_channel_authority() {
   local rec id sm out status launch
-  id=profile-secondmate-control-channel-z21b
+  id='profile-secondmate-control-channel-z21b'
   rec=$(make_spawn_case profile-secondmate-control-channel claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -1291,7 +1382,7 @@ test_claude_secondmate_launch_omits_task_control_channel_authority() {
 
 test_claude_long_launch_is_delivered_intact() {
   local rec id out status launch expected
-  id=profile-claude-long-launch-z24
+  id='profile-claude-long-launch-z24'
   rec=$(make_spawn_case profile-claude-long-launch claude "$id")
   read_case_record "$rec"
 
@@ -1311,7 +1402,7 @@ test_claude_long_launch_is_delivered_intact() {
 
 test_claude_crewmate_launch_carries_the_attribution_policy() {
   local rec id out status launch
-  id=profile-claude-attribution-z22
+  id='profile-claude-attribution-z22'
   rec=$(make_spawn_case profile-claude-attribution claude "$id")
   read_case_record "$rec"
 
@@ -1326,7 +1417,7 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
 
 test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
   local rec id out status launch
-  id=profile-claude-keep-attribution-z25
+  id='profile-claude-keep-attribution-z25'
   rec=$(make_spawn_case profile-claude-keep-attribution claude "$id")
   read_case_record "$rec"
   : > "$HOME_DIR/config/keep-ai-trailers"
@@ -1345,8 +1436,8 @@ test_keep_ai_trailers_omits_attribution_settings_and_strip_hooks() {
 
 test_keep_ai_trailers_reaches_secondmate_crew_launches() {
   local rec sm_rec sm_id crew_id sm out status launch
-  sm_id=profile-keep-attribution-sm-z26
-  crew_id=profile-keep-attribution-crew-z27
+  sm_id='profile-keep-attribution-sm-z26'
+  crew_id='profile-keep-attribution-crew-z27'
   rec=$(make_spawn_case profile-keep-attribution-primary claude "$sm_id")
   sm_rec=$(make_spawn_case profile-keep-attribution-sm claude "$crew_id")
   read_case_record "$rec"
@@ -1375,7 +1466,7 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches() {
 
 test_claude_secondmate_launch_carries_the_attribution_policy() {
   local rec id sm out status launch
-  id=profile-secondmate-attribution-z23
+  id='profile-secondmate-attribution-z23'
   rec=$(make_spawn_case profile-secondmate-attribution claude "$id")
   read_case_record "$rec"
   sm="$CASE_DIR/secondmate-home"
@@ -1392,7 +1483,7 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
 
 test_active_dispatch_profile_does_not_block_secondmate_launch() {
   local rec id sm out status
-  id=profile-secondmate-z16
+  id='profile-secondmate-z16'
   rec=$(make_spawn_case profile-secondmate codex "$id")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
@@ -1907,9 +1998,8 @@ test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
-test_grok_threads_model_and_reasoning_effort
-test_grok_omits_invalid_max_reasoning_effort
-test_grok_omits_invalid_xhigh_reasoning_effort
+test_grok_crew_profiles_are_refused_before_launch
+test_quota_preflight_diverts_doomed_profiles_to_confirmed_lane
 test_cursor_threads_model_workspace_and_omits_effort_axis
 test_cursor_refuses_model_absent_from_live_catalog
 test_cursor_failed_catalog_probe_does_not_block_spawn
