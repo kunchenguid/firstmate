@@ -1970,8 +1970,14 @@ if [ -f "$D/herdr-stopped" ]; then
 fi
 case "${1:-} ${2:-}" in
   'pane get')
+    if [ -f "$D/herdr-pane-no-terminal" ] && [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
+      # A read that answers without the pane's terminal identity.
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"tabnew","foreground_cwd":"%s"}}}\n' \
+        "${3:-}" "$(cat "$D/cwd")"
+      exit 0
+    fi
     if [ "${3:-}" = "$(cat "$D/herdr-pane")" ]; then
-      printf '{"result":{"pane":{"pane_id":"%s","foreground_cwd":"%s"}}}\n' \
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"tabnew","terminal_id":"term-survivor","foreground_cwd":"%s"}}}\n' \
         "${3:-}" "$(cat "$D/cwd")"
     else
       # Only the pane this case says survived can be read back. Any other pane
@@ -2019,7 +2025,24 @@ case "${1:-} ${2:-}" in
     esac
     exit 0 ;;
   'workspace list')
-    printf '{"result":{"workspaces":[]}}\n'
+    if [ -f "$D/herdr-viewer" ]; then
+      # The captain's own focused workspace, which a focus-preserving pane
+      # close snapshots before and after it closes a pane elsewhere.
+      printf '{"result":{"workspaces":[{"workspace_id":"wscaptain","label":"captain","focused":true,"active_tab_id":"tabcaptain"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[]}}\n'
+    fi
+    exit 0 ;;
+  'session list')
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s/herdr.sock"}]}\n' \
+      "${@: -1}" "$D"
+    exit 0 ;;
+  'terminal title')
+    printf '{"result":{"reason":"no_foreground_client"}}\n'
+    exit 0 ;;
+  'pane close')
+    # A closed pane no longer reads back.
+    [ "${3:-}" != "$(cat "$D/herdr-pane")" ] || printf '%s' '%none' > "$D/herdr-pane"
     exit 0 ;;
   'workspace create')
     if [ -f "$D/herdr-workspace-create-fails" ]; then
@@ -2029,13 +2052,22 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"workspace":{"workspace_id":"wsnew"},"tab":{"tab_id":"seedtab"}}}\n'
     exit 0 ;;
   'tab list')
-    printf '{"result":{"tabs":[]}}\n'
+    if [ -f "$D/herdr-viewer" ] && [ "${4:-}" = wscaptain ]; then
+      printf '{"result":{"tabs":[{"tab_id":"tabcaptain","focused":true}]}}\n'
+    else
+      printf '{"result":{"tabs":[]}}\n'
+    fi
     exit 0 ;;
   'tab create')
     # The re-created endpoint. Recording it lets a case prove the pane the
     # record ends up naming is the one this call minted.
     printf '%s\n' "$*" >> "$D/herdr-created-tabs"
-    printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9"}}}\n'
+    if [ -f "$D/herdr-create-terminal" ]; then
+      printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9","terminal_id":"%s"}}}\n' \
+        "$(cat "$D/herdr-create-terminal")"
+    else
+      printf '{"result":{"tab":{"tab_id":"tabnew"},"root_pane":{"pane_id":"%%9"}}}\n'
+    fi
     # From here on the new pane is the one that reads back.
     printf '%s' '%9' > "$D/herdr-pane"
     exit 0 ;;
@@ -2227,6 +2259,62 @@ test_herdr_rebind_stays_in_the_recorded_session() {
   [ "$(meta_field "$dir" rl73 herdr_pane_id)" = '%9' ] \
     || fail "the rebound record should name the pane the reclaim minted, got $(meta_field "$dir" rl73 herdr_pane_id)"
   pass "reclaim: a herdr rebind is created in the session the record names, never the ambient one"
+}
+
+test_herdr_rebind_refuses_a_terminal_identity_the_create_did_not_return() {
+  local dir out rc log
+  herdr_case_or_skip gone-herdr-identity rl76 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  # The create response names one terminal, and the later read of the same
+  # pane id answers with another, as if Herdr reissued the pane id between.
+  printf '%s' term-created > "$dir/fake/herdr-create-terminal"
+  : > "$dir/fake/herdr-viewer"
+
+  out=$(run_spawn "$dir" rl76 --relaunch --harness claude); rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 1 "$rc" "a rebind whose pane reads back another terminal must refuse"$'\n'"$out"$'\n'"$log"
+  assert_contains "$out" "refusing to publish its record" "the refusal should say the record was not published"
+  [ "$(meta_field "$dir" rl76 window)" = 'fmlab:%7' ] \
+    || fail "a refused rebind published the new endpoint, got $(meta_field "$dir" rl76 window)"
+  assert_not_contains "$(cat "$dir/home/state/rl76.meta")" "term-" \
+    "a refused rebind recorded a terminal id it could not establish"
+  [ ! -e "$dir/fake/launched-command" ] \
+    || fail "a refused rebind launched an agent into the unverified pane"
+  # The identity was read, so the abort cleanup closes the pane this spawn
+  # created.
+  assert_contains "$log" "pane close %9 " "a refused rebind with a read identity must close the pane it created"
+  pass "reclaim: a herdr rebind refuses to publish a record whose pane reads back another terminal than the create returned"
+}
+
+test_herdr_rebind_leaves_a_pane_with_an_unreadable_identity_open() {
+  local dir out rc log
+  herdr_case_or_skip gone-herdr-unreadable rl77 fmlab '%none' || {
+    echo "skip - herdr rebind needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  printf '%s' term-created > "$dir/fake/herdr-create-terminal"
+  : > "$dir/fake/herdr-viewer"
+  # Every read of the pane answers without a terminal id, so its identity is
+  # unknown.
+  : > "$dir/fake/herdr-pane-no-terminal"
+
+  out=$(run_spawn "$dir" rl77 --relaunch --harness claude); rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 1 "$rc" "a rebind whose pane identity cannot be read must refuse"$'\n'"$out"$'\n'"$log"
+  assert_contains "$out" "refusing to publish its record" "the refusal should say the record was not published"
+  [ "$(meta_field "$dir" rl77 window)" = 'fmlab:%7' ] \
+    || fail "a refused rebind published the new endpoint, got $(meta_field "$dir" rl77 window)"
+  [ ! -e "$dir/fake/launched-command" ] \
+    || fail "a refused rebind launched an agent into the unverified pane"
+  # An unread identity grants no close by pane id alone, so the pane stays
+  # open and the operator is told which one to close.
+  assert_not_contains "$log" "pane close" "a refused rebind closed a pane whose identity it could not read"
+  assert_contains "$out" "herdr pane fmlab:%9 was left open" "the refusal should name the pane it left open"
+  pass "reclaim: a herdr rebind that cannot read its pane identity leaves the pane open and names it"
 }
 
 test_herdr_reclaim_refuses_an_agent_that_came_back() {
@@ -2452,6 +2540,8 @@ test_herdr_relaunch_resumes_only_the_registered_pi_session
 test_herdr_reclaim_adopts_a_pane_that_outlived_its_server
 test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
+test_herdr_rebind_refuses_a_terminal_identity_the_create_did_not_return
+test_herdr_rebind_leaves_a_pane_with_an_unreadable_identity_open
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner

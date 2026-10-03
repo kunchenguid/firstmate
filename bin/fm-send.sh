@@ -374,6 +374,7 @@ fm_send_resolve_target() { # <raw-target>
       return 1
     fi
     backend=$(fm_backend_of_meta "$meta")
+    fm_backend_bind_task_record "$meta" "$target"
     RESOLVED_TARGET=$target
     TARGET_BACKEND=$backend
     TARGET_META=$meta

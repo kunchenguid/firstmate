@@ -580,13 +580,17 @@ print_status_tail() {
 # surprise in one task's read into that task's own endpoint line - never a
 # silently missing rest of digest. The inner bash re-sources fm-backend.sh
 # per read; that cost is a few milliseconds per task and buys the isolation.
-fm_session_start_endpoint_read() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 label=${3:-}
+# A given <meta-file> is bound to <target> inside that child
+# (fm_backend_bind_task_record), so the identity check reads this task's own
+# record even when another record names the same target.
+fm_session_start_endpoint_read() {  # <backend> <target> [expected-label] [meta-file]
+  local backend=$1 target=$2 label=${3:-} meta=${4:-}
   # shellcheck disable=SC2016  # Positional parameters expand inside the child bash, not here.
   fm_run_timed "$ENDPOINT_TIMEOUT" bash -c '
     . "$1"
+    [ -z "$5" ] || fm_backend_bind_task_record "$5" "$3"
     fm_backend_target_exists "$2" "$3" "$4"
-  ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label"
+  ' _ "$SCRIPT_DIR/fm-backend.sh" "$backend" "$target" "$label" "$meta"
 }
 
 hash_file_sha256() {
@@ -899,7 +903,7 @@ for meta in "$STATE"/*.meta; do
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     endpoint_rc=0
-    fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" || endpoint_rc=$?
+    fm_session_start_endpoint_read "$backend" "${target:-$window}" "fm-$id" "$meta" || endpoint_rc=$?
     # Only the timeout owner's own statuses mean the read itself failed: 124 is
     # the bound firing and >=128 is a signal death. Every other nonzero status
     # is the probe's own verdict that the endpoint is gone.
