@@ -119,9 +119,14 @@ case "${1:-}" in
   capture-pane)
     # An empty bordered composer, so the shared composer classifier reads
     # empty. FM_FAKE_TMUX_COMPOSER=pending renders leftover composer text
-    # instead, for suites that prove a readiness gate refuses.
+    # instead, for suites that prove a readiness gate refuses; =v2idle
+    # renders the real opencode 2.0.22 idle left-bar composer (with its
+    # `Build auto · Model · intensity` footer) so the v2 empty-composer gate
+    # runs against the shape the fleet's installed CLI actually draws.
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = v2idle ]; then
+      printf '  ┃\n  ┃  Ask anything… "Fix broken tests"\n  ┃\n  ┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · xhigh\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi

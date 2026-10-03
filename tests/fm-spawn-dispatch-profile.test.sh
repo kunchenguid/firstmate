@@ -851,7 +851,7 @@ test_opencode2_pins_model_in_config_and_drops_bare_flag() {
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
 
-  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 FM_FAKE_TMUX_COMPOSER=v2idle \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5 --effort high)
   status=$?
   expect_code 0 "$status" "opencode 2.x spawn with model and effort should succeed"
@@ -884,7 +884,7 @@ test_opencode2_without_effort_still_pins_model() {
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
 
-  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 FM_FAKE_TMUX_COMPOSER=v2idle \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model anthropic/claude-sonnet-4-5)
   status=$?
   expect_code 0 "$status" "opencode 2.x spawn with model and no effort should succeed"
@@ -908,7 +908,7 @@ test_opencode2_without_model_keeps_permission_only_config() {
   read_case_record "$rec"
   home_real=$(cd "$HOME_DIR" && pwd -P)
 
-  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 \
+  out=$(FM_TEST_OPENCODE_VERSION=2.0.22 FM_FAKE_TMUX_COMPOSER=v2idle \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "opencode 2.x spawn without model should succeed"
