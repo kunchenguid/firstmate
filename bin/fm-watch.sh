@@ -519,8 +519,8 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # Steering-inbox loss detection, one cheap check per recorded window per poll.
 # Quiet when healthy: an absent, empty, or handled inbox costs one directory
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
-# policy owner) reports a due action, a busy pane just waits - the record is
-# durable and the worker will reach a turn boundary - an idle pane gets one
+# policy owner) reports a due action, a busy pane waits within its durable
+# bounded busy-deferral budget, then escalates without typing; an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
 # or missing skips the ladder altogether: it is never typed into and surfaces
@@ -536,7 +536,7 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason='' ring_rc backend agent_state
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
@@ -565,7 +565,16 @@ inbox_steer_check() {  # <window> <task>
   esac
   tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || tail40=
   if window_is_busy "$w" "$tail40"; then
-    return 0
+    [ "$verb" != retry ] || return 0
+    if ! count=$(fm_task_inbox_record_busy "$STATE" "$task" "$rec"); then
+      [ -f "$rec" ] || return 0
+      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be written while $rec stays unhandled; inspect the inbox directory)"
+    elif [ "$count" -ge "$(fm_task_inbox_busy_max)" ]; then
+      reason="stale: $w (unread firstmate instruction: stuck-busy after $count consecutive busy-deferred due doorbells; $rec stays unhandled and no doorbell was typed; inspect the worker)"
+    else
+      return 0
+    fi
+    verb=escalate
   fi
   case "$verb" in
     ring)
@@ -574,6 +583,13 @@ inbox_steer_check() {  # <window> <task>
       if [ "$ring_rc" -eq 3 ]; then
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
+      fi
+      if [ "$ring_rc" -eq 0 ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+        [ ! -f "$rec" ] || {
+          reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after delivery; inspect the inbox directory)"
+          fm_wake_append stale "$w" "$reason" || exit 1
+          wake "$reason"
+        }
       fi
       if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
         if [ ! -f "$rec" ]; then
@@ -599,7 +615,7 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox retry ring: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      reason=${reason:-"stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"}
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0

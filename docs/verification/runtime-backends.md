@@ -2456,3 +2456,16 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Busy inbox escalation
+
+Verified 2026-10-03 with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
+`bin/fm-task-inbox-lib.sh` owns the durable busy-deferral budget.
+
+A real Claude worker with Firstmate's `UserPromptSubmit`/`Stop` busy hooks opened an `AskUserQuestion` panel.
+Four due inbox checks on the unchanged watcher each read `busy=yes` and added zero wakes.
+With `FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2`, two separate watcher processes calling `inbox_steer_check` against that same pane produced one wake containing `stuck-busy after 2 consecutive busy-deferred due doorbells`; the question panel remained open and the steer remained unhandled.
+The zero grace accelerates only the experiment; the normal grace remains unchanged.
+Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which did not classify as busy; that is a different path and does not establish this regression.
+
+Repeat the hooked-worker check above after a busy-signal integration change; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
