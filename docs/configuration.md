@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, environment, or sandbox | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and [worker command sandbox](#worker-command-sandbox-configworker-sandbox) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -995,6 +995,51 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+## Worker command sandbox (config/worker-sandbox)
+
+The optional local, gitignored `config/worker-sandbox` presence flag runs every newly launched worker, scout, and local secondmate command inside Anthropic's [`sandbox-runtime`](https://github.com/anthropics/sandbox-runtime) (`srt`), including relaunches and raw launch commands.
+With the flag absent, launches are byte-for-byte unchanged.
+This is the worker command boundary: the agent process and every command it runs inherit the sandbox, unlike [`config/launch-env-allowlist`](#worker-launch-environment-configlaunch-env-allowlist), which only filters the environment.
+
+The mode is fail-closed.
+If the pinned runtime is missing, is not the pinned version, the settings file is unusable, or a live capability probe fails, the spawn refuses with a diagnostic and the worker command is never run.
+There is no silent fallback to an unsandboxed launch.
+
+### Runtime pin and settings
+
+The wrapper is pinned to `@anthropic-ai/sandbox-runtime` `0.0.78`, the release its interface was verified against.
+Install it with `npm install -g @anthropic-ai/sandbox-runtime@0.0.78`, or point `FM_SANDBOX_SRT_BIN` at an existing executable.
+
+The settings file is the local, gitignored `config/worker-sandbox-settings.json`, or `FM_SANDBOX_SETTINGS` when set.
+It must exist, be readable and non-empty, and be a JSON object accepted by the pinned runtime; the wrapper validates it by running `true` through that runtime before readiness, and passes it unchanged, so the filesystem read, write, and network rules are the captain's to author.
+The runtime's own secure-by-default behavior applies: reads are allowed except where denied, writes are denied except where allowed, and network is denied except for allowed domains.
+An unreadable, empty, or invalid settings file refuses rather than falling back to the runtime's built-in defaults, which are a different configuration, not a weaker one.
+
+### Capability probe
+
+`bin/fm-sandbox.sh probe` validates the runtime, the settings, and a live capability probe in a disposable fixture, and exits nonzero with the failing reason.
+The probe requires a permitted write to succeed, a denied write to fail, and a denied read to return no file contents, so a runtime that does not actually enforce its settings is rejected.
+On Linux the pinned runtime masks denied files with `/dev/null`, so reading a denied file may succeed with empty output.
+It uses no real secrets and resolves no credentials.
+
+On Linux the runtime needs working unprivileged user namespaces (bubblewrap).
+A host that blocks them - for example Ubuntu 24.04+ with the default AppArmor unprivileged-userns restriction - fails the probe and refuses the launch; Firstmate never weakens host-wide AppArmor or sysctl settings to enable it.
+
+### Validation and limits
+
+Run `bin/fm-sandbox.sh probe` on a host before enabling the flag, and see [`docs/verification/worker-sandbox.md`](verification/worker-sandbox.md) for the pinned-version evidence record and the live guard.
+`bin/fm-sandbox.sh --help` owns the exact subcommands, environment overrides, and exit codes.
+The wrapper covers the worker launch boundary that spawn and relaunch share; cleanup deliberately runs outside the sandbox with full host privileges, so cleanup is unchanged when the flag is on.
+Sandboxing the agent process does not isolate the pane shell, the terminal daemon, or same-user processes that run outside the worker.
+
+Portable regression coverage lives in [`tests/fm-sandbox.test.sh`](../tests/fm-sandbox.test.sh), [`tests/fm-sandbox-spawn.test.sh`](../tests/fm-sandbox-spawn.test.sh), the secondmate inheritance cases in [`tests/fm-secondmate-harness.test.sh`](../tests/fm-secondmate-harness.test.sh), and the relaunch case in [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh); the live guard is in the `live-harness-optin` family.
+
+### Inheritance
+
+`config/worker-sandbox` and `config/worker-sandbox-settings.json` are inherited into secondmate homes under the primary-authoritative inherited-local-material contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate's own workers run under the same sandbox.
+Because the posture is fail-closed, a secondmate launch that does not leave both files in the child home refuses rather than coming up with the sandbox silently off.
+The refusal covers a failed copy, a skipped inheritance, and any other path that leaves the child without the flag or its settings.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
