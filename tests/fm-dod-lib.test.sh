@@ -382,11 +382,94 @@ test_pr_based_dod_draft_check_uses_gh_axi() {
   pass "PR-based DoD draft check uses gh-axi"
 }
 
+# A head the pipeline pushed from its own gate leaves the project clone's
+# remote-tracking refs behind; the gate fetches the worker's branch from origin
+# before refusing (issue 6197).
+test_pushed_unfetched_head_is_accepted_after_fetch() {
+  local repo wt sha
+  repo="$TMP_ROOT/unfetched-repo"
+  wt="$TMP_ROOT/unfetched-wt"
+  fm_git_worktree "$repo" "$wt" fm/unfetched
+  git -C "$wt" commit -q --allow-empty -m 'fix pushed by the gate'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" push -q "$repo.origin.git" HEAD:refs/heads/fm/unfetched
+  [ -z "$(git -C "$repo" for-each-ref --contains="$sha" refs/remotes)" ] \
+    || fail "setup: the project clone already tracks the pushed head"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/o/r/-/merge_requests/4 checks green" \
+    || fail "a pushed head the project clone had not fetched was refused"
+  assert_equals "$sha" "$(git -C "$repo" rev-parse refs/remotes/origin/fm/unfetched)" \
+    "the gate did not fetch the worker's branch into the project clone"
+  pass "a pushed head the project clone had not fetched is accepted after a fetch"
+}
+
+test_gitlab_merge_request_head_is_accepted_after_fetch() {
+  local repo wt sha
+  repo="$TMP_ROOT/merge-request-repo"
+  wt="$TMP_ROOT/merge-request-wt"
+  fm_git_worktree "$repo" "$wt" fm/merge-request
+  git -C "$wt" commit -q --allow-empty -m 'fix pushed from a fork'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" push -q "$repo.origin.git" HEAD:refs/merge-requests/7/head
+  git -C "$repo.origin.git" rev-parse -q --verify refs/heads/fm/merge-request >/dev/null \
+    && fail "setup: the source branch exists on origin"
+  [ -z "$(git -C "$repo" for-each-ref --contains="$sha" refs/remotes)" ] \
+    || fail "setup: the project clone already tracks the merge-request head"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/o/r/-/merge_requests/7 checks green" \
+    || fail "a GitLab merge-request head without an origin source branch was refused"
+  assert_equals "$sha" "$(git -C "$repo" rev-parse refs/remotes/origin/merge-requests/7/head)" \
+    "the gate did not fetch the GitLab merge-request head into the project clone"
+  pass "a GitLab merge-request head is accepted after a fetch"
+}
+
+test_branch_behind_unpushed_head_is_refused_after_fetch() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/behind-repo"
+  wt="$TMP_ROOT/behind-wt"
+  fm_git_worktree "$repo" "$wt" fm/behind
+  git -C "$wt" commit -q --allow-empty -m 'pushed part'
+  git -C "$wt" push -q "$repo.origin.git" HEAD:refs/heads/fm/behind
+  git -C "$wt" commit -q --allow-empty -m 'never pushed'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/o/r/-/merge_requests/5 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "an unpushed head on a pushed branch was accepted (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unpushed-head refusal did not name the commit: $reason" ;;
+  esac
+  git -C "$repo" rev-parse -q --verify refs/remotes/origin/fm/behind >/dev/null \
+    || fail "setup: the fetch did not run, so the refusal proves nothing"
+  pass "an unpushed head is refused even after the branch is fetched"
+}
+
+test_unreachable_remote_still_refuses() {
+  local repo wt sha reason rc
+  repo="$TMP_ROOT/noremote-repo"
+  wt="$TMP_ROOT/noremote-wt"
+  fm_git_worktree "$repo" "$wt" fm/noremote
+  git -C "$wt" commit -q --allow-empty -m 'fix'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" push -q "$repo.origin.git" HEAD:refs/heads/fm/noremote
+  git -C "$repo" remote set-url origin "file://$TMP_ROOT/missing-remote.git"
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://gitlab.example.test/o/r/-/merge_requests/6 checks green")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "a head was accepted although the remote could not be read (exit $rc)"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "unreachable-remote refusal changed its reason: $reason" ;;
+  esac
+  pass "an unreachable remote still refuses with the same reason"
+}
+
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
+test_pushed_unfetched_head_is_accepted_after_fetch
+test_gitlab_merge_request_head_is_accepted_after_fetch
+test_branch_behind_unpushed_head_is_refused_after_fetch
+test_unreachable_remote_still_refuses
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
