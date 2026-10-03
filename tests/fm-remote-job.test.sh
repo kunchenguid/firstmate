@@ -61,6 +61,7 @@ cat > "$REMOTE_ROOT/bin/fm-probe-job.sh" <<'SH'
 #!/bin/bash
 set -u
 printf 'home=%s\nroot=%s\nactive=%s\npath=%s\n' "$FM_HOME" "$FM_ROOT_OVERRIDE" "${FM_REMOTE_JOB_ACTIVE:-}" "$PATH"
+printf 'user=%s\nlogname=%s\n' "${USER:-}" "${LOGNAME:-}"
 printf 'args:'
 printf ' <%s>' "$@"
 printf '\n'
@@ -284,6 +285,7 @@ rm -rf -- "$ACCOUNT_HOME/.local/share/mise"
 pass "operator PATH orders discovered tool installs deterministically"
 
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
+  USER=ambient-not-the-account LOGNAME=ambient-not-the-account \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$TMP_ROOT/worker.out" 2> "$TMP_ROOT/worker.err" &
@@ -323,6 +325,9 @@ OUT=$(<"$FM_REMOTE_JOB_STDOUT")
 assert_contains "$OUT" "home=$REMOTE_HOME" "the worker did not pass the staged FM_HOME"
 assert_contains "$OUT" "root=$REMOTE_ROOT" "the worker did not pass the configured root"
 assert_contains "$OUT" 'active=1' "the target did not execute inside the worker environment"
+ACCOUNT_USER=$(id -un)
+assert_contains "$OUT" "user=$ACCOUNT_USER" "the worker child did not receive the account USER that macOS Keychain lookups need"
+assert_contains "$OUT" "logname=$ACCOUNT_USER" "the worker child did not receive the account LOGNAME"
 # shellcheck disable=SC2016 # Literal shell-looking expected output is an injection probe.
 assert_contains "$OUT" 'args: <two words> <$(not executed)>' "the worker changed argv boundaries"
 assert_contains "$OUT" 'stdin=first line' "the worker lost staged stdin"

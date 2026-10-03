@@ -69,7 +69,10 @@
 #
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
-# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
+# PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, FM_REMOTE_JOB_ACTIVE=1, and USER and
+# LOGNAME set to the worker account's `id -un`. The account name is required
+# because macOS Claude Code keys its login Keychain item by USER, so without it
+# a signed-in pinned account reads as signed out. The PATH
 # is intentionally filesystem-discovered rather than login-shell-derived:
 # ~/.local/bin; nvm, asdf, and mise shims/install bins; Nix; Homebrew; and the
 # system tail. No shell startup files are evaluated. Each discovered set is
