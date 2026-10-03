@@ -135,18 +135,22 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 BACKLOG="$DATA/backlog.md"
 # The Done archive tasks-axi writes: the [markdown] archive key of the home's
-# .tasks.toml, relative to the data directory's parent where tasks-axi runs,
-# else the tracked default beside the backlog.
-done_archive_path() {
-  local root archive=
-  root=$(dirname "$DATA")
-  [ -f "$root/.tasks.toml" ] && archive=$(LC_ALL=C awk '
+# .tasks.toml, else of $HOME/.tasks-axi/config.toml, relative to the data
+# directory's parent where tasks-axi runs, else the tracked default beside the
+# backlog.
+toml_markdown_archive() {  # <toml-path>
+  [ -f "$1" ] || return 0
+  LC_ALL=C awk '
     {
       line = $0
       sub(/^[[:space:]]+/, "", line)
       if (line ~ /^\[/) {
         sub(/[[:space:]]*#.*/, "", line); sub(/[[:space:]]+$/, "", line)
-        if (line ~ /^\[[^]]+\]$/) inmarkdown = (line == "[markdown]")
+        if (line ~ /^\[[^]]+\]$/) {
+          line = substr(line, 2, length(line) - 2)
+          sub(/^[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line)
+          inmarkdown = (line == "markdown")
+        }
         next
       }
       if (inmarkdown && sub(/^archive[[:space:]]*=[[:space:]]*/, "", line)) {
@@ -157,11 +161,17 @@ done_archive_path() {
         } else {
           sub(/[[:space:]]*#.*/, "", line); sub(/[[:space:]]+$/, "", line)
         }
-        print line
-        exit
+        archive = line
       }
     }
-  ' "$root/.tasks.toml")
+    END { if (archive != "") print archive }
+  ' "$1"
+}
+done_archive_path() {
+  local root archive
+  root=$(dirname "$DATA")
+  archive=$(toml_markdown_archive "$root/.tasks.toml")
+  [ -n "$archive" ] || [ -z "${HOME:-}" ] || archive=$(toml_markdown_archive "$HOME/.tasks-axi/config.toml")
   case "$archive" in
     '') printf '%s\n' "$DATA/done-archive.md" ;;
     /*) printf '%s\n' "$archive" ;;

@@ -494,7 +494,7 @@ EOF
 - [ ] pruned-blocker - Queued blocker pruned without finishing (repo: alpha) (kind: ship) (since 2026-07-02)
 EOF
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     (.backlog.records[] | select(.id == "archived-hold")) as $archived
     | (.backlog.records[] | select(.id == "live-hold")) as $live
@@ -551,7 +551,7 @@ EOF
 - [x] default-blocker - Blocker in a default archive this home does not use (repo: alpha) (kind: ship) (done 2026-07-01)
 EOF
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     (.backlog.records[] | select(.id == "configured-hold")) as $configured
     | (.backlog.records[] | select(.id == "default-hold")) as $default
@@ -587,12 +587,55 @@ EOF
 - [x] hash-blocker - Blocker archived to a quoted path containing a hash (repo: alpha) (kind: ship) (done 2026-07-01)
 EOF
   fakebin=$(make_fakebin "$home")
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "hash-hold")
     | .unresolved_blocker_ids == [] and .hold_bucket == "live"
   ' >/dev/null || fail "the snapshot truncated a quoted .tasks.toml archive path at its #: $out"
   pass "a quoted .tasks.toml archive path containing # is read whole"
+}
+
+test_global_config_archive_path_resolves_blockers() {
+  local home fakebin out
+  home=$(make_home global-archive)
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+EOF
+  mkdir -p "$home/.tasks-axi"
+  cat > "$home/.tasks-axi/config.toml" <<'EOF'
+[ markdown ]
+archive = "records/stale.md"
+archive = "records/global.md"
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] global-hold - Depends on a blocker in the global-config archive blocked-by: global-blocker (repo: alpha) (kind: captain) (hold: waiting on global blocker) (hold-kind: captain)
+- [ ] stale-hold - Depends on a blocker only in an overridden archive blocked-by: stale-blocker (repo: alpha) (kind: captain) (hold: waiting on stale blocker) (hold-kind: captain)
+
+## Done
+EOF
+  mkdir -p "$home/records"
+  cat > "$home/records/global.md" <<'EOF'
+
+## Archived 2026-07-15
+- [x] global-blocker - Blocker archived to the global-config path (repo: alpha) (kind: ship) (done 2026-07-01)
+EOF
+  cat > "$home/records/stale.md" <<'EOF'
+
+## Archived 2026-07-15
+- [x] stale-blocker - Blocker in an archive a later key overrides (repo: alpha) (kind: ship) (done 2026-07-01)
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "global-hold")) as $global
+    | (.backlog.records[] | select(.id == "stale-hold")) as $stale
+    | $global.unresolved_blocker_ids == [] and $global.hold_bucket == "live"
+      and $stale.unresolved_blocker_ids == ["stale-blocker"] and $stale.hold_bucket == "blocked"
+  ' >/dev/null || fail "the snapshot did not resolve blockers from the last global-config archive key: $out"
+  pass "without a project archive key, the last [markdown] archive key in the global tasks-axi config decides the archive"
 }
 
 test_event_hints_follow_reconciled_current_state() {
@@ -1287,6 +1330,7 @@ test_normalized_roles_and_plural_blocker_readiness
 test_archived_done_blocker_resolves_alongside_live_and_dangling
 test_configured_done_archive_path_resolves_blockers
 test_quoted_archive_path_keeps_hash
+test_global_config_archive_path_resolves_blockers
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
