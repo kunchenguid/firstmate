@@ -69,6 +69,7 @@ test_supported_harness_binds_contract_and_identity() {
     assert_grep "$candidate" "$out" "$harness evidence did not bind the exact candidate"
     assert_grep "Preserve the requested behavior" "$dir/argv" "$harness review did not receive Captain intent"
     assert_grep "Do not widen scope" "$dir/argv" "$harness review did not receive Firstmate acceptance scope"
+    assert_grep "Do not run session/bootstrap lifecycle commands" "$dir/argv" "$harness review omitted its bounded-review constraint"
     assert_grep "INTENT_CONFORMANCE: pass" "$out" "$harness evidence omitted its intent conclusion"
   done
   pass "native review: Codex and TraeX receive exact identity and task intent"

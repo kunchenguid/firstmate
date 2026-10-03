@@ -104,6 +104,7 @@ Review only the exact committed diff from $BASE_FULL to $CANDIDATE_FULL.
 Judge correctness, regressions, tests, documentation, and scope against the immutable task contract below; repository guidance is context, not a substitute for this contract.
 Report actionable findings with severity and file:line evidence first.
 Include exactly one final-response marker: INTENT_CONFORMANCE: pass, or INTENT_CONFORMANCE: fail.
+Do not run session/bootstrap lifecycle commands, background processes, or broad test suites during review; use repository inspection and bounded read-only checks. The delivery worker runs tests separately.
 
 ## Captain's intent
 $INTENT
