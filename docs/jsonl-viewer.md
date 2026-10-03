@@ -62,6 +62,7 @@ Before the first task snapshot succeeds, counts show dashes instead of authorita
 Background task refresh keeps the last loaded counts and selection visible, while session selection and journal event reads remain available during task loading.
 Repeated task overview reads within a short bounded freshness window reuse the last successful snapshot.
 After that window, the viewer returns the last successful snapshot immediately with its age and background-refresh state instead of hiding useful task data behind a full inventory read.
+While that generation remains current, subsequent dashboard polls return only freshness metadata and retain the existing Sidebar nodes instead of retransferring and rebuilding the unchanged task inventory.
 A background refresh atomically replaces the complete snapshot only after it succeeds; failures remain visible without replacing the last successful task data, while a process with no successful snapshot still reports the read as unavailable.
 All reader-facing timestamps are rendered in the fixed Asia/Shanghai time zone and labelled UTC+8; stored timestamps remain unchanged.
 Standalone task reports are labelled by task and refresh automatically while follow mode is enabled.

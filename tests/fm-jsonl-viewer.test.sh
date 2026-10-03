@@ -326,6 +326,13 @@ jq -e '
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
 jq -e '.cacheHit == true and (.cacheAgeMs | type) == "number"' "$TMP_ROOT/tasks-cached.json" >/dev/null \
   || fail "repeated task overview did not use the bounded cache"
+task_generation=$(jq -r '.generatedAt' "$TMP_ROOT/tasks-cached.json")
+curl -sS -G -H "Authorization: Bearer $TOKEN" --data-urlencode "generation=$task_generation" "$BASE/api/tasks" > "$TMP_ROOT/tasks-unchanged.json"
+jq -e --arg generation "$task_generation" '.unchanged == true and (has("tasks") | not) and .generatedAt == $generation and .cacheHit == true' "$TMP_ROOT/tasks-unchanged.json" >/dev/null \
+  || fail "known task generation repeated the full task inventory"
+curl -sS -G -H "Authorization: Bearer $TOKEN" --data-urlencode 'generation=unknown-generation' "$BASE/api/tasks" > "$TMP_ROOT/tasks-generation-miss.json"
+jq -e '.unchanged == false and (.tasks | length) > 0' "$TMP_ROOT/tasks-generation-miss.json" >/dev/null \
+  || fail "unknown task generation did not return the complete task inventory"
 
 status=$(curl -sS -o "$TMP_ROOT/traversal.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=..%2Foutside.jsonl&cursor=0")
 [ "$status" = 404 ] || fail "traversal selection returned HTTP $status"

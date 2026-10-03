@@ -797,7 +797,13 @@ function serve() {
     });
     if (url.pathname === "/api/tasks") {
       cachedTaskOverview(home, roots, codeRoot)
-        .then(body => json(res, 200, body))
+        .then(body => {
+          if (url.searchParams.get("generation") === body.generatedAt) {
+            const { tasks: _tasks, ...metadata } = body;
+            return json(res, 200, { ...metadata, unchanged: true });
+          }
+          return json(res, 200, { ...body, unchanged: false });
+        })
         .catch(() => json(res, 503, { error: "task overview is temporarily unavailable" }));
       return;
     }
