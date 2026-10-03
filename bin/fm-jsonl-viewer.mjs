@@ -231,12 +231,25 @@ function listTaskDocuments(root) {
   try { ids = readdirSync(root).filter(taskIdPathSafe); } catch { return []; }
   const documents = [];
   for (const id of ids) {
-    const document = resolveTaskDocument(root, id);
-    if (!document) continue;
-    let info;
-    try { info = lstatSync(document.file); } catch { continue; }
-    if (!info.isFile() || info.isSymbolicLink()) continue;
-    documents.push({ source: document.source, id, bytes: info.size, modifiedAt: info.mtime.toISOString() });
+    const available = resolveTaskDocuments(root, id);
+    const sources = ["report", "brief"].filter(source => available?.[source]);
+    if (!sources.length) continue;
+    const details = [];
+    for (const source of sources) {
+      let info;
+      try { info = lstatSync(available[source]); } catch { continue; }
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      details.push({ source, bytes: info.size, modifiedAt: info.mtime.toISOString() });
+    }
+    if (!details.length) continue;
+    const preferred = details.find(document => document.source === "report") || details[0];
+    documents.push({
+      source: preferred.source,
+      id,
+      bytes: preferred.bytes,
+      modifiedAt: details.map(document => document.modifiedAt).sort().at(-1),
+      documentTypes: details.map(document => document.source),
+    });
   }
   return documents;
 }
@@ -360,6 +373,7 @@ function taskOverview(home, roots, codeRoot) {
     const item = ensure(id);
     item.hasDocument = true;
     item.documentType = document.source;
+    item.documentTypes = document.documentTypes;
     item.documentModifiedAt = document.modifiedAt;
   }
   const tasks = [...items.values()].map(item => {
@@ -410,6 +424,7 @@ function taskOverview(home, roots, codeRoot) {
       warning: remoteStatusUnconfirmed ? "Remote status unconfirmed; archive reflects business disposition only." : null,
       hasDocument: Boolean(item.hasDocument),
       documentType: item.documentType || null,
+      documentTypes: item.documentTypes || [],
       documentModifiedAt: item.documentModifiedAt || null,
     };
   }).sort((left, right) => left.category.localeCompare(right.category) || left.title.localeCompare(right.title));
@@ -486,18 +501,27 @@ function resolveReport(root, id) {
   return file ? { source: "report", file } : null;
 }
 
-function resolveTaskDocument(root, id) {
+function resolveTaskDocuments(root, id) {
   if (!root || !taskIdPathSafe(id)) return null;
   const directory = join(root, id);
   try {
     const info = lstatSync(directory);
     if (!info.isDirectory() || info.isSymbolicLink() || !inside(root, realpathSync(directory))) return null;
   } catch { return null; }
+  const documents = {};
   for (const [source, name] of [["report", "report.md"], ["brief", "brief.md"]]) {
     const file = safeMarkdownFile(root, join(directory, name));
-    if (file) return { source, file };
+    if (file) documents[source] = file;
   }
-  return null;
+  return documents;
+}
+
+function resolveTaskDocument(root, id, requestedSource = "") {
+  if (requestedSource && !["brief", "report"].includes(requestedSource)) return null;
+  const documents = resolveTaskDocuments(root, id);
+  if (!documents) return null;
+  const source = requestedSource || (documents.report ? "report" : documents.brief ? "brief" : "");
+  return source && documents[source] ? { source, file: documents[source] } : null;
 }
 
 function readMarkdownDocument(root, id, resolver, noun) {
@@ -541,18 +565,61 @@ function readReport(root, id) {
   return readMarkdownDocument(root, id, resolveReport, "report");
 }
 
-function readTaskDocument(root, id) {
-  return readMarkdownDocument(root, id, resolveTaskDocument, "task document");
+function readTaskDocument(root, id, source) {
+  return readMarkdownDocument(root, id, (documentsRoot, taskId) => resolveTaskDocument(documentsRoot, taskId, source), "task document");
 }
 
 function tailStart(fd, size) {
-  if (size <= TAIL_BYTES) return { offset: 0, omittedPrefixBytes: 0 };
-  const begin = size - TAIL_BYTES;
-  const probe = Buffer.alloc(size - begin);
-  const count = readSync(fd, probe, 0, probe.length, begin);
-  const newline = probe.subarray(0, count).indexOf(0x0a);
-  const offset = newline === -1 ? 0 : begin + newline + 1;
-  return { offset, omittedPrefixBytes: offset };
+  let completeEnd = size;
+  let trailingPartialBytes = 0;
+  if (size > 0) {
+    const last = Buffer.alloc(1);
+    readSync(fd, last, 0, 1, size - 1);
+    if (last[0] !== 0x0a) {
+      completeEnd = 0;
+      let position = size;
+      while (position > 0) {
+        const begin = Math.max(0, position - READ_CHUNK_BYTES);
+        const chunk = Buffer.alloc(position - begin);
+        const count = readSync(fd, chunk, 0, chunk.length, begin);
+        const newline = chunk.subarray(0, count).lastIndexOf(0x0a);
+        if (newline !== -1) {
+          completeEnd = begin + newline + 1;
+          break;
+        }
+        position = begin;
+      }
+      trailingPartialBytes = size - completeEnd;
+    }
+  }
+  const targetBegin = Math.max(0, completeEnd - TAIL_BYTES);
+  let initialOffset = 0;
+  let position = targetBegin;
+  while (position > 0) {
+    const begin = Math.max(0, position - READ_CHUNK_BYTES);
+    const chunk = Buffer.alloc(position - begin);
+    const count = readSync(fd, chunk, 0, chunk.length, begin);
+    const newline = chunk.subarray(0, count).lastIndexOf(0x0a);
+    if (newline !== -1) {
+      initialOffset = begin + newline + 1;
+      break;
+    }
+    position = begin;
+  }
+  const newlineOffsets = [];
+  position = initialOffset;
+  while (position < completeEnd) {
+    const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, completeEnd - position));
+    const count = readSync(fd, chunk, 0, chunk.length, position);
+    if (!count) break;
+    for (let index = 0; index < count; index += 1) {
+      if (chunk[index] === 0x0a) newlineOffsets.push(position + index);
+    }
+    position += count;
+  }
+  const skippedCompleteLines = Math.max(0, newlineOffsets.length - MAX_EVENTS);
+  const offset = skippedCompleteLines ? newlineOffsets[skippedCompleteLines - 1] + 1 : initialOffset;
+  return { offset, omittedPrefixBytes: offset, trailingPartialBytes };
 }
 
 function parseLine(bytes, lineOffset) {
@@ -567,7 +634,7 @@ function parseLine(bytes, lineOffset) {
   }
 }
 
-function readPage(fd, size, requestedOffset) {
+function readPage(fd, size, requestedOffset, tailPage = false) {
   const events = [];
   let position = requestedOffset;
   let lineOffset = position;
@@ -599,7 +666,7 @@ function readPage(fd, size, requestedOffset) {
       storedBytes = 0;
       parts = [];
       segmentStart = index + 1;
-      if (events.length >= MAX_EVENTS || completeThrough - requestedOffset >= TARGET_PAGE_BYTES) {
+      if (events.length >= MAX_EVENTS || (!tailPage && completeThrough - requestedOffset >= TARGET_PAGE_BYTES)) {
         stop = true;
         break;
       }
@@ -616,7 +683,7 @@ function readPage(fd, size, requestedOffset) {
     }
     position += count;
   }
-  return { events, nextCursor: completeThrough, partialBytes: stop ? 0 : size - completeThrough, eof: !stop && completeThrough === size };
+  return { events, nextCursor: completeThrough, partialBytes: stop ? 0 : size - completeThrough, eof: completeThrough === size };
 }
 
 function readEvents(roots, source, id, query) {
@@ -634,17 +701,24 @@ function readEvents(roots, source, id, query) {
     let omittedPrefixBytes = 0;
     if (priorIdentity && priorIdentity !== opened.identity) {
       reset = "rotated";
-      cursor = 0;
+      cursor = "tail";
     } else if (cursor !== "tail" && cursor > opened.info.size) {
       reset = "truncated";
-      cursor = 0;
+      cursor = "tail";
     }
+    const tailPage = cursor === "tail";
+    let trailingPartialBytes = 0;
     if (cursor === "tail") {
       const tail = tailStart(opened.fd, opened.info.size);
       cursor = tail.offset;
       omittedPrefixBytes = tail.omittedPrefixBytes;
+      trailingPartialBytes = tail.trailingPartialBytes;
     }
-    const page = readPage(opened.fd, opened.info.size, cursor);
+    const page = readPage(opened.fd, opened.info.size, cursor, tailPage);
+    if (trailingPartialBytes && page.nextCursor === opened.info.size - trailingPartialBytes) {
+      page.partialBytes = trailingPartialBytes;
+      page.eof = false;
+    }
     return { status: 200, body: { source, id, identity: opened.identity, size: opened.info.size, reset, omittedPrefixBytes, ...page } };
   } finally {
     closeSync(opened.fd);
@@ -703,7 +777,7 @@ function serve() {
       return json(res, result.status, result.body);
     }
     if (url.pathname === "/api/task-document") {
-      const result = readTaskDocument(roots.reports, url.searchParams.get("id") || "");
+      const result = readTaskDocument(roots.reports, url.searchParams.get("id") || "", url.searchParams.get("type") || "");
       return json(res, result.status, result.body);
     }
     return json(res, 404, { error: "not found" });
