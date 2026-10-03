@@ -63,7 +63,7 @@ Run these stages in order, distinguishing the first delivery through a newly cre
 If a native-review fix changes tracked code or another build input, the changed head is a new candidate and the earlier deployment and test evidence no longer qualify it.
 Commit the corrected candidate, then repeat exact source delivery, independent source-head verification, same-PPE deployment, API Test, and a new final native review through the existing Dev Task.
 Any review, documentation, lint, CI, or API-test fix that changes tracked code or another build input follows the same existing-task and existing-PPE loop.
-Authorize at most two native-review fix rounds across one delivery task; if another review fix is requested, stop and escalate rather than extending the loop.
+Continue routine authorized corrections through that loop until review passes; stop only when a finding requires authority beyond the task contract.
 The implementation worker never answers its own ask-user finding; `AGENTS.md` section 7 and `ask-user-authority` own that decision path.
 
 ## Intake and exact identity

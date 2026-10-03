@@ -44,8 +44,18 @@ done
 
 META="$STATE/$ID.meta"
 BRIEF="$DATA/$ID/brief.md"
+SHIP_INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 [ -f "$META" ] || { echo "error: no task metadata for $ID at $META" >&2; exit 2; }
 [ -f "$BRIEF" ] || { echo "error: no task brief for $ID at $BRIEF" >&2; exit 2; }
+if [ -e "$SHIP_INSTRUCTIONS" ] || [ -L "$SHIP_INSTRUCTIONS" ]; then
+  [ -f "$SHIP_INSTRUCTIONS" ] && [ ! -L "$SHIP_INSTRUCTIONS" ] || {
+    echo "error: current ship review contract is not a regular file: $SHIP_INSTRUCTIONS" >&2
+    exit 2
+  }
+  REVIEW_CONTRACT=$SHIP_INSTRUCTIONS
+else
+  REVIEW_CONTRACT=$BRIEF
+fi
 
 WORKTREE=$(sed -n 's/^worktree=//p' "$META" | tail -1)
 HARNESS=$(sed -n 's/^harness=//p' "$META" | tail -1)
@@ -61,7 +71,7 @@ HEAD_FULL=$(git -C "$WORKTREE" rev-parse HEAD)
   echo "error: task worktree HEAD $HEAD_FULL does not equal review candidate $CANDIDATE_FULL" >&2
   exit 2
 }
-if ! git -C "$WORKTREE" diff --quiet -- || ! git -C "$WORKTREE" diff --cached --quiet --; then
+if [ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=all)" ]; then
   echo "error: native review requires a clean committed candidate" >&2
   exit 2
 fi
@@ -70,8 +80,8 @@ git -C "$WORKTREE" merge-base --is-ancestor "$BASE_FULL" "$CANDIDATE_FULL" || {
   exit 2
 }
 
-INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
-SPEC=$(fm_brief_task_heading_body "$BRIEF" "## Firstmate spec")
+INTENT=$(fm_brief_task_heading_body "$REVIEW_CONTRACT" "## Captain's intent")
+SPEC=$(fm_brief_task_heading_body "$REVIEW_CONTRACT" "## Firstmate spec")
 [ -n "$(printf '%s%s' "$INTENT" "$SPEC" | tr -d '[:space:]')" ] || {
   echo "error: task $ID has no reviewable Captain intent and Firstmate spec" >&2
   exit 2
@@ -153,6 +163,7 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
   printf -- "- Runtime: \`%s\`\n" "$VERSION"
   printf -- "- Base: \`%s\`\n" "$BASE_FULL"
   printf -- "- Candidate: \`%s\`\n" "$CANDIDATE_FULL"
+  printf -- "- Contract source: \`%s\`\n" "$REVIEW_CONTRACT"
   printf -- "- Intent snapshot SHA-256: \`%s\`\n\n" "$CONTRACT_SHA"
   printf '## Immutable review contract\n\n%s\n\n' "$PROMPT"
   printf '## Native review result\n\n```text\n'

@@ -95,6 +95,46 @@ test_moving_or_uncommitted_candidate_is_refused() {
   pass "native review: moving candidate state is refused"
 }
 
+test_untracked_candidate_input_is_refused() {
+  local dir base candidate out rc=0
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  printf 'untracked build input\n' >"$dir/repo/generated.conf"
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  rm -f "$dir/repo/generated.conf"
+  expect_code 2 "$rc" "an untracked candidate input must be refused"
+  assert_contains "$out" "clean committed candidate" "untracked-candidate refusal was not actionable"
+  pass "native review: untracked candidate input is refused"
+}
+
+test_promoted_ship_uses_current_ship_contract() {
+  local dir base candidate out
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  cat >"$dir/home/data/task/ship-instructions.md" <<'EOF'
+# Task
+## Captain's intent
+Deliver the promoted implementation.
+
+## Firstmate spec
+Verify the ship-time acceptance and exclusions.
+EOF
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  out="$dir/home/data/task/promoted-review.md"
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$out" >/dev/null \
+    || fail "promoted native review route failed"
+  assert_grep "Deliver the promoted implementation" "$dir/argv" "promoted review omitted current Captain intent"
+  assert_grep "Verify the ship-time acceptance and exclusions" "$dir/argv" "promoted review omitted current ship spec"
+  assert_no_grep "Preserve the requested behavior" "$dir/argv" "promoted review reused stale scout intent"
+  assert_grep "ship-instructions.md" "$out" "promoted review evidence omitted its current contract source"
+  pass "native review: promoted ships use the current ship-time contract"
+}
+
 test_missing_conclusion_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case codex)
@@ -127,5 +167,7 @@ test_failing_conclusion_preserves_evidence_and_stops_delivery() {
 test_supported_harness_binds_contract_and_identity
 test_missing_capability_fails_actionably
 test_moving_or_uncommitted_candidate_is_refused
+test_untracked_candidate_input_is_refused
+test_promoted_ship_uses_current_ship_contract
 test_missing_conclusion_is_refused
 test_failing_conclusion_preserves_evidence_and_stops_delivery
