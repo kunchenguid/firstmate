@@ -2155,8 +2155,15 @@ launch_template() {
   # --help), so the shared effort axis is deliberately omitted here and
   # stays in task metadata only, per the record-and-omit contract.
   # Its turn-end and busy-state signals do NOT ride the launch command:
-  # they are project hooks written into the worktree below.
-  gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # they are hooks in the private per-task settings file written below.
+  gemini)
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS '
+    # Gemini's node-pty shell path retains completed-command PTY masters on
+    # Darwin (upstream #15945). Its native getPty() override avoids that path
+    # independently of settings-layer trust; the outer agent TUI stays intact.
+    [ "$(uname -s)" != Darwin ] || printf '%s' 'GEMINI_PTY_INFO=child_process '
+    printf '%s' 'GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+    ;;
   # Devin receives the typed launch envelope after --. Its private config
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
