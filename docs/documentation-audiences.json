@@ -349,6 +349,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/plans/discord-mention-watch-adapter-20261002.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/extension-bindings.md",
       "audience": "maintainer-architecture"
     },

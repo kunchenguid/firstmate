@@ -2742,6 +2742,10 @@ while :; do
       fm_wake_append check bot-manager-autofix-source \
         "check: Bot Manager issue source could not be armed; inspect its registration and adapter" || exit 1
     fi
+    if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-discord-mention.sh" ensure >/dev/null 2>&1; then
+      fm_wake_append check discord-claude-mentions-source \
+        "check: Discord mention source could not be armed; inspect its registration and adapter" || exit 1
+    fi
   fi
 
   # Process-to-event liveness repair. This never discovers a result by polling:
