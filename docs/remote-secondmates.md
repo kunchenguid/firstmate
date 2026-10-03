@@ -85,6 +85,14 @@ Linux uses the same queue and worker protocol without the Aqua-session requireme
 The [`fm-remote-job-worker.sh` header](../bin/fm-remote-job-worker.sh) owns dispatch cadence and the quiet-scan latency for work arriving after its post-activity burst.
 Active-command and result waits use a separate sampling interval; the [`fm-remote-job-lib.sh` header](../bin/fm-remote-job-lib.sh) owns its defaults, overrides, and completion, cancellation, and timeout latency contract.
 
+On macOS, worker repair serializes the replacement decision and LaunchAgent reload with other callers, including its bounded startup wait.
+A live process tracked by launchd gets time to publish readiness even if the caller that started it disconnected before publication.
+A verified lock owner running stale code or no longer tracked by launchd is stopped identity-safely before launchd starts the current worker.
+If readiness remains stale while a verified current, launchd-tracked lock owner is alive, the command fails with `remote-job: ready heartbeat stale while verified worker lock owner is alive` rather than reloading that worker merely for the stale heartbeat.
+The repair invariant is implemented in [`fm_remote_job_repair_launchagent`](../bin/fm-remote-job-lib.sh); heartbeat ownership and cadence are documented in the worker header above.
+
+The independent heartbeat and live-owner check build on [Diabl0570's contribution](https://github.com/kunchenguid/firstmate/pull/6217), alongside [gearhead924's supervisor-multiplication work](https://github.com/kunchenguid/firstmate/pull/5851), addressing [remote reply reliability](https://github.com/kunchenguid/firstmate/issues/2921).
+
 ### Job lanes and preemption
 
 The worker serves one lane per staged home:
@@ -677,6 +685,7 @@ The portable tests use these pieces:
 - A stateful host-local Herdr CLI fixture.
 - A controlled account fixture for the readiness gate.
 
+[`fm-remote-job-launchagent.test.sh`](../tests/fm-remote-job-launchagent.test.sh) exercises the real worker with stubbed asynchronous `launchctl`, covering slow claim sweeps, concurrent repair, untracked owners, and recovery after a repairing caller dies before startup publication.
 The lifecycle test covers seeding a registered project that this machine has never cloned.
 It asserts that the local project tree is unchanged afterwards.
 It carries Bitbucket, self-hosted, and scp-like origins through to the remote clone.
@@ -689,6 +698,7 @@ bin/fm-test-run.sh tests/fm-secondmate-reconcile.test.sh
 bin/fm-test-run.sh tests/fm-peek-remote.test.sh
 bin/fm-test-run.sh tests/fm-crew-state.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
+bin/fm-test-run.sh tests/fm-remote-job-launchagent.test.sh
 bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
 bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
