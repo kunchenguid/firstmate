@@ -10,8 +10,8 @@
 
 # Parse an exact ATX heading outside fenced blocks. Body mode prints through
 # the next unfenced heading at the same or a higher level; present mode reports
-# whether the heading exists.
-fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
+# whether the heading exists; terminator mode prints that ending heading.
+fm_brief_heading_parse() {  # <file|-> <heading> <body|present|terminator>
   local file=$1 heading=$2 mode=$3 input=$1
   if [ "$file" = - ]; then
     input=/dev/stdin
@@ -58,19 +58,46 @@ fm_brief_heading_parse() {  # <file|-> <heading> <body|present>
       }
       if (mode == "present" || !grab) next
       if (is_fence || was_fenced) {
-        print line
+        if (mode != "terminator") print line
         next
       }
 
       level = 0
       while (substr(scan, level + 1, 1) == "#") level++
-      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) exit
-      print line
+      if (level > 0 && level <= target_level && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) {
+        if (mode == "terminator") {
+          print line
+          found_term = 1
+        }
+        exit
+      }
+      if (mode != "terminator") print line
     }
     END {
       if (mode == "present" && !found) exit 1
+      if (mode == "terminator" && !found_term) exit 1
     }
   ' "$input"
+}
+
+# Level of one line under the same leading-space and hash rules as
+# fm_brief_heading_parse. A line that is not an unfenced-style ATX heading
+# prints 0. Fence state is the parser's; this only classifies a single line.
+fm_brief_heading_line_level() {  # <line>
+  printf '%s\n' "$1" | awk '
+    {
+      scan = $0
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      level = 0
+      while (substr(scan, level + 1, 1) == "#") level++
+      if (level > 0 && substr(scan, level + 1, 1) ~ /^[[:space:]]?$/) print level
+      else print 0
+    }
+  '
 }
 
 fm_brief_heading_body() {  # <file> <heading>
@@ -91,5 +118,15 @@ fm_brief_task_heading_present() {  # <file> <heading>
   local task
   task=$(fm_brief_heading_body "$1" "# Task")
   fm_brief_heading_parse - "$2" present >/dev/null <<<"$task"
+}
+
+fm_brief_heading_terminator() {  # <file> <heading>
+  fm_brief_heading_parse "$1" "$2" terminator
+}
+
+fm_brief_task_heading_terminator() {  # <file> <heading>
+  local task
+  task=$(fm_brief_heading_body "$1" "# Task")
+  printf '%s\n' "$task" | fm_brief_heading_parse - "$2" terminator
 }
 

@@ -22,6 +22,9 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
+#   When a present subsection parses empty because an unfenced same-level
+#   heading ended it, that same refusal names the heading; bin/fm-dod-lib.sh
+#   owns the clause.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -3038,7 +3041,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     exit 1
   fi
   if ! fm_brief_task_content_valid "$BRIEF"; then
-    echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn" >&2
+    TASK_HEADING_CUTOFF=$(fm_brief_task_heading_cutoff_clause "$BRIEF") || TASK_HEADING_CUTOFF=
+    echo "error: $BRIEF must contain nonempty ## Captain's intent and ## Firstmate spec subsections (or a nonempty legacy # Task body) before spawn${TASK_HEADING_CUTOFF:+; $TASK_HEADING_CUTOFF}" >&2
     exit 1
   fi
   if ADDRESS_LINE=$(fm_brief_intent_address_line "$BRIEF"); then
