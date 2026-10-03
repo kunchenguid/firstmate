@@ -58,12 +58,12 @@ Run these stages in order, distinguishing the first delivery through a newly cre
 9. Read back the browser-started task and pipeline-run identity and monitor that exact run to a completed successful result, with Firstmate responsible for judging whether the API Test passed.
 10. When the API Test requires a fix, repeat the smallest fix -> commit -> exact source push -> independent source-head verification -> same-PPE deployment -> API Test loop until Firstmate judges the test passed.
 11. Only after the required test succeeds against the verified candidate, run the recorded supported harness's native review through `bin/fm-native-review.sh` on that same candidate.
-12. Treat the final review as valid only when it binds the task's immutable intent, exact base, and tested candidate, concludes `INTENT_CONFORMANCE: pass`, and the candidate remains unchanged through completion.
+12. Treat a review as valid only when it binds the task's immutable intent, exact base, and tested candidate; the original task may launch at most two attempts under `AGENTS.md` section 7.
 
 If a native-review fix changes tracked code or another build input, the changed head is a new candidate and the earlier deployment and test evidence no longer qualify it.
-Commit the corrected candidate, then repeat exact source delivery, independent source-head verification, same-PPE deployment, API Test, and a new final native review through the existing Dev Task.
+Commit the corrected candidate, then repeat exact source delivery, independent source-head verification, same-PPE deployment, and API Test through the existing Dev Task before using any remaining permitted review attempt.
 Any review, documentation, lint, CI, or API-test fix that changes tracked code or another build input follows the same existing-task and existing-PPE loop.
-Continue routine authorized corrections through that loop until review passes; stop only when a finding requires authority beyond the task contract.
+After the second review attempt, follow `AGENTS.md` section 7's residual-finding disposition instead of starting another review; preserve an explicit statement when the final tested candidate differs from the last reviewed candidate.
 The implementation worker never answers its own ask-user finding; `AGENTS.md` section 7 and `ask-user-authority` own that decision path.
 
 ## Intake and exact identity
@@ -147,14 +147,14 @@ These boundaries hold regardless of yolo posture.
 - Never use shared `ppe_test`; create one fresh dedicated PPE for the first delivery and reuse that exact PPE with complete deployment readback for every subsequent revision.
 - Never let native review push, open or update an MR, or own CI on the BITS path.
 - Never pass a stage, force-skip a job, continue a release, deploy to production, merge, or roll back without the exact authority existing Firstmate rules require.
-- Never merge a BITS MR before the exact-candidate PPE API or end-to-end test and final candidate-unchanged native review have both succeeded.
+- Never merge a BITS MR before the exact-candidate PPE API or end-to-end test succeeds and native review either passes or reaches the recorded two-attempt disposition in `AGENTS.md` section 7.
 - Never merge a BITS MR on yolo alone; the captain must explicitly authorize that merge as a separate action.
 - Never persist, print, or paste a BITS token, service identity, cookie, JWT, or authorization header anywhere, including status lines, briefs, commits, or captain chat.
 
 ## Captain-facing outcome reporting
 
 Report BITS outcomes as project outcomes under `AGENTS.md` section 9 rather than raw mechanics, IDs, or command output.
-Lead with the candidate that reached the dedicated PPE, whether the exact-candidate API or end-to-end test and final native review passed, and the next decision.
+Lead with the candidate that reached the dedicated PPE, whether the exact-candidate API or end-to-end test passed, the native-review result or capped disposition, and the next decision.
 Include the full `https://...` URL of any MR, Dev Task, deployment, or pipeline the captain needs to act on.
-Report a ready BITS delivery only when the candidate validated by final native review is still the exact code deployed and proven by the required PPE API or end-to-end test.
+Report a ready BITS delivery only when the exact deployed candidate passed the required PPE API or end-to-end test and its native-review result or post-cap unreviewed status is stated honestly.
 Escalate for the separate MR merge, production deployment, release continuation, rollback, stage pass, an authority-bearing review finding, or a credential or permission the integration needs.

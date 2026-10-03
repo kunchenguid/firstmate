@@ -241,8 +241,8 @@ Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded a
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 For deployable ByteDance-internal code with a BITS/PPE delivery surface, resolve the concrete task mode to `review-PR`, load `bits-development` before delivery begins, and follow its initial one-time dedicated-PPE delivery or subsequent existing-PPE revision lifecycle through final intent-aware native review.
-On that path BITS owns push, MR, and CI; native review, tests, documentation, and lint validate the exact deployed candidate but never own those delivery phases, and any code-changing fix returns to the existing BITS task, exact source delivery, same-PPE deployment, and API Test before another final review.
-Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before both the exact-candidate PPE API or end-to-end test and the candidate-unchanged native review succeed.
+On that path BITS owns push, MR, and CI; native review, tests, documentation, and lint validate the exact deployed candidate but never own those delivery phases, and any code-changing fix returns to the existing BITS task, exact source delivery, same-PPE deployment, and API Test before any remaining permitted review attempt.
+Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before the exact-candidate PPE API or end-to-end test succeeds and native review either passes or reaches its two-attempt disposition below.
 Shared IDL source or generated repositories and documentation-only, local-only, or otherwise non-deployable work retain their ordinary resolved delivery path, including direct-PR where configured, and never gain an invented PPE stage.
 
 ### Validate
@@ -252,7 +252,11 @@ A deployable ByteDance BITS/PPE ship instead reaches final native review only at
 Codex and TraeX are supported native-review routes. Pi remains a supported worker harness, but it has no verified native review command; a `review-PR` task recorded with Pi must stop with the actionable unsupported-route error and be relaunched on Codex or TraeX rather than inventing a command or falling back to another review system.
 When the captain adds or changes an ask mid-task, use the native continuation tool's authenticated brief-update route where available, then relay those words to the worker; `bin/fm-task-lifecycle.py --help` owns that operation and explicit reconciliation for other edits.
 The brief's `## Captain's intent` contains only the captain's words without added speaker labels or direct address; Firstmate build constraints stay in `## Firstmate spec` or the steer.
-After actionable findings, the worker makes only authorized corrections, reruns relevant tests, commits the new candidate, and reviews the complete base-to-new-head diff again. A result is ready only when the recorded review concludes `INTENT_CONFORMANCE: pass`; the review conclusion never changes merge authority.
+One original task may launch at most two native-review attempts; `bin/fm-native-review.sh` records that count across candidate changes, retries, compaction, and renamed evidence and refuses an ordinary third invocation.
+After first-round actionable findings, the worker makes only authorized corrections, reruns relevant tests, commits the new candidate, and uses the second attempt to review the complete base-to-new-head diff.
+After the second attempt, record and ignore non-serious non-blocking residuals and continue necessary tests and green delivery; route only a concrete serious correctness, security, data-loss, or intent-blocking finding to Firstmate for a decision, and never start another review automatically.
+A result is ready when review passes, or when the two-attempt path is exhausted and the remaining findings have that disposition; report honestly when the final corrected head was not reviewed and never describe a non-clean result as passing.
+The review conclusion and the two-attempt disposition never change merge authority.
 Once review starts, prefer routing genuinely new requirements to follow-up work rather than expanding the current task. The smallest downstream changes needed to keep accepted behavior correct, add behavioral tests where an executable contract exists, keep documentation accurate, or resolve in-scope findings remain within the current task.
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.

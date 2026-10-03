@@ -341,8 +341,12 @@ test_native_review_dod_wording() {
     "review-PR brief did not route review through the supervising Firstmate root"
   assert_grep "immutable Captain intent and Firstmate acceptance" "$brief" \
     "review-PR brief did not require the task contract in review"
-  assert_grep "complete final diff again" "$brief" \
-    "review-PR brief did not require final re-review after corrections"
+  assert_grep "At most two attempts belong to the task" "$brief" \
+    "review-PR brief did not carry the bounded review policy"
+  assert_grep "Never start a third review" "$brief" \
+    "review-PR brief did not refuse repeated review"
+  assert_grep "final head as unreviewed" "$brief" \
+    "review-PR brief did not require honest post-cap reporting"
   # Generated commands contain the supervising checkout's absolute root. Strip
   # that variable-length prefix before enforcing the stable wording budget.
   bytes=$(sed "s|$ROOT|<FM_ROOT>|g" "$brief" | wc -c | tr -d ' ')

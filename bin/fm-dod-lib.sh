@@ -255,11 +255,13 @@ This task ships **review-PR**: implement and test, run the selected harness's na
 Review only after the acceptance evidence is satisfied and the result is committed.
 Run \`$FM_DOD_ROOT/bin/fm-native-review.sh\` with the exact task base, candidate commit, and an output path under the task data directory.
 The helper supplies the immutable Captain intent and Firstmate acceptance, scope, and exclusions to the native reviewer and requires an explicit intent-conformance conclusion.
-Apply routine corrections that are already required by the accepted contract, rerun affected tests, commit, and review the complete final diff again.
-Ask-user findings are never yours to answer; append \`needs-decision\` and stop. Firstmate applies \`ask-user-authority\`.
-After a passing final review, push only the feature branch, open or update its PR, and verify the required forge checks.
+At most two attempts belong to the task; candidate changes, retries, compaction, and renamed evidence do not reset them.
+After first findings, make authorized corrections, test, commit, and use attempt two on the full diff.
+After attempt two, record and ignore non-serious residuals. Ask-user findings are never yours to answer; use \`needs-decision\` only for serious or authority-bearing findings.
+Never start a third review or call a non-clean result passing; identify any later corrected final head as unreviewed.
+After a pass or completed two-attempt disposition, push the feature branch, open or update its PR, and verify required forge checks.
 Task data directory: \`$task_data_dir\`.
-Append \`done: PR {url} checks green\` only after the exact reviewed candidate is the PR head and required checks are green.
+Append \`done: PR {url} checks green\` only after the reviewed or honestly reported post-cap candidate is the PR head and required checks are green.
 Never merge the PR; Firstmate owns semantic acceptance and the configured merge decision.
 EOF
       ;;

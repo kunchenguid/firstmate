@@ -1027,6 +1027,16 @@ if [ -n "$LEGACY_DAEMON_IDENTITY" ] \
   LEGACY_DAEMON_ACTIVE=1
   printf 'LEGACY_DAEMON_ACTIVE: pid %s still owns %s/.supervise-daemon.lock; stop that legacy daemon explicitly before arming ordinary supervision. This session will not stop it automatically.\n' \
     "$LEGACY_DAEMON_PID" "$STATE"
+elif [ -d "$STATE/.supervise-daemon.lock" ] \
+  && [ -z "$LEGACY_DAEMON_IDENTITY" ] \
+  && [ -n "$LEGACY_DAEMON_CURRENT" ]; then
+  # The removed daemon deliberately kept running when it could not persist its
+  # process identity. A live recorded PID plus its still-present lock is
+  # therefore ambiguous, not stale: fail closed instead of arming a second
+  # supervision owner. Never signal or clean up that process here.
+  LEGACY_DAEMON_ACTIVE=1
+  printf 'LEGACY_DAEMON_AMBIGUOUS: live pid %s and %s/.supervise-daemon.lock remain, but pid-identity is absent; stop or reconcile that exact legacy daemon explicitly before arming ordinary supervision. This session will not stop it automatically.\n' \
+    "$LEGACY_DAEMON_PID" "$STATE"
 elif [ -e "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
   printf 'preserved but inactive - this version does not start a legacy away/quiet daemon; ordinary supervision remains authoritative.\n'
 else

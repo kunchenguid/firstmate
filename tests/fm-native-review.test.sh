@@ -8,7 +8,8 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-native-review)
 
 make_case() {
-  local harness=$1 dir="$TMP_ROOT/$1"
+  local harness=$1 dir
+  dir=$(mktemp -d "$TMP_ROOT/$harness.XXXXXX") || fail "could not create native-review fixture"
   mkdir -p "$dir/home/data/task" "$dir/home/state" "$dir/bin" "$dir/repo"
   git -C "$dir/repo" init -q
   git -C "$dir/repo" config user.email test@example.com
@@ -266,6 +267,54 @@ test_failing_conclusion_preserves_evidence_and_stops_delivery() {
   pass "native review: actionable failure preserves evidence without granting delivery authority"
 }
 
+test_original_task_review_attempts_are_capped_at_two() {
+  local dir base candidate second third out rc=0 calls
+  dir=$(make_case codex)
+  write_reviewer "$dir" codex
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" --output "$dir/home/data/task/first.md" >/dev/null \
+    || fail "first native review attempt failed"
+
+  printf 'second candidate\n' >> "$dir/repo/file"
+  git -C "$dir/repo" commit -qam second
+  second=$(git -C "$dir/repo" rev-parse HEAD)
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$second" --output "$dir/home/data/task/renamed-second.md" >/dev/null \
+    || fail "second native review attempt failed after a candidate change"
+
+  printf 'third candidate\n' >> "$dir/repo/file"
+  git -C "$dir/repo" commit -qam third
+  third=$(git -C "$dir/repo" rev-parse HEAD)
+  rc=0
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$third" --output "$dir/home/data/task/third.md" 2>&1) || rc=$?
+  expect_code 4 "$rc" "a third review attempt for the original task must be refused"
+  assert_contains "$out" "attempt limit reached for original task task (2/2)" "third-attempt refusal omitted the stable task boundary"
+  assert_contains "$out" "ask MAIN to decide only a severe" "third-attempt refusal did not route the exceptional decision"
+  assert_absent "$dir/home/data/task/third.md" "third-attempt refusal fabricated review evidence"
+  calls=$(find "$dir/home/data/task" -name 'native-review-attempt-*.record' -type f | wc -l | tr -d ' ')
+  assert_equals 2 "$calls" "candidate changes or output renaming reset the task review count"
+  pass "native review: one original task cannot automatically exceed two attempts"
+}
+
+test_existing_review_evidence_counts_toward_cap() {
+  local dir base candidate out rc=0
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  printf '# Native review evidence\n\nHistorical attempt one.\n' > "$dir/home/data/task/old-name.md"
+  printf '# Native review evidence\n\nHistorical attempt two.\n' > "$dir/home/data/task/renamed-history.md"
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  expect_code 4 "$rc" "historical review evidence must prevent an automatic third attempt"
+  assert_contains "$out" "attempt limit reached for original task task (2/2)" "historical-attempt refusal was not actionable"
+  assert_absent "$dir/argv" "historical-attempt refusal still invoked the harness"
+  pass "native review: retained historical attempts cannot be reset"
+}
+
 test_supported_harness_binds_contract_and_identity
 test_missing_capability_fails_actionably
 test_moving_or_uncommitted_candidate_is_refused
@@ -277,3 +326,5 @@ test_structured_result_marker_is_accepted
 test_output_must_resolve_under_task_directory
 test_missing_conclusion_is_refused
 test_failing_conclusion_preserves_evidence_and_stops_delivery
+test_original_task_review_attempts_are_capped_at_two
+test_existing_review_evidence_counts_toward_cap

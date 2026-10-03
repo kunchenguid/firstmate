@@ -2100,7 +2100,7 @@ EOF
 }
 
 test_legacy_mode_records_are_inactive() {
-  local rec root home fakebin out rc legacy_pid legacy_identity
+  local rec root home fakebin out rc legacy_pid legacy_identity ambiguous_pid
   rec=$(new_world legacy-mode-records)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2134,6 +2134,20 @@ EOF
   assert_contains "$out" "LEGACY_DAEMON_ACTIVE: pid $legacy_pid" "live legacy daemon diagnostic omitted its exact process"
   assert_contains "$out" "will not stop it automatically" "legacy daemon diagnostic did not preserve the no-auto-stop boundary"
   assert_not_contains "$out" "ordinary supervision remains authoritative" "live legacy daemon was falsely reported inactive"
+
+  rm -f "$home/state/.supervise-daemon.lock/pid-identity"
+  sleep 300 &
+  ambiguous_pid=$!
+  printf '%s\n' "$ambiguous_pid" > "$home/state/.supervise-daemon.pid"
+  rc=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || rc=$?
+  kill "$ambiguous_pid" 2>/dev/null || true
+  wait "$ambiguous_pid" 2>/dev/null || true
+  expect_code 2 "$rc" "a live legacy daemon without recorded identity must fail closed"
+  assert_contains "$out" "LEGACY_DAEMON_AMBIGUOUS: live pid $ambiguous_pid" "missing-identity diagnostic omitted the live legacy process"
+  assert_contains "$out" "pid-identity is absent" "missing-identity refusal did not explain its ambiguity"
+  assert_contains "$out" "will not stop it automatically" "missing-identity refusal crossed the no-auto-stop boundary"
+  assert_not_contains "$out" "ordinary supervision remains authoritative" "ambiguous live legacy daemon was falsely reported inactive"
 
   pass "legacy mode records are preserved but cannot reactivate removed modes"
 }

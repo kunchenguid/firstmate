@@ -9,7 +9,9 @@
 # refused with an actionable diagnostic. The worktree must be clean and its
 # HEAD must equal the candidate, so the vendor cannot silently review a moving
 # or uncommitted target. The output is accepted only when the reviewer states
-# an explicit intent-conformance conclusion.
+# an explicit intent-conformance conclusion. Each original task may launch at
+# most two native-review attempts; task-local attempt records make retries and
+# candidate changes consume the same bounded history.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -162,6 +164,59 @@ command -v "$COMMAND" >/dev/null 2>&1 || {
 }
 
 VERSION=$($COMMAND --version 2>&1 | head -1)
+
+# Reserve one of the task's two review attempts immediately before invoking the
+# vendor. The per-attempt files are the durable native-review record: changing
+# candidate, output name, or brief title cannot reset them. For tasks that
+# predate these records, completed evidence files establish the conservative
+# historical floor. noclobber makes concurrent reservations converge without a
+# separate review-control plane.
+review_attempt_floor() {
+  local path base number highest=0 evidence=0 first
+  for path in "$TASK_DATA_DIR"/native-review-attempt-*.record; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    base=${path##*/native-review-attempt-}
+    number=${base%.record}
+    case "$number" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$number" -le "$highest" ] || highest=$number
+  done
+  if [ "$highest" -eq 0 ]; then
+    for path in "$TASK_DATA_DIR"/*; do
+      [ -f "$path" ] && [ ! -L "$path" ] || continue
+      IFS= read -r first < "$path" || first=
+      [ "$first" = '# Native review evidence' ] || continue
+      evidence=$((evidence + 1))
+      [ "$evidence" -lt 2 ] || break
+    done
+    highest=$evidence
+  fi
+  printf '%s\n' "$highest"
+}
+
+ATTEMPT_RECORD=
+while [ -z "$ATTEMPT_RECORD" ]; do
+  ATTEMPT_FLOOR=$(review_attempt_floor)
+  if [ "$ATTEMPT_FLOOR" -ge 2 ]; then
+    echo "error: native review attempt limit reached for original task $ID (2/2); do not start another automatic review. Preserve residual findings and ask MAIN to decide only a severe correctness, security, data-loss, or intent-blocking issue." >&2
+    exit 4
+  fi
+  ATTEMPT=$((ATTEMPT_FLOOR + 1))
+  ATTEMPT_RECORD="$TASK_DATA_DIR/native-review-attempt-$ATTEMPT.record"
+  if ! (set -C; umask 077; {
+    printf 'schema=fm-native-review-attempt.v1\n'
+    printf 'task=%s\n' "$ID"
+    printf 'attempt=%s\n' "$ATTEMPT"
+    printf 'base=%s\n' "$BASE_FULL"
+    printf 'candidate=%s\n' "$CANDIDATE_FULL"
+    printf 'harness=%s\n' "$HARNESS"
+    printf 'output=%s\n' "$OUTPUT"
+  } > "$ATTEMPT_RECORD") 2>/dev/null; then
+    ATTEMPT_RECORD=
+  fi
+done
+
 PROMPT_CONFIG=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"$PROMPT")
 RESULT=$(mktemp "$(dirname "$OUTPUT")/.native-review-result.XXXXXX")
 TRACE=$(mktemp "$(dirname "$OUTPUT")/.native-review-trace.XXXXXX")
