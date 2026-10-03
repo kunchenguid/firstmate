@@ -28,6 +28,7 @@
           <a href="/dashboard" data-route="dashboard">Dashboard</a>
           <a href="/reports" data-route="reports">Reports</a>
           <a href="/journal/supervisor" data-route="journal">Supervisor Work Journal</a>
+          <a href="/journal/short" data-route="short">ShortTask Journal</a>
         </nav>
         <button id="forget" class="quiet" type="button" disabled>Log out</button>
       </header>
@@ -40,7 +41,7 @@
           </div>
           <div id="sidebar-body" class="sidebar-body">
             <label class="search-field"><span class="sr-only">Find task or item</span><input id="session-search" type="search" placeholder="Search tasks"></label>
-            <select id="source" class="legacy-source" aria-label="View">
+            <select id="source" class="legacy-source" aria-label="View" aria-hidden="true" tabindex="-1">
               <option value="tasks">Task dashboard</option><option value="all">All</option><option value="short">Short agents</option><option value="supervisor">Supervisor sessions</option><option value="report">Task reports</option>
             </select>
             <div id="sessions" class="sessions" aria-live="polite"></div>
@@ -54,8 +55,7 @@
               <label class="follow-control"><input id="task-follow" type="checkbox" checked> Live refresh</label>
             </div>
             <div id="task-counts" class="task-counts"></div>
-            <div id="task-groups" class="task-groups legacy-task-groups"></div>
-            <section id="dashboard-empty" class="empty-state"><span>↖</span><h2>Select a task</h2><p>Choose a task from the sidebar to inspect its exact identity, state, brief, and report.</p></section>
+            <section id="dashboard-empty" class="empty-state"><span>↖</span><h2 id="dashboard-empty-title">Select a task</h2><p id="dashboard-empty-copy">Choose a task from the sidebar to inspect its exact identity, state, brief, and report.</p></section>
             <article id="task-detail" class="task-detail" hidden>
               <div class="task-detail-heading">
                 <div><p id="task-detail-state" class="eyebrow"></p><h2 id="task-detail-title"></h2><p id="task-detail-meta" class="status"></p><p id="task-detail-wait" class="task-wait" hidden></p><p id="task-detail-warning" class="task-warning" hidden></p></div>

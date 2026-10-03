@@ -43,6 +43,8 @@ const elements = {
   sidebarTitle: document.getElementById("sidebar-title"),
   pageKind: document.getElementById("page-kind"),
   dashboardEmpty: document.getElementById("dashboard-empty"),
+  dashboardEmptyTitle: document.getElementById("dashboard-empty-title"),
+  dashboardEmptyCopy: document.getElementById("dashboard-empty-copy"),
   token: document.getElementById("token"),
   rememberToken: document.getElementById("remember-token"),
   tokenNote: document.getElementById("token-note"),
@@ -71,7 +73,6 @@ const elements = {
   retryTasks: document.getElementById("retry-tasks"),
   taskFollow: document.getElementById("task-follow"),
   taskCounts: document.getElementById("task-counts"),
-  taskGroups: document.getElementById("task-groups"),
   taskDetail: document.getElementById("task-detail"),
   taskDetailState: document.getElementById("task-detail-state"),
   taskDetailTitle: document.getElementById("task-detail-title"),
@@ -629,7 +630,7 @@ function configurePage(source) {
   if (!dashboard && state.selected?.source !== source) {
     clearArtifactSelection(source);
   }
-  setActiveNavigation(dashboard ? "dashboard" : report ? "reports" : "journal");
+  setActiveNavigation(dashboard ? "dashboard" : report ? "reports" : source === "short" ? "short" : "journal");
   selectDisplay(report);
   renderSessions();
 }
@@ -650,8 +651,8 @@ async function applyLocation() {
     const documentType = new URLSearchParams(window.location.search).get("document");
     if (taskId && state.tasks.some(task => task.id === taskId)) await selectTask(taskId, { updateRoute: false, documentType });
     else {
-      state.selectedTaskId = null;
-      state.selectedTaskDocumentType = null;
+      state.selectedTaskId = taskId || null;
+      state.selectedTaskDocumentType = documentType || null;
       state.taskSelectionGeneration += 1;
       renderSessions();
     }
@@ -734,10 +735,7 @@ function taskCard(task) {
 }
 
 function renderTaskDashboard() {
-  const query = elements.sessionSearch.value.toLowerCase();
-  const visible = state.tasks.filter(task => taskMatches(task, query));
   elements.taskCounts.replaceChildren();
-  elements.taskGroups.replaceChildren();
   for (const [category, label] of taskGroups) {
     const count = state.tasks.filter(task => task.category === category).length;
     const counter = document.createElement("div");
@@ -748,24 +746,6 @@ function renderTaskDashboard() {
     value.textContent = state.taskLoaded ? String(count) : "—";
     counter.append(name, value);
     elements.taskCounts.append(counter);
-
-    const group = document.createElement("section");
-    group.className = "task-group";
-    group.dataset.category = category;
-    const heading = document.createElement("h3");
-    heading.textContent = label;
-    const list = document.createElement("div");
-    list.className = "task-list";
-    const matches = visible.filter(task => task.category === category);
-    for (const task of matches) list.append(taskCard(task));
-    if (!matches.length) {
-      const empty = document.createElement("p");
-      empty.className = "empty";
-      empty.textContent = taskEmptyMessage(query, "No tasks in this category.");
-      list.append(empty);
-    }
-    group.append(heading, list);
-    elements.taskGroups.append(group);
   }
   renderTaskDetail();
 }
@@ -774,7 +754,13 @@ function renderTaskDetail() {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   elements.taskDetail.hidden = !task;
   elements.dashboardEmpty.hidden = Boolean(task);
-  if (!task) return;
+  if (!task) {
+    elements.dashboardEmptyTitle.textContent = state.selectedTaskId ? "Task unavailable" : "Select a task";
+    elements.dashboardEmptyCopy.textContent = state.selectedTaskId
+      ? `Task ${state.selectedTaskId} is not available in the current inventory.`
+      : "Choose a task from the sidebar to inspect its exact identity, state, brief, and report.";
+    return;
+  }
   elements.taskDetailState.textContent = task.status;
   elements.taskDetailTitle.textContent = task.title;
   elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");
@@ -905,7 +891,6 @@ async function loadTasks() {
     state.tasks = body.tasks;
     state.taskLoaded = true;
     if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
-      state.selectedTaskId = null;
       state.taskSelectionGeneration += 1;
       clearTaskDocument("");
     }

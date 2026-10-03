@@ -248,7 +248,6 @@ try {
   await page.locator("#connect").click();
   await page.locator("#task-status").filter({ hasText: "task overview is temporarily unavailable" }).waitFor({ state: "visible", timeout: 3000 });
   if (!(await page.locator("#sessions .empty").textContent()).startsWith("Task loading failed:")) throw new Error("left task list presented a loading error as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent.startsWith("Task loading failed:")))) throw new Error("task groups presented a loading error as empty categories");
   await captureEvidence("viewer-task-error-state");
   const initialTaskDelay = delayNextTaskRequest();
   await page.locator("#retry-tasks").click();
@@ -256,7 +255,6 @@ try {
   if (await page.locator("#task-status").textContent() !== "Loading task status…") throw new Error("initial task loading state was not explicit");
   if (await page.locator("#task-counts strong").evaluateAll(nodes => nodes.some(node => node.textContent === "0"))) throw new Error("unloaded task counts were presented as authoritative zeros");
   if (await page.locator("#sessions .empty").textContent() !== "Loading task status…") throw new Error("left task list presented loading as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent === "Loading task status…"))) throw new Error("task groups presented loading as empty categories");
   await captureEvidence("viewer-task-loading-state");
   await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
@@ -267,11 +265,10 @@ try {
   if (new URL(page.url()).pathname !== "/dashboard") throw new Error(`authenticated landing did not use the Dashboard route: ${page.url()}`);
   if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
-  if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
-  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task dashboard section was rendered");
+  if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
-  if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
-  if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
+  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
+  if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
   await page.locator('#sessions .task-card[data-category="history"]').first().click();
   await page.getByRole("heading", { name: "Archived task brief" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.locator("#task-document-report").isDisabled()) throw new Error("archived brief-only task did not show its unavailable report");
@@ -374,7 +371,6 @@ try {
   const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
   fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] ${process.env.VIEWER_BRIEF_ID} - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
   await page.locator('#sessions .task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
-  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task reappeared as a dedicated dashboard group after refresh");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
@@ -386,6 +382,9 @@ try {
   await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/dashboard?task=${process.env.VIEWER_FIRST_REPORT_ID}&document=brief`, { waitUntil: "domcontentloaded", timeout: 3000 });
   await directPage.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 5000 });
   if (new URL(directPage.url()).searchParams.get("document") !== "report") throw new Error("unavailable brief deep link rendered a report without normalizing document identity");
+  await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/dashboard?task=missing-task-identity`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await directPage.getByRole("heading", { name: "Task unavailable" }).waitFor({ state: "visible", timeout: 5000 });
+  if (!await directPage.getByText("missing-task-identity", { exact: false }).count() || new URL(directPage.url()).searchParams.get("task") !== "missing-task-identity") throw new Error("unavailable task deep link lost its requested identity");
   await directPage.close();
   directPage = null;
 
