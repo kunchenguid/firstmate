@@ -4,10 +4,10 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub, an
-# arbitrarily nested group/subgroup/project namespace on GitLab, and an
-# arbitrarily nested project name on Gerrit, where "number" is the change
-# number. A GitLab or Gerrit project can sit at any depth, so no
+# "path" is the full project path, which is owner/repository on GitHub,
+# workspace/repository on Bitbucket Cloud, an arbitrarily nested
+# group/subgroup/project namespace on GitLab, and an arbitrarily nested project
+# name on Gerrit, where "number" is the change number. A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
 # instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
 # so the host is part of that identity rather than a constant. Every consumer re-derives the identity
@@ -95,6 +95,16 @@ FM_PR_RETIRE_RECEIPT_IDENTITY=
 FM_PR_RECORD_STATE=
 FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
+FM_PR_BITBUCKET_STATUS=
+FM_PR_BITBUCKET_BODY=
+FM_PR_BITBUCKET_VALUES=
+FM_PR_BITBUCKET_STATE=
+FM_PR_BITBUCKET_DRAFT=
+FM_PR_BITBUCKET_HEAD=
+FM_PR_BITBUCKET_HEAD_REPORTED=
+FM_PR_BITBUCKET_SOURCE_BRANCH=
+FM_PR_BITBUCKET_DEST_BRANCH=
+FM_PR_BITBUCKET_JSON=
 
 fm_task_id_path_safe() {
   local id=${1-}
@@ -118,16 +128,17 @@ fm_task_id_creation_valid() {
 # GitLab and Gerrit both serve self-hosted instances, so the host is part of the
 # identity rather than a constant. It is accepted only as a lowercase DNS name
 # with no userinfo, port, or trailing dot, which keeps one canonical spelling per
-# change. github.com is refused here even though its shape is otherwise valid:
-# it is GitHub's own host and never another forge's instance, so a URL like
-# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a watch that can never succeed.
+# change. github.com and bitbucket.org are refused here even though their shape
+# is otherwise valid: each is its own forge's only host and never another
+# forge's instance, so a URL like https://github.com/o/r/-/merge_requests/1 (a
+# typo'd or spoofed GitHub URL) would otherwise be armed as a watch that can
+# never succeed.
 fm_pr_forge_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
+  [ "$host" != github.com ] && [ "$host" != bitbucket.org ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -188,16 +199,43 @@ fm_pr_gerrit_path_valid() {
   done
 }
 
+# A Bitbucket Cloud workspace ID is lowercase letters, digits, "-", and "_", and
+# a repository slug additionally allows ".", so each has exactly one canonical
+# spelling, which is the one the API's own pull request links use. A leading
+# hyphen is refused because a path segment must never read as an option, and
+# "." and ".." never name a repository.
+fm_pr_bitbucket_path_valid() {
+  local path=${1-} workspace repo
+  local LC_ALL=C
+  case "$path" in
+    */*/*|/*|*/) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  workspace=${path%%/*}
+  repo=${path#*/}
+  [ "${#workspace}" -ge 1 ] && [ "${#workspace}" -le 100 ] || return 1
+  [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || return 1
+  case "$workspace" in
+    -*|*[!a-z0-9_-]*) return 1 ;;
+  esac
+  case "$repo" in
+    .|..|-*|*[!a-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical pull request, merge request, or Gerrit change URL into the
 # provider-tagged identity. Validation is strict and per provider: the GitHub
-# username and repository rules are unchanged, and GitLab and Gerrit each get
-# their own namespace rules rather than a loosened GitHub rule.
+# username and repository rules are unchanged, and Bitbucket, GitLab, and
+# Gerrit each get their own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or gerrit
-# URL leaves them empty, and those paths address the project by FM_PR_HOST and
-# FM_PR_PATH instead, so a change on any instance resolves without a hardcoded
-# host.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A bitbucket, gitlab,
+# or gerrit URL leaves them empty, and those paths address the project by
+# FM_PR_HOST and FM_PR_PATH instead, so a change on any instance resolves
+# without a hardcoded host. Bitbucket Cloud has one host, so its URL is
+# https://bitbucket.org/<workspace>/<repository>/pull-requests/<number> and
+# nothing else; a Bitbucket Data Center URL is not one and is refused.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -222,6 +260,17 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  pattern='^https://bitbucket\.org/([^/]+/[^/]+)/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    path=${BASH_REMATCH[1]}
+    fm_pr_bitbucket_path_valid "$path" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[2]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -1120,6 +1169,242 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
   # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
   # shellcheck disable=SC2034
   FM_PR_RECORD_REVISION=$revision
+}
+
+# --- Bitbucket Cloud REST API 2.0 --------------------------------------------
+# Bitbucket Cloud has no CLI firstmate can rely on, so its reads and its merge
+# go through curl against this one fixed API base. The credential is the one
+# the no-mistakes pipeline already uses to open Bitbucket pull requests:
+# NO_MISTAKES_BITBUCKET_EMAIL and NO_MISTAKES_BITBUCKET_API_TOKEN, an Atlassian
+# API token used as HTTP Basic auth (docs/configuration.md owns the setup). It
+# is read from the environment only and handed to curl on stdin as a config
+# line, never as an argument, so it never appears in a process listing, and it
+# is never printed, logged, or recorded. curl's -q comes first so no ambient
+# .curlrc can add options to a request that carries it.
+FM_PR_BITBUCKET_API=https://api.bitbucket.org/2.0
+
+# Prints what a Bitbucket read or merge still needs, joined for a refusal, and
+# nothing when every requirement is present.
+fm_pr_bitbucket_missing_requirements() {
+  local missing=''
+  command -v curl >/dev/null 2>&1 || missing="curl"
+  command -v jq >/dev/null 2>&1 || missing="${missing:+$missing, }jq"
+  [ -n "${NO_MISTAKES_BITBUCKET_EMAIL:-}" ] \
+    || missing="${missing:+$missing, }the NO_MISTAKES_BITBUCKET_EMAIL environment variable"
+  [ -n "${NO_MISTAKES_BITBUCKET_API_TOKEN:-}" ] \
+    || missing="${missing:+$missing, }the NO_MISTAKES_BITBUCKET_API_TOKEN environment variable"
+  printf '%s' "$missing"
+}
+
+# One request to the Bitbucket API. <api-path> is relative to the fixed base
+# and is built only from a validated identity. Sets FM_PR_BITBUCKET_STATUS to
+# the HTTP status and FM_PR_BITBUCKET_BODY to the response body whenever curl
+# completed, and succeeds only on a 2xx status, so a caller that needs to tell
+# an accepted-but-pending merge from a refusal can read the status either way.
+# shellcheck disable=SC2034 # FM_PR_BITBUCKET_STATUS is read by sourcing callers.
+fm_pr_bitbucket_request() {  # <method> <api-path> [<json-body>]
+  local method=$1 path=$2 body=${3-} credential out code
+  local -a args
+  FM_PR_BITBUCKET_STATUS=
+  FM_PR_BITBUCKET_BODY=
+  [ -z "$(fm_pr_bitbucket_missing_requirements)" ] || return 1
+  credential="$NO_MISTAKES_BITBUCKET_EMAIL:$NO_MISTAKES_BITBUCKET_API_TOKEN"
+  credential=${credential//\\/\\\\}
+  credential=${credential//\"/\\\"}
+  args=(-q -sS -K - -X "$method" -H 'Accept: application/json'
+    --connect-timeout 10 --max-time "${FM_PR_BITBUCKET_MAX_TIME:-60}" -w '\n%{http_code}')
+  if [ -n "$body" ]; then
+    args+=(-H 'Content-Type: application/json' --data-binary "$body")
+  fi
+  out=$(printf 'user = "%s"\n' "$credential" \
+    | curl "${args[@]}" "$FM_PR_BITBUCKET_API/$path" 2>/dev/null) || return 1
+  code=${out##*$'\n'}
+  if [ "$code" = "$out" ]; then
+    out=
+  else
+    out=${out%$'\n'*}
+  fi
+  [[ "$code" =~ ^[0-9]{3}$ ]] || return 1
+  FM_PR_BITBUCKET_STATUS=$code
+  FM_PR_BITBUCKET_BODY=$out
+  case "$code" in
+    2??) return 0 ;;
+  esac
+  return 1
+}
+
+# Every value of one paginated Bitbucket collection, as one JSON array in
+# FM_PR_BITBUCKET_VALUES. A "next" link is followed only while it stays under
+# the fixed API base, so a response can never steer the credential at another
+# host, and a collection that does not end within the page bound is a failed
+# read rather than a silently truncated one.
+fm_pr_bitbucket_get_all() {  # <api-path>
+  local path=$1 page=0 next values='[]' page_values
+  FM_PR_BITBUCKET_VALUES=
+  while :; do
+    page=$((page + 1))
+    [ "$page" -le 50 ] || return 1
+    fm_pr_bitbucket_request GET "$path" || return 1
+    page_values=$(printf '%s' "$FM_PR_BITBUCKET_BODY" | jq -c '
+      if type == "object" and (.values | type) == "array" then .values
+      else error("not a paginated collection") end' 2>/dev/null) || return 1
+    values=$(jq -cn --argjson a "$values" --argjson b "$page_values" '$a + $b') || return 1
+    next=$(printf '%s' "$FM_PR_BITBUCKET_BODY" | jq -r '
+      if .next == null then "" elif (.next | type) == "string" then .next
+      else error("invalid next link") end' 2>/dev/null) || return 1
+    [ -n "$next" ] || break
+    case "$next" in
+      "$FM_PR_BITBUCKET_API"/*) path=${next#"$FM_PR_BITBUCKET_API"/} ;;
+      *) return 1 ;;
+    esac
+  done
+  FM_PR_BITBUCKET_VALUES=$values
+}
+
+# Resolve a commit hash as the API reports it to the full 40-character hash.
+# A pull request reports its head as an abbreviated hash, so the repository's
+# own commit read supplies the full one, which must extend the abbreviation.
+fm_pr_bitbucket_resolve_commit() {  # <path> <hash>
+  local path=$1 hash=$2 full
+  local LC_ALL=C
+  [[ "$hash" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+  if [ "${#hash}" -eq 40 ]; then
+    printf '%s' "$hash"
+    return 0
+  fi
+  fm_pr_bitbucket_request GET "repositories/$path/commit/$hash?fields=hash" || return 1
+  full=$(printf '%s' "$FM_PR_BITBUCKET_BODY" | jq -r '
+    if type == "object" and (.hash | type) == "string" then .hash else error("no hash") end' 2>/dev/null) \
+    || return 1
+  [[ "$full" =~ ^[0-9a-f]{40}$ ]] || return 1
+  [ "${full#"$hash"}" != "$full" ] || return 1
+  printf '%s' "$full"
+}
+
+# Make one Bitbucket pull request commit present in a local copy. Bitbucket
+# has no pull ref, so a missing commit is fetched from origin by the pull
+# request's source branch while that branch exists, then by hash.
+fm_pr_bitbucket_fetch_commit() {  # <worktree> <full-hash> <source-branch>
+  local wt=$1 hash=$2 source=${3-}
+  fm_pr_head_valid "$hash" || return 1
+  git -C "$wt" cat-file -e "$hash^{commit}" 2>/dev/null && return 0
+  git -C "$wt" remote get-url origin >/dev/null 2>&1 || return 1
+  if [ -n "$source" ] && git check-ref-format --branch "$source" >/dev/null 2>&1; then
+    git -C "$wt" fetch --quiet origin "refs/heads/$source" >/dev/null 2>&1 || true
+  fi
+  git -C "$wt" cat-file -e "$hash^{commit}" 2>/dev/null \
+    || git -C "$wt" fetch --quiet origin "$hash" >/dev/null 2>&1 || return 1
+  git -C "$wt" cat-file -e "$hash^{commit}" 2>/dev/null
+}
+
+# One live read of a Bitbucket pull request. Sets FM_PR_BITBUCKET_STATE (OPEN,
+# MERGED, DECLINED, or SUPERSEDED), FM_PR_BITBUCKET_DRAFT ("true", "false", or
+# empty when the payload carries no boolean draft), FM_PR_BITBUCKET_HEAD_REPORTED
+# (the head exactly as reported, which is abbreviated), FM_PR_BITBUCKET_HEAD,
+# both branch names, and FM_PR_BITBUCKET_JSON. With the default "resolve",
+# FM_PR_BITBUCKET_HEAD is the full hash resolved live; with "reported" it is
+# left empty, for a read after a merge whose source branch may already be gone.
+# The record must be the exact pull request asked for, and every field a
+# caller relies on must be present, or the read fails.
+# shellcheck disable=SC2034 # These results are read by sourcing callers.
+fm_pr_bitbucket_read_pull_request() {  # <path> <number> [resolve|reported]
+  local path=$1 number=$2 head_mode=${3:-resolve} fields line total=0 named=0
+  local state='' draft='' head='' source='' dest=''
+  local LC_ALL=C
+  FM_PR_BITBUCKET_STATE=
+  FM_PR_BITBUCKET_DRAFT=
+  FM_PR_BITBUCKET_HEAD=
+  FM_PR_BITBUCKET_HEAD_REPORTED=
+  FM_PR_BITBUCKET_SOURCE_BRANCH=
+  FM_PR_BITBUCKET_DEST_BRANCH=
+  FM_PR_BITBUCKET_JSON=
+  fm_pr_bitbucket_path_valid "$path" || return 1
+  case "$number" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  fm_pr_bitbucket_request GET "repositories/$path/pullrequests/$number" || return 1
+  fields=$(printf '%s' "$FM_PR_BITBUCKET_BODY" | jq -r --argjson number "$number" '
+    if type == "object" and .id == $number
+       and (.state | type) == "string" and .state != ""
+       and (.source.commit.hash | type) == "string"
+       and (.source.branch.name | type) == "string"
+       and (.destination.branch.name | type) == "string" and .destination.branch.name != ""
+    then
+      "state=" + .state,
+      "draft=" + (if (.draft | type) == "boolean" then (.draft | tostring) else "" end),
+      "head=" + .source.commit.hash,
+      "source=" + .source.branch.name,
+      "dest=" + .destination.branch.name
+    else
+      error("not the requested pull request")
+    end' 2>/dev/null) || return 1
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      draft=*) draft=${line#draft=} ;;
+      head=*) head=${line#head=} ;;
+      source=*) source=${line#source=} ;;
+      dest=*) dest=${line#dest=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  [ "$named" -eq 5 ] && [ "$total" -eq 5 ] || return 1
+  [[ "$head" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+  FM_PR_BITBUCKET_JSON=$FM_PR_BITBUCKET_BODY
+  FM_PR_BITBUCKET_HEAD_REPORTED=$head
+  if [ "$head_mode" = resolve ]; then
+    FM_PR_BITBUCKET_HEAD=$(fm_pr_bitbucket_resolve_commit "$path" "$head") || return 1
+  fi
+  FM_PR_BITBUCKET_STATE=$state
+  FM_PR_BITBUCKET_DRAFT=$draft
+  FM_PR_BITBUCKET_SOURCE_BRANCH=$source
+  FM_PR_BITBUCKET_DEST_BRANCH=$dest
+}
+
+# The state of one Bitbucket pull request, in the shape every other provider's
+# record read gives bin/fm-crew-state.sh. It is one request, because a state
+# read needs no head.
+fm_pr_bitbucket_read_record() {  # <path> <number>
+  local path=$1 number=$2 state merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  fm_pr_bitbucket_path_valid "$path" || return 1
+  case "$number" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  fm_pr_bitbucket_request GET "repositories/$path/pullrequests/$number?fields=id,state" || return 1
+  state=$(printf '%s' "$FM_PR_BITBUCKET_BODY" | jq -r --argjson number "$number" '
+    if type == "object" and .id == $number and (.state | type) == "string"
+       and .state != "" and (.state | test("\n") | not)
+    then .state else error("not the requested pull request") end' 2>/dev/null) || return 1
+  [ "$state" != MERGED ] || merged=true
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# Every commit status reported on one commit, as a JSON array of
+# {key, name, state} in FM_PR_BITBUCKET_VALUES. A status is identified by its
+# key, which Bitbucket keeps unique per commit, so the key is the check name
+# every refusal and waiver uses. A status whose key or state is not a string
+# makes the whole read fail rather than be dropped.
+fm_pr_bitbucket_read_statuses() {  # <path> <full-hash>
+  local path=$1 head=$2 values
+  fm_pr_head_valid "$head" || return 1
+  fm_pr_bitbucket_get_all "repositories/$path/commit/$head/statuses?pagelen=100" || return 1
+  values=$(printf '%s' "$FM_PR_BITBUCKET_VALUES" | jq -c '
+    map(if type == "object" and (.key | type) == "string" and .key != ""
+           and (.state | type) == "string"
+        then {key, name: (.name // .key | tostring), state}
+        else error("invalid commit status") end)' 2>/dev/null) || return 1
+  FM_PR_BITBUCKET_VALUES=$values
 }
 
 fm_pr_poll_retirement_data_valid() {

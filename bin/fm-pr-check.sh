@@ -6,12 +6,13 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL, a GitLab merge request URL, and a Gerrit change URL
-# are all accepted, including a merge request or change on a self-hosted
-# instance.
-# A GitHub pull request the forge reports as a draft is refused, naming the draft
-# state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
-# would wait for an event that cannot occur while nobody is asked to act.
+# A GitHub pull request URL, a Bitbucket Cloud pull request URL, a GitLab merge
+# request URL, and a Gerrit change URL are all accepted, including a merge
+# request or change on a self-hosted instance.
+# A GitHub or Bitbucket pull request the forge reports as a draft is refused,
+# naming the draft state and recording and arming nothing: a draft cannot be
+# merged, so a poll armed on it would wait for an event that cannot occur while
+# nobody is asked to act.
 # Mark the pull request ready for review, then arm again; a lane that keeps a
 # draft on purpose declares a wait instead of reporting done. An unreadable
 # draft state does not refuse, matching how the head read below is optional.
@@ -87,6 +88,16 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
 fi
+# A Bitbucket watch reads the REST API directly, so its prerequisites are curl,
+# jq, and the pipeline's own Bitbucket credential in this environment, which the
+# watcher inherits.
+if [ "$PROVIDER" = bitbucket ]; then
+  BITBUCKET_MISSING=$(fm_pr_bitbucket_missing_requirements)
+  if [ -n "$BITBUCKET_MISSING" ]; then
+    echo "error: watching a Bitbucket pull request requires $BITBUCKET_MISSING" >&2
+    exit 1
+  fi
+fi
 if [ "$PROVIDER" = gerrit ]; then
   if ! command -v gerrit-axi >/dev/null 2>&1; then
     echo "error: watching a Gerrit change requires gerrit-axi on PATH" >&2
@@ -99,21 +110,30 @@ if [ "$PROVIDER" = gerrit ]; then
 fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
-# draft reading refuses, because an unreadable one must not block arming.
+# draft reading refuses, because an unreadable one must not block arming. The
+# one Bitbucket read also supplies the head recorded below.
+DRAFT_STATE=
+BITBUCKET_HEAD=
 if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
-  if [ "$(fm_pr_json_draft_state "$DRAFT_JSON")" = true ]; then
-    echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
-    exit 1
-  fi
+  DRAFT_STATE=$(fm_pr_json_draft_state "$DRAFT_JSON")
+fi
+if [ "$PROVIDER" = bitbucket ] && fm_pr_bitbucket_read_pull_request "$PROJECT_PATH" "$NUMBER"; then
+  [ "${FM_PR_CHECK_MERGE:-}" = 1 ] || DRAFT_STATE=$FM_PR_BITBUCKET_DRAFT
+  BITBUCKET_HEAD=$FM_PR_BITBUCKET_HEAD
+fi
+if [ "$DRAFT_STATE" = true ]; then
+  echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
+  exit 1
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
 
-# pr_head is recorded only when the forge's CLI can supply it. gh exposes the
-# head commit as a selectable field; plain glab exposes it only inside its JSON
-# output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
+# pr_head is recorded only when the forge can supply it. gh exposes the head
+# commit as a selectable field, and the Bitbucket read above resolved the pull
+# request's abbreviated head to the full hash. Plain glab exposes it only inside
+# its JSON output, which would need a JSON processor firstmate does not require,
+# so a GitLab task records no pr_head, and neither does a Gerrit task: a Gerrit
 # revision names one patch set, every amend or rebase is a new patch set, and
 # bin/fm-review-diff.sh has no Gerrit path to resolve a current head with, so a
 # recorded revision would silently become the reviewed content. Both consumers
@@ -122,8 +142,9 @@ fi
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh fetches a pull request head from the remote when none is
 # recorded and otherwise diffs the local branch, which is the current content.
-# bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
-# and treats a recorded value that disagrees as stale rather than authoritative.
+# bin/fm-pr-merge.sh reads a GitLab or Bitbucket head live at merge time for
+# the same reason, and treats a recorded value that disagrees as stale rather
+# than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
@@ -132,6 +153,7 @@ if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/d
     PR_HEAD=$REMOTE_HEAD
   fi
 fi
+[ -z "$BITBUCKET_HEAD" ] || PR_HEAD=$BITBUCKET_HEAD
 
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)

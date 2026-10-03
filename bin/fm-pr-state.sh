@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Report the blockers this command can see on one GitHub pull request.
+# Report the blockers this command can see on one GitHub or Bitbucket Cloud
+# pull request.
 #
 # This is a one-shot, read-only command. It reads the current pull request,
-# reported checks, submitted reviews, and review decision from GitHub at
+# reported checks, submitted reviews, and review decision from the forge at
 # invocation time. It never posts, requests, approves, or merges.
 # It reports on checks that have reported. A required context that has never
 # reported on this head is absent from what this command reads and cannot be
@@ -17,6 +18,12 @@
 # STALE when it was left at a superseded head.
 # A closed or merged pull request reports that terminal state and nothing else.
 # Unresolved review-thread state is out of this command's scope.
+#
+# A Bitbucket pull request is read through the REST API with curl and jq under
+# the NO_MISTAKES_BITBUCKET_EMAIL and NO_MISTAKES_BITBUCKET_API_TOKEN
+# credential. Bitbucket requires a count of successful builds rather than named
+# checks, so every build at the head that is not SUCCESSFUL is printed, and a
+# participant who requested changes is printed by nickname.
 #
 # Usage: fm-pr-state.sh <pr-url>
 #   Prints one line per blocker it can see and nothing when it sees none.
@@ -43,12 +50,54 @@ if [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then
   exit 0
 fi
 [ "$#" -eq 1 ] || die "usage: fm-pr-state.sh <pr-url>"
-command -v gh >/dev/null 2>&1 || die "gh is required"
 
 URL=$1
-if ! fm_pr_url_parse "$URL" || [ "$FM_PR_PROVIDER" != github ]; then
-  die "expected a GitHub pull-request URL"
+if ! fm_pr_url_parse "$URL" \
+  || { [ "$FM_PR_PROVIDER" != github ] && [ "$FM_PR_PROVIDER" != bitbucket ]; }; then
+  die "expected a GitHub or Bitbucket pull-request URL"
 fi
+
+# Bitbucket Cloud has no required-check list to read: it requires a count of
+# successful builds and no failed one, so every commit status at the head that
+# is not SUCCESSFUL is reported, named by its key. A participant whose latest
+# verdict requests changes is reported by nickname.
+bitbucket_state() {
+  local missing statuses participants
+  missing=$(fm_pr_bitbucket_missing_requirements)
+  [ -z "$missing" ] || die "reading a Bitbucket pull request requires $missing"
+  fm_pr_bitbucket_read_pull_request "$FM_PR_PATH" "$FM_PR_NUMBER" \
+    || die "could not read $URL"
+  case "$FM_PR_BITBUCKET_STATE" in
+    OPEN) ;;
+    *)
+      printf 'STATE: %s\n' "$(printf '%s' "$FM_PR_BITBUCKET_STATE" | tr '[:upper:]' '[:lower:]')"
+      exit 0
+      ;;
+  esac
+  case "$FM_PR_BITBUCKET_DRAFT" in
+    false) ;;
+    true) printf 'DRAFT: pull request is not ready for review\n' ;;
+    *) die "Bitbucket returned no draft state for $URL" ;;
+  esac
+  participants=$(printf '%s' "$FM_PR_BITBUCKET_JSON" | jq -r '
+    (.participants // []) | if type == "array" then .[] else error("invalid participants") end
+    | select(.state == "changes_requested")
+    | "REVIEW: \(.user.nickname // .user.display_name // "unknown") CHANGES_REQUESTED"') \
+    || die "Bitbucket returned invalid participants for $URL"
+  fm_pr_bitbucket_read_statuses "$FM_PR_PATH" "$FM_PR_BITBUCKET_HEAD" \
+    || die "could not read the builds for $URL"
+  statuses=$FM_PR_BITBUCKET_VALUES
+  if [ "$(printf '%s' "$statuses" | jq length)" -eq 0 ]; then
+    printf 'CHECKS: none reported yet\n'
+  else
+    printf '%s' "$statuses" | jq -r '.[] | select(.state != "SUCCESSFUL") | "CHECK: \(.key) (\(.state))"'
+  fi
+  [ -z "$participants" ] || printf '%s\n' "$participants" | LC_ALL=C sort
+  exit 0
+}
+
+[ "$FM_PR_PROVIDER" != bitbucket ] || bitbucket_state
+command -v gh >/dev/null 2>&1 || die "gh is required"
 
 PATH_PART=$FM_PR_PATH
 NUMBER=$FM_PR_NUMBER

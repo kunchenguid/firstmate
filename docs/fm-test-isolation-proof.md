@@ -165,6 +165,21 @@ That its duration landed within 3% of the two clean runs is evidence the elevate
 These durations are not comparable with the six-member run above: that measurement was taken on a different machine state, and the gap is far larger than two short scripts can account for, so it is not evidence about the two new members.
 For the same reason the 1.72x four-worker figure recorded above is left as a statement about that measurement rather than restated as current.
 
+`tests/fm-pr-bitbucket.test.sh` joined this family after 2026-09-12, so the family was re-proved at its full nine-member membership.
+
+- Date: 2026-09-29
+- Command: `bin/fm-test-isolation-proof.sh --pool pr-forge --jobs 4`
+- Result: two consecutive runs, 9 candidates, 0 failures.
+
+| Run | Summary |
+|---|---|
+| 1 | `FM_ISOLATION_SUMMARY total=9 failed=0 concurrency=4 duration_ms=386698` |
+| 2 | `FM_ISOLATION_SUMMARY total=9 failed=0 concurrency=4 duration_ms=598055` |
+
+The recorded runs began at one-minute load averages of 0.62 and 2.14.
+A run between them was interrupted before its summary line, after its seven completed candidates had all exited 0, so it is disclosed here rather than recorded as a measurement.
+Run 2's longer clock came from its two longest scripts, `fm-pr-check-security` (598.0s) and `fm-pr-merge` (589.5s), not from `fm-pr-bitbucket` (120.6s), so these durations are evidence of isolation rather than a new baseline for the family.
+
 ### secondmate: admitted
 
 - Date: 2026-09-03

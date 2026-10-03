@@ -988,6 +988,154 @@ test_merged_pr_with_later_local_commit_refuses() {
   pass "merged PR does not allow teardown after a later local commit"
 }
 
+# A merged Bitbucket Cloud pull request whose reported head abbreviates <head>,
+# served by the stub Bitbucket API, and recorded as the task's pr= (plus pr_head=
+# when <record-head> is "record"). Bitbucket has no pull ref, so the landed proof
+# rests on the recorded or resolved head alone. Args: case_dir head record-head
+add_bitbucket_pr_merged_for_head() {
+  local case_dir=$1 head=$2 record=$3
+  fm_fake_bitbucket_curl "$case_dir/fakebin" "$case_dir/bb"
+  fm_bitbucket_pr_json 7 MERGED "${head:0:12}" > "$case_dir/bb/pr.json"
+  printf '{"hash":"%s"}\n' "$head" > "$case_dir/bb/commit.json"
+  printf '%s\n' 'pr=https://bitbucket.org/example/repo/pull-requests/7' >> "$case_dir/state/task-x1.meta"
+  [ "$record" != record ] || printf 'pr_head=%s\n' "$head" >> "$case_dir/state/task-x1.meta"
+}
+
+run_teardown_with_bitbucket_credential() {
+  NO_MISTAKES_BITBUCKET_EMAIL=captain@example.invalid \
+  NO_MISTAKES_BITBUCKET_API_TOKEN=synthetic-token \
+  FM_TEST_BB_EXPECT_USER=captain@example.invalid:synthetic-token \
+    run_teardown "$@"
+}
+
+test_bitbucket_squash_merged_branch_deleted_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case bitbucket-squash-merged)
+  write_meta "$case_dir" no-mistakes ship
+  # The same squash-merge-then-delete-branch flow as on GitHub: HEAD is on no
+  # remote, and the merged Bitbucket pull request's recorded head is the only
+  # signal that the work landed.
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" record
+
+  set +e
+  run_teardown_with_bitbucket_credential "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bitbucket-squash-merged: teardown should succeed when the Bitbucket PR is merged"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-squash-merged: teardown printed a REFUSED line"
+  if grep -q 'commit/' "$case_dir/bb/curl-argv.log"; then
+    fail "bitbucket-squash-merged: the recorded head that extends the reported one was resolved again"
+  fi
+  pass "squash-merged + deleted-branch worktree with a merged Bitbucket PR is torn down"
+}
+
+# tasks-axi links only a GitHub or Forgejo pull request on a row, so a closed
+# Bitbucket task records its PR as a note rather than failing the close.
+test_bitbucket_teardown_closes_the_backlog_item() {
+  local case_dir rc pr_head
+  case_dir=$(make_case bitbucket-backlog-close)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" record
+  seed_backlog_in_flight "$case_dir"
+
+  set +e
+  run_teardown_with_bitbucket_credential "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bitbucket-backlog-close: teardown should close the backlog item"$'\n'"$(cat "$case_dir/stderr")"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "bitbucket-backlog-close: backlog item still open: $(backlog_row_state "$case_dir")"
+  assert_grep 'https://bitbucket.org/example/repo/pull-requests/7' "$case_dir/data/backlog.md" \
+    "bitbucket-backlog-close: closed backlog item did not record the task's PR"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "bitbucket-backlog-close: a landed close left its pending-close record behind"
+  pass "teardown of a merged Bitbucket task closes its backlog item with the PR recorded"
+}
+
+test_bitbucket_merged_pr_without_recorded_head_resolves_it() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case bitbucket-resolved-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes follow-up")
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" no-record
+
+  set +e
+  run_teardown_with_bitbucket_credential "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "bitbucket-resolved-head: teardown should resolve the merged head through the API"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-resolved-head: teardown printed a REFUSED line"
+  pass "a merged Bitbucket PR with no recorded head proves landing through the resolved head"
+}
+
+test_bitbucket_merged_pr_with_later_local_commit_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case bitbucket-stale-pr-head)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt_commit_file "$case_dir" later.txt local-only "local follow-up"
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" record
+
+  set +e
+  run_teardown_with_bitbucket_credential "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-stale-pr-head: teardown should refuse when HEAD moved past the merged head"
+  grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-stale-pr-head: no REFUSED line in stderr"
+  pass "a merged Bitbucket PR does not allow teardown of a later local commit"
+}
+
+test_bitbucket_merged_pr_without_credential_names_it() {
+  local case_dir rc pr_head
+  case_dir=$(make_case bitbucket-no-credential)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" record
+
+  set +e
+  NO_MISTAKES_BITBUCKET_EMAIL='' NO_MISTAKES_BITBUCKET_API_TOKEN='' \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-no-credential: teardown cannot prove landing without the credential"
+  grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-no-credential: no REFUSED line in stderr"
+  assert_grep 'reading it requires the NO_MISTAKES_BITBUCKET_EMAIL environment variable, the NO_MISTAKES_BITBUCKET_API_TOKEN environment variable' \
+    "$case_dir/stderr" "bitbucket-no-credential: the refusal did not name the missing credential"
+  pass "a Bitbucket landed proof without the credential refuses and names what is missing"
+}
+
+test_bitbucket_open_pr_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case bitbucket-open-pr)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_bitbucket_pr_merged_for_head "$case_dir" "$pr_head" record
+  fm_bitbucket_pr_json 7 OPEN "${pr_head:0:12}" > "$case_dir/bb/pr.json"
+
+  set +e
+  run_teardown_with_bitbucket_credential "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "bitbucket-open-pr: teardown should refuse while the Bitbucket PR is still open"
+  grep -q REFUSED "$case_dir/stderr" || fail "bitbucket-open-pr: no REFUSED line in stderr"
+  pass "an open Bitbucket PR does not prove unpushed work landed"
+}
+
 test_squash_merged_rebased_branch_allows() {
   local case_dir rc pr_head
   case_dir=$(make_case squash-rebased)
@@ -4328,6 +4476,12 @@ test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
 test_merged_pr_with_later_local_commit_refuses
+test_bitbucket_squash_merged_branch_deleted_allows
+test_bitbucket_teardown_closes_the_backlog_item
+test_bitbucket_merged_pr_without_recorded_head_resolves_it
+test_bitbucket_merged_pr_with_later_local_commit_refuses
+test_bitbucket_open_pr_refuses
+test_bitbucket_merged_pr_without_credential_names_it
 test_squash_merged_rebased_branch_allows
 test_squash_merged_same_file_different_content_refuses
 test_squash_merged_rebased_local_with_unlanded_commit_refuses

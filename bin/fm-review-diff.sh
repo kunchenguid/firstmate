@@ -11,14 +11,17 @@
 # (stale recorded SHAs must never win over a reachable remote PR head). If
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A GitLab merge request and a Gerrit change expose no comparable ref and record
-# no pr_head, so a task recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the task's
-# immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
-# created before that field existed), or the worktree's checked-out branch when
-# that branch does not exist in the worktree. A recorded branch that is not a
-# valid git branch name is refused instead of taking that fallback, the same
-# refusal fm-merge-local.sh applies, so a corrupt meta record can never turn a
-# review into a diff of the wrong content.
+# no pr_head, so a task recording one always takes that warning path. A
+# Bitbucket pull request exposes no ref either, so its head is read live from
+# the Bitbucket API and fetched by its source branch or hash when this copy
+# lacks it; a recorded pr_head= is the fallback only when that live read fails,
+# with a warning. docs/architecture.md owns that fallback. Without pr=, compare
+# the task's immutable ship branch recorded in state/<id>.meta ("fm/<id>" for
+# records created before that field existed), or the worktree's checked-out
+# branch when that branch does not exist in the worktree. A recorded branch that
+# is not a valid git branch name is refused instead of taking that fallback, the
+# same refusal fm-merge-local.sh applies, so a corrupt meta record can never turn
+# a review into a diff of the wrong content.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -28,6 +31,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 usage() {
   echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
@@ -119,18 +124,29 @@ fetch_pull_head() {
 }
 
 resolve_pr_head() {
-  local pr_url=$1 recorded_head=$2 n resolved
-  n=$(pr_number_from_target "$pr_url") || true
-  if [ -n "$n" ]; then
-    if resolved=$(fetch_pull_head "$n"); then
-      printf '%s' "$resolved"
+  local pr_url=$1 recorded_head=$2 n resolved fallback_note=''
+  if fm_pr_url_parse "$pr_url" && [ "$FM_PR_PROVIDER" = bitbucket ]; then
+    if [ -z "$(fm_pr_bitbucket_missing_requirements)" ] \
+      && fm_pr_bitbucket_read_pull_request "$FM_PR_PATH" "$FM_PR_NUMBER"; then
+      fm_pr_bitbucket_fetch_commit "$WT" "$FM_PR_BITBUCKET_HEAD" "$FM_PR_BITBUCKET_SOURCE_BRANCH" || return 1
+      printf '%s' "$FM_PR_BITBUCKET_HEAD"
       return 0
+    fi
+    fallback_note="warning: could not read the live head of $pr_url; falling back to its recorded pr_head"
+  else
+    n=$(pr_number_from_target "$pr_url") || true
+    if [ -n "$n" ]; then
+      if resolved=$(fetch_pull_head "$n"); then
+        printf '%s' "$resolved"
+        return 0
+      fi
     fi
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
   # branch, but never preferred over a successful pull-head fetch above.
   if [ -n "$recorded_head" ] \
     && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    [ -z "$fallback_note" ] || echo "$fallback_note" >&2
     printf '%s' "$recorded_head"
     return 0
   fi

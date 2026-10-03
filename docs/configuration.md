@@ -14,6 +14,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
+| Forge credentials for Bitbucket Cloud pull requests | [Bitbucket Cloud pull requests](#bitbucket-cloud-pull-requests-no_mistakes_bitbucket_email--no_mistakes_bitbucket_api_token) |
 
 ## FM_HOME
 
@@ -1219,6 +1220,25 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Bitbucket Cloud pull requests (NO_MISTAKES_BITBUCKET_EMAIL / NO_MISTAKES_BITBUCKET_API_TOKEN)
+
+Firstmate records, watches, reads, and merges a Bitbucket Cloud pull request (`https://bitbucket.org/<workspace>/<repository>/pull-requests/<number>`) through the Bitbucket REST API 2.0, with the same credential the no-mistakes pipeline uses to open it, so the fleet has one Bitbucket credential.
+Bitbucket Data Center and Server URLs are not Bitbucket Cloud URLs and are refused.
+
+Set both variables in the environment firstmate runs in, which its watcher inherits:
+
+- `NO_MISTAKES_BITBUCKET_EMAIL` is the Atlassian account email.
+- `NO_MISTAKES_BITBUCKET_API_TOKEN` is an Atlassian API token for that account, used as HTTP Basic auth.
+
+The token needs read access to pull requests, commit statuses, and the repository, and write access to pull requests for a merge.
+A merge also reads the destination branch's restrictions, which Bitbucket exposes only to a repository administrator, so without admin access every Bitbucket merge refuses and names that missing read; when those restrictions require default-reviewer approvals or resolved tasks, it also reads the repository's effective default reviewers or the pull request's tasks; see [`bin/fm-pr-merge.sh`](../bin/fm-pr-merge.sh)'s header for the full merge contract.
+A merge verifies five merge-check kinds from those restrictions: `require_passing_builds_to_merge`, `require_approvals_to_merge`, `require_default_reviewer_approvals_to_merge`, `require_no_changes_requested`, and `require_tasks_to_be_completed`.
+Other Bitbucket merge-check kinds, for example `require_commits_behind`, `require_all_dependencies_merged`, and `require_review_group_approvals_to_merge`, are not verified by the script and are enforced only where the workspace turns Bitbucket's merge-check enforcement on.
+Bitbucket's merge API cannot bind a merge to an expected head, so a merge re-reads the head immediately before the merge request and reads the landed head back afterwards; a push to the source branch after that final head read and before Bitbucket processes the merge request can land an unverified head, which the read-back then reports after the fact rather than prevents.
+Firstmate reads the credential from the environment only, never from `.env`, and hands it to `curl` on standard input rather than as an argument, so it never appears in a process listing and is never printed, logged, or recorded.
+`curl` and `jq` are required alongside it.
+Registering a Bitbucket watch, merging a Bitbucket pull request, or reading one with `bin/fm-pr-state.sh` refuses and names whichever of the four is missing, rather than skipping the read.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -2297,6 +2317,8 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+NO_MISTAKES_BITBUCKET_EMAIL=       # Bitbucket Cloud credential shared with no-mistakes; see "Bitbucket Cloud pull requests"
+NO_MISTAKES_BITBUCKET_API_TOKEN=   # its Atlassian API token; never printed, logged, or recorded
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20

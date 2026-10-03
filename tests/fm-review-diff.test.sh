@@ -15,6 +15,11 @@
 #       reviewed even when the worktree HEAD has moved off it
 #   (g) meta records a corrupt branch= -> refused, never silently reviewed as
 #       the moved worktree HEAD
+#   (h) Bitbucket pr= + STALE recorded pr_head= + newer live head -> must use
+#       the live head read from the Bitbucket API
+#   (i) Bitbucket pr= whose live head cannot be read -> recorded pr_head= with
+#       a warning, or the local branch with only its own warning when no
+#       recorded head is usable
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -216,6 +221,82 @@ test_corrupt_recorded_branch_is_refused() {
   pass "fm-review-diff refuses a corrupt recorded ship branch instead of reviewing the wrong content"
 }
 
+BB_URL=https://bitbucket.org/example/repo/pull-requests/9
+
+# The Bitbucket API stub answers pull request 9 at the pipeline-fixed head.
+bitbucket_fixture() {
+  local case_dir=$1
+  mkdir -p "$case_dir/fakebin"
+  fm_fake_bitbucket_curl "$case_dir/fakebin" "$case_dir/bb"
+  fm_bitbucket_pr_json 9 OPEN "${PR_SHA:0:12}" > "$case_dir/bb/pr.json"
+  printf '{"hash":"%s"}\n' "$PR_SHA" > "$case_dir/bb/commit.json"
+}
+
+run_bitbucket_review_diff() {
+  local case_dir=$1
+  shift
+  NO_MISTAKES_BITBUCKET_EMAIL="${FM_TEST_BB_EMAIL-reviewer@example.invalid}" \
+  NO_MISTAKES_BITBUCKET_API_TOKEN=synthetic-token \
+  FM_TEST_BB_EXPECT_USER=reviewer@example.invalid:synthetic-token \
+  PATH="$case_dir/fakebin:$PATH" \
+    run_review_diff "$case_dir" "$@"
+}
+
+test_bitbucket_live_head_beats_stale_recorded_pr_head() {
+  local case_dir out err stale_sha
+  case_dir=$(make_case bb-live-head)
+  stale_and_pr_commits "$case_dir"
+  stale_sha=$(git -C "$case_dir/wt" rev-parse fm/task-x1)
+  git -C "$case_dir/wt" push -q origin "pr-head-tmp:refs/heads/fm/task-x1"
+  bitbucket_fixture "$case_dir"
+  write_task_meta "$case_dir" "pr=$BB_URL" "pr_head=$stale_sha"
+
+  out=$(run_bitbucket_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" '+pr-fixed' \
+    "bb-live-head: diff must show the live Bitbucket head, not the recorded stale SHA"
+  assert_not_contains "$out" 'stale-local' "bb-live-head: diff must not use the stale recorded content"
+  err=$(cat "$case_dir/stderr")
+  assert_not_contains "$err" 'could not read the live head' \
+    "bb-live-head: a readable live head must not warn of a recorded-head fallback"
+  assert_not_contains "$err" 'warning: PR head unavailable' \
+    "bb-live-head: a readable live head must not warn of a local-branch fallback"
+  pass "fm-review-diff reviews a Bitbucket pull request's live head over a stale recorded pr_head="
+}
+
+test_bitbucket_unreadable_live_head_falls_back_to_recorded_with_warning() {
+  local case_dir out
+  case_dir=$(make_case bb-unreadable)
+  stale_and_pr_commits "$case_dir"
+  bitbucket_fixture "$case_dir"
+  write_task_meta "$case_dir" "pr=$BB_URL" "pr_head=$PR_SHA"
+
+  out=$(FM_TEST_BB_EMAIL='' run_bitbucket_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$(cat "$case_dir/stderr")" "warning: could not read the live head of $BB_URL; falling back to its recorded pr_head" \
+    "bb-unreadable: the fallback to the recorded head was not warned about"
+  assert_contains "$out" '+pr-fixed' "bb-unreadable: diff should use the recorded pr_head"
+  pass "fm-review-diff falls back to a Bitbucket task's recorded pr_head= only with a warning"
+}
+
+test_bitbucket_unreadable_live_head_without_recorded_head_warns_only_of_local_branch() {
+  local case_dir out err
+  case_dir=$(make_case bb-unreadable-unrecorded)
+  stale_and_pr_commits "$case_dir"
+  bitbucket_fixture "$case_dir"
+  write_task_meta "$case_dir" "pr=$BB_URL"
+
+  out=$(FM_TEST_BB_EMAIL='' run_bitbucket_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  err=$(cat "$case_dir/stderr")
+
+  assert_not_contains "$err" 'falling back to its recorded pr_head' \
+    "bb-unreadable-unrecorded: a recorded-head fallback was claimed with no recorded head"
+  assert_contains "$err" 'warning: PR head unavailable; diff may lag the open PR' \
+    "bb-unreadable-unrecorded: the local-branch fallback was not warned about"
+  assert_contains "$out" '+stale-local' "bb-unreadable-unrecorded: diff should use the local branch"
+  pass "fm-review-diff claims a Bitbucket recorded-head fallback only when it uses that head"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -223,3 +304,6 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_branch_beats_moved_worktree_head
 test_corrupt_recorded_branch_is_refused
+test_bitbucket_live_head_beats_stale_recorded_pr_head
+test_bitbucket_unreadable_live_head_falls_back_to_recorded_with_warning
+test_bitbucket_unreadable_live_head_without_recorded_head_warns_only_of_local_branch

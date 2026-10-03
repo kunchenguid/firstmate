@@ -264,7 +264,7 @@ test_refusals_exit_nonzero() {
   out=$(PATH="$FAKEBIN:$PATH" "$SCRIPT" 7 2>&1) || status=$?
   [ "$status" -ne 0 ] \
     || fail "a bare number resolves against the ambient repository and is not an address"
-  assert_contains "$out" 'expected a GitHub pull-request URL' \
+  assert_contains "$out" 'expected a GitHub or Bitbucket pull-request URL' \
     "a bare number must be refused as an address, not attempted as a lookup"
   pass "argument and lookup refusals exit nonzero"
 }
