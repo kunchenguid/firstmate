@@ -88,6 +88,10 @@ A relaunch does take one session reference when the endpoint's own runtime recor
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
+Per-task activity reporting is bound by that launch rather than held in the task record: `bin/fm-spawn.sh` writes the busy generation together with that harness's wiring, and [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh) owns which paths each form leaves behind.
+Wiring the harness reads back for itself out of the worktree outlives a passive reopen, while wiring carried on the launch command - an extension flag, an injected settings file, a notifier - reaches only the process that command started, so an agent started without replaying it reports nothing at all while its work continues normally and current-state reads then have only the process and the terminal left to go on.
+There the repair is a `relaunch` and never a passive reopen, and a per-task extension file's mtime is the launch timestamp rather than evidence that reporting is alive.
+
 ### Reclaiming a task whose endpoint is gone
 
 A Herdr pane or workspace can be destroyed out from under a live task by churn or a session restart.
