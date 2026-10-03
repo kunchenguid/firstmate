@@ -128,12 +128,16 @@ BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
-# Git Bash/MSYS pays a much higher fork cost while the watcher completes its
-# required pre-lock migration, so its bounded default covers that cold start.
-case "${OSTYPE:-}" in
-  msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
-  *) ARM_CONFIRM_DEFAULT=10 ;;
-esac
+# The watcher's pre-lock startup sources a large library graph and is
+# spawn-bound: on a state directory bloated by months of leaked scratch
+# records it measured 5-8s and past 10s under load, and a 10s window TERMed
+# every child mid-startup - the 2026-09-29 zero-output wedge, where arming
+# failed identically from every path. The watcher now reclaims those leaked
+# records at startup (fm_lock_sweep_dead_owners), so a healthy home confirms
+# in well under a second; the 30s default only tolerates a slow-but-alive
+# child instead of killing it, matching the fork-cost allowance MSYS has
+# always carried.
+ARM_CONFIRM_DEFAULT=30
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
