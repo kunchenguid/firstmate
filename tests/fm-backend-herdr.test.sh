@@ -534,8 +534,14 @@ stale_registration_case() {  # <dir-suffix> <agent_status> <process-info-body|->
   for n in 0 3 6; do
     # +1: pane get -> the pane structurally exists
     printf '{"result":{"pane":{"pane_id":"w1:p2"}}}\n' > "$resp/$((n + 1)).out"
-    # +2: agent get -> a registered agent with the given status
-    printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "${5:-pi}" "$2" > "$resp/$((n + 2)).out"
+    # +2: agent get -> a registered agent with the given status (an agent
+    # label of `-` lays down the label-less registration an exited worker
+    # can leave behind: agent_status set, no .agent field)
+    if [ "${5:-pi}" = - ]; then
+      printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$2" > "$resp/$((n + 2)).out"
+    else
+      printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "${5:-pi}" "$2" > "$resp/$((n + 2)).out"
+    fi
     # +3: pane process-info -> the pane's actual process view
     [ "$3" = - ] || printf '%s\n' "$3" > "$resp/$((n + 3)).out"
     [ -z "${4:-}" ] || printf '%s\n' "$4" > "$resp/$((n + 3)).exit"
@@ -599,6 +605,38 @@ test_codex_unknown_registration_uses_process_liveness() {
   done
   kill "$shell_pid"
   pass 'Codex unknown/stale registrations use process liveness without widening husk or other-harness decisions'
+}
+
+# The TakeOne husk shape (2026-10-03): an agent that exited to its shell can
+# leave a registration with agent_status unknown and NO agent label, which the
+# Codex-only unknown carve-out refused as `unknown`, so recovery read
+# `unreadable` and fm-control could neither stop nor relaunch the task.
+# Issue #4115's proof settles it: a label-less unknown/stale registration over
+# a positively shell-only pane is stale-agent (dead for recovery); every other
+# process view - a running harness included - stays unknown, because without a
+# label the registration has no process identity to keep authoritative.
+test_unlabeled_unknown_registration_reads_the_process_view() {
+  local shell_pid out status
+  sleep 300 &
+  shell_pid=$!
+  for status in unknown stale; do
+    out=$(stale_registration_case "unlabeled-$status-shell" "$status" "$(shell_only_process_info "$shell_pid")" '' -)
+    [ "$out" = 'stale-agent dead refused' ] \
+      || { kill "$shell_pid"; fail "label-less $status over a real shell must read stale-agent, recover as dead, and refuse husk closing, got '$out'"; }
+    out=$(stale_registration_case "unlabeled-$status-agent" "$status" \
+      '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv":["/opt/codex/bin/codex"]}]}}}' '' -)
+    [ "$out" = 'unknown unreadable refused' ] \
+      || { kill "$shell_pid"; fail "a running harness under label-less $status must stay unknown, never live, got '$out'"; }
+    out=$(stale_registration_case "unlabeled-$status-other" "$status" \
+      '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"less","argv":["less"]}]}}}' '' -)
+    [ "$out" = 'unknown unreadable refused' ] \
+      || { kill "$shell_pid"; fail "an unidentified foreground under label-less $status must stay unknown, got '$out'"; }
+    out=$(stale_registration_case "unlabeled-$status-unreadable" "$status" - '' -)
+    [ "$out" = 'unknown unreadable refused' ] \
+      || { kill "$shell_pid"; fail "an unreadable process view under label-less $status must stay unknown, got '$out'"; }
+  done
+  kill "$shell_pid"
+  pass 'label-less unknown/stale registrations recover only on the positive shell-only proof'
 }
 
 test_registered_agent_with_a_live_foreground_process_stays_alive() {
@@ -682,21 +720,28 @@ EOF
 
 test_unknown_registration_requires_stable_task_and_shell_proof() {
   local out variant
-  out=$(unknown_task_recovery_case stable)
-  [ "$out" = "dead unknown" ] || fail "task-bound unknown shell must recover, generic close classifier must refuse: $out"
-  for variant in missing-pane foreign-pane foreign-tab foreign-workspace foreign-cwd \
-    missing-generation foreign-binding foreign-session absent-shell foreign-process \
-    foreign-process-pane missing-process unreachable changed-generation changed-endpoint changed-runtime; do
+  # A positively shell-only pane settles a label-less unknown registration on
+  # its own - the same stale-agent proof every labeled registration gets
+  # (issue #4115) - so recovery reads dead whatever the task records say,
+  # because pane-level staleness was never task-bound.
+  for variant in stable missing-name foreign-name missing-pane foreign-pane \
+    foreign-tab foreign-workspace foreign-cwd missing-generation foreign-binding \
+    foreign-session changed-generation changed-endpoint changed-runtime; do
+    out=$(unknown_task_recovery_case "$variant")
+    [ "$out" = "dead stale-agent" ] \
+      || fail "a label-less unknown over a real shell must read stale-agent regardless of task records: $variant $out"
+  done
+  # When the process view is NOT a positive shell (a running harness, an
+  # unidentified or unreadable view), the pane classifier stays unknown and
+  # only the task-bound recovery may settle it - and it still refuses every
+  # unstable record.
+  for variant in absent-shell foreign-process foreign-process-pane missing-process unreachable; do
     out=$(unknown_task_recovery_case "$variant")
     [ "$out" = "unreadable unknown" ] || fail "unknown recovery must refuse $variant: $out"
   done
-  for variant in missing-name foreign-name; do
-    out=$(unknown_task_recovery_case "$variant")
-    [ "$out" = "dead unknown" ] || fail "display-only name must not change runtime ownership proof: $variant $out"
-  done
   out=$(unknown_task_recovery_case live-agent)
   [ "$out" = "alive unknown" ] || fail "unknown registration with a verified live agent must prohibit relaunch: $out"
-  pass "unknown registration: stable task-bound processes recover; identity, generation, process and transport failures refuse"
+  pass "unknown registration: shell-only panes recover without task records; every other view still needs the stable task-bound proof"
 }
 
 # --- the bound agent session reference (relaunch session continuity) --------
@@ -6046,6 +6091,7 @@ test_stale_registration_ignores_status_and_reads_the_process
 test_pane_agent_session_ref_reports_a_resumable_reference_with_its_agent
 test_pane_agent_session_ref_degrades_to_nothing_when_not_resumable
 test_codex_unknown_registration_uses_process_liveness
+test_unlabeled_unknown_registration_reads_the_process_view
 test_registered_agent_with_a_live_foreground_process_stays_alive
 test_registered_agent_with_a_non_shell_foreground_process_stays_alive
 test_transient_prompt_helper_settles_into_stale_agent
