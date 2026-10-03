@@ -1149,6 +1149,37 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
+test_ci_wait_predicate_uses_effective_step() {
+  reset_fakes
+  local d fixture expected
+  d=$(new_case ci-wait-predicate)
+  make_repo_on_branch "$d/wt" fm/ci-wait
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/ci-wait.meta" "window=fm:fm-ci-wait" "worktree=$d/wt" "kind=ship"
+  for fixture in run_ci_monitoring run_running run_fixing_ci_running run_ci_fixing; do
+    FM_FAKE_AXI_STATUS="$($fixture fm/ci-wait)"
+    expected=1
+    [ "$fixture" != run_ci_monitoring ] || expected=0
+    if PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_BIN="$CREW_STATE" crew_is_ci_waiting ci-wait; then
+      [ "$expected" -eq 0 ] || fail "$fixture incorrectly suppresses local-work wedges"
+    else
+      [ "$expected" -eq 1 ] || fail "running CI step is not recognized through the real classifier"
+    fi
+  done
+  # The same ci step after its checks pass: the classifier reports `done` with
+  # the monitoring detail instead of `working` / `ci running`, and that is still
+  # the external wait.
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/ci-wait)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed"
+  if PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_BIN="$CREW_STATE" crew_is_ci_waiting ci-wait; then
+    :
+  else
+    fail "a checks-green ci monitor is not recognized as an external wait through the real classifier"
+  fi
+  FM_FAKE_CI_LOGS=""
+  pass "CI wait predicate uses the real classifier and preserves local-work escalation"
+}
+
 test_ci_ready_done_log_beats_monitoring_run() {
   reset_fakes
   local d; d=$(new_case ci-ready)
@@ -5502,6 +5533,7 @@ test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
 test_captured_completed_history
+test_ci_wait_predicate_uses_effective_step
 cancellation_failures=0
 for cancellation_test in test_captured_cancelled_review_has_no_verdict \
   test_terminal_green_delivery_disposition \

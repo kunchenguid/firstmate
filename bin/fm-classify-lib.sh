@@ -2564,6 +2564,46 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   printf '%s\n' "$run"
 }
 
+# 0 when crew <id>'s authoritative current state is an active CI step:
+# bin/fm-crew-state.sh reports `working`, attributed to the run step, with its
+# `ci running` detail while the checks are still running, and `done` with the
+# `checks green: PR ready for review (still monitoring for merge/close)` detail
+# once they pass and that same still-running step waits on merge instead. Both
+# readings are the one STRUCTURALLY external wait - the pipeline
+# has handed the branch to the forge and is doing nothing locally until the
+# checks report back - so a quiet pane is the expected shape of it, for however
+# long the checks take, and no local activity exists to prove liveness with.
+#
+# Deliberately narrower than crew_absorb_class's `working` token, which covers
+# every active run step and a busy pane alike: only the `ci` step is external in
+# this sense. Local validation, fixing, or a verdict sourced from the pane is
+# work the crew is doing HERE, so a silent pane during one stays a wedge suspect
+# on the unchanged schedule. The classifier resolves the effective step even
+# when the run's top-level status is `running`.
+#
+# Matched on the exact current-state line rather than re-derived, so this reads
+# the one authoritative classifier instead of becoming a second one. Trailing
+# detail segments (the run id, a superseded status-log clause) are allowed after
+# it, and the green reading carries the run's PR url inline after its own fixed
+# text. NOT a pure read for the same reason crew_absorb_class is not: it may make
+# a bounded no-mistakes call, so every caller carries its own budget. The two
+# threshold probes do: the watcher's at-threshold probe and the daemon's stale
+# persistence recheck each take it at most once per FM_STALE_ESCALATE_SECS per
+# window. The daemon's transient-stale pause-marker wipe guard does not - it takes
+# the read once per distinct-pane-hash stale wake that finds an open recheck
+# window, with no bound across a churning display.
+crew_is_ci_waiting() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in
+    "state: working · source: run-step · ci running") return 0 ;;
+    "state: working · source: run-step · ci running · "*) return 0 ;;
+    "state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)"*) return 0 ;;
+  esac
+  return 1
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
@@ -2585,9 +2625,9 @@ FM_WORKTREE_WRITE_MAXDEPTH=${FM_WORKTREE_WRITE_MAXDEPTH:-6}
 # root ITSELF sits on a hung network or container mount; unbounded, such a walk
 # would wedge the very supervisor that exists to notice a wedge, stalling its
 # heartbeat instead of escalating. Hitting the bound is a negative outcome like
-# every other: it reads as no evidence, so the caller's escalation schedule is
-# untouched and a stall that writes nothing still escalates on the existing
-# schedule. A value that is not a positive integer is not a bound at all (`timeout
+# every other: it reads as no evidence, so the caller continues to the endpoint
+# and CI probes before escalation, exactly as for a walk that completed and found
+# nothing. A value that is not a positive integer is not a bound at all (`timeout
 # 0` and the perl fallback's `alarm 0` both disable the deadline), so the default
 # applies instead; the check lives at the point of use so an in-process override
 # gets it too.
@@ -2603,8 +2643,8 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 #
 # 1 for every other outcome, including an id with no recorded worktree, a worktree
 # that is gone, a missing anchor, and a walk that fails or finds nothing. Absence of
-# evidence therefore always leaves the caller's existing escalation schedule
-# untouched, so a crew that writes nothing still escalates exactly as before.
+# evidence therefore never defers by itself: the caller continues to the endpoint
+# and CI probes before escalation.
 #
 # A kind=secondmate task records a provisioned firstmate home, not a code tree, and
 # such a home runs its OWN supervision inside it: its state/ directory churns a
