@@ -1347,6 +1347,15 @@ coord_merge_guard() {
     python3 "$FM_ROOT/bin/fm-coord-adapter.py" pre-merge "$ID" "$URL" "$FM_PR_MERGE_HEAD"
 }
 
+# Report the forge outcome so an attempted integration slot settles: merged,
+# refused (the PR reads back unmerged and unqueued after a failed merge call),
+# or unknown. The adapter warns on its own; the merge's exit status stands.
+coord_merge_result() {
+  [ -f "$FM_HOME/config/coordination.json" ] && [ -f "$FM_ROOT/bin/fm-coord-adapter.py" ] || return 0
+  FM_HOME="$FM_HOME" FM_PR_GITHUB_VIEW="${FM_PR_GITHUB_VIEW:-}" \
+    python3 "$FM_ROOT/bin/fm-coord-adapter.py" merge-result "$ID" "$URL" "$1" || true
+}
+
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,
 # stale-owner recovery can release the record for archive or replacement and
@@ -1411,30 +1420,38 @@ case "$PROVIDER" in
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
+      coord_outcome=unknown
       if github_read_outcome; then
         if [ "$FM_PR_GITHUB_MERGED" != true ] && [ "$FM_PR_GITHUB_QUEUED" != true ]; then
+          coord_outcome=refused
           github_report_unmerged_outcome
         else
+          [ "$FM_PR_GITHUB_MERGED" != true ] || coord_outcome=merged
           printf 'actionable: the merge command for %s failed, but the pull request reads back as state=%s, merged=%s, isInMergeQueue=%s\n' \
             "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED" >&2
         fi
       fi
+      coord_merge_result "$coord_outcome"
       exit "$merge_status"
     fi
     if ! github_read_outcome; then
       github_report_forge_output "$merge_output"
+      coord_merge_result unknown
       exit 1
     fi
     if [ "$FM_PR_GITHUB_MERGED" = true ]; then
       printf 'verified: %s is merged (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      coord_merge_result merged
     elif [ "$FM_PR_GITHUB_QUEUED" = true ]; then
       printf 'verified: %s is queued (state=%s, merged=%s, isInMergeQueue=%s)\n' \
         "$URL" "$FM_PR_GITHUB_STATE" "$FM_PR_GITHUB_MERGED" "$FM_PR_GITHUB_QUEUED"
+      coord_merge_result unknown
       exit 0
     else
       github_report_forge_output "$merge_output"
       github_report_unmerged_outcome
+      coord_merge_result unknown
       exit 1
     fi
     ;;

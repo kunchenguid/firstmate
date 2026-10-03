@@ -53,6 +53,11 @@ def repo_name(project):
     return f"{match[1]}/{match[2]}"
 
 
+def pull_repo(url):
+    match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+", url)
+    return f"{match[1]}/{match[2]}" if match else None
+
+
 def declared(brief):
     lines = Path(brief).read_text(encoding="utf-8").splitlines()
     resources = [line.split(":", 1)[1].strip() for line in lines if line.startswith("Coordination resources:")]
@@ -339,8 +344,9 @@ class Adapter:
         Each transition is guarded by the central queue state, so a lost reply is
         recovered by re-reading that state rather than replaying a journaled request.
         The wrapper's live GitHub view (FM_PR_GITHUB_VIEW) and required checks
-        (FM_PR_GITHUB_REQUIRED) are the check, base, and validation evidence; the
-        wrapper has already passed the captain hold, away, and merge authority checks.
+        (FM_PR_GITHUB_REQUIRED) are the check, base, and validation evidence, and the
+        forge compares the head with that base so a stale local worktree cannot refuse
+        it; the wrapper has already passed the captain hold, away, and merge authority checks.
         """
         live = self.live_claim(task_id)
         if not live or head != task.get("published_head"):
@@ -349,7 +355,8 @@ class Adapter:
         view = json.loads(os.environ.get("FM_PR_GITHUB_VIEW") or "{}")
         required = json.loads(os.environ.get("FM_PR_GITHUB_REQUIRED") or "[]")
         base_oid = view.get("baseRefOid")
-        contains = bool(base_oid) and bool(task.get("worktree")) and subprocess.run(["git", "-C", task["worktree"], "merge-base", "--is-ancestor", base_oid, head], capture_output=True).returncode == 0
+        compare = subprocess.run(["gh", "api", f"repos/{task['repo']}/compare/{base_oid}...{head}", "--jq", ".status"], capture_output=True, text=True, timeout=30, check=False) if base_oid else None
+        contains = compare is not None and compare.returncode == 0 and compare.stdout.strip() in {"ahead", "identical"}
         # ponytail: the wrapper already judged reruns and waivers; any ok run of a name counts here.
         ok = {}
         for check in view.get("statusCheckRollup", []):
@@ -393,10 +400,7 @@ class Adapter:
                 return
 
     def pre_merge(self, task_id, url, head):
-        match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+", url)
-        if not match:
-            return
-        repo = self.repo = f"{match[1]}/{match[2]}"
+        repo = self.repo = pull_repo(url)
         if repo not in self.enforced_repos:
             return
         if not OID.fullmatch(head):
@@ -406,6 +410,37 @@ class Adapter:
             self.land(task_id, task, url, head)
         receipt = self.call("merge-guard", {"pr_url": url, "head_oid": head})
         self.required(repo, receipt is not None and receipt.get("ok") is True, "integration slot is absent, stale, or unreachable")
+
+    def merge_result(self, task_id, url, outcome):
+        """Settle this task's attempted slot from the merge wrapper's forge outcome.
+
+        Only a refusal the wrapper proved unlanded releases the slot directly; any
+        other outcome is recorded as outcome-unknown and settles as merged only when
+        queue-reconcile's live forge read proves the exact head landed.
+        """
+        if outcome not in {"merged", "refused", "unknown"}:
+            raise ValueError("merge outcome must be merged, refused, or unknown")
+        repo = self.repo = pull_repo(url)
+        task = self.state["tasks"].get(task_id)
+        if repo not in self.enforced_repos or not task or task["repo"] != repo:
+            return
+        central = self.call("inspect", {})
+        if central is None:
+            return
+        item = next((q for q in central["queue"] if q["intent_id"] == task["intent_id"]), None)
+        slot = next((s for s in central["slots"] if s["intent_id"] == task["intent_id"]), None)
+        if item is None or slot is None:
+            return
+        attempt = {"intent_id": task["intent_id"], "generation": slot["generation"]}
+        state = item["state"]
+        if state == "attempting" and outcome == "refused":
+            view = json.loads(os.environ.get("FM_PR_GITHUB_VIEW") or "{}")
+            self.call("queue-result", {"request_id": str(uuid.uuid4()), **attempt, "outcome": "refused", "wrapper_refused": True, "pr_merged": False, "observed_base_oid": view.get("baseRefOid")})
+            return
+        if state == "attempting" and self.call("queue-result", {"request_id": str(uuid.uuid4()), **attempt, "outcome": "unknown"}):
+            state = "outcome-unknown"
+        if state == "outcome-unknown" and self.call("queue-reconcile", {"request_id": str(uuid.uuid4()), **attempt, "outcome": "merged", "pr_url": url, "base": task["base"]}) is None:
+            warn(f"{task_id}: merge outcome stays unknown until a live forge read proves the landing")
 
     def pre_ci(self, task_id, batch_id):
         task = self.state["tasks"].get(task_id)
@@ -455,8 +490,8 @@ class Adapter:
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "pre-merge", "readmit", "heartbeat", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH]|pre-merge TASK PR_URL HEAD|readmit TASK WORKTREE|heartbeat TASK|replay|view>", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "pre-merge", "merge-result", "readmit", "heartbeat", "replay", "view"}:
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH]|pre-merge TASK PR_URL HEAD|merge-result TASK PR_URL merged|refused|unknown|readmit TASK WORKTREE|heartbeat TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
@@ -492,6 +527,8 @@ def main():
             adapter.pre_ci(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else sys.argv[2])
         elif command == "pre-merge" and len(sys.argv) == 5:
             adapter.pre_merge(sys.argv[2], sys.argv[3], sys.argv[4])
+        elif command == "merge-result" and len(sys.argv) == 5:
+            adapter.merge_result(sys.argv[2], sys.argv[3], sys.argv[4])
         elif command == "replay" and len(sys.argv) == 2:
             adapter.replay()
         elif command == "view" and len(sys.argv) == 2:

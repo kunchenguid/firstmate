@@ -167,7 +167,10 @@ A readmitted task keys its journaled `pre-ci` and renewal requests by the new ad
 `fm-pr-merge.sh` calls `pre-merge TASK PR_URL HEAD` immediately before the forge merge for an enforced GitHub repository, and refuses an absent, stale, or unreachable integration slot.
 For a task this home dispatched, `pre-merge` first attaches the PR and advances the task's queue item through `queue-ready`, `queue-next`, `queue-synced`, `queue-validated`, `queue-checks`, and `queue-attempt` from the observed central state, so an ordinary ship landing reaches the attempting slot without operator queue commands.
 The merge head must be the head published by `pre-push`; the wrapper's live pull request view supplies the base OID, check rollup, and final validation for that head, and the wrapper's captain-hold, away, and merge-authority checks supply the attempt attestations.
-A local worktree that does not contain the current base, a missing required-check manifest, or a slot held by another candidate refuses the merge.
+The forge's comparison of the merge head with that base OID decides whether the head contains the current base, so a task worktree that has not fetched the base cannot refuse the merge.
+A head the forge does not report as containing the current base, a missing required-check manifest, or a slot held by another candidate refuses the merge.
+After the forge call, `fm-pr-merge.sh` reports `merge-result TASK PR_URL merged|refused|unknown`.
+A refusal, where the failed merge call leaves the PR unmerged and unqueued, is recorded with `queue-result` and releases the slot; any other outcome is recorded as `outcome-unknown` and settles as merged only when `queue-reconcile`'s live forge read proves the exact head landed.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings in shadow mode and refuse the checkpoint in enforced mode.
 The worker must run `pre-push` before a direct push or a no-mistakes pipeline that pushes on its behalf, and must run `pre-ci` before its CI request.

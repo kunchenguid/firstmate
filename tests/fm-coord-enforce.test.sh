@@ -232,8 +232,39 @@ pass 'readmit opens a new session and intent after recovery revokes the claim an
 
 coord manifest-set '{"request_id":"manifest-land","repo":"owner/repo","base":"main","checks":["ci"]}' > /dev/null
 head_a=$(git -C "$repo" rev-parse HEAD)
-view_a=$(printf '{"baseRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$(git -C "$repo" rev-parse HEAD~1)")
-land() { FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' adapter "$tmp/a" pre-merge a https://github.com/owner/repo/pull/7 "$head_a"; }
+pr=https://github.com/owner/repo/pull/7
+# The forge base has advanced past anything the task worktree has fetched.
+git clone -q "$repo" "$tmp/forge"
+git -C "$tmp/forge" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m advanced
+forge_base=$(git -C "$tmp/forge" rev-parse HEAD)
+merge_oid=$(printf 'd%.0s' $(seq 40))
+landed_base=$(printf 'c%.0s' $(seq 40))
+mkdir -p "$tmp/fakebin"
+cat > "$tmp/fakebin/gh" <<SH
+#!/usr/bin/env bash
+[ "\$*" = "api repos/owner/repo/compare/$forge_base...$head_a --jq .status" ] || exit 1
+cat "$tmp/compare-status"
+SH
+cat > "$tmp/fakebin/gh-axi" <<SH
+#!/usr/bin/env bash
+case "\$3" in
+  repos/owner/repo/pulls/7) body=\$(cat "$tmp/pr-state") ;;
+  repos/owner/repo/git/ref/heads/main) body=$landed_base ;;
+  *) exit 1 ;;
+esac
+printf 'api_response:\n  body: "%s"\n  truncated: false\n' "\$body"
+SH
+chmod +x "$tmp/fakebin/gh" "$tmp/fakebin/gh-axi"
+printf '%s|open|false|%s|main|\n' "$pr" "$head_a" > "$tmp/pr-state"
+view_a=$(printf '{"baseRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$forge_base")
+land() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' adapter "$tmp/a" pre-merge a "$pr" "$head_a"; }
+result() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a adapter "$tmp/a" merge-result a "$pr" "$1"; }
+slot_state() { python3 -c 'import json,sys; c=json.loads(sys.argv[1]); i=json.load(open(sys.argv[2]))["tasks"]["a"]["intent_id"]; print(" ".join([q["state"] for q in c["queue"] if q["intent_id"]==i]+["slot:"+s["state"] for s in c["slots"]]))' "$(coord inspect)" "$tmp/a/state/fm-coord-adapter.json"; }
+printf 'diverged\n' > "$tmp/compare-status"
+if land > /dev/null 2> "$tmp/err"; then
+  fail 'a head the forge reports as not containing the current base must refuse the merge'
+fi
+printf 'ahead\n' > "$tmp/compare-status"
 land > /dev/null 2> "$tmp/err" || fail "ordinary dispatched task must reach an attempting integration slot at merge: $(cat "$tmp/err")"
 land > /dev/null 2> "$tmp/err" || fail "a retried merge must reuse the attempting slot: $(cat "$tmp/err")"
 python3 - "$(coord inspect)" "$tmp/a/state/fm-coord-adapter.json" <<'PY' || fail 'pre-merge must attach the PR and hold the attempting slot for the task intent'
@@ -244,6 +275,22 @@ assert [i['pr_url'] for i in central['intents'] if i['intent_id']==intent]==['ht
 assert [(s['intent_id'],s['state']) for s in central['slots']]==[(intent,'attempting')]
 PY
 pass 'pre-merge attaches the PR and advances an ordinary dispatched task to the attempting integration slot'
+pass 'the forge, not a stale task worktree, decides whether the merge head contains the current base'
+
+result refused > /dev/null 2> "$tmp/err" || fail "a refused merge must report its outcome: $(cat "$tmp/err")"
+[ "$(slot_state)" = refused ] || fail "a refused merge proven unlanded must release the integration slot: $(slot_state)"
+land > /dev/null 2> "$tmp/err" || fail "a refused task must re-queue to a new attempt: $(cat "$tmp/err")"
+[ "$(slot_state)" = 'attempting slot:attempting' ] || fail "re-queued task must hold the attempting slot again: $(slot_state)"
+pass 'a refused merge releases the integration slot for the next attempt'
+
+result unknown > /dev/null 2> "$tmp/err" || fail "a timed-out merge must report its outcome: $(cat "$tmp/err")"
+[ "$(slot_state)" = 'outcome-unknown slot:outcome-unknown' ] || fail "an unproven merge must stay outcome-unknown: $(slot_state)"
+pass 'a timed-out merge the forge cannot prove landed stays outcome-unknown'
+
+printf '%s|closed|true|%s|main|%s\n' "$pr" "$head_a" "$merge_oid" > "$tmp/pr-state"
+result merged > /dev/null 2> "$tmp/err" || fail "a merged outcome must report: $(cat "$tmp/err")"
+[ "$(slot_state)" = merged ] || fail "a merge the forge proves landed must settle merged and release the slot: $(slot_state)"
+pass 'a merge the forge proves landed settles merged and releases the integration slot'
 
 if adapter "$tmp/b" pre-push missing "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'enforced push without a local intent must refuse'
