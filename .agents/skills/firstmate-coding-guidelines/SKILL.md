@@ -46,6 +46,12 @@ A single deliberate one-line reinforcement at a genuine risk point is allowed, f
 Restating the contract's substance a second time is not allowed: the two copies will drift the moment only one is edited.
 When you touch a contract, patch, replace, or prune the owner's existing language rather than appending a new clause or paragraph wherever possible, then grep the repo for its other mentions and update the cross-references, not duplicate the change into a second full copy.
 
+## Necessary-only safety validation
+
+Do not add excessive safety or defensive validation logic: follow "nonessential means do not add" and require each new check to address a concrete accepted requirement or an evidenced risk.
+Place the check in the smallest existing owner, without speculative threat checks, duplicated validation, or another framework.
+This principle preserves existing concrete protections for authority, identity, data loss, and uncertain effects.
+
 ## Inline-stub pattern
 
 When content moves out of `AGENTS.md` into a skill, decide what stays behind by asking one question: what must survive with no skill loaded?
