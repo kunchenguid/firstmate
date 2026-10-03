@@ -288,6 +288,68 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+# commit_check_changed <wt>: commit the worktree's bin/check-changed and publish
+# it as the default branch, as a project that ships the convention would.
+commit_check_changed() {
+  git -C "$1" add bin/check-changed
+  git -C "$1" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm check-changed
+  git -C "$1" push -q origin HEAD:main
+}
+
+test_claude_settings_without_check_changed_add_no_pretooluse() {
+  local rec id=busy-cl-3 out settings
+  rec=$(make_spawn_case claude-no-check claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/bin"
+  printf '#!/bin/sh\nexit 2\n' >"$WT_DIR/bin/check-changed"
+  chmod 644 "$WT_DIR/bin/check-changed"
+  commit_check_changed "$WT_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  out=$(jq -c '.hooks | keys' "$settings") || fail "claude hook settings are not valid JSON"
+  [ "$out" = '["SessionEnd","Stop","StopFailure","UserPromptSubmit"]' ] \
+    || fail "a worktree without an executable bin/check-changed must get only the lifecycle hooks, got $out"
+  pass "claude settings gain no PreToolUse hook without an executable bin/check-changed"
+}
+
+test_claude_settings_run_project_check_changed_before_bash() {
+  local rec id=busy-cl-4 out settings cmd rc
+  rec=$(make_spawn_case claude-check claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$WT_DIR/bin"
+  cat >"$WT_DIR/bin/check-changed" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >"$(dirname "$0")/../check-changed.args"
+cat >"$(dirname "$0")/../check-changed.stdin"
+echo "check-changed: finding" >&2
+exit 2
+EOF
+  chmod 755 "$WT_DIR/bin/check-changed"
+  commit_check_changed "$WT_DIR"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  settings="$WT_DIR/.claude/settings.local.json"
+  jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
+  for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "the check hook dropped the $ev lifecycle hook"
+  done
+  out=$(jq -c '.hooks.PreToolUse' "$settings")
+  # shellcheck disable=SC2016  # the literal is the unexpanded command Claude receives
+  [ "$out" = '[{"matcher":"Bash","hooks":[{"type":"command","command":"\"$CLAUDE_PROJECT_DIR\"/bin/check-changed --hook","timeout":7200}]}]' ] \
+    || fail "unexpected PreToolUse entry: $out"
+
+  cmd=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$settings")
+  out=$(printf '{"tool_name":"Bash","tool_input":{"command":"git commit"}}' \
+    | (cd "$TMP_ROOT" && CLAUDE_PROJECT_DIR="$WT_DIR" sh -c "$cmd" 2>&1))
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "the hook must pass the project's blocking exit 2 through, got $rc"
+  [ "$out" = "check-changed: finding" ] || fail "the hook must surface the project's message, got '$out'"
+  [ "$(cat "$WT_DIR/check-changed.args")" = "--hook" ] || fail "bin/check-changed must be invoked with --hook"
+  grep -q '"git commit"' "$WT_DIR/check-changed.stdin" || fail "bin/check-changed must receive the hook JSON on stdin"
+  pass "claude settings run an executable bin/check-changed --hook before Bash and keep the lifecycle hooks"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -429,6 +491,8 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_settings_without_check_changed_add_no_pretooluse
+test_claude_settings_run_project_check_changed_before_bash
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
