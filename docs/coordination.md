@@ -145,7 +145,7 @@ Do not copy a database into a second live authority.
 A ship brief declares exactly one `Coordination resources:` line containing a JSON array of the resource objects above, and may declare one `Coordination issue:` line with its stable issue name.
 In a home with `config/coordination.json`, `fm-brief.sh` scaffolds an empty array to make the declaration visible; fill it before spawn.
 A brief that still declares an empty array is recorded locally as an unclaimed intent with a warning and is not submitted centrally.
-`fm-spawn.sh` records the pre-dispatch intent and claim from that brief for Claude Code, Codex, omp, and OpenCode workers after it refreshes the task worktree, using the commit the worker starts at as the intent base.
+`fm-spawn.sh` records the pre-dispatch intent and claim from that brief for Claude Code, Codex, omp, and OpenCode workers after it refreshes the task worktree, using the commit the worker starts at as the intent base; a fresh retry of the same task whose start commit moved releases the prior attempt's claim and submits a new intent at the retried start commit.
 When the task worktree has no `origin/<base>` ref, the intent is recorded locally with no base and a warning, and is not submitted centrally.
 A spawn that aborts before its worker launches releases any claim that dispatch acquired and drops the local intent's pending requests.
 The launch brief gives every supported harness the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.

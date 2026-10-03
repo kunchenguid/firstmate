@@ -350,6 +350,24 @@ task=json.load(open(sys.argv[1]))['tasks']['nobase']
 assert task['base_oid'] is None and 'claim' not in task and not task['pending_dispatch']
 PY
 pass 'a missing origin base records an explicit unsubmitted no-base intent'
+git -C "$tmp/nobase" update-ref refs/remotes/origin/main HEAD
+adapter "$tmp/nobase" dispatch nobase "$tmp/nobase" "$tmp/nobase" "$tmp/nobase.brief" branch/nobase codex > /dev/null 2> "$tmp/nobase-retry.err" || fail "no-base retry must dispatch: $(cat "$tmp/nobase-retry.err")"
+git -C "$tmp/nobase" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m advanced
+git -C "$tmp/nobase" update-ref refs/remotes/origin/main HEAD
+python3 - "$tmp/nobase/state/fm-coord-adapter.json" "$(git -C "$tmp/nobase" rev-parse HEAD~1)" <<'PY' || fail 'a retry after a no-base attempt must submit and claim at the retried worktree HEAD'
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['nobase']
+assert task['base_oid']==sys.argv[2] and task['claim']['ok'] is True, task
+PY
+adapter "$tmp/nobase" dispatch nobase "$tmp/nobase" "$tmp/nobase" "$tmp/nobase.brief" branch/nobase codex > /dev/null 2> "$tmp/nobase-advance.err" || fail "advanced-base retry must dispatch: $(cat "$tmp/nobase-advance.err")"
+python3 - "$tmp/nobase/state/fm-coord-adapter.json" "$(git -C "$tmp/nobase" rev-parse HEAD)" "$(coord view)" <<'PY' || fail "a retry after the base advanced must record and claim the retried worktree HEAD: $(cat "$tmp/nobase-advance.err")"
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['nobase']
+assert task['base_oid']==sys.argv[2] and task['claim']['ok'] is True, task
+live=[i for i in json.loads(sys.argv[3])['intents'] if i['task_id']=='nobase' and i['state']=='claimed']
+assert [i['intent_id'] for i in live]==[task['intent_id']], live
+PY
+pass 'a fresh retry refreshes the intent base to the retried worktree HEAD'
 
 make_home scaffold
 mkdir -p "$tmp/scaffold/data"

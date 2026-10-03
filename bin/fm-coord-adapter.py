@@ -232,10 +232,11 @@ class Adapter:
                 raise ValueError("worker start commit is not a full Git OID")
         key = f"{repo}:{task_id}"
         task = self.state["tasks"].get(task_id)
-        if task is not None and (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue):
-            if "reply" in self.state["requests"].get(f"{task_id}:submit", {}):
+        if task is not None and (task["repo"], task["branch"], task["declared"], task["issue"], task["base_oid"]) != (repo, branch, resources, issue, base_oid):
+            if (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue) and "reply" in self.state["requests"].get(f"{task_id}:submit", {}):
                 raise ValueError(f"{task_id}: coordination declaration changed after submission")
-            self.reset_task(task_id)
+            # A fresh spawn starts a new attempt: drop the prior attempt's claim before submitting the new start commit.
+            self.release(task_id)
             task.update({"repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "declared": resources, "issue": issue, "harness": harness, "pending_dispatch": bool(resources and base_oid)})
             self.save()
         if task is None:
