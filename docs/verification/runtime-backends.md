@@ -2203,7 +2203,7 @@ ok - real Pi SDK 0.84.4 delivers a custom message to the provider as user text c
 FM_TEST_END 2026-08-29T01:01:01Z tests/fm-pi-branch-live-e2e.test.sh exit=0 duration_ms=2520 gate_skip=false
 ```
 
-The focused extension suite also exercised the installed Pi 0.84.4 picker and outcome-renderer consumers; [`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-10-03-pi-101-html-renderer-compatibility-verification) owns the version-scoped renderer evidence, including the 2026-10-03 Pi 1.0.1 verification and its refresh command.
+The focused extension suite also exercised the installed Pi 0.84.4 picker and outcome-renderer consumers; [`calm-mode-feasibility.md`](../calm-mode-feasibility.md#2026-08-28-pi-0844-outcome-renderer-compatibility-verification) owns that version-scoped renderer evidence, with the latest HTML-renderer verification and refresh command in its [Pi 1.0.1 record](../calm-mode-feasibility.md#2026-10-03-pi-101-html-renderer-compatibility-verification).
 
 ### 2026-08-29 deterministic captain-outcome delivery
 

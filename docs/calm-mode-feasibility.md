@@ -680,7 +680,7 @@ The Calm renderer fixture supplies both names through the same registered-tool l
 The production extension requires no change for this seam.
 
 Verified on macOS with Node v25.9.0 using a temporary npm prefix; both `PATH` and `FM_PI_PACKAGE_DIR` select the same Pi package, and the shared installation is unchanged.
-Refresh the full renderer, lifecycle, native TUI, and export-DOM evidence with:
+With tmux and Chrome or Chromium available, refresh the full renderer, lifecycle, native TUI, and export-DOM evidence with:
 
 ```sh
 pi_test_prefix=$(mktemp -d)
