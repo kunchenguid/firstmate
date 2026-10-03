@@ -881,6 +881,42 @@ test_provably_working_signal_absorbed() {
   pass "a no-verb signal whose crew is provably working is absorbed (no exit, no queue, suppressor advanced, beacon present)"
 }
 
+test_signal_triage_matches_with_spaced_home() {
+  local name dir state fakebin out drain_out status_file crew_log pid
+  # Run the same absorption and actionable-append assertions for both homes.
+  for name in signal-home 'signal home'; do
+    dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    mkdir -p "$dir/data"
+    out="$dir/watch.out"; drain_out="$dir/drain.out"; crew_log="$dir/crew-state.log"
+    status_file="$state/task.status"
+    printf 'working: compiling step 2\n' > "$status_file"
+    watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" \
+      FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+      FM_FAKE_CREW_STATE_LOG="$crew_log"
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "$name: watcher did not absorb the provably-working signal: $(cat "$out")"
+    fi
+    [ ! -s "$out" ] || { reap "$pid"; fail "$name: absorbed signal printed a wake reason"; }
+    [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "$name: absorbed signal enqueued a wake"; }
+    [ -s "$state/.seen-task_status" ] || { reap "$pid"; fail "$name: absorbed signal did not advance its suppressor"; }
+    grep -Fx task "$crew_log" >/dev/null || { reap "$pid"; fail "$name: crew-state did not receive the intact task ID"; }
+
+    printf 'needs-decision: pick A or B\n' >> "$status_file"
+    if ! wait_for_exit "$pid" 100; then
+      reap "$pid"; fail "$name: watcher did not exit successfully for the decision append"
+    fi
+    grep -Fx "signal: $status_file" "$out" >/dev/null \
+      || fail "$name: decision wake did not contain the complete signal path"
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null \
+      || fail "$name: drain after the decision append failed"
+    grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
+      || fail "$name: decision append was not durably queued with the complete path"
+    [ -s "$state/.hb-surfaced-task" ] || fail "$name: decision append did not record the surfaced marker"
+    pass "$name: routine signal absorbed and decision append surfaced with intact paths"
+  done
+}
+
 test_turn_ended_provably_working_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case turn-ended-working); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -6628,6 +6664,7 @@ test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
 test_secondmate_status_routine_absorbed_routed_surfaced_classifier
 test_provably_working_signal_absorbed
+test_signal_triage_matches_with_spaced_home
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed
