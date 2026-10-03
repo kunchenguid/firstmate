@@ -588,6 +588,62 @@ SH
   pass "session-lock: exact old-thread attestation, quiet guards, and prior-lock backup govern managed-daemon takeover"
 }
 
+test_codex_daemon_without_thread_id_never_acquires() {
+  local dir fakebin state owner out
+  dir="$TMP_ROOT/codex-no-thread-id"
+  fakebin=$(fm_fakebin "$dir")
+  state="$dir/state"
+  mkdir -p "$state"
+  sleep 120 &
+  owner=$!
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$pid" = "$FM_TEST_OWNER_PID" ]; then
+  case "$field" in
+    comm=) printf '%s\n' codex ;;
+    args=) printf '%s\n' 'codex app-server --managed-daemon' ;;
+    ppid=) printf '%s\n' 1 ;;
+  esac
+else
+  case "$field" in
+    comm=) printf '%s\n' bash ;;
+    args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+    ppid=) printf '%s\n' "$FM_TEST_OWNER_PID" ;;
+  esac
+fi
+SH
+  chmod +x "$fakebin/ps"
+  codex_lock_as() {  # <thread-id or empty>
+    local -a id_env=()
+    [ -z "$1" ] || id_env=("CODEX_THREAD_ID=$1")
+    env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID -u CODEX_THREAD_ID ${id_env[@]+"${id_env[@]}"} \
+      FM_HOME="$dir" FM_TEST_OWNER_PID="$owner" PATH="$fakebin:$PATH" "$ROOT/bin/fm-lock.sh"
+  }
+  for bad_id in '' 'bad id!'; do
+    if out=$(codex_lock_as "$bad_id" 2>&1); then
+      fail "a Codex thread without a usable thread id ('$bad_id') acquired the shared daemon lock"
+    fi
+    assert_contains "$out" "CODEX_THREAD_ID" "the refusal did not tell the operator to provide a trusted thread id"
+    [ ! -e "$state/.lock" ] || fail "a refused Codex acquisition still wrote the lock"
+    [ ! -e "$state/.lock-session" ] || fail "a refused Codex acquisition still wrote the sidecar"
+  done
+  codex_lock_as thread-one >/dev/null || fail "a Codex thread with a trusted id could not acquire a free lock"
+  [ "$(cat "$state/.lock")" = "$owner" ] || fail "the trusted Codex thread did not record the daemon pid"
+  [ "$(cat "$state/.lock-session")" = codex:thread-one ] || fail "the trusted Codex thread did not publish its sidecar"
+  codex_lock_as thread-one >/dev/null || fail "the trusted Codex thread did not retain its lock"
+  kill "$owner" 2>/dev/null || true
+  wait "$owner" 2>/dev/null || true
+  pass "session-lock: a Codex thread without a trusted id never records the shared daemon pid"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -1269,6 +1325,7 @@ test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_managed_codex_daemon_is_not_a_thread_identity
 test_guarded_codex_takeover_requires_quiet_exact_owner
+test_codex_daemon_without_thread_id_never_acquires
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

@@ -133,11 +133,15 @@ elif [ "$#" -ne 0 ]; then
 fi
 
 me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
-if [ "$TAKEOVER" -eq 1 ]; then
-  fm_session_lock_trusted_session_id >/dev/null || {
+if ! fm_session_lock_trusted_session_id >/dev/null; then
+  if [ "$TAKEOVER" -eq 1 ]; then
     echo "error: take-over requires a verified Claude session or Codex thread identity" >&2
     exit 1
-  }
+  fi
+  if fm_session_lock_shared_codex_pid "$me"; then
+    echo "error: refusing to record the shared managed Codex daemon pid $me without a trusted thread id; export a valid CODEX_THREAD_ID ([A-Za-z0-9_-], at most 128 chars) or run the primary under a per-session harness anchor" >&2
+    exit 1
+  fi
 fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
