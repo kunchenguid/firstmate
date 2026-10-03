@@ -1151,6 +1151,7 @@ test_no_mistakes_command_list_matches_installed_cli() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "fm-brief.sh ship scaffold exited non-zero"
   brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # literal backticks delimit the brief text
   list=$(sed -n '/^Use exactly these commands/,/^Open `--help` only/{/^- /p;}' "$brief")
   [ -n "$list" ] || fail "the no-mistakes DOD lost its exact command list"
   while IFS= read -r line; do
