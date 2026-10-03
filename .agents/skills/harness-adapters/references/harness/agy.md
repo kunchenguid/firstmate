@@ -1,6 +1,6 @@
 # Antigravity CLI
 
-Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend.
+Antigravity's `agy` TUI, verified end to end on 2026-09-10 with agy 1.2.0 on Linux through the Herdr backend, with composer and lifecycle behavior refreshed on 2026-10-01 against agy 1.2.14.
 Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` refuses a secondmate launch on it because `../../../../../docs/supervision-protocols/` carries no agy wake protocol.
 `../../../../../docs/verification/agy.md` owns how every fact below was established and what is still unproven.
 
@@ -21,7 +21,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Composer | `>` between two horizontal rules; `bin/fm-composer-lib.sh` owns its proof from native idle identity or the adjacent idle footer, accepted as `empty` only by the `fm-control` exit/relaunch guard and never as send confirmation, and preserves typed drafts; see `docs/verification/agy.md` for the current live guard. |
 
 ## Trust, and where the decision persists
 
