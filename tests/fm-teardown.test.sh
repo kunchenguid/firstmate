@@ -673,6 +673,7 @@ test_local_only_fork_remote_allows() {
   # The supervision branch's bounded per-task outcome cache is a footprint of
   # the retired task, not a record anything reads after it is gone.
   printf 'fm-branch-outcome-index-v1\t5\t0\t-\n' > "$case_dir/state/.task-x1.branch-outcome-index"
+  printf 'export FM_TEST_ALLOWED=synthetic\n' > "$case_dir/state/task-x1.launch-env"
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -694,6 +695,8 @@ test_local_only_fork_remote_allows() {
     || fail "fork-allow: post-teardown branch report was not stored"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: post-teardown branch report recreated the retired task index"
+  [ ! -e "$case_dir/state/task-x1.launch-env" ] \
+    || fail "fork-allow: teardown left the private launch environment snapshot behind"
   [ "$(cat "$case_dir/state/.branch-outcome-index-ready")" = 1 ] \
     || fail "fork-allow: post-teardown branch report did not publish its ready sequence"
   jq -e --arg id task-x1 '
