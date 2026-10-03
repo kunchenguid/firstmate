@@ -175,6 +175,7 @@ For a remote home, the authenticated adapter supplies `wrapper_start` along with
 Each participating home may opt in through the `config/coordination.json` schema in [configuration](configuration.md); both supported modes only record and warn.
 The coordinator initializes the database with `bin/fm-coord.sh --db PATH init` before participants submit.
 Same-host participants call the central database directly, while remote homes use the configured batch SSH transport to invoke the central command with quoted fixed arguments and an eight-second upper bound.
+A remote home enrolls with its own machine identity as `host_id`, computed only when the `enroll` request is first journaled and reused from the journal afterward; if that identity is unavailable, the adapter warns and does not enroll.
 Do not copy a database into a second live authority.
 
 A ship brief declares exactly one `Coordination resources:` line containing a JSON array of the resource objects above, and may declare one `Coordination issue:` line with its stable issue name.
@@ -184,7 +185,8 @@ A brief that still declares an empty array is recorded locally as an unclaimed i
 When the task worktree has no `origin/<base>` ref, the intent is recorded locally with no base and a warning, and is not submitted centrally.
 A spawn that aborts before its worker launches releases any claim that dispatch acquired and drops the local intent's pending requests.
 Both releases are journaled before they are sent; if the coordinator is unavailable, the release stays queued and linked to the task, `replay` resends it, and the retried attempt is not submitted until that release is recorded centrally.
-The launch brief gives every supported harness the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.
+The launch brief of every ship task in a coordinated home gives the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.
+A checkpoint for a task with no local intent record, such as one on another harness or whose dispatch failed, warns and is skipped without assuming a grant.
 `pre-push` compares the commit diff from the merge base of `origin/<base>` and HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head only when that fence is live and every changed path is claimed.
 While an amendment is refused or pending, the head stays unpublished and both `pre-push` and `scope-amend` remain pending in `view`.
 `pre-ci` checks the same fence before a `ci:batch` request and warns without clearing its pending checkpoint while the worktree HEAD differs from the published head, so CI is never authorized for an older head.
