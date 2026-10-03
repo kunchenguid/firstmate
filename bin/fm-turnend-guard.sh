@@ -47,15 +47,11 @@
 # are unchanged everywhere else, including for a dead daemon pid or a beacon
 # older than AFK_GRACE, which still block.
 #
-# Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
-# Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
-# takes precedence when both spellings are present. A true value means the
-# current stop attempt already follows a block, so this guard always allows it.
-# Passive harness adapters provide their own one-follow-up guard before calling
-# this script.
-# That bounds those harnesses to at most one forced continuation per turn -
-# never a wedged, un-endable session - while still nagging again on a later turn
-# if the problem persists.
+# Loop-guard, default mode: passive harness adapters provide their own
+# one-follow-up guard before calling this script. Codex supplies session_id and
+# turn_id, so its stop_hook_active retries are bounded by beacon progress and
+# FM_CODEX_TURNEND_BLOCK_BUDGET. Older payloads without turn_id retain the
+# original one-block allow behavior.
 #
 # Loop-guard, --claude mode (Stop-owned auto-arm cooperation): Claude Code
 # marks EVERY stop after ANY stop-hook-driven continuation stop_hook_active=true,
@@ -103,9 +99,13 @@ CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+CODEX_BLOCK_BUDGET=${FM_CODEX_TURNEND_BLOCK_BUDGET:-3}
+CODEX_RETRY_WINDOW=${FM_CODEX_TURNEND_RETRY_WINDOW:-120}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+case "$CODEX_BLOCK_BUDGET" in ''|*[!0-9]*|0) CODEX_BLOCK_BUDGET=3 ;; esac
+case "$CODEX_RETRY_WINDOW" in ''|*[!0-9]*|0) CODEX_RETRY_WINDOW=120 ;; esac
 
 for arg in "$@"; do
   case "$arg" in
@@ -150,8 +150,18 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
+CODEX_TURNEND_TRACKED=0
+CODEX_STOP_RETRY=0
+CODEX_TURN_ID=
+CODEX_LEDGER_LOCK="$STATE/.turnend-codex-ledger.lock"
+if [ "$CLAUDE_MODE" -eq 0 ]; then
+  CODEX_TURN_ID=$(printf '%s' "$PAYLOAD" | jq -r 'if (.turn_id | type) == "string" then .turn_id else "" end' 2>/dev/null || true)
+  if [ -n "$CODEX_TURN_ID" ]; then
+    CODEX_TURNEND_TRACKED=1
+  elif [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+    exit 0
+  fi
+  [ "$STOP_HOOK_ACTIVE" != "true" ] || CODEX_STOP_RETRY=1
 fi
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
@@ -182,6 +192,79 @@ OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+CODEX_LEDGER_DIR="$STATE/.turnend-codex-ledgers"
+CODEX_LEDGER="$CODEX_LEDGER_DIR/$(printf '%s' "$SESSION_ID" | cksum | cut -d' ' -f1)"
+
+# Each Codex session owns one ledger file recording its last blocked turn, so
+# concurrent sessions in one home cannot reset each other's count. A new turn
+# overwrites it, a healthy pass-through removes it, and every ledger write
+# prunes ledgers older than 24 hours. A watcher beacon written at or after the
+# last block, but not in the future, proves that a checkpoint may have run
+# since then and earns a fresh block budget (whole-second mtimes make a
+# same-second update ambiguous, so it counts as progress).
+# The budget only bounds immediate retries: a stop more than
+# CODEX_RETRY_WINDOW seconds after the last block (or before it, after a clock
+# rollback) also starts a fresh budget, so an exhausted ledger cannot leave the
+# rest of a long turn unguarded.
+codex_ledger_read() {
+  CODEX_LEDGER_SESSION=$(sed -n '1s/^session=//p' "$CODEX_LEDGER" 2>/dev/null || true)
+  CODEX_LEDGER_TURN=$(sed -n '2s/^turn=//p' "$CODEX_LEDGER" 2>/dev/null || true)
+  CODEX_LEDGER_TIME=$(sed -n '3s/^time=//p' "$CODEX_LEDGER" 2>/dev/null || true)
+  CODEX_LEDGER_COUNT=$(sed -n '4s/^count=//p' "$CODEX_LEDGER" 2>/dev/null || true)
+  case "$CODEX_LEDGER_COUNT" in ''|*[!0-9]*) CODEX_LEDGER_COUNT=0 ;; esac
+  case "$CODEX_LEDGER_TIME" in ''|*[!0-9]*) CODEX_LEDGER_TIME=0 ;; esac
+}
+
+codex_ledger_continues() {
+  local beacon_mtime now
+  now=$(date +%s)
+  beacon_mtime=$(fm_path_mtime "$STATE/.last-watcher-beat" 2>/dev/null || true)
+  case "$beacon_mtime" in ''|*[!0-9]*) beacon_mtime=-1 ;; esac
+  [ "$CODEX_LEDGER_SESSION" = "$SESSION_ID" ] \
+    && [ "$CODEX_LEDGER_TURN" = "$CODEX_TURN_ID" ] \
+    && { [ "$beacon_mtime" -lt "$CODEX_LEDGER_TIME" ] || [ "$beacon_mtime" -gt "$now" ]; } \
+    && [ "$CODEX_LEDGER_TIME" -le "$now" ] && [ $((now - CODEX_LEDGER_TIME)) -lt "$CODEX_RETRY_WINDOW" ]
+}
+
+codex_retry_budget_exhausted() {
+  [ "$CODEX_TURNEND_TRACKED" -eq 1 ] || return 1
+  fm_lock_try_acquire "$CODEX_LEDGER_LOCK" || return 1
+  codex_ledger_read
+  fm_lock_release "$CODEX_LEDGER_LOCK"
+  codex_ledger_continues \
+    && [ "$CODEX_LEDGER_COUNT" -ge "$CODEX_BLOCK_BUDGET" ] || return 1
+  printf 'TURN-END GUARD: Codex stop retry budget exhausted for turn %s without watcher-beacon progress within %ss; allowing this stop to prevent an unending continuation loop.\n' \
+    "$CODEX_TURN_ID" "$CODEX_RETRY_WINDOW" >&2
+  return 0
+}
+
+codex_ledger_record_block() {
+  local count tmp
+  [ "$CODEX_TURNEND_TRACKED" -eq 1 ] || return 0
+  fm_lock_try_acquire "$CODEX_LEDGER_LOCK" || {
+    printf 'TURN-END GUARD: unable to lock Codex retry ledger; retaining the supervision block.\n' >&2
+    return 0
+  }
+  codex_ledger_read
+  if codex_ledger_continues; then
+    count=$((CODEX_LEDGER_COUNT + 1))
+  else
+    count=1
+  fi
+  mkdir -p "$CODEX_LEDGER_DIR" 2>/dev/null || true
+  find "$CODEX_LEDGER_DIR" -type f -mmin +1440 -exec rm -f {} + 2>/dev/null || true
+  tmp="$CODEX_LEDGER.tmp.$$"
+  if printf 'session=%s\nturn=%s\ntime=%s\ncount=%s\n' \
+    "$SESSION_ID" "$CODEX_TURN_ID" "$(date +%s)" "$count" > "$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$CODEX_LEDGER" 2>/dev/null; then
+    :
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    printf 'TURN-END GUARD: unable to persist Codex retry ledger; retaining the supervision block.\n' >&2
+  fi
+  fm_lock_release "$CODEX_LEDGER_LOCK"
+}
+
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
@@ -197,7 +280,10 @@ fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
-  [ "$CLAUDE_MODE" -eq 1 ] || exit 0
+  if [ "$CLAUDE_MODE" -eq 0 ]; then
+    rm -f "$CODEX_LEDGER" 2>/dev/null || true
+    exit 0
+  fi
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
 }
@@ -222,6 +308,12 @@ AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   && fm_afk_daemon_owns_supervision "$STATE"; then
   allow_supervised_stop
+fi
+
+# Healthy and idle paths above always keep their ordinary silent allow. Spend
+# the Codex no-progress budget only when this stop would otherwise be blocked.
+if [ "$CODEX_STOP_RETRY" -eq 1 ] && codex_retry_budget_exhausted; then
+  exit 0
 fi
 
 block_stop() {
@@ -251,6 +343,7 @@ block_stop() {
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
   } >&2
+  codex_ledger_record_block
   exit 2
 }
 
