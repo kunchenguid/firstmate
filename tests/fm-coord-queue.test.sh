@@ -36,10 +36,11 @@ candidate() {
   coord attach-pr "$(printf '{"request_id":"pr-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"https://github.com/owner/repo/pull/%s"}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$( [ "$id" = a ] && echo 1 || echo 2 )")" > /dev/null
   coord publish-head "$(printf '{"request_id":"head-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s","expected_previous_oid":null}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$head")" > /dev/null
   coord queue-ready "$(printf '{"request_id":"ready-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s","priority":%s}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$head" "${5:-0}")" > /dev/null
-  eval "claim_$id=\$claim_id fence_$id=\$fence"
 }
 candidate a a "$ga" "$head_a"
+claim_a=$claim_id fence_a=$fence
 candidate b b "$gb" "$head_b"
+claim_b=$claim_id fence_b=$fence
 
 first=$(coord queue-next '{"request_id":"next-a","repo":"owner/repo","base":"main"}')
 [ "$(field "$first" intent_id)" = a ] || fail 'first ready candidate should occupy the slot'
@@ -169,7 +170,9 @@ ga=$(field "$(coord session '{"request_id":"session-a","home_id":"a"}')" generat
 gb=$(field "$(coord session '{"request_id":"session-b","home_id":"b"}')" generation)
 coord manifest-set '{"request_id":"manifest","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
 candidate a a "$ga" "$head_a"
+claim_a=$claim_id fence_a=$fence
 candidate b b "$gb" "$head_b"
+claim_b=$claim_id fence_b=$fence
 for bad in https://github.com/owner/repo/pull/1/files https://gitlab.com/owner/repo/pull/1 http://github.com/owner/repo/pull/1 https://github.com/owner/repo/pull/0 https://github.com/owner/other/pull/1; do
   reject attach-pr "$(printf '{"request_id":"pr-bad","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"%s"}' "$ga" "$claim_a" "$fence_a" "$bad")" "attach-pr must refuse unevaluable PR URL $bad"
 done
