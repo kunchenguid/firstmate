@@ -39,24 +39,24 @@
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
-# reason. After initial readiness it keeps verifying the owned child instead of
-# reducing liveness to process existence: a live identity-matched child whose
-# beacon reaches the shared stale-beacon grace is retired with a bounded TERM/KILL
-# sequence, its stale ownership is released through the watcher-down recovery
-# transition, and this arm fails loudly so a persistent adapter can retry without
-# a primary session restart. On attached it stays live across identity-matched
-# successors. Once attached, a stale beacon alone does not end the followed cycle:
-# while that holder is alive and the lock still names it under the same identity,
-# the arm keeps following it, as a started arm waits out a slow child, until the
-# lock changes or the beacon reaches fm_watcher_stall_bound (bin/fm-wake-lib.sh),
-# the age at which the watcher's own re-arm evicts it; there it fails with the
-# stalled-holder line so its owner's retry replaces the holder. A cycle
-# that ends with no reason line and no healthy successor is resolved against the
-# watcher's identity-bound delivery record: a matching record reports that wake
-# and exits 0, and only a cycle that delivered nothing is the typed nonzero
-# failure. Neither is ever a clean empty completion. On FAILED it exits non-zero
-# so the failure is loud. A live cycle already present means re-arm attaches - do
-# not start a second watcher.
+# reason, except that after initial readiness it keeps verifying the owned child
+# instead of reducing liveness to process existence: a live identity-matched child
+# whose beacon reaches the shared stale-beacon grace is retired with a bounded
+# TERM/KILL sequence, its stale ownership is released through the watcher-down
+# recovery transition, and this arm fails loudly so a persistent adapter can retry
+# without a primary session restart. On attached it stays live across
+# identity-matched successors. Once attached, a stale beacon alone does not end
+# the followed cycle: while that holder is alive and the lock still names it under
+# the same identity, the arm keeps following it - an attached arm owns no child to
+# wait on - until the lock changes or the beacon reaches fm_watcher_stall_bound
+# (bin/fm-wake-lib.sh), the age at which the watcher's own re-arm evicts it; there
+# it fails with the stalled-holder line so its owner's retry replaces the holder.
+# A cycle that ends with no reason line and no healthy successor is resolved
+# against the watcher's identity-bound delivery record: a matching record reports
+# that wake and exits 0, and only a cycle that delivered nothing is the typed
+# nonzero failure. Neither is ever a clean empty completion. On FAILED it exits
+# non-zero so the failure is loud. A live cycle already present means re-arm
+# attaches - do not start a second watcher.
 #
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
@@ -140,8 +140,8 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
-# Poll interval while attached to an existing healthy watcher; also the
-# cadence for the owned-child wait loop and the watchdog's stale-beacon recheck.
+# Poll interval while attached to an existing healthy watcher; also the cadence
+# at which the owned-child wait loop rechecks its child's identity-bound beacon.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 # Seconds allowed for a stalled owned watcher to retire after TERM before its
 # isolated process group receives KILL. This is deliberately much shorter than
@@ -662,8 +662,6 @@ fi
 child=
 child_group=
 child_out=
-watchdog_pid=
-watchdog_status=
 
 watch_child_running() {
   local proc_root stat state_line
@@ -746,52 +744,7 @@ owned_child_has_stale_beacon() {
   return 0
 }
 
-stop_owned_watchdog() {
-  [ -n "$watchdog_pid" ] || return 0
-  kill -TERM "$watchdog_pid" 2>/dev/null || true
-  wait "$watchdog_pid" 2>/dev/null || true
-  watchdog_pid=
-}
-
-# Keep the arm following the child through a short poll so an actionable child
-# close still propagates promptly, and once the watchdog has retired the
-# stalled group the same poll is bounded by the retire deadline below instead
-# of hanging on a child KILL cannot make waitable. A separate arm-owned
-# watchdog performs only the stale-beacon check and retires the isolated
-# watcher group when the shared grace expires.
-start_owned_watchdog() {
-  watchdog_status="$child_out.liveness"
-  rm -f "$watchdog_status" 2>/dev/null || true
-  (
-    watchdog_sleep_pid=
-    # shellcheck disable=SC2329 # Invoked indirectly by the signal trap below.
-    stop_watchdog_sleep() {
-      [ -z "$watchdog_sleep_pid" ] || kill -TERM "$watchdog_sleep_pid" 2>/dev/null || true
-      exit 0
-    }
-    trap stop_watchdog_sleep HUP TERM INT
-    while fm_pid_alive "$child"; do
-      if owned_child_has_stale_beacon; then
-        fm_path_age "$BEAT" > "$watchdog_status"
-        signal_watch_child TERM
-        sleep "$STALL_RETIRE_TIMEOUT"
-        signal_watch_child KILL
-        exit 0
-      fi
-      # Wait through a background sleep so the arm's stop signal interrupts the
-      # wait immediately; a foreground sleep defers Bash's trap and delays every
-      # healthy actionable close by the full polling interval.
-      sleep "$ATTACH_POLL" &
-      watchdog_sleep_pid=$!
-      wait "$watchdog_sleep_pid" 2>/dev/null || true
-      watchdog_sleep_pid=
-    done
-  ) &
-  watchdog_pid=$!
-}
-
 cleanup_child() {
-  stop_owned_watchdog
   retire_watch_child || true
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
@@ -906,50 +859,23 @@ owned_child_finished() {
 # Follow a watcher this arm actually forked while rechecking the same strict
 # identity+beacon predicate used for initial readiness. The old raw `wait`
 # could never observe an alive-but-stalled watcher, so Pi/OpenCode kept an arm
-# claim forever and every repair call became an ownership no-op.
+# claim forever and every repair call became an ownership no-op. This loop owns
+# both halves of that rule: the predicate, and the bounded retirement it triggers
+# through the same retire_watch_child the arm's cleanup paths already use.
 wait_owned_child() {
-  local stalled_pid age rc retire_deadline
+  local stalled_pid age rc
   stalled_pid=$child
-  start_owned_watchdog
-  rc=124
-  retire_deadline=
+  age=
   while watch_child_running; do
-    if [ -z "$retire_deadline" ] && [ -s "$watchdog_status" ]; then
-      retire_deadline=$(( $(date +%s) + STALL_RETIRE_TIMEOUT + 3 ))
-    fi
-    if [ -n "$retire_deadline" ] && [ "$(date +%s)" -ge "$retire_deadline" ]; then
+    if owned_child_has_stale_beacon; then
+      age=$(fm_path_age "$BEAT")
       break
     fi
     sleep "$ATTACH_POLL"
   done
-  if watch_child_running; then
-    WATCH_CHILD_RC=124
-  elif wait "$child" 2>/dev/null; then
-    rc=0
-  else
-    rc=$?
-  fi
-  stop_owned_watchdog
-  if [ -s "$watchdog_status" ]; then
-    age=$(cat "$watchdog_status" 2>/dev/null || fm_path_age "$BEAT")
-    signal_watch_child KILL
-    # If the deadline broke the loop with the child still running, it was never
-    # reaped by the `elif wait` above. Give the KILL a bounded moment to drop the
-    # process into a reapable state so the arm does not leave a zombie or a lock
-    # holder behind before returning.
-    bail_deadline=$(( $(date +%s) + 2 ))
-    while fm_pid_alive "$child" && [ "$(date +%s)" -lt "$bail_deadline" ]; do
-      sleep 0.05
-    done
-    # Only reap when the child is dead or a reapable zombie; a child that truly
-    # survives SIGKILL (an uninterruptible D-state wait) must not block this arm
-    # forever on `wait` - that would reintroduce the unbounded hang the bounded
-    # retirement exists to prevent. Reaping a zombie always returns immediately,
-    # so a normal retire is unchanged. A still-alive child then fails the stale
-    # release below, keeping its lock exactly as the retirement contract records.
-    if [ -n "$child" ] && { ! fm_pid_alive "$child" || ! watch_child_running; }; then
-      wait "$child" 2>/dev/null || true
-    fi
+  if [ -n "$age" ]; then
+    retire_watch_child || true
+    rc=$WATCH_CHILD_RC
     child=
     child_group=
     if ! fm_recovery_marker_publish "$STATE/.watcher-down" downtime \
@@ -959,16 +885,16 @@ wait_owned_child() {
       return 1
     fi
     cycle_log_append "$rc" "$(cycle_signal_name "$rc")" stale-beacon-retired none
-    rm -f "$child_out" "$watchdog_status" 2>/dev/null || true
-    child=
-    child_group=
+    rm -f "$child_out" 2>/dev/null || true
     child_out=
-    watchdog_status=
     echo "watcher: FAILED - watcher pid=$stalled_pid stopped advancing its beacon for ${age}s; retired the stalled cycle and released stale ownership for bounded recovery"
     return 1
   fi
-  rm -f "$watchdog_status" 2>/dev/null || true
-  watchdog_status=
+  if wait "$child" 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
   owned_child_finished "$rc"
 }
 

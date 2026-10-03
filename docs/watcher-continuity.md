@@ -379,7 +379,8 @@ A matching PID and identity lets an attached arm report the delivered reason and
 An unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 After initial readiness, an arm that forked the watcher keeps applying the same identity-bound beacon predicate instead of treating a live PID as permanent health.
-When that owned watcher reaches the shared stale-beacon grace, the arm sends TERM and then KILL to the watcher's isolated process group within `FM_WATCH_STALL_RETIRE_TIMEOUT`, publishes the existing watcher-down recovery episode, and exits with a typed failure.
+When that owned watcher reaches the shared stale-beacon grace, the arm sends TERM to the watcher's isolated process group and then, for a child still alive after `FM_WATCH_STALL_RETIRE_TIMEOUT`, KILL to that same group: the arm's one retirement contract, shared with its signal and stand-down cleanup paths.
+It then publishes the existing watcher-down recovery episode and exits with a typed failure.
 The stale lock is removed only once the child is dead and still matches the expected PID, so a child that survives the bound keeps its lock and the ledger records the refused release.
 Persistent adapters therefore lose their owned-child no-op when the child is no longer healthy and can run their existing bounded retry without restarting the primary session.
 
