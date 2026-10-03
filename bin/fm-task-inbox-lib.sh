@@ -121,7 +121,11 @@ fm_task_inbox_ring_max() {
 
 fm_task_inbox_busy_max() {
   local m=${FM_TASK_INBOX_BUSY_MAX:-$FM_TASK_INBOX_BUSY_MAX_DEFAULT}
-  case "$m" in ''|0|*[!0-9]*) m=$FM_TASK_INBOX_BUSY_MAX_DEFAULT ;; esac
+  case "$m" in ''|*[!0-9]*) m=$FM_TASK_INBOX_BUSY_MAX_DEFAULT ;; esac
+  # Check the length before numeric comparison so oversized input cannot overflow.
+  if [ "${#m}" -gt 9 ] || [ "$m" -eq 0 ]; then
+    m=$FM_TASK_INBOX_BUSY_MAX_DEFAULT
+  fi
   printf '%s' "$m"
 }
 
@@ -449,7 +453,7 @@ fm_task_inbox_clear_retry() {  # <state-dir> <task-id> <record-path>
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
-  local dir oldest base now grace max ladder rec_base count last busy_base
+  local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" "$dir/.busy-state" 2>/dev/null || true
@@ -468,10 +472,6 @@ fm_task_inbox_due_action() {  # <state-dir> <task-id>
     return 0
   fi
   base=${oldest##*/}
-  busy_base=$(cut -f1 "$dir/.busy-state" 2>/dev/null || true)
-  if [ -n "$busy_base" ] && [ "$busy_base" != "$base" ]; then
-    fm_task_inbox_clear_busy "$1" "$2" || return 1
-  fi
   grace=$(fm_task_inbox_grace_secs)
   if [ "$(fm_path_age "$oldest")" -lt "$grace" ]; then
     printf 'quiet'

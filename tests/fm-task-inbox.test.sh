@@ -699,10 +699,10 @@ test_watcher_rerings_idle_pane_quietly() {
 }
 
 # A fresh process for each check proves the busy budget survives watcher restarts.
-busy_steer_check() {  # <case-dir> [capture]
+busy_steer_check() {  # <case-dir> [capture] [busy-max]
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
     FM_FAKE_TMUX_CAPTURE="${2:-$1/busy.capture}" FM_BUSY_REGEX=BUSYTOKEN \
-    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2 \
+    FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX="${3-2}" \
     bash -c '. "$1" && inbox_steer_check sess:fm-t1 t1' _ "$WATCH" > "$1/check.out" 2>&1
 }
 
@@ -758,6 +758,120 @@ test_watcher_busy_bookkeeping_failure_surfaces() {
     || fail "unwritable busy budget silently deferred forever"
   [ ! -s "$dir/send.log" ] || fail "bookkeeping failure typed into busy pane"
   pass "watcher: unwritable busy bookkeeping surfaces without typing"
+}
+
+# Fail only the busy-state unlink, leaving reads and escalation-marker writes
+# available. Unlike directory permissions, this fault also works as root in CI.
+block_busy_reset() {  # <case-dir>
+  local real_rm
+  real_rm=$(command -v rm)
+  cat > "$1/fakebin/rm" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in */t1.inbox/.busy-state) exit 1 ;; esac
+done
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$1/fakebin/rm"
+}
+
+test_watcher_successor_busy_reset_failure_surfaces() {
+  local mode=$1 dir rec check capture
+  dir=$(busy_case "successor-reset-failure-$mode")
+  busy_steer_check "$dir"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
+  block_busy_reset "$dir"
+  capture=$(idle_capture "$dir")
+  [ "$mode" != busy ] || capture="$dir/busy.capture"
+  for check in 1 2 3; do
+    busy_steer_check "$dir" "$capture"
+    if [ "$mode" = busy ] && [ "$check" = 1 ]; then
+      [ ! -s "$dir/state/.wake-queue" ] || fail "successor inherited its predecessor's busy count"
+      continue
+    fi
+    [ "$(wc -l < "$dir/state/.wake-queue" 2>/dev/null | tr -d ' ')" = 1 ] \
+      || fail "$mode successor must surface once, including check $check"
+  done
+  [ "$(cat "$dir/state/t1.inbox/.escalated")" = "${rec##*/}" ] \
+    || fail "reset failure did not mark the successor as escalated"
+  case "$mode" in
+    idle)
+      grep -q 'steering-inbox busy bookkeeping unwritable' "$dir/state/.wake-queue" || fail "successor lost the reset failure reason"
+      [ "$(cut -f1 "$dir/state/t1.inbox/.busy-state")" = 001.msg ] || fail "successor fixture did not retain predecessor state"
+      ;;
+    busy)
+      grep -q 'stuck-busy after 2 consecutive' "$dir/state/.wake-queue" || fail "successor did not get its own busy budget"
+      ;;
+  esac
+  [ ! -s "$dir/send.log" ] || fail "reset failure tried delivery before reporting the error"
+  [ -f "$rec" ] || fail "reset failure lost the queued successor"
+  pass "watcher: $mode successor surfaces once despite unremovable predecessor bookkeeping"
+}
+
+test_watcher_nonbusy_reset_failure_escalates_once() {
+  local mode=$1 dir rec capture check
+  dir=$(busy_case "reset-failure-$mode")
+  rec="$dir/state/t1.inbox/001.msg"
+  busy_steer_check "$dir"
+  block_busy_reset "$dir"
+  capture=$(idle_capture "$dir")
+  if [ "$mode" = protected ]; then
+    printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$capture"
+  fi
+  for check in 1 2 3; do
+    busy_steer_check "$dir" "$capture"
+    [ "$(grep -c 'steering-inbox busy bookkeeping unwritable' "$dir/state/.wake-queue" 2>/dev/null)" = 1 ] \
+      || fail "$mode reset failure repeated or lost its wake on check $check"
+  done
+  [ "$(cat "$dir/state/t1.inbox/.escalated")" = 001.msg ] || fail "$mode reset failure was not marked escalated"
+  [ ! -s "$dir/send.log" ] || fail "$mode reset failure typed into the pane"
+  [ -f "$rec" ] || fail "$mode reset failure lost the unhandled instruction"
+  # The marker belongs to this record, not the next one after repair and ack.
+  rm "$dir/fakebin/rm"
+  mv "$rec" "$dir/state/t1.inbox/handled/"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "after repair")
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  grep -q 'Firstmate instruction waiting' "$dir/send.log" || fail "$mode repair did not restore delivery"
+  [ "$(cut -f1 "$dir/state/t1.inbox/.ring-state")" = "${rec##*/}" ] || fail "$mode repair lost the delivery ladder"
+  pass "watcher: persistent $mode busy-reset failure escalates once and later instructions still deliver"
+}
+
+test_watcher_busy_limit_validation() {
+  local limit=$1 expected=$2 dir check
+  dir=$(busy_case "busy-limit-$limit")
+  for ((check=1; check<expected; check++)); do
+    busy_steer_check "$dir" "$dir/busy.capture" "$limit"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "busy limit '$limit' escalated early at $check"
+  done
+  busy_steer_check "$dir" "$dir/busy.capture" "$limit"
+  grep -q "stuck-busy after $expected consecutive" "$dir/state/.wake-queue" 2>/dev/null \
+    || fail "busy limit '$limit' did not escalate at $expected"
+  busy_steer_check "$dir" "$dir/busy.capture" "$limit"
+  [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] || fail "busy limit '$limit' repeated escalation"
+  [ ! -s "$dir/send.log" ] || fail "busy limit '$limit' typed into the pane"
+  pass "watcher: busy limit '$limit' escalates exactly once at $expected"
+}
+
+test_watcher_retry_ignores_busy_reset_failure() {
+  local dir rec check
+  dir=$(busy_case retry-reset-failure)
+  busy_steer_check "$dir"
+  mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
+  mkdir -p "$dir/config"
+  : > "$dir/config/wait-no-turns"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "one-shot steer" fire-and-forget)
+  inbox_lib "$dir/state" fm_task_inbox_mark_retry "$dir/state" t1 "$rec"
+  block_busy_reset "$dir"
+  for check in 1 2 3; do
+    FM_CONFIG_OVERRIDE="$dir/config" busy_steer_check "$dir" "$(idle_capture "$dir")"
+    [ ! -s "$dir/state/.wake-queue" ] || fail "fire-and-forget retry escalated a busy reset failure on check $check"
+  done
+  [ "$(grep -c 'Firstmate instruction waiting' "$dir/send.log")" = 1 ] || fail "fire-and-forget retry did not ring exactly once"
+  [ ! -e "$dir/state/t1.inbox/.retry-ring" ] || fail "fire-and-forget retry kept its retry mark"
+  [ ! -e "$dir/state/t1.inbox/.escalated" ] || fail "fire-and-forget retry entered escalation"
+  [ -f "$rec" ] || fail "fire-and-forget retry lost its instruction"
+  pass "watcher: unremovable obsolete busy state does not block or escalate a fire-and-forget retry"
 }
 
 test_watcher_successor_escalation_stays_quiet() {
@@ -1086,6 +1200,19 @@ test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
+test_watcher_successor_busy_reset_failure_surfaces idle
+test_watcher_successor_busy_reset_failure_surfaces busy
+test_watcher_nonbusy_reset_failure_escalates_once idle
+test_watcher_nonbusy_reset_failure_escalates_once protected
+test_watcher_busy_limit_validation 999999999999999999999999999999 2
+test_watcher_busy_limit_validation 1000000000 2
+test_watcher_busy_limit_validation 0 2
+test_watcher_busy_limit_validation 000 2
+test_watcher_busy_limit_validation '' 2
+test_watcher_busy_limit_validation invalid 2
+test_watcher_busy_limit_validation 1 1
+test_watcher_busy_limit_validation 3 3
+test_watcher_retry_ignores_busy_reset_failure
 test_watcher_successor_escalation_stays_quiet busy
 test_watcher_successor_escalation_stays_quiet dead
 test_watcher_successor_escalation_stays_quiet missing

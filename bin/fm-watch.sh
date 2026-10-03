@@ -561,12 +561,9 @@ inbox_steer_check() {  # <window> <task>
       return 0
     fi
     verb=escalate
-  elif ! fm_task_inbox_clear_busy "$STATE" "$task"; then
-    [ ! -f "$rec" ] || {
-      reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
-      fm_wake_append stale "$w" "$reason" || exit 1
-      wake "$reason"
-    }
+  elif [ "$verb" != retry ] && ! fm_task_inbox_clear_busy "$STATE" "$task"; then
+    reason="stale: $w (steering-inbox busy bookkeeping unwritable: ${rec%/*}/.busy-state cannot be reset after a non-busy check; inspect the inbox directory)"
+    verb=escalate
   fi
   case "$verb" in
     ring)
