@@ -2175,6 +2175,30 @@ test_recovery_retains_codebase_evidence_when_history_already_archived() {
   pass "an archived task stays archived and its unapplied Codebase receipt stays retryable"
 }
 
+test_archived_replay_without_cleanup_receipt_preserves_task_record() {
+  local case_dir home id marker out generation
+  id=atomic-archive-missing-cleanup-b9
+  generation=spawn-archive-missing-cleanup
+  case_dir=$(make_home archive-missing-cleanup "$id")
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  (cd "$home" && tasks-axi prune --keep 0 --file "$(backlog_of "$case_dir")" >/dev/null)
+  printf 'spawn_gen=%s\nkind=ship\n' "$generation" >"$home/state/$id.meta"
+  marker="$home/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=%s\n' "$id" "$home/data" "$generation" >"$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  assert_present "$home/state/$id.meta" \
+    "archive replay without cleanup readback retired the executor record"
+  assert_present "$marker" \
+    "archive replay without cleanup readback consumed its pending-close record"
+  assert_contains "$out" 'no matching generation-bound cleanup receipt' \
+    "archive replay refusal did not expose the missing operation readback"
+  pass "archived replay keeps executor and close records until generation-bound cleanup readback exists"
+}
+
 test_recovery_preserves_a_captain_hold_while_retaining_a_codebase_mr() {
   local case_dir id mr marker out shown
   id=atomic-codebase-captain-hold-b9
@@ -3146,6 +3170,7 @@ if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
   test_immediate_child_absolute_data_dispatches_and_completes
   test_bare_relative_data_dispatches_and_completes
   test_completed_cleanup_bookkeeping_retry_preserves_resources
+  test_archived_replay_without_cleanup_receipt_preserves_task_record
   test_home_without_a_backlog_dispatches_and_completes
   test_dispatch_and_completion_are_structural
   test_unlanded_copy_is_retained_while_completed_cleanup_finishes
@@ -3216,6 +3241,7 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_retries_a_codebase_close_after_bookkeeping_failure
 test_recovery_backfills_a_codebase_mr_on_an_already_done_item
 test_recovery_retains_codebase_evidence_when_history_already_archived
+test_archived_replay_without_cleanup_receipt_preserves_task_record
 test_recovery_preserves_a_captain_hold_while_retaining_a_codebase_mr
 test_recovery_rejects_a_malformed_codebase_mr
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read

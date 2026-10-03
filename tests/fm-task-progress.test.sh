@@ -373,6 +373,12 @@ historical_mode=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DAT
   '. "$1"; fm_cleanup_completion_mode historical-terminal legacy-g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh") \
   || fail "generation-matched historical terminal fact was not readable"
 assert_equals archived "$historical_mode" "historical archived disposition was not selected before field access"
+out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
+  '. "$1"; fm_task_progress_completion_guard historical-terminal' _ "$ROOT/bin/fm-task-progress-lib.sh" 2>&1)
+rc=$?
+expect_code 6 "$rc" "missing original row through the ordinary teardown fallback"
+assert_contains "$out" 'absent from its configured original-task source' \
+  "ordinary teardown treated a missing compact-era row as implicit acceptance"
 out=$(progress update-progress ordinary --expected-token "$(printf '%s' "$complete" | jq -r .record_token)" --progress "$record" 2>&1)
 rc=$?
 expect_code 6 "$rc" "completed task progress update"

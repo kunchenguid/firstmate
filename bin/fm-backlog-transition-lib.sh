@@ -1276,11 +1276,10 @@ fm_backlog_archived_done() {  # <data> <id> <state> <generation> [artifact-pair]
   disposition=$(fm_task_disposition_for "$snapshot" "$id") || return 1
   [ "$disposition" = archive_done ] || return 1
   receipt="$state/$id.cleanup.json"
-  if [ -e "$receipt" ] || [ -L "$receipt" ]; then
-    [ -f "$receipt" ] && [ ! -L "$receipt" ] && \
-      jq -e --arg id "$id" --arg generation "$generation" \
-        '.schema=="fm-task-cleanup.v1" and .task_id==$id and .spawn_gen==$generation' "$receipt" >/dev/null
-  fi
+  [ -e "$receipt" ] || [ -L "$receipt" ] || return 1
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] && \
+    jq -e --arg id "$id" --arg generation "$generation" \
+      '.schema=="fm-task-cleanup.v1" and .task_id==$id and .spawn_gen==$generation' "$receipt" >/dev/null
 }
 
 fm_backlog_replay_transition() {
@@ -1387,6 +1386,21 @@ fm_backlog_close_marker_replay() {  # <state-dir> <marker-path> <authorized-data
       fm_backlog_close_marker_remove "$marker" "$state" || return 1
       FM_BACKLOG_CLOSE_REPLAY_RESULT=stale
       return 0
+    fi
+    # A pruned row does not authorize retiring live execution metadata by
+    # itself. Before crossing the record-removal boundary, require the exact
+    # archived task plus this generation's cleanup receipt; otherwise retain
+    # both records for operation readback.
+    if ! fm_backlog_row_probe "$data" "$id"; then
+      if [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+        FM_BACKLOG_TRANSITION_ERROR=$FM_BACKLOG_ROW_ERROR
+        return 1
+      fi
+      if ! fm_backlog_archived_done "$data" "$id" "$state" "$marker_spawn_gen" \
+          "${args[@]+"${args[@]}"}"; then
+        FM_BACKLOG_TRANSITION_ERROR="missing task $id has no matching generation-bound cleanup receipt and archived delivery evidence; preserving its task and pending-close records"
+        return 1
+      fi
     fi
     if [ -z "$cleanup_disposition" ]; then
       fm_backlog_close_marker_mark_cleanup_incomplete "$state" "$marker" "$id" "$data" \

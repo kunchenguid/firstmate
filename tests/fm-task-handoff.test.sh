@@ -131,6 +131,32 @@ test_restart_sweep_recovers_pending_handoff() {
   pass "task-handoff: restart recovery delivers without conversation memory after the lease is gone"
 }
 
+test_pending_handoff_rejects_replacement_executor() {
+  local dir home fakebin id rc out
+  dir="$TMP_ROOT/replacement-generation"
+  fakebin=$(make_fake_backend "$dir")
+  home=$(make_home "$dir" source target)
+  id=replacement-generation
+  PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$LEASE" claim target --actor branch || fail "replacement-generation lease failed"
+  rc=0
+  PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
+    "$HANDOFF" send source target --id "$id" "instruction for the original executor" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 6 ] || fail "replacement-generation fixture did not stop at the ownership conflict"
+  assert_contains "$(FM_HOME="$home" "$HANDOFF" inspect "$id")" \
+    'target_generation=test-target' "pending handoff did not capture the original executor generation"
+
+  sed -i 's/^spawn_gen=.*/spawn_gen=replacement-target/' "$home/state/target.meta"
+  PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    "$LEASE" release target --actor branch >/dev/null || fail "replacement-generation owner release failed"
+  [ ! -d "$home/state/target.inbox" ] || fail "pending handoff reached a replacement executor"
+  out=$(FM_HOME="$home" "$HANDOFF" inspect "$id") || fail "replacement rejection was not inspectable"
+  assert_contains "$out" 'state=rejected' "replacement executor mismatch did not become a durable refusal"
+  assert_contains "$out" 'changed executor generation' "replacement refusal lost its identity blocker"
+  assert_contains "$out" 'instruction for the original executor' "replacement refusal lost the retained instruction"
+  pass "task-handoff: retained instructions stay bound to the captured executor generation"
+}
+
 test_pending_handoff_rejects_target_archived_before_retry() {
   local dir home fakebin id rc out
   dir="$TMP_ROOT/archive-before-retry"
@@ -294,6 +320,7 @@ test_same_task_send_and_reminder_contract_stay_ordinary() {
 
 test_conflict_preserves_then_delivers_exactly_once
 test_restart_sweep_recovers_pending_handoff
+test_pending_handoff_rejects_replacement_executor
 test_pending_handoff_rejects_target_archived_before_retry
 test_sweep_without_handoffs_is_a_noop
 test_local_runtime_backend_matrix_uses_one_durable_plane

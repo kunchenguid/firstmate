@@ -34,7 +34,9 @@
 # the delivered status is repaired by the next retry, which finds the same
 # handoff id in the inbox rather than writing a duplicate.
 #
-# Delivery takes the target metadata/inbox lock under the command lock.
+# Preparation captures the target executor generation under its metadata lock;
+# delivery takes that same metadata/inbox lock under the command lock and
+# refuses a replacement executor rather than rebinding old work to it.
 # After an inbox record exists, retry never enqueues another copy: it observes
 # the exact stable handoff id and repairs only the delivery status.
 # Scope is deliberately local and textual. Recorded crewmate/scout task
@@ -159,6 +161,7 @@ handoff_write_state() {  # <id> <state> <reason> [inbox-record]
 
 handoff_prepare_record_locked() {  # <id> <source> <target> <body>
   local id=$1 source=$2 target=$3 body=$4 record tmp want have got_source got_target
+  local meta meta_lock generation
   record=$(handoff_record_path "$id")
   if [ -e "$record" ] || [ -L "$record" ]; then
     [ -f "$record" ] && [ ! -L "$record" ] || {
@@ -179,12 +182,31 @@ handoff_prepare_record_locked() {  # <id> <source> <target> <body>
     rm -f "$want" "$have"
     return 0
   fi
+  meta="$STATE/$target.meta"
+  generation=absent
+  # Even an invalid/missing target keeps the exact rejected instruction
+  # inspectable. Only a safe live target receives an executor binding; the
+  # delivery path below rejects the `absent` sentinel before any enqueue.
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    meta_lock=$(fm_meta_lock_path "$meta") || return 1
+    if ! fm_task_inbox_lock_acquire "$meta_lock"; then
+      echo "error: target '$target' metadata could not be locked while capturing its executor generation" >&2
+      return "$FM_LEASE_REFUSE_EXIT"
+    fi
+    generation=$(fm_meta_get "$meta" spawn_gen)
+    fm_lock_release "$meta_lock"
+  fi
+  handoff_valid_atom "$generation" || {
+    echo "error: target '$target' has no valid executor generation to bind the handoff" >&2
+    return "$FM_TASK_HANDOFF_REJECT_EXIT"
+  }
   tmp=$(umask 077; mktemp "$HANDOFF_RECORDS/.record.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_HANDOFF_SCHEMA"
     printf 'id=%s\n' "$id"
     printf 'from=%s\n' "$source"
     printf 'target=%s\n' "$target"
+    printf 'target_generation=%s\n' "$generation"
     printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf -- '--\n'
     printf '%s' "$body"
@@ -215,7 +237,7 @@ handoff_retryable_locked() {  # <id> <reason>
 handoff_deliver_locked() { _handoff_deliver_locked "$1"; }
 
 _handoff_deliver_locked() {  # <id>
-  local id=$1 record state source target body_file body actor meta kind remote backend endpoint meta_lock inbox_record write_rc=0 ring_rc=0
+  local id=$1 record state source target target_generation body_file body actor meta kind remote backend endpoint meta_lock inbox_record write_rc=0 ring_rc=0
   record=$(handoff_record_path "$id")
   [ -f "$record" ] && [ ! -L "$record" ] || {
     echo "error: no durable task handoff '$id' under $HANDOFF_RECORDS" >&2
@@ -236,6 +258,7 @@ _handoff_deliver_locked() {  # <id>
   esac
   source=$(handoff_record_field "$record" from 2>/dev/null || true)
   target=$(handoff_record_field "$record" target 2>/dev/null || true)
+  target_generation=$(handoff_record_field "$record" target_generation 2>/dev/null || true)
   if [ "$source" = "$target" ]; then
     handoff_reject_locked "$id" "source and target are both '$target'; ordinary same-task steering must use fm-send.sh"
     return $?
@@ -243,6 +266,10 @@ _handoff_deliver_locked() {  # <id>
   meta="$STATE/$target.meta"
   if [ ! -f "$meta" ] || [ -L "$meta" ]; then
     handoff_reject_locked "$id" "target task '$target' has no safe live metadata record at $meta"
+    return $?
+  fi
+  if ! handoff_valid_atom "$target_generation"; then
+    handoff_reject_locked "$id" "its durable record has no captured target executor generation; retained instruction requires MAIN reconciliation"
     return $?
   fi
   kind=$(fm_meta_get "$meta" kind)
@@ -300,6 +327,11 @@ _handoff_deliver_locked() {  # <id>
     handoff_reject_locked "$id" "target '$target' retired or changed route during delivery validation"
     return $?
   fi
+  if [ "$(fm_meta_get "$meta" spawn_gen)" != "$target_generation" ]; then
+    fm_lock_release "$meta_lock"
+    handoff_reject_locked "$id" "target '$target' changed executor generation after preparation; retained instruction requires MAIN reconciliation"
+    return $?
+  fi
   # Stable handoff identity prevents duplicate delivery; it does not authorize
   # a stale instruction after the target became business-terminal.
   # shellcheck source=bin/fm-task-disposition-lib.sh
@@ -314,7 +346,7 @@ _handoff_deliver_locked() {  # <id>
   fi
   # The original handoff record and exact inbox id are the no-replay authority.
   # A delivered retry above is readback only, never another enqueue.
-  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$(fm_meta_get "$meta" spawn_gen)") || write_rc=$?
+  inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$target_generation") || write_rc=$?
   fm_lock_release "$meta_lock"
   if [ "$write_rc" -eq 2 ]; then
     handoff_reject_locked "$id" "target inbox already contains handoff id '$id' with a different instruction"

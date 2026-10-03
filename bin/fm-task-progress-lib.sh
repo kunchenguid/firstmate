@@ -340,6 +340,9 @@ fm_task_progress_completion_guard() ( # <task>
   local context projection detail_error detail_status root backend file
   # shellcheck disable=SC2031 # This guard is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+  # config/backlog-backend=manual opts out of the ordinary task owner even if
+  # a markdown adapter is configured for paths and operator guidance.
+  fm_backlog_backend_manual "${FM_HOME:?}/config" && return 0
   root=$(fm_backlog_root "$data") || {
     echo "error: task $id cannot be torn down because its backlog data directory is inaccessible: $data" >&2
     return 1
@@ -359,11 +362,13 @@ fm_task_progress_completion_guard() ( # <task>
   fm_task_progress_detail "$id" 2>"$detail_error"
   detail_status=$?
   if [ "$detail_status" -ne 0 ]; then
-    # Historical landed tasks may already have no ordinary backlog row. With
-    # no row there can be no active compact progress block to accept; all
-    # other backend/read failures remain safety-significant and fail closed.
+    # A configured ordinary task source with no row cannot prove MAIN accepted
+    # the goal. Historical explicit terminal/archive compatibility belongs to
+    # fm_cleanup_completion_guard; this legacy teardown fallback must not turn
+    # a disappeared fresh row into implicit completion.
     if grep -qx 'code: NOT_FOUND' "$detail_error"; then
-      return 0
+      echo "REFUSED: compact task $id is absent from its configured original-task source; explicit terminal or archive proof is required before cleanup" >&2
+      return 6
     fi
     cat "$detail_error" >&2
     return "$detail_status"

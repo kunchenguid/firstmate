@@ -456,6 +456,50 @@ fm_send_feed_resolved_holds() { # <answer-text>
 # failure is surfaced below with the attempted resolution attached, while a
 # timeout-like result stays uncertain and forbids blind replay.
 
+TASK_EFFECT_META_LOCK=
+fm_send_task_effect_lock() { # task-selector native request boundary; leaves lock held
+  local task current_target current_backend current_generation disposition_rc=0
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || return 0
+  task=$(fm_send_id_from_meta "$TARGET_META")
+  TASK_EFFECT_META_LOCK=$(fm_meta_lock_path "$TARGET_META") || return 1
+  if ! fm_task_inbox_lock_acquire "$TASK_EFFECT_META_LOCK"; then
+    echo "error: steer not sent to $task: its task metadata could not be locked for final delivery validation" >&2
+    TASK_EFFECT_META_LOCK=
+    return 1
+  fi
+  current_target=
+  current_backend=
+  current_generation=
+  if [ -f "$TARGET_META" ] && [ ! -L "$TARGET_META" ]; then
+    current_target=$(fm_backend_target_of_meta "$TARGET_META")
+    current_backend=$(fm_backend_of_meta "$TARGET_META")
+    current_generation=$(fm_meta_get "$TARGET_META" spawn_gen)
+  fi
+  if [ "$current_target" != "$T" ] || [ "$current_backend" != "$TARGET_BACKEND" ] || \
+    { [ -n "${FM_SEND_EXPECTED_SPAWN_GEN:-}" ] && \
+      [ "$current_generation" != "$FM_SEND_EXPECTED_SPAWN_GEN" ]; } || \
+    [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+    fm_lock_release "$TASK_EFFECT_META_LOCK"
+    TASK_EFFECT_META_LOCK=
+    echo "error: steer not sent to $task: the task retired or changed endpoint during target resolution" >&2
+    return 1
+  fi
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$task" steer \
+    || disposition_rc=$?
+  if [ "$disposition_rc" -ne 0 ]; then
+    fm_lock_release "$TASK_EFFECT_META_LOCK"
+    TASK_EFFECT_META_LOCK=
+    return "$disposition_rc"
+  fi
+}
+
+fm_send_task_effect_unlock() {
+  [ -z "$TASK_EFFECT_META_LOCK" ] || fm_lock_release "$TASK_EFFECT_META_LOCK"
+  TASK_EFFECT_META_LOCK=
+}
+
 if [ -n "$COMPACT_PROGRESS_TOKEN" ] && [ "${1:-}" = --key ]; then
   echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: compact continuation authorizes only its exact MAIN-authored text next_step" >&2
   exit 6
@@ -469,10 +513,13 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_task_effect_lock || exit $?
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+    fm_send_task_effect_unlock
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
+  fm_send_task_effect_unlock
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
 else
   MESSAGE=$*
@@ -609,12 +656,14 @@ else
   fi
   # Submit once through the native backend API. API success means submitted,
   # not read or completed; uncertainty is loud and is never retried here.
+  fm_send_task_effect_lock || exit $?
   send_rc=0
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" 0 0 0 "$EXPECTED_LABEL"); then
     :
   else
     send_rc=$?
   fi
+  fm_send_task_effect_unlock
   if [ "$send_rc" -ne 0 ]; then
     echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1

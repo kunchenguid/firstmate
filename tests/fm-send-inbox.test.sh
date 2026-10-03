@@ -462,6 +462,31 @@ test_terminal_task_refuses_new_steer() {
   pass "fm-send: retained terminal resources reject new steers before enqueue"
 }
 
+test_terminal_task_refuses_native_task_sends() {
+  local variant dir err rc
+  for variant in slash key; do
+    dir=$(setup_case "terminal-native-$variant")
+    err="$dir/send.err"
+    mkdir -p "$dir/home/data"
+    printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+    printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
+      '- [x] t1 - Explicitly terminal native fixture (kind: ship)' >"$dir/home/data/backlog.md"
+
+    rc=0
+    if [ "$variant" = slash ]; then
+      run_send "$dir" "$err" -- t1 "/help" || rc=$?
+    else
+      run_send "$dir" "$err" -- t1 --key Enter || rc=$?
+    fi
+    [ "$rc" -eq 6 ] || fail "terminal $variant send exited $rc instead of 6: $(cat "$err")"
+    assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+      "terminal $variant refusal did not name the authoritative disposition"
+    [ ! -d "$dir/home/state/t1.inbox" ] || fail "terminal $variant send created an inbox record"
+    [ ! -s "$dir/send.log" ] || fail "terminal $variant send reached the retained endpoint"
+  done
+  pass "fm-send: terminal task selectors reject native prompts and keys at the request boundary"
+}
+
 test_removed_lifecycle_action_flags_refuse() {
   local dir err rc
   dir=$(setup_case removed-action-flags)
@@ -542,6 +567,7 @@ test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
 test_terminal_task_refuses_new_steer
+test_terminal_task_refuses_native_task_sends
 test_removed_lifecycle_action_flags_refuse
 test_done_row_with_open_gap_allows_repair_steer
 test_non_markdown_terminal_read_refuses_steer
