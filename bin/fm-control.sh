@@ -28,6 +28,11 @@
 #              state is never rewritten as proof of the action. Devin
 #              cancellation invalidates it to unknown because its native hooks
 #              emit no cancellation close; this is not a success claim.
+#              A composer that visibly holds text afterwards is reported as
+#              `composer=pending` or `composer=pending-unproven` and left as
+#              it is: omp moves queued messages, which can be the captain's,
+#              into its composer on Escape, so the next line typed would
+#              concatenate onto them.
 #              An adapter whose repeated interrupt key does something else on
 #              an idle agent (Devin's revert picker) sends its later presses
 #              only after the first press rendered a running turn, and
@@ -1061,6 +1066,12 @@ case "$VERB" in
       *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle key into an unattributed endpoint" ;;
     esac
     proof=$(do_interrupt)
+    # A composer the interrupt left holding text (omp restores queued
+    # messages there) is reported, never cleared: it can be the captain's.
+    composer=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) || composer=unknown
+    case "$composer" in
+      pending|pending-unproven) proof="$proof composer=$composer" ;;
+    esac
     echo "interrupt-delivered $ID harness=$HARNESS backend=$BACKEND verified=$proof"
     ;;
   exit)

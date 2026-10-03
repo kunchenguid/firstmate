@@ -13,7 +13,8 @@ Supervision host: on for this home (`config/supervision-host-off` turns it off; 
 {claude,cursor}    Routine outcomes never wake you; your next drain lists only visible routine outcomes under `BRANCH OUTCOMES, ROUTINE` for awareness, with nothing to acknowledge. Silent rows do not appear there, but remain available through `bin/fm-branch-outcome.sh list`.
 2. Away (an away record exists and no daemon runs): the host hands each wake to a headless away session that runs the supervision branch's contract under the record, and you are parked.
 {claude}    Only a wake the host hands back reaches you, as `Stop hook feedback` carrying the close plus one `supervision-host: <why>` line.
-{cursor,opencode,omp}    Only a wake the host hands back reaches you, as a `watcher` follow-up carrying the close plus one `supervision-host: <why>` line.
+{cursor,opencode}    Only a wake the host hands back reaches you, as a `watcher` follow-up carrying the close plus one `supervision-host: <why>` line.
+{omp}    Only a wake the host hands back reaches you, as a `watcher` message carrying the close plus one `supervision-host: <why>` line.
 {grok}    Only a wake the host hands back reaches you, as the arm's background-task-completed notification whose output carries the close plus one `supervision-host: <why>` line.
 {codex}    Only a wake the host hands back reaches you, as checkpoint output carrying the close plus one `supervision-host: <why>` line.
 {codex}    While an away record exists each checkpoint uses the longer away bound (`FM_CODEX_WATCH_CHECKPOINT_AWAY`, default 3600s, subject to the host's park cap; see [`supervision-host.md`](../supervision-host.md#the-park-boundary)), so a captain message waits until the checkpoint returns unless the captain interrupts it.

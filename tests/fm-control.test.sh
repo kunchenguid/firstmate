@@ -39,8 +39,9 @@ VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
-# clear that must FOLLOW the interrupt key, empty for every adapter that leaves
-# its composer empty on cancel.
+# clear that must FOLLOW the interrupt key, empty for every adapter that does
+# not restore its cancelled prompt (omp restores only queued messages, which
+# can be the captain's, so it is never cleared).
 verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repeat, clear key
   case "$1" in
     claude) printf '/exit\tEscape\t1\t\n' ;;
@@ -985,6 +986,27 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
+# omp's Escape during a run moves queued messages, which can be the captain's,
+# into its composer. interrupt reports that composer and never clears it.
+test_interrupt_reports_a_composer_left_holding_text() {
+  local dir out rc
+  dir=$(new_case omp-restored)
+  add_task "$dir" t1 omp
+  alive_as "$dir" omp
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "omp interrupt delivery should succeed"$'\n'"$out"
+  assert_not_contains "$out" "composer=" "an empty composer after the key needs no report"
+  printf '╭──────────────╮\n│ queued reply │\n╰──────────────╯\n' > "$dir/fake/pane"
+  : > "$dir/fake/keys"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "omp interrupt delivery should succeed with text left behind"$'\n'"$out"
+  assert_contains "$out" "verified=agent-alive cancel=unconfirmed composer=pending" \
+    "a composer left holding text after the key must be reported"
+  [ "$(keys_sent "$dir")" = Escape ] || fail "the restored text must not be cleared, got keys: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "interrupt must type nothing into a restored composer"
+  pass "fm-control interrupt: a composer the key left holding text is reported, not cleared"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -1107,5 +1129,6 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_interrupt_reports_a_composer_left_holding_text
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
