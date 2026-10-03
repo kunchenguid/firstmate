@@ -2,8 +2,8 @@
 name: quota-array-dispatch
 description: >-
   Agent-only decision procedure for resolving a matched crew-dispatch profile
-  array from quota-axi's default TOON, ranking by spendPriority after three
-  orthogonal gates.
+  array from quota-axi's default TOON, applying declared quality preference and
+  ranking by spendPriority after three orthogonal gates.
   Load when a dispatch rule or default resolves to more than one profile candidate.
 user-invocable: false
 metadata:
@@ -55,10 +55,11 @@ Read `quota-axi auth --json` only when a candidate's credential surface is in qu
 
 For each candidate, preserve explicit `harness`, `model`, and `provider`; `harness-adapters` owns identity, and model/provider never infer harness.
 
-## Three gates, then spendPriority
+## Three gates, quality preference, then spendPriority
 
 Apply the three cheap orthogonal gates first.
-`spendPriority` ranks only among candidates that pass all three.
+Then apply any declared quality preference.
+`spendPriority` ranks only among candidates left after those steps.
 It cannot override a hard-gate failure, and it is never hidden inside a new composite score.
 
 ### 1. Eligibility
@@ -109,9 +110,28 @@ A high `spendPriority` on a nearly empty window that will exhaust soon must not 
 Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
 Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
+## Apply a declared quality preference
+
+A config may declare one top-level `quality_preference` and mark selected profiles with `prefer_quality: true`.
+This is the one supported policy filter between the three gates and `spendPriority`; it does not infer model quality from a model name and does not change any unmarked profile, including Fable or dedicated visual profiles.
+A marked candidate qualifies when its limiting applicable quota row has either:
+
+- `effectivePercentRemaining` at least `comfortable_percent`; or
+- positive `effectivePercentRemaining`, `runway=through_reset`, and `resetsAt` no more than `reset_within_hours` after the snapshot's `generatedAt`.
+
+Use the limiting applicable row already selected for the candidate's quota evidence.
+Do not let a healthy exact-model row bypass a tighter account-wide bound.
+If one or more eligible, rankable marked candidates qualify, retain only those qualifying candidates for the final `spendPriority` ranking.
+If marked candidates exist but none qualify, retain only eligible, rankable unmarked fallback candidates.
+If no fallback remains, escalate instead of silently spending the conditional quality profile outside its policy.
+When no profile is marked, rank the full eligible, rankable set exactly as before.
+Missing or unparsable reset evidence does not satisfy the near-reset branch, and the comfortable-headroom branch remains independent of reset timing.
+This filter is deterministic policy declared by the captain's config, not a second quota score: `spendPriority` remains the only ordering within the resulting pool.
+Account for each marked candidate with its percentage, runway, `resetsAt`, and whether the quality preference activated.
+
 ## Rank by spendPriority
 
-Among candidates that pass all three gates, pick the highest known `spendPriority`.
+Among candidates left after the three gates and any active declared quality preference, pick the highest known `spendPriority`.
 A higher known scalar is better: positive means paid allowance is on track to reach reset unused, `0` is exact utilization, and negative means overdrawn against the reset clock.
 Rank only from comparable known scalars.
 Never treat absent, `unknown`, or unmeasurable `spendPriority` as zero or as healthy; `0` means exact utilization, a different claim from unknown.
@@ -129,6 +149,6 @@ Genuine ties: stop and report every tied candidate for captain choice.
 Do not select by array order, harness name, or another arbitrary identity ordering.
 Report duplicate concrete profiles as a configuration error.
 
-Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, `spendPriority`, and runway-versus-horizon result.
+Account for every candidate visibly before selecting or escalating, naming its catalog evidence, provider relation, applicable quota and authentication facts, remaining uncertainty, fit and reasoning class, any declared quality-preference activation, `spendPriority`, and runway-versus-horizon result.
 A blocked credential report must name `harness`, `model`, authentication surface, and concrete failure evidence; never emit a bare `Grok unauthenticated` statement.
 Never conclude with an unexplained "best quota" label.
