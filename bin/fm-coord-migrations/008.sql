@@ -1,10 +1,9 @@
-CREATE TABLE ci_capacity (
-  repo TEXT NOT NULL,
-  base_ref TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS ci_capacity (
+  repo TEXT PRIMARY KEY,
   capacity INTEGER NOT NULL CHECK (capacity > 0),
-  PRIMARY KEY (repo, base_ref)
+  ttl_seconds INTEGER NOT NULL CHECK (ttl_seconds > 0)
 );
-CREATE TABLE ci_heads (
+CREATE TABLE IF NOT EXISTS ci_heads (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   repo TEXT NOT NULL,
   base_ref TEXT NOT NULL,
@@ -14,6 +13,7 @@ CREATE TABLE ci_heads (
   state TEXT NOT NULL CHECK (state IN ('queued', 'active')),
   delivered INTEGER NOT NULL DEFAULT 0,
   event_id TEXT REFERENCES events(event_id),
+  admitted_at INTEGER,
   UNIQUE (repo, base_ref, batch_id),
-  UNIQUE (repo, base_ref, head_oid)
+  UNIQUE (repo, head_oid)
 );

@@ -50,12 +50,12 @@ upgraded=$(coord init)
 coord enroll '{"request_id":"bind-legacy-host","home_id":"legacy","repos":["owner/repo"],"host_id":"legacy-test-host"}' > /dev/null
 field "$(coord inspect '{}')" participants | python3 -c 'import ast,sys; assert any(p["home_id"]=="legacy" and p["host_id"]=="legacy-test-host" for p in ast.literal_eval(sys.stdin.read()))' || fail 'an existing participant must bind its host after v3 upgrade'
 
-db=$tmp/upgrade-v4.sqlite3
-for migration in 001 002 003 004; do
+db=$tmp/upgrade-v6.sqlite3
+for migration in 001 002 003 004 005 006; do
   sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/$migration.sql"
 done
 legacy_host=$(python3 -c 'import socket; print(socket.gethostname())')
-sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('was-local','[\"owner/repo\"]','$legacy_host'),('was-remote','[\"owner/repo\"]','remote-test-host'),('renamed-local','[\"owner/repo\"]','old-name.local'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('inflight','was-local',1,'owner/repo','main','$base','branch/inflight','inflight','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id,attempt_epoch,wrapper_pid,wrapper_start,wrapper_boot,wrapper_home_id,wrapper_host_id,wrapper_local) VALUES('inflight','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','legacy-attempt',0,1,'legacy-start','synthetic-previous-boot','was-local','$legacy_host',1); PRAGMA user_version=4;"
+sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('was-local','[\"owner/repo\"]','$legacy_host'),('was-remote','[\"owner/repo\"]','remote-test-host'),('renamed-local','[\"owner/repo\"]','old-name.local'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('inflight','was-local',1,'owner/repo','main','$base','branch/inflight','inflight','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id,attempt_epoch,wrapper_pid,wrapper_start,wrapper_boot,wrapper_home_id,wrapper_host_id,wrapper_local) VALUES('inflight','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','legacy-attempt',0,1,'legacy-start','synthetic-previous-boot','was-local','$legacy_host',1); PRAGMA user_version=6;"
 upgraded=$(coord init)
 [ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
 coord enroll '{"request_id":"enroll-fresh","home_id":"fresh","repos":["owner/repo"]}' > /dev/null
@@ -68,6 +68,28 @@ coord enroll '{"request_id":"rebind-remote","home_id":"was-remote","repos":["own
 v4_state 'assert hosts["renamed-local"] == hosts["fresh"] and hosts["was-remote"] == "remote-test-host"' || fail 'a cleared v4 participant must rebind its host once through enroll'
 reject enroll '{"request_id":"rebind-remote-again","home_id":"was-remote","repos":["owner/repo"],"host_id":"other-host"}' 'a rebound host must not change again'
 pass 'v4 database migrates hostname bindings to machine identity without reinterpreting attempts'
+
+# Databases created by step 4 at v3 (ci_batches) and v4 (fenced_ci_batches) follow the append-only migrations with their rows intact.
+for version in 3 4; do
+  db=$tmp/step4-v$version.sqlite3
+  fenced=
+  for migration in 001 002 003 004; do
+    if [ "${migration#00}" -le "$version" ]; then
+      sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/$migration.sql"
+    fi
+  done
+  if [ "$version" = 4 ]; then
+    fenced="INSERT INTO fenced_ci_batches(repo,base_ref,batch_id) VALUES('owner/repo','main','fenced-batch');"
+  fi
+  sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('step4','[\"owner/repo\"]'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('step4-intent','step4',1,'owner/repo','main','$base','branch/step4','step4','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id) VALUES('step4-intent','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','step4-attempt'); INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES('step4-event','ci-pulse-authorized','{}','2026-01-01T00:00:00+00:00'); INSERT INTO ci_batches(repo,base_ref,batch_id,intent_id,head_oid,event_id) VALUES('owner/repo','main','step4-batch','step4-intent','$head_a','step4-event'); $fenced PRAGMA user_version=$version;"
+  [ "$(field "$(coord init 2> "$tmp/err")" schema_version)" = 8 ] || fail "a step-4 v$version database must upgrade: $(cat "$tmp/err")"
+  [ "$(sqlite3 "$db" "SELECT batch_id||' '||head_oid||' '||event_id FROM ci_batches")" = "step4-batch $head_a step4-event" ] || fail "a step-4 v$version upgrade must keep its pulsed batches"
+  [ "$(sqlite3 "$db" "SELECT intent_id||' '||state||' '||wrapper_host_id FROM queue_items")" = "step4-intent outcome-unknown legacy-coordinator" ] || fail "a step-4 v$version upgrade must keep its queue and mark its attempt legacy"
+  [ "$(sqlite3 "$db" "SELECT group_concat(batch_id) FROM fenced_ci_batches")" = "${fenced:+fenced-batch}" ] || fail "a step-4 v$version upgrade must keep its fenced batches"
+  coord enroll '{"request_id":"bind-step4","home_id":"step4","repos":["owner/repo"],"host_id":"step4-host"}' > /dev/null || fail "a step-4 v$version participant must bind its host after upgrade"
+  [ "$(field "$(coord init)" schema_version)" = 8 ] || fail "a step-4 v$version database must stay at the current schema on a second init"
+done
+pass 'step-4 v3 and v4 databases upgrade through the append-only migrations with their data intact'
 
 if [ ! -e /etc/machine-id ] && [ "$(uname -s)" = Darwin ]; then
   mkdir -p "$tmp/ioreg-fail" "$tmp/ioreg-empty"
@@ -335,7 +357,7 @@ aborted=$(FM_COORD_AUTHORITY_TOKEN="$authority_token" coord queue-operator-abort
 [ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
 reject queue-operator-abort "$abort_payload" 'an unauthenticated replay must not return the authority receipt'
 operator_identity=$(authority_identity)
-field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]==sys.argv[1] and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' "$operator_identity" || fail 'operator abort must record its authenticated local account and reason'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]==sys.argv[1] and e["payload"]["reason"]=="wrapper lost" for e in json.load(sys.stdin)["events"])' "$operator_identity" || fail 'operator abort must record its authenticated local account and reason'
 kill "$live_wrapper"
 wait "$live_wrapper" 2> /dev/null || true
 pass 'a stuck wrapper never auto-releases; only the enrolled authority can abort'
@@ -396,7 +418,7 @@ PYTHONPATH="$tmp/nopasswd" FM_COORD_AUTHORITY_TOKEN="$authority_token" coord ini
 [ "$(enrolled_events)" = 1 ] || fail 'first token on an initialized v3 database must enroll with one event'
 nopasswd_identity=$(PYTHONPATH="$tmp/nopasswd" authority_identity)
 [ "$nopasswd_identity" = "@authority:uid:$(id -u)" ] || fail 'a UID without a passwd entry must fall back to the uid account name'
-field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="authority-enrolled" and e["payload"]["actor"]==sys.argv[1] for e in ast.literal_eval(sys.stdin.read()))' "$nopasswd_identity" || fail 'enrollment without a passwd entry must record the numeric-UID authority identity'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="authority-enrolled" and e["payload"]["actor"]==sys.argv[1] for e in json.load(sys.stdin)["events"])' "$nopasswd_identity" || fail 'enrollment without a passwd entry must record the numeric-UID authority identity'
 FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
 [ "$(enrolled_events)" = 1 ] || fail 'repeating enrollment with the same token must be idempotent'
 FM_COORD_AUTHORITY_TOKEN=other-authority-credential-0123456789abcdef reject init '{}' 'init must never replace an enrolled token'

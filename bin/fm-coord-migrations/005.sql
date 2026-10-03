@@ -1,1 +1,4 @@
-UPDATE participants SET host_id=CASE WHEN host_id=:legacy_host THEN :machine_host ELSE NULL END WHERE host_id IS NOT NULL;
+ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER;
+ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER;
+ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT;
+ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT;

@@ -615,23 +615,26 @@ class Adapter:
             del self.state["requests"][key]
             prior = None
         answered = prior is not None and "reply" in prior
-        if answered and prior["reply"].get("ok") is True and task.get("pending_ci") == batch_id:
-            # replay received this batch's authorization; hand it to the worker once.
-            task.pop("pending_ci")
-            self.save()
-            return
-        self.required(task["repo"], not answered, f"batch {batch_id} pulse was already requested")
-        if answered:
+        # replay may have received this batch's authorization; it is handed to the worker once.
+        delivered = answered and prior["reply"].get("ok") is True and task.get("pending_ci") == batch_id
+        self.required(task["repo"], not answered or delivered, f"batch {batch_id} pulse was already requested")
+        if answered and not delivered:
             return
         task["worktree"] = worktree
         task["pending_ci"] = batch_id
         self.save()
-        # The batch is authorized only for the head the worker is about to validate.
+        # Every pre-ci, a replayed authorization included, reverifies the live lease and the exact admitted head.
         live = self.ci_ready(task_id, worktree)
         if self.reset:
             return
-        self.required(task["repo"], bool(live), f"{task_id} CI pulse needs a live claim on the published HEAD")
+        admitted = prior["payload"]["head_oid"] if prior else task.get("published_head")
+        live = live if admitted == task.get("published_head") else None
+        self.required(task["repo"], bool(live), f"{task_id} CI pulse needs a live claim on the admitted published HEAD")
         if not live:
+            return
+        if delivered:
+            task.pop("pending_ci")
+            self.save()
             return
         payload = {k: v for k, v in prior["payload"].items() if k != "request_id"} if prior else {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id}
         receipt = self.send(key, "pulse-batch", payload)

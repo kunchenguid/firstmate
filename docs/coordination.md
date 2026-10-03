@@ -129,18 +129,19 @@ The database is authoritative; unrestricted status prose and notification cursor
 Schema versions 1 through 8 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity and the authority credential digest; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
-Version 3 adds recorded wrapper identity and attempt time to queue items.
-It also recognizes the complete set of those columns in previously patched version-2 databases, while refusing a partial or incompatible set for manual repair.
-Version 4 binds participant homes to host IDs and records whether a wrapper was local or remote, plus any remote exit attestation.
+Version 3 adds one CI pulse authorization per `(repo, base, batch_id)`.
+Version 4 adds fenced CI batch identities that manual recovery restores from the marker.
+Version 5 adds recorded wrapper identity and attempt time to queue items.
+It also recognizes the complete set of those columns in previously patched databases, while refusing a partial or incompatible set for manual repair.
+Version 6 binds participant homes to host IDs and records whether a wrapper was local or remote, plus any remote exit attestation.
 Earlier active attempts are classified as local because all prior attempts required a coordinator-local PID.
 Existing participants without a host ID must bind one through `enroll` before a new attempt; a bound host ID cannot change.
-Version 5 replaces the hostname with a durable machine identity, a 32-character lowercase hexadecimal `/etc/machine-id` on Linux or `IOPlatformUUID` on macOS, so a hostname change cannot turn a same-host home remote; the coordinator refuses to initialize or enroll a same-host home when that identity is missing, empty, `uninitialized`, malformed, or unreadable through `ioreg`.
-The migration rebinds a participant whose version-4 host ID equals the coordinator's current hostname to the machine identity and clears every other host ID, so each such home must bind again once through `enroll` before its next attempt; the adapter's `attempt` command does this itself when the coordinator refuses for a missing host ID, enrolling again once and retrying the attempt once.
+Version 7 replaces the hostname with a durable machine identity, a 32-character lowercase hexadecimal `/etc/machine-id` on Linux or `IOPlatformUUID` on macOS, so a hostname change cannot turn a same-host home remote; the coordinator refuses to initialize or enroll a same-host home when that identity is missing, empty, `uninitialized`, malformed, or unreadable through `ioreg`.
+The migration rebinds a participant whose version-6 host ID equals the coordinator's current hostname to the machine identity and clears every other host ID, so each such home must bind again once through `enroll` before its next attempt; the adapter's `attempt` command does this itself when the coordinator refuses for a missing host ID, enrolling again once and retrying the attempt once.
 It leaves recorded attempts, including their local or remote classification and host ID, unchanged.
-Version 6 adds one CI pulse authorization per `(repo, base, batch_id)`.
-Version 7 adds fenced CI batch identities that manual recovery restores from the marker.
-Version 8 adds per-repository CI admission capacity and the queued or active CI heads it governs.
-A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
+Version 8 adds per-repository CI admission capacity with its slot lease, and the queued or active CI heads it governs.
+Published migrations are append-only: a schema change adds a higher-numbered migration and never renumbers or edits a published one, and a column a migration adds is skipped when the table already has it, so an existing database upgrades with its receipts, allocation identities, and CI batches intact.
+Databases created by the step-3 adapter branch or by an earlier head of the step-4 change, which numbered these migrations differently, are not supported and must be recreated.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
 Transactions contain no network call, editor work, CI run or LLM wait.
@@ -176,9 +177,12 @@ For a remote home, the authenticated adapter supplies `wrapper_start` along with
 `queue-wrapper-exited` includes `request_id`, `intent_id`, `home_id`, participant `generation`, `slot_generation`, `attempt_event_id`, `wrapper_host_id`, `wrapper_pid`, and `wrapper_start` from that remote attempt, plus `exit_verified_host_id` from the participant adapter.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `pulse-batch` accepts the current writer claim, `intent_id`, published `head_oid`, and a stable `batch_id`; a second request for that batch receives `batch-already-pulsed`.
-CI admission capacity is opt-in per repository and base and off by default: until `ci-capacity-set {"request_id":...,"repo":"owner/repo","base":"main","capacity":4}` is run, every `pulse-batch` is admitted at once.
-With a capacity, `pulse-batch` reserves an active-head slot for that immutable head before authorizing it; when every slot is taken it queues the head and replies `admitted:false` with its queue `position`, and a second batch for a head that already holds or awaits a slot receives `head-already-admitted`.
-A head keeps its slot, even after its run turns red or its claim ends, until `ci-complete {"request_id":...,"repo":...,"base":...,"head_oid":...,"conclusion":"success|failure|cancelled|timed_out"}` reports a terminal run; that releases the slot and admits the oldest queued heads into the free slots, each with one `ci-pulse-authorized` event.
+CI admission capacity is opt-in per repository and off by default: until `ci-capacity-set {"request_id":...,"repo":"owner/repo","capacity":4,"ttl_seconds":3600}` is run, every `pulse-batch` is admitted at once.
+The capacity counts every base ref of the repository together, because they share its runners; `ttl_seconds` is optional and defaults to 3600.
+With a capacity, `pulse-batch` reserves an active-head slot for that immutable head before authorizing it; when every slot is taken it queues the head and replies `admitted:false` with its queue `position`, and a second batch for a head that holds, awaits, or ever held a slot in that repository receives `head-already-admitted`, so a completed run never pulses its head again.
+A head keeps its slot, even after its run turns red or its claim ends, until its run completes or its slot lease lapses.
+`queue-checks` that records the head's required checks green completes its run; `ci-complete {"request_id":...,"repo":...,"head_oid":...,"conclusion":"success|failure|cancelled|timed_out"}` reports any other terminal run; and a slot held longer than `ttl_seconds` is released as `lease-expired` on the repository's next `pulse-batch`, `ci-complete`, or `ci-capacity-set`, so a lost completion cannot hold a slot forever.
+Each release emits `ci-completed` and admits the oldest queued heads into the free slots, each with one `ci-pulse-authorized` event; a queued head whose intent no longer holds an active claim or whose published head has moved on is dropped with `ci-pulse-dropped` instead.
 The first `pulse-batch` for a promoted batch returns that authorization with `admitted:true`; a lost reply replays it by request ID, and any later request receives `batch-already-pulsed`, so a duplicate never pulses twice.
 `merge-guard` accepts a PR URL and head OID and confirms an active attempting slot, current writer claim, and exact queued head.
 `inspect` gives a small state summary for operators.
@@ -204,6 +208,7 @@ The launch brief of every ship task in a coordinated home gives the same `pre-pu
 While an amendment is refused or pending, the head stays unpublished and both `pre-push` and `scope-amend` remain pending in `view`.
 `pre-ci TASK [BATCH [WORKTREE]]` checks the same fence and records one authorization for the stable batch ID before a `ci:batch` request; omitting `BATCH` uses the task ID.
 It refuses to pulse, and keeps its pending checkpoint, while the worktree HEAD differs from the published head, so CI is never authorized for an older head.
+Every `pre-ci`, including one that hands over an authorization `replay` received, rechecks the live lease and that the worktree HEAD is the exact head the batch was admitted for; an expired lease or a moved HEAD refuses that batch, and the task must run `pre-push` again and pulse a new batch.
 When the repository's CI capacity is full, `pre-ci` reports the batch's queue position and keeps the checkpoint pending (an enforced repository refuses); rerunning `pre-ci` for the same batch polls with a fresh request and clears the checkpoint once the batch is admitted.
 `check` returns the intent's latest central head, and the adapter refreshes its local published-head cache from it before comparing, so a lost `publish-head` reply cannot let an older worktree HEAD pass.
 `pre-ci` without a worktree uses the task's recorded worktree and refuses when none is recorded; `replay` skips a pending `pre-ci` with no recorded worktree and warns.

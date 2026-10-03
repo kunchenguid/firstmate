@@ -1659,11 +1659,15 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
+// Pi 1.0.1 renamed the exporter's lookup from getToolDefinition to getToolRenderers;
+// a tool definition carries the renderers either name resolves to.
+const findExportTool = (name) => tools.find((tool) => tool.name === name);
+const exportToolLookup = { getToolDefinition: findExportTool, getToolRenderers: findExportTool };
 async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    ...exportToolLookup,
     theme,
     cwd: process.cwd(),
   });
@@ -1694,7 +1698,7 @@ getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  ...exportToolLookup,
   theme,
   cwd: process.cwd(),
 });

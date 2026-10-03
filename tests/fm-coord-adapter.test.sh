@@ -185,9 +185,10 @@ PY
 adapter "$tmp/codex" pre-ci codex batch-185 "$repo" > /dev/null 2> "$tmp/ci.err" || fail 'current writer CI check must complete'
 [ ! -s "$tmp/ci.err" ] || fail 'current writer CI check must not warn'
 adapter "$tmp/codex" heartbeat codex > /dev/null 2> "$tmp/heartbeat.err" || fail 'active worker heartbeat must complete'
-python3 - "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'heartbeat must renew the claim centrally'
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$tmp/outbox.json" <<'PY' || fail 'heartbeat must renew the claim centrally'
 import json,sys
-events=json.loads(sys.argv[1])['events']
+events=json.load(open(sys.argv[1]))['events']
 assert any(event['type']=='lease-renewed' for event in events)
 PY
 pass 'undeclared write requests amendment before push; current writer checks before CI'
@@ -537,7 +538,7 @@ coord manifest-set '{"request_id":"manifest-attempt","repo":"owner/repo","base":
 head=$(git -C "$repo" rev-parse HEAD)
 # Prepare TASK in HOME up to awaiting-checks with the adapter's own claim, PR number $3; prints the slot generation.
 prepare_slot() {
-  local state claim generation base_oid common slot
+  local state claim base_oid common slot
   state=$tmp/$1/state/fm-coord-adapter.json
   claim=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); t=s["tasks"][sys.argv[2]]; print("\"intent_id\":\"%s\",\"home_id\":\"%s\",\"generation\":%s,\"claim_id\":\"%s\",\"fence\":%s" % (t["intent_id"], sys.argv[2], s["requests"]["session"]["reply"]["generation"], t["claim"]["claim_id"], t["claim"]["fence"]))' "$state" "$1")
   base_oid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][sys.argv[2]]["base_oid"])' "$state" "$1")
@@ -557,8 +558,8 @@ make_home upgraded
 make_brief upgraded upgraded 201
 adapter "$tmp/upgraded" dispatch upgraded "$repo" "$repo" "$tmp/upgraded.brief" branch/upgraded claude > /dev/null 2>&1 || fail 'pre-migration dispatch must complete'
 gates=$(prepare_slot upgraded 201)
-# Simulate a v4 database whose binding is not the coordinator hostname, then upgrade it: migration 005 clears that host ID.
-sqlite3 "$db" "UPDATE participants SET host_id='pre-migration-hostname' WHERE home_id='upgraded'; DROP TABLE ci_heads; DROP TABLE ci_capacity; DROP TABLE fenced_ci_batches; DROP TABLE ci_batches; PRAGMA user_version=4;"
+# Simulate a v6 database whose binding is not the coordinator hostname, then upgrade it: migration 007 clears that host ID.
+sqlite3 "$db" "UPDATE participants SET host_id='pre-migration-hostname' WHERE home_id='upgraded'; DROP TABLE ci_heads; DROP TABLE ci_capacity; PRAGMA user_version=6;"
 coord init > /dev/null
 [ "$(host_of upgraded)" = None ] || fail 'migration must keep treating a non-hostname v4 binding as untrusted'
 sleep 600 &

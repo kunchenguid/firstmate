@@ -38,7 +38,7 @@ def pulse(name, batch, request_id):
     return coord("pulse-batch", {**owner, "request_id": request_id, "head_oid": head, "batch_id": batch})
 def complete(batch, conclusion, request_id, ok=True):
     owner, head = live[batch]
-    return coord("ci-complete", {"request_id": request_id, "repo": "owner/repo", "base": "main", "head_oid": head, "conclusion": conclusion}, ok)
+    return coord("ci-complete", {"request_id": request_id, "repo": "owner/repo", "head_oid": head, "conclusion": conclusion}, ok)
 
 # Off by default: with no configured capacity every head is admitted at once.
 for i in range(1, 6):
@@ -46,7 +46,7 @@ for i in range(1, 6):
     assert pulse(f"ci-{i}", f"ci-{i}", f"pulse-ci-{i}")["admitted"] is True
 assert len(authorized()) == 5 and heads("active") == [] and heads("queued") == []
 
-coord("ci-capacity-set", {"request_id": "capacity", "repo": "owner/repo", "base": "main", "capacity": 4})
+coord("ci-capacity-set", {"request_id": "capacity", "repo": "owner/repo", "capacity": 4})
 for i in range(6, 77):
     intent(i)
 replies = [pulse(f"ci-{i}", f"ci-{i}", f"pulse-ci-{i}") for i in range(6, 77)]
@@ -82,6 +82,8 @@ while order:
     order.extend(done["admitted"])
     assert len(done["admitted"]) <= 1 and len(heads("active")) <= 4
     step += 1
+# A completed immutable head is never admitted again under a new batch ID.
+assert pulse("ci-7", "ci-7-rerun", "pulse-ci-7-rerun")["reason"] == "head-already-admitted"
 granted = authorized()
 assert len(granted) == 76 and len(set(granted)) == 76, len(granted)
 assert granted[5:] == [f"ci-{i}" for i in range(6, 77)]
@@ -97,13 +99,13 @@ git -C "$repo" remote add origin git@github.com:owner/gated.git
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m base
 git -C "$repo" update-ref refs/remotes/origin/main HEAD
 adapter() { FM_HOME=$1 python3 "$ROOT/bin/fm-coord-adapter.py" "${@:2}"; }
-for name in x y; do
+for name in x y z; do
   mkdir -p "$tmp/$name/config"
   printf '{"mode":"shadow","home_id":"%s","repos":["owner/gated"],"enforce_repos":["owner/gated"],"db":"%s"}\n' "$name" "$db" > "$tmp/$name/config/coordination.json"
   printf 'Coordination resources: [{"type":"file","name":"src/%s.py"}]\n' "$name" > "$tmp/$name.brief"
   adapter "$tmp/$name" dispatch "$name" "$repo" "$repo" "$tmp/$name.brief" "branch/$name" codex > /dev/null || fail "$name dispatch must be admitted"
 done
-coord ci-capacity-set '{"request_id":"capacity-gated","repo":"owner/gated","base":"main","capacity":1}' > /dev/null
+coord ci-capacity-set '{"request_id":"capacity-gated","repo":"owner/gated","capacity":1}' > /dev/null
 adapter "$tmp/x" pre-push x "$repo" > /dev/null || fail 'x must publish its head'
 adapter "$tmp/x" pre-ci x batch-x "$repo" > /dev/null || fail 'the first head must take the free CI slot'
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m y
@@ -116,30 +118,59 @@ if adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'a queued batch must stay refused until a slot completes'
 fi
 head_x=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["x"]["published_head"])' "$tmp/x/state/fm-coord-adapter.json")
-coord ci-complete "$(printf '{"request_id":"complete-x","repo":"owner/gated","base":"main","head_oid":"%s","conclusion":"failure"}' "$head_x")" > /dev/null
+coord ci-complete "$(printf '{"request_id":"complete-x","repo":"owner/gated","head_oid":"%s","conclusion":"failure"}' "$head_x")" > /dev/null
 # The poll after admission lost its reply; replay then receives the authorization.
-python3 - "$tmp/y/state/fm-coord-adapter.json" <<'PY'
+lose_poll() {
+  python3 - "$tmp/$1/state/fm-coord-adapter.json" "$1" <<'PY'
 import json,sys
-path=sys.argv[1]
+path,name=sys.argv[1:3]
 state=json.load(open(path))
-task=state['tasks']['y']
-live={'home_id':'y','generation':state['requests']['session']['reply']['generation'],'claim_id':task['claim']['claim_id'],'fence':task['claim']['fence']}
-state['requests']['y:pulse:batch-y']={'op':'pulse-batch','payload':{**live,'intent_id':task['intent_id'],'head_oid':task['published_head'],'batch_id':'batch-y','request_id':'lost-poll'}}
-task['pending_ci']='batch-y'
+task=state['tasks'][name]
+live={'home_id':name,'generation':state['requests']['session']['reply']['generation'],'claim_id':task['claim']['claim_id'],'fence':task['claim']['fence']}
+state['requests'][f'{name}:pulse:batch-{name}']={'op':'pulse-batch','payload':{**live,'intent_id':task['intent_id'],'head_oid':task['published_head'],'batch_id':f'batch-{name}','request_id':f'lost-poll-{name}'}}
+task['pending_ci']=f'batch-{name}'
 json.dump(state,open(path,'w'))
 PY
-adapter "$tmp/y" replay > /dev/null 2>&1 || fail 'replay must resend the lost CI poll'
+  adapter "$tmp/$1" replay > /dev/null 2>&1 || fail 'replay must resend the lost CI poll'
+}
+lose_poll y
+# A replayed authorization is never enough alone: a worktree HEAD moved off the admitted head refuses.
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m moved
+if adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err"; then
+  fail 'a replayed CI authorization must refuse a worktree HEAD moved off the admitted head'
+fi
+git -C "$repo" reset -q --hard HEAD~1
 adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err" || fail "an admitted batch whose authorization reached replay must still authorize its pulse: $(cat "$tmp/err")"
 if adapter "$tmp/y" pre-ci y batch-y "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'an admitted batch must not pulse twice'
 fi
-python3 - "$(coord outbox '{"limit":1000}')" "$(adapter "$tmp/y" view)" <<'PY' || fail 'the queued batch must be authorized exactly once and clear its CI checkpoint'
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+adapter "$tmp/y" view > "$tmp/view.json"
+python3 - "$tmp/outbox.json" "$tmp/view.json" <<'PY' || fail 'the queued batch must be authorized exactly once and clear its CI checkpoint'
 import json,sys
-events=[e['payload']['batch_id'] for e in json.loads(sys.argv[1])['events'] if e['type']=='ci-pulse-authorized' and e['payload']['repo']=='owner/gated']
+events=[e['payload']['batch_id'] for e in json.load(open(sys.argv[1]))['events'] if e['type']=='ci-pulse-authorized' and e['payload']['repo']=='owner/gated']
 assert events==['batch-x','batch-y'], events
-assert not json.loads(sys.argv[2])['local_tasks']['y'].get('pending_ci')
+assert not json.load(open(sys.argv[2]))['local_tasks']['y'].get('pending_ci')
 PY
 pass 'an enforced worker queued for CI capacity pulses once after the slot ahead completes'
+
+# A replayed authorization whose writer lease expired refuses until the writer is readmitted.
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m z
+adapter "$tmp/z" pre-push z "$repo" > /dev/null || fail 'z must publish its head'
+adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2>&1 && fail 'z must queue behind the active head'
+head_y=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]["y"]["published_head"])' "$tmp/y/state/fm-coord-adapter.json")
+coord ci-complete "$(printf '{"request_id":"complete-y","repo":"owner/gated","head_oid":"%s","conclusion":"success"}' "$head_y")" > /dev/null
+lose_poll z
+sqlite3 "$db" "UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'z:%' AND state='active'"
+if adapter "$tmp/z" pre-ci z batch-z "$repo" > /dev/null 2> "$tmp/err"; then
+  fail 'a replayed CI authorization must refuse once the writer lease has expired'
+fi
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$tmp/outbox.json" <<'PY' || fail 'the expired writer lease must be revoked centrally'
+import json,sys
+assert any(e['type']=='lease-expired' for e in json.load(open(sys.argv[1]))['events'])
+PY
+pass 'every pre-ci reverifies the live lease and exact admitted HEAD, including a replayed authorization'
 
 # Recovery from an older backup must not admit and pulse again a head promoted after that backup.
 python3 - "$ROOT/bin/fm-coord.sh" "$db" "$tmp/older.sqlite3" <<'PY' || fail 'fenced recovery must not re-admit a head promoted after the backup'
@@ -151,7 +182,7 @@ def coord(op, payload):
     return json.loads(run.stdout)
 coord("enroll", {"request_id": "enroll-r", "home_id": "r", "repos": ["owner/rec"]})
 gen = coord("session", {"request_id": "session-r", "home_id": "r"})["generation"]
-coord("ci-capacity-set", {"request_id": "capacity-rec", "repo": "owner/rec", "base": "main", "capacity": 1})
+coord("ci-capacity-set", {"request_id": "capacity-rec", "repo": "owner/rec", "capacity": 1})
 for i in (1, 2):
     name = f"rec-{i}"
     coord("submit", {"request_id": f"submit-{name}", "intent_id": name, "home_id": "r", "generation": gen, "repo": "owner/rec", "base": "main", "base_oid": "0" * 40, "branch": f"branch/{name}", "task_id": name, "goal": "ci", "resources": [{"type": "file", "name": f"src/{name}.py"}]})
@@ -161,12 +192,72 @@ for i in (1, 2):
     coord("pulse-batch", {**owner, "request_id": f"pulse-{name}", "head_oid": f"e{i:039x}", "batch_id": name})
 with sqlite3.connect(db) as source, sqlite3.connect(older) as target:
     source.backup(target)
-assert coord("ci-complete", {"request_id": "complete-rec-1", "repo": "owner/rec", "base": "main", "head_oid": f"e{1:039x}", "conclusion": "success"})["admitted"] == ["rec-2"]
+assert coord("ci-complete", {"request_id": "complete-rec-1", "repo": "owner/rec", "head_oid": f"e{1:039x}", "conclusion": "success"})["admitted"] == ["rec-2"]
 subprocess.run(["mv", older, db], check=True)
 coord("recover", {"confirm": "FENCE_AND_REENROLL"})
 assert [h["batch_id"] for h in coord("inspect", {})["ci_heads"] if h["repo"] == "owner/rec"] == ["rec-1"]
-assert coord("ci-complete", {"request_id": "complete-rec-1-restored", "repo": "owner/rec", "base": "main", "head_oid": f"e{1:039x}", "conclusion": "success"})["admitted"] == []
+assert coord("ci-complete", {"request_id": "complete-rec-1-restored", "repo": "owner/rec", "head_oid": f"e{1:039x}", "conclusion": "success"})["admitted"] == []
 events = coord("outbox", {"limit": 1000})["events"]
 assert sum(e["type"] == "ci-pulse-authorized" and e["payload"]["batch_id"] == "rec-2" for e in events) == 0
 PY
 pass 'fenced recovery never re-admits a CI head promoted after the backup'
+
+# Capacity is per repository across base refs; queued promotion rechecks the writer; an observed green
+# run and an expired slot lease each admit the next head with no manual ci-complete.
+python3 - "$ROOT/bin/fm-coord.sh" "$db" <<'PY' || fail 'CI slots must be shared across bases, recheck queued writers, and free on observed completion or lease expiry'
+import json, subprocess, sys, time
+cmd, db = sys.argv[1], sys.argv[2]
+def coord(op, payload):
+    run = subprocess.run([cmd, "--db", db, op, json.dumps(payload)], capture_output=True, text=True)
+    assert run.returncode == 0, (op, payload, run.stderr)
+    return json.loads(run.stdout)
+def heads(state):
+    return [h["batch_id"] for h in coord("inspect", {})["ci_heads"] if h["repo"] == "owner/heal" and h["state"] == state]
+coord("enroll", {"request_id": "enroll-heal", "home_id": "heal", "repos": ["owner/heal"]})
+gen = coord("session", {"request_id": "session-heal", "home_id": "heal"})["generation"]
+coord("manifest-set", {"request_id": "manifest-heal", "repo": "owner/heal", "base": "main", "checks": ["Lint"]})
+coord("ci-capacity-set", {"request_id": "capacity-heal", "repo": "owner/heal", "capacity": 1})
+live = {}
+def intent(name, base="main"):
+    coord("submit", {"request_id": f"submit-{name}", "intent_id": name, "home_id": "heal", "generation": gen, "repo": "owner/heal", "base": base, "base_oid": "0" * 40, "branch": f"branch/{name}", "task_id": name, "goal": "ci", "resources": [{"type": "file", "name": f"src/{name}.py"}]})
+    grant = coord("claim", {"request_id": f"claim-{name}", "intent_id": name, "home_id": "heal", "generation": gen, "version": 1})
+    owner = {"home_id": "heal", "generation": gen, "claim_id": grant["claim_id"], "fence": grant["fence"], "intent_id": name}
+    head = name.encode().hex().ljust(40, "0")
+    coord("publish-head", {**owner, "request_id": f"head-{name}", "head_oid": head, "expected_previous_oid": None})
+    live[name] = (owner, head)
+def pulse(name, request_id=None):
+    owner, head = live[name]
+    return coord("pulse-batch", {**owner, "request_id": request_id or f"pulse-{name}-{time.monotonic_ns()}", "head_oid": head, "batch_id": name})
+for name, base in (("main-a", "main"), ("release-b", "release"), ("gone-c", "main"), ("main-d", "main")):
+    intent(name, base)
+assert pulse("main-a")["admitted"] is True
+assert pulse("release-b")["admitted"] is False, "a second base must share the repository's one CI slot"
+assert pulse("gone-c")["admitted"] is False and pulse("main-d")["admitted"] is False
+owner, _ = live["gone-c"]
+coord("release", {"request_id": "release-gone-c", **{k: owner[k] for k in ("home_id", "generation", "claim_id", "fence")}})
+
+# The merge path observes main-a's required checks green; that frees its slot for the oldest live queued head.
+owner, head = live["main-a"]
+coord("attach-pr", {**owner, "request_id": "pr-main-a", "pr_url": "https://github.com/owner/heal/pull/1"})
+coord("queue-ready", {**owner, "request_id": "ready-main-a", "head_oid": head, "priority": 0})
+slot = coord("queue-next", {"request_id": "next-main-a", "repo": "owner/heal", "base": "main"})["generation"]
+common = {**owner, "slot_generation": slot, "current_head_oid": head, "current_base_oid": "0" * 40}
+coord("queue-synced", {**common, "request_id": "sync-main-a", "head_contains_base": True})
+coord("queue-validated", {**common, "request_id": "validate-main-a", "validation_passed": True, "validation_id": "v-main-a"})
+coord("queue-checks", {**common, "request_id": "checks-main-a", "protection_available": False, "checks": [{"name": "Lint", "head_oid": head, "conclusion": "success"}]})
+assert heads("active") == ["release-b"] and heads("queued") == ["gone-c", "main-d"], (heads("active"), heads("queued"))
+assert pulse("release-b")["admitted"] is True
+
+# release-b's run never reports; under a shorter configured lease its slot lapses, the released gone-c is dropped, and main-d is admitted.
+time.sleep(2)
+assert coord("ci-capacity-set", {"request_id": "ttl-heal", "repo": "owner/heal", "capacity": 1, "ttl_seconds": 1})["admitted"] == ["main-d"]
+# Restore a long lease at once so main-d's own fresh slot cannot lapse before its poll.
+coord("ci-capacity-set", {"request_id": "ttl-restore", "repo": "owner/heal", "capacity": 1, "ttl_seconds": 3600})
+assert pulse("main-d")["admitted"] is True
+events = coord("outbox", {"limit": 1000})["events"]
+assert any(e["type"] == "ci-completed" and e["payload"]["batch_id"] == "release-b" and e["payload"]["conclusion"] == "lease-expired" for e in events)
+assert any(e["type"] == "ci-pulse-dropped" and e["payload"]["batch_id"] == "gone-c" for e in events)
+assert not any(e["type"] == "ci-pulse-authorized" and e["payload"]["batch_id"] == "gone-c" for e in events)
+assert heads("active") == ["main-d"] and heads("queued") == []
+PY
+pass 'CI capacity is shared across bases, skips stale queued writers, and frees slots on observed completion or lease expiry'

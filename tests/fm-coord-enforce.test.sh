@@ -84,10 +84,11 @@ state['tasks']['a']['pending_ci']=True
 json.dump(state,open(path,'w'))
 PY
 adapter "$tmp/a" pre-ci a batch-one > /dev/null 2> "$tmp/err" || fail "lost pulse reply must replay its stored central receipt: $(cat "$tmp/err")"
-python3 - "$(adapter "$tmp/a" view)" "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'lost pulse reply replay must clear the CI checkpoint without a second pulse'
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$(adapter "$tmp/a" view)" "$tmp/outbox.json" <<'PY' || fail 'lost pulse reply replay must clear the CI checkpoint without a second pulse'
 import json,sys
 assert not json.loads(sys.argv[1])['local_tasks']['a'].get('pending_ci')
-assert sum(e['type']=='ci-pulse-authorized' for e in json.loads(sys.argv[2])['events'])==1
+assert sum(e['type']=='ci-pulse-authorized' for e in json.load(open(sys.argv[2]))['events'])==1
 PY
 if adapter "$tmp/a" pre-ci a batch-one > "$tmp/out" 2> "$tmp/err"; then
   fail 'second pulse for the same batch must be refused'
@@ -155,10 +156,11 @@ fi
 case "$(cat "$tmp/err")" in *'older than authority marker'*) ;; *) fail 'restored DB refusal must name authority marker' ;; esac
 pass 'restored older database cannot re-grant superseded generations'
 coord recover '{"confirm":"FENCE_AND_REENROLL"}' > /dev/null || fail 'manual recovery must fence prior generations'
-python3 - "$tmp/newer-outbox.json" "$(coord outbox '{"limit":1000}')" "$lost_seq" <<'PY' || fail 'fenced recovery must not reissue an event sequence issued before the restore'
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$tmp/newer-outbox.json" "$tmp/outbox.json" "$lost_seq" <<'PY' || fail 'fenced recovery must not reissue an event sequence issued before the restore'
 import json,sys
 newer={e["event_id"] for e in json.load(open(sys.argv[1]))["events"]}
-events=json.loads(sys.argv[2])["events"]
+events=json.load(open(sys.argv[2]))["events"]
 lost=int(sys.argv[3])
 assert all(e["event_id"] in newer for e in events if e["seq"]<=lost)
 recovered=[e for e in events if e["type"] in {"authority-manually-recovered","lease-revoked"} and e["event_id"] not in newer]
@@ -305,9 +307,10 @@ pass 'the forge, not a stale task worktree, decides whether the merge head conta
 result refused > /dev/null 2> "$tmp/err" || fail "a refused merge must report its outcome: $(cat "$tmp/err")"
 [ "$(slot_state)" = 'outcome-unknown slot:outcome-unknown' ] || fail "a wrapper-reported refusal must stay outcome-unknown while the wrapper may still act: $(slot_state)"
 FM_COORD_QUIET_SECONDS=0 land > /dev/null 2> "$tmp/err" || fail "the next merge run must settle the exited attempt from the forge and re-queue: $(cat "$tmp/err")"
-python3 - "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'the prior attempt must settle refused before the new attempt'
+coord outbox '{"limit":1000}' > "$tmp/outbox.json"
+python3 - "$tmp/outbox.json" <<'PY' || fail 'the prior attempt must settle refused before the new attempt'
 import json,sys
-assert [e['type'] for e in json.loads(sys.argv[1])['events'] if e['type'] in {'merge-refused','merge-attempted'}][-2:]==['merge-refused','merge-attempted']
+assert [e['type'] for e in json.load(open(sys.argv[1]))['events'] if e['type'] in {'merge-refused','merge-attempted'}][-2:]==['merge-refused','merge-attempted']
 PY
 [ "$(slot_state)" = 'attempting slot:attempting' ] || fail "re-queued task must hold the attempting slot again: $(slot_state)"
 pass 'a refused merge settles from the forge once its wrapper exits and releases the slot for the next attempt'

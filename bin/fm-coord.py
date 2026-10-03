@@ -27,6 +27,7 @@ NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\Z")
 RECOVERY_GAP = 10
+CI_SLOT_TTL_SECONDS = 3600
 
 
 class Refusal(Exception):
@@ -511,6 +512,11 @@ def queue_operation(db, op, p):
         require(not missing, "required checks missing or non-green: " + ", ".join(missing))
         db.execute("UPDATE queue_items SET manifest_version=?,updated_at=? WHERE intent_id=?", (manifest["version"], stamp(), item["intent_id"]))
         event_id = emit(db, "checks-passed", request_id, {"intent_id": item["intent_id"], "manifest_version": manifest["version"], "required": sorted(required)})
+        # Observed green required checks are this head's terminal CI run, so its admission slot passes to the next queued head.
+        held = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND state='active'", (item["repo"], item["head_oid"])).fetchone()
+        if held is not None:
+            complete_ci(db, request_id, held, "success")
+            promote_ci(db, request_id, item["repo"])
         return {"ok": True, "state": "awaiting-checks", "manifest_version": manifest["version"], "event_id": event_id}
     if op == "queue-attempt":
         manifest = db.execute("SELECT version FROM check_manifests WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"])).fetchone()
@@ -595,7 +601,7 @@ def forge_landing(p):
 
 
 def queue_position(db, row):
-    return db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND base_ref=? AND state='queued' AND seq<=?", (row["repo"], row["base_ref"], row["seq"])).fetchone()[0]
+    return db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND state='queued' AND seq<=?", (row["repo"], row["seq"])).fetchone()[0]
 
 
 def authorize_ci(db, request_id, key, batch_id, intent_id, head):
@@ -604,16 +610,31 @@ def authorize_ci(db, request_id, key, batch_id, intent_id, head):
     return event_id
 
 
-def promote_ci(db, request_id, key):
-    """Admit the oldest queued heads into free CI slots, each exactly once."""
-    capacity = db.execute("SELECT capacity FROM ci_capacity WHERE repo=? AND base_ref=?", key).fetchone()
+def complete_ci(db, request_id, row, conclusion):
+    db.execute("DELETE FROM ci_heads WHERE seq=?", (row["seq"],))
+    return emit(db, "ci-completed", request_id, {"repo": row["repo"], "base": row["base_ref"], "batch_id": row["batch_id"], "head_oid": row["head_oid"], "conclusion": conclusion})
+
+
+def promote_ci(db, request_id, repo):
+    """Free the repository's CI slots whose lease lapsed, then admit the oldest queued live heads, each exactly once."""
+    capacity = db.execute("SELECT capacity,ttl_seconds FROM ci_capacity WHERE repo=?", (repo,)).fetchone()
+    if capacity is None:
+        return []
+    for row in db.execute("SELECT * FROM ci_heads WHERE repo=? AND state='active' AND admitted_at<=?", (repo, int(time.time()) - capacity["ttl_seconds"])).fetchall():
+        complete_ci(db, request_id, row, "lease-expired")
     admitted = []
-    while capacity is not None and db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND base_ref=? AND state='active'", key).fetchone()[0] < capacity[0]:
-        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND base_ref=? AND state='queued' ORDER BY seq LIMIT 1", key).fetchone()
+    while db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND state='active'", (repo,)).fetchone()[0] < capacity["capacity"]:
+        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND state='queued' ORDER BY seq LIMIT 1", (repo,)).fetchone()
         if row is None:
             break
-        event_id = authorize_ci(db, request_id, key, row["batch_id"], row["intent_id"], row["head_oid"])
-        db.execute("UPDATE ci_heads SET state='active',event_id=? WHERE seq=?", (event_id, row["seq"]))
+        latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (row["intent_id"],)).fetchone()
+        if latest is None or latest[0] != row["head_oid"] or db.execute("SELECT 1 FROM claims WHERE intent_id=? AND state='active'", (row["intent_id"],)).fetchone() is None:
+            # A queued head whose writer lost its claim or moved on is never admitted.
+            db.execute("DELETE FROM ci_heads WHERE seq=?", (row["seq"],))
+            emit(db, "ci-pulse-dropped", request_id, {"repo": repo, "base": row["base_ref"], "batch_id": row["batch_id"], "head_oid": row["head_oid"]})
+            continue
+        event_id = authorize_ci(db, request_id, (repo, row["base_ref"]), row["batch_id"], row["intent_id"], row["head_oid"])
+        db.execute("UPDATE ci_heads SET state='active',event_id=?,admitted_at=? WHERE seq=?", (event_id, int(time.time()), row["seq"]))
         admitted.append(row["batch_id"])
     return admitted
 
@@ -630,6 +651,7 @@ def run_operation(db, op, p):
         latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (intent_id,)).fetchone()
         require(latest is not None and latest[0] == head, "CI pulse requires the current published writer head")
         key = (intent["repo"], intent["base_ref"])
+        promote_ci(db, request_id, key[0])
         held = db.execute("SELECT * FROM ci_heads WHERE repo=? AND base_ref=? AND batch_id=?", (*key, batch_id)).fetchone()
         if held is not None:
             require(held["intent_id"] == intent_id and held["head_oid"] == head, "batch is bound to another head")
@@ -642,35 +664,36 @@ def run_operation(db, op, p):
         existing = db.execute("SELECT event_id FROM ci_batches WHERE repo=? AND base_ref=? AND batch_id=? UNION ALL SELECT NULL FROM fenced_ci_batches WHERE repo=? AND base_ref=? AND batch_id=?", (*key, batch_id) * 2).fetchone()
         if existing:
             return {"ok": False, "reason": "batch-already-pulsed", "event_id": existing[0]}
-        capacity = db.execute("SELECT capacity FROM ci_capacity WHERE repo=? AND base_ref=?", key).fetchone()
+        capacity = db.execute("SELECT capacity FROM ci_capacity WHERE repo=?", (key[0],)).fetchone()
         if capacity is not None:
-            if db.execute("SELECT 1 FROM ci_heads WHERE repo=? AND base_ref=? AND head_oid=?", (*key, head)).fetchone():
+            # An immutable head is admitted once per repository; completing its run never frees it for another pulse.
+            if db.execute("SELECT 1 FROM ci_heads WHERE repo=? AND head_oid=? UNION ALL SELECT 1 FROM ci_batches WHERE repo=? AND head_oid=?", (key[0], head) * 2).fetchone():
                 return {"ok": False, "reason": "head-already-admitted"}
-            if db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND base_ref=? AND state='active'", key).fetchone()[0] >= capacity[0]:
+            if db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND state='active'", (key[0],)).fetchone()[0] >= capacity[0]:
                 emit(db, "ci-pulse-queued", request_id, {"repo": key[0], "base": key[1], "batch_id": batch_id, "intent_id": intent_id, "head_oid": head})
                 db.execute("INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state) VALUES(?,?,?,?,?,'queued')", (*key, batch_id, intent_id, head))
                 row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND base_ref=? AND batch_id=?", (*key, batch_id)).fetchone()
                 return {"ok": True, "admitted": False, "batch_id": batch_id, "position": queue_position(db, row)}
         event_id = authorize_ci(db, request_id, key, batch_id, intent_id, head)
         if capacity is not None:
-            db.execute("INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id) VALUES(?,?,?,?,?,'active',1,?)", (*key, batch_id, intent_id, head, event_id))
+            db.execute("INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id,admitted_at) VALUES(?,?,?,?,?,'active',1,?,?)", (*key, batch_id, intent_id, head, event_id, int(time.time())))
         return {"ok": True, "admitted": True, "batch_id": batch_id, "event_id": event_id}
     if op == "ci-capacity-set":
-        key = (token(p.get("repo"), "repo"), token(p.get("base"), "base"))
-        capacity = p.get("capacity")
+        repo = token(p.get("repo"), "repo")
+        capacity, ttl = p.get("capacity"), p.get("ttl_seconds", CI_SLOT_TTL_SECONDS)
         require(type(capacity) is int and capacity > 0, "capacity must be a positive integer")
-        db.execute("INSERT INTO ci_capacity(repo,base_ref,capacity) VALUES(?,?,?) ON CONFLICT(repo,base_ref) DO UPDATE SET capacity=excluded.capacity", (*key, capacity))
-        event_id = emit(db, "ci-capacity-set", request_id, {"repo": key[0], "base": key[1], "capacity": capacity})
-        return {"ok": True, "capacity": capacity, "admitted": promote_ci(db, request_id, key), "event_id": event_id}
+        require(type(ttl) is int and ttl > 0, "ttl_seconds must be a positive integer")
+        db.execute("INSERT INTO ci_capacity(repo,capacity,ttl_seconds) VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET capacity=excluded.capacity,ttl_seconds=excluded.ttl_seconds", (repo, capacity, ttl))
+        event_id = emit(db, "ci-capacity-set", request_id, {"repo": repo, "capacity": capacity, "ttl_seconds": ttl})
+        return {"ok": True, "capacity": capacity, "ttl_seconds": ttl, "admitted": promote_ci(db, request_id, repo), "event_id": event_id}
     if op == "ci-complete":
-        key = (token(p.get("repo"), "repo"), token(p.get("base"), "base"))
+        repo = token(p.get("repo"), "repo")
         head = oid(p.get("head_oid"), "head_oid")
         require(p.get("conclusion") in {"success", "failure", "cancelled", "timed_out"}, "conclusion must be a terminal CI state")
-        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND base_ref=? AND head_oid=? AND state='active'", (*key, head)).fetchone()
+        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND state='active'", (repo, head)).fetchone()
         require(row is not None, "head holds no active CI slot")
-        db.execute("DELETE FROM ci_heads WHERE seq=?", (row["seq"],))
-        event_id = emit(db, "ci-completed", request_id, {"repo": key[0], "base": key[1], "batch_id": row["batch_id"], "head_oid": head, "conclusion": p["conclusion"]})
-        return {"ok": True, "released": row["batch_id"], "admitted": promote_ci(db, request_id, key), "event_id": event_id}
+        event_id = complete_ci(db, request_id, row, p["conclusion"])
+        return {"ok": True, "released": row["batch_id"], "admitted": promote_ci(db, request_id, repo), "event_id": event_id}
     if op == "merge-guard":
         url = token(p.get("pr_url"), "pr_url")
         head = oid(p.get("head_oid"), "head_oid")
@@ -869,7 +892,7 @@ def run_operation(db, op, p):
         db.execute("UPDATE outbox SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE event_id=?", (stamp(), event_id))
         return {"ok": True, "event_id": event_id}
     if op == "inspect":
-        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,host_id,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")], "ci_capacity": [dict(r) for r in db.execute("SELECT * FROM ci_capacity ORDER BY repo,base_ref")], "ci_heads": [dict(r) for r in db.execute("SELECT * FROM ci_heads ORDER BY seq")]}
+        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,host_id,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")], "ci_capacity": [dict(r) for r in db.execute("SELECT * FROM ci_capacity ORDER BY repo")], "ci_heads": [dict(r) for r in db.execute("SELECT * FROM ci_heads ORDER BY seq")]}
     if op == "view":
         return {"ok": True,
                 "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,base_ref,branch,task_id,issue,state,version FROM intents WHERE state IN ('submitted','claimed') ORDER BY created_at,intent_id")],
@@ -927,7 +950,7 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                 try:
                     for target in range(version + 1, 9):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
-                        if target == 3:
+                        if target == 5:
                             expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
                             columns = {row["name"]: row["type"].upper() for row in db.execute("PRAGMA table_info(queue_items)")}
                             present = set(expected) & set(columns)
@@ -939,9 +962,13 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                                     if statement.strip():
                                         db.execute(statement)
                         else:
-                            params = {"legacy_host": socket.gethostname(), "machine_host": local_host_id()} if target == 5 else {}
+                            params = {"legacy_host": socket.gethostname(), "machine_host": local_host_id()} if target == 7 else {}
                             for statement in schema.read_text(encoding="utf-8").split(";"):
-                                if statement.strip():
+                                words = statement.split()
+                                # Published migrations are append-only, so a later one may meet a column an earlier lineage already added.
+                                if words[:2] == ["ALTER", "TABLE"] and words[3:5] == ["ADD", "COLUMN"] and any(row["name"] == words[5] for row in db.execute(f"PRAGMA table_info({words[2]})")):
+                                    continue
+                                if words:
                                     db.execute(statement, params)
                         if target == 1:
                             db.execute("INSERT INTO meta(key,value) VALUES('boot_id',?)", (boot_id(),))

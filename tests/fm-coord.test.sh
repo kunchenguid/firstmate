@@ -124,14 +124,14 @@ submit rename-free "$loser" "$loser_generation" '[{"type":"rename","from":"lib/f
 [ "$(field "$(claim rename-free "$loser" "$loser_generation")" ok)" = True ] || fail 'unrelated directory rename should grant'
 pass 'directory rename covers descendants on both paths'
 
-outbox_before=$(coord outbox '{"limit":1000}')
+coord outbox '{"limit":1000}' > "$tmp/outbox-before.json"
 event_id=$(field "$winner_result" event_id)
 coord ack "$(printf '{"request_id":"ack-grant","event_id":"%s"}' "$event_id")" > /dev/null
 coord ack "$(printf '{"request_id":"ack-grant","event_id":"%s"}' "$event_id")" > /dev/null
-outbox_after=$(coord outbox '{"limit":1000}')
-python3 - "$outbox_before" "$outbox_after" "$event_id" <<'PY' || fail 'outbox acknowledgment must preserve event identity and suppress delivered event'
+coord outbox '{"limit":1000}' > "$tmp/outbox-after.json"
+python3 - "$tmp/outbox-before.json" "$tmp/outbox-after.json" "$event_id" <<'PY' || fail 'outbox acknowledgment must preserve event identity and suppress delivered event'
 import json, sys
-before, after, event = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+before, after, event = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3]
 assert any(x['event_id'] == event for x in before['events'])
 assert not any(x['event_id'] == event for x in after['events'])
 PY

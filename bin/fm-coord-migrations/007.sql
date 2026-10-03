@@ -1,6 +1,1 @@
-CREATE TABLE fenced_ci_batches (
-  repo TEXT NOT NULL,
-  base_ref TEXT NOT NULL,
-  batch_id TEXT NOT NULL,
-  PRIMARY KEY (repo, base_ref, batch_id)
-);
+UPDATE participants SET host_id=CASE WHEN host_id=:legacy_host THEN :machine_host ELSE NULL END WHERE host_id IS NOT NULL;
