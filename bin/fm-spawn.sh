@@ -3072,13 +3072,13 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         coord_id=$(shell_quote "$ID")
         cat <<EOF
 
-# Advisory coordination for this task
+# Coordination for this task
 The local Firstmate enrolled this intent at dispatch when the coordinator was reachable.
 Before any push or /no-mistakes run, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-push $coord_id "\$PWD"\` from this task worktree.
-Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id\`.
+Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id BATCH_ID\` with the stable batch ID agreed by the integration owner.
 While actively working, execute \`FM_HOME=$coord_home python3 $coord_adapter heartbeat $coord_id\` about every 60 seconds to renew the claim.
 These calls only record and warn in shadow/advisory mode; report any warning in your ordinary task status so Firstmate can coordinate it.
-If the adapter command is missing or fails, report that visibly in task status; continue the selected delivery path.
+For an enforced repository, a failed adapter command stops that push or CI request until the owner explicitly readmits the intent; never treat an unreachable store as advisory.
 EOF
       fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -3196,13 +3196,15 @@ fi
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
-# Coordination is deliberately advisory in V1. A refusal, unavailable central
-# store, or missing adapter is visible but cannot veto the existing spawn gate.
+# The adapter keeps shadow repositories advisory and refuses dispatch for an
+# explicitly enforced repository until its claim is admitted.
 if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
   if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
-    echo "warning: $ID coordination adapter is missing; no intent or claim recorded" >&2
+    echo "error: $ID coordination adapter is missing; dispatch paused" >&2
+    exit 1
   elif ! FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" dispatch "$ID" "$PROJ_ABS" "$SOURCE_BRIEF" "$BRANCH" "$HARNESS"; then
-    echo "warning: $ID coordination dispatch failed; no claim is assumed" >&2
+    echo "error: $ID coordination dispatch refused; inspect the adapter reason before retrying" >&2
+    exit 1
   fi
 fi
 

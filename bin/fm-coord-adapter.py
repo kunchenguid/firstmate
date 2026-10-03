@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Best-effort local lifecycle adapter for the advisory coordination store.
+"""Local lifecycle adapter for advisory and opt-in enforced coordination.
 
 The config and on-disk request journal are described in docs/coordination.md.
 Every central mutation is journaled before invocation so a lost reply is replayed
@@ -23,7 +23,7 @@ OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 
 
 def warn(message):
-    print(f"fm-coord advisory: {message}", file=sys.stderr)
+    print(f"fm-coord: {message}", file=sys.stderr)
 
 
 def atomic_write(path, value):
@@ -81,6 +81,10 @@ class Adapter:
             raise ValueError("coordination home_id is required")
         if not isinstance(self.config.get("repos"), list) or not self.config["repos"]:
             raise ValueError("coordination repos must be nonempty")
+        enforced = self.config.get("enforce_repos", [])
+        if not isinstance(enforced, list) or any(repo not in self.config["repos"] for repo in enforced) or len(enforced) != len(set(enforced)):
+            raise ValueError("enforce_repos must be a unique subset of repos")
+        self.enforced_repos = set(enforced)
         db = self.config.get("db")
         remote = self.config.get("remote")
         if bool(db) == bool(remote):
@@ -100,6 +104,10 @@ class Adapter:
         self.lock_handle = self.lock.open("a+")
         fcntl.flock(self.lock_handle, fcntl.LOCK_EX)
         self.state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"requests": {}, "tasks": {}}
+
+    def required(self, repo, condition, message):
+        if not condition and repo in self.enforced_repos:
+            raise ValueError(f"{repo}: enforcement paused: {message}")
 
     def save(self):
         atomic_write(self.path, self.state)
@@ -158,7 +166,8 @@ class Adapter:
         if submitted is None:
             warn(f"{task_id}: intent pending; no claim granted")
             return task
-        claim = self.send(f"{task_id}:claim", "claim", {**common, "version": submitted["version"]})
+        attempt = task.get("claim_attempt", 0)
+        claim = self.send(f"{task_id}:claim" + (f":{attempt}" if attempt else ""), "claim", {**common, "version": submitted["version"]})
         if claim is None:
             warn(f"{task_id}: claim pending; no grant assumed")
         elif not claim["ok"]:
@@ -172,11 +181,12 @@ class Adapter:
         return task
 
     def dispatch(self, task_id, project, brief, branch, harness):
+        repo = self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
         if harness not in {"claude", "codex", "omp", "opencode"}:
             warn(f"{task_id}: {harness} has no coordination adapter; dispatch continues without a grant")
+            self.required(repo, False, f"{harness} has no coordination adapter")
             return
         resources, issue = declared(brief)
-        repo = self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
         if repo not in self.config["repos"]:
             raise ValueError(f"{repo} is outside coordination enrollment")
         base = self.config.get("base", "main")
@@ -192,6 +202,7 @@ class Adapter:
         elif (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue):
             raise ValueError(f"{task_id}: coordination declaration changed after submission")
         self.ensure_task(task_id)
+        self.required(repo, bool(task.get("claim", {}).get("ok")), f"{task_id} has no admitted claim")
 
     def live_claim(self, task_id):
         task = self.ensure_task(task_id)
@@ -213,8 +224,7 @@ class Adapter:
     def scope(self, task_id, worktree):
         task = self.state["tasks"].get(task_id)
         if not task:
-            warn(f"{task_id}: no local intent record for scope check")
-            return
+            raise ValueError(f"{task_id}: no local intent record for scope check")
         live = self.live_claim(task_id)
         paths = self.changed_paths(task, worktree)
         covered = lambda name: any((kind == "file" and value == name) or (kind == "directory" and (name == value or name.startswith(value + "/"))) for kind, value in task.get("resources", []))
@@ -225,7 +235,8 @@ class Adapter:
             self.save()
         if live and undeclared:
             payload = {**live, "intent_id": task["intent_id"], "version": task["version"], "resources": [{"type": kind, "name": value} for kind, value in task["resources"]] + [{"type": "file", "name": p} for p in undeclared if not covered(p)]}
-            key = f"{task_id}:amend:{task['version']}"
+            attempt = task.get("amend_attempt", 0)
+            key = f"{task_id}:amend:{task['version']}" + (f":{attempt}" if attempt else "")
             if key in self.state["requests"]:
                 prior = self.state["requests"][key]["payload"]
                 payload = {k: v for k, v in prior.items() if k != "request_id"}
@@ -240,6 +251,8 @@ class Adapter:
             elif amended:
                 for conflict in amended["conflicts"]:
                     warn(f"{task_id}: amendment conflict held by {conflict['home_id']} intent {conflict['intent_id']}")
+        self.required(task["repo"], bool(live), f"{task_id} has no current branch writer generation")
+        self.required(task["repo"], not task.get("pending_paths"), f"{task_id} has undeclared scope; re-admission required")
         if not live:
             return
         head = git(worktree, "rev-parse", "HEAD")
@@ -250,6 +263,7 @@ class Adapter:
                 task["published_head"] = head
                 task.pop("pending_head", None)
                 self.save()
+            self.required(task["repo"], reply is not None, f"{task_id} head publication is unconfirmed")
         else:
             task.pop("pending_head", None)
             self.save()
@@ -263,12 +277,63 @@ class Adapter:
             task = self.state["tasks"][task_id]
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
                 self.scope(task_id, task["worktree"])
-            if task.get("pending_ci") and self.live_claim(task_id):
+            if task.get("pending_ci") and task["repo"] not in self.enforced_repos and self.live_claim(task_id):
                 task.pop("pending_ci", None)
                 self.save()
             if task.get("renew_key") and "reply" in self.state["requests"].get(task["renew_key"], {}):
                 task.pop("renew_key", None)
                 self.save()
+
+    def readmit(self, task_id, worktree):
+        task = self.state["tasks"].get(task_id)
+        if not task:
+            raise ValueError(f"{task_id}: no local intent to readmit")
+        if not task.get("claim", {}).get("ok"):
+            attempt = task.get("claim_attempt", 0)
+            key = f"{task_id}:claim" + (f":{attempt}" if attempt else "")
+            if "reply" in self.state["requests"].get(key, {}):
+                task["claim_attempt"] = attempt + 1
+                self.save()
+            self.ensure_task(task_id)
+        self.required(task["repo"], bool(task.get("claim", {}).get("ok")), f"{task_id} claim remains denied")
+        task["amend_attempt"] = task.get("amend_attempt", 0) + 1
+        self.save()
+        self.scope(task_id, worktree)
+
+    def pre_merge(self, url, head):
+        match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+", url)
+        if not match:
+            return
+        repo = f"{match[1]}/{match[2]}"
+        if repo not in self.enforced_repos:
+            return
+        if not OID.fullmatch(head):
+            raise ValueError("merge head must be a full Git object ID")
+        receipt = self.call("merge-guard", {"pr_url": url, "head_oid": head})
+        self.required(repo, receipt is not None and receipt.get("ok") is True, "integration slot is absent, stale, or unreachable")
+
+    def pre_ci(self, task_id, batch_id):
+        task = self.state["tasks"].get(task_id)
+        if not task:
+            raise ValueError(f"{task_id}: no local intent record for CI pulse")
+        key = f"{task_id}:pulse:{batch_id}"
+        self.required(task["repo"], key not in self.state["requests"], f"batch {batch_id} pulse was already requested")
+        if key in self.state["requests"]:
+            return
+        task["pending_ci"] = True
+        self.save()
+        live = self.live_claim(task_id)
+        self.required(task["repo"], bool(live), f"{task_id} CI pulse lacks current branch writer generation")
+        if not live:
+            return
+        if not task.get("published_head"):
+            self.required(task["repo"], False, f"{task_id} CI pulse has no published head")
+            return
+        receipt = self.send(key, "pulse-batch", {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id})
+        self.required(task["repo"], receipt is not None and receipt.get("ok") is True, f"batch {batch_id} pulse is unconfirmed or already issued")
+        if receipt and receipt.get("ok") is True:
+            task.pop("pending_ci", None)
+            self.save()
 
     def heartbeat(self, task_id):
         task = self.state["tasks"].get(task_id)
@@ -292,8 +357,8 @@ class Adapter:
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK|heartbeat TASK|replay|view>", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "pre-merge", "readmit", "heartbeat", "replay", "view"}:
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH]|pre-merge PR_URL HEAD|readmit TASK WORKTREE|heartbeat TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
@@ -315,14 +380,12 @@ def main():
             adapter.scope(sys.argv[2], sys.argv[3])
         elif command == "heartbeat" and len(sys.argv) == 3:
             adapter.heartbeat(sys.argv[2])
-        elif command == "pre-ci" and len(sys.argv) == 3:
-            task = adapter.state["tasks"].get(sys.argv[2])
-            if task:
-                task["pending_ci"] = True
-                adapter.save()
-            if adapter.live_claim(sys.argv[2]) and task:
-                task.pop("pending_ci", None)
-                adapter.save()
+        elif command == "readmit" and len(sys.argv) == 4:
+            adapter.readmit(sys.argv[2], sys.argv[3])
+        elif command == "pre-ci" and len(sys.argv) in {3, 4}:
+            adapter.pre_ci(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else sys.argv[2])
+        elif command == "pre-merge" and len(sys.argv) == 4:
+            adapter.pre_merge(sys.argv[2], sys.argv[3])
         elif command == "replay" and len(sys.argv) == 2:
             adapter.replay()
         elif command == "view" and len(sys.argv) == 2:

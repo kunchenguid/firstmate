@@ -96,6 +96,7 @@ Each effective `FM_HOME` contains private operational directories.
 
 The optional home-local `config/coordination.json` enables the V1 coordination adapters; its absence leaves them off.
 It is a JSON object with `mode` (`shadow` or `advisory`), a nonempty stable `home_id`, a nonempty `repos` array of `owner/repo` strings, and exactly one authority transport.
+Optional `enforce_repos` is the single opt-in switch: a list of repository IDs from `repos`, empty by default, whose lifecycle checkpoints fail closed when the central authority is unavailable or refuses a claim.
 For same-host participants, `db` is the absolute path to the one central SQLite database.
 For another host, `remote` is an object with `host` (SSH destination), `command` (absolute path to that host's `fm-coord.sh`), and `db` (absolute central database path on that host).
 Optional `base` names the branch used for an intent's initial base OID and defaults to `main`.

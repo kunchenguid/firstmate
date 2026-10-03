@@ -1336,6 +1336,15 @@ require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
 
+coord_merge_guard() {
+  [ -f "$FM_HOME/config/coordination.json" ] || return 0
+  if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
+    echo "error: coordination adapter is missing; merge paused" >&2
+    return 1
+  fi
+  FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" pre-merge "$URL" "$FM_PR_MERGE_HEAD"
+}
+
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,
 # stale-owner recovery can release the record for archive or replacement and
@@ -1384,6 +1393,7 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    coord_merge_guard || exit 1
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
@@ -1438,6 +1448,7 @@ case "$PROVIDER" in
     away_status=0
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
+    coord_merge_guard || exit 1
     merge_status=0
     gitlab_merge_args=()
     if [ "$FM_PR_AWAY_POSTURE" = true ]; then

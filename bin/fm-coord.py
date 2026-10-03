@@ -2,6 +2,7 @@
 """Local SQLite authority for the advisory coordination protocol in docs/coordination.md."""
 
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import quote, urlsplit
 import uuid
@@ -16,7 +18,7 @@ from datetime import datetime, timezone
 
 
 SCHEMA_DIR = Path(__file__).with_name("fm-coord-migrations")
-MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort"}
+MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "pulse-batch"}
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
@@ -112,6 +114,48 @@ def emit(db, event_type, request_id, payload):
     db.execute("INSERT INTO events(event_id,event_type,request_id,payload_json,created_at) VALUES(?,?,?,?,?)", (event_id, event_type, request_id, compact(payload), stamp()))
     db.execute("INSERT INTO outbox(event_id) VALUES(?)", (event_id,))
     return event_id
+
+
+def authority_seq(db):
+    return db.execute("SELECT COALESCE(MAX(seq),0) FROM events").fetchone()[0]
+
+
+def check_authority(db, identity, anchor_path):
+    require(anchor_path.is_file(), "authority recovery marker is absent; manual fenced recovery required")
+    anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    require(anchor.get("authority_id") == identity and type(anchor.get("highwater_seq")) is int, "authority recovery marker disagrees with database")
+    require(anchor.get("pending") is not True, "authority marker records an interrupted transaction; manual fenced recovery required")
+    require(authority_seq(db) >= anchor["highwater_seq"], "restored database is older than authority marker; manual fenced recovery required")
+
+
+def seal_authority(db, db_path, identity, anchor_path, force=False, pending=False):
+    if anchor_path.exists():
+        if not force:
+            check_authority(db, identity, anchor_path)
+        prior = json.loads(anchor_path.read_text(encoding="utf-8"))
+        old = prior["highwater_seq"]
+    else:
+        prior = {}
+        old = -1
+    seq = authority_seq(db)
+    generations = {row["home_id"]: row["generation"] for row in db.execute("SELECT home_id,generation FROM participants")}
+    if not force and seq == old and generations == prior.get("generations", {}) and pending == prior.get("pending", False):
+        return
+    fd, name = tempfile.mkstemp(prefix=".authority-", dir=Path(db_path).parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write(compact({"authority_id": identity, "highwater_seq": seq, "generations": generations, "pending": pending}) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, anchor_path)
+        directory = os.open(Path(db_path).parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def revoke(db, claim, state, reason):
@@ -421,6 +465,28 @@ def forge_landing(p):
 
 def run_operation(db, op, p):
     request_id = p.get("request_id")
+    if op == "pulse-batch":
+        intent_id = token(p.get("intent_id"), "intent_id")
+        intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
+        require(intent is not None, "intent does not exist")
+        active_claim(db, p, intent)
+        batch_id = token(p.get("batch_id"), "batch_id")
+        head = oid(p.get("head_oid"), "head_oid")
+        latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (intent_id,)).fetchone()
+        require(latest is not None and latest[0] == head, "CI pulse requires the current published writer head")
+        existing = db.execute("SELECT event_id FROM ci_batches WHERE repo=? AND base_ref=? AND batch_id=?", (intent["repo"], intent["base_ref"], batch_id)).fetchone()
+        if existing:
+            return {"ok": False, "reason": "batch-already-pulsed", "event_id": existing[0]}
+        event_id = emit(db, "ci-pulse-authorized", request_id, {"repo": intent["repo"], "base": intent["base_ref"], "batch_id": batch_id, "intent_id": intent_id, "head_oid": head})
+        db.execute("INSERT INTO ci_batches(repo,base_ref,batch_id,intent_id,head_oid,event_id) VALUES(?,?,?,?,?,?)", (intent["repo"], intent["base_ref"], batch_id, intent_id, head, event_id))
+        return {"ok": True, "batch_id": batch_id, "event_id": event_id}
+    if op == "merge-guard":
+        url = token(p.get("pr_url"), "pr_url")
+        head = oid(p.get("head_oid"), "head_oid")
+        rows = db.execute("SELECT q.head_oid,q.state,s.state AS slot_state,s.generation AS slot_generation,i.intent_id,i.repo,i.branch,i.home_id,i.generation AS writer_generation,c.claim_id,c.fence,c.expires_mono_ns,c.boot_id,p.generation AS current_generation,p.boot_id AS participant_boot,b.claim_id AS branch_claim FROM intents i JOIN queue_items q ON q.intent_id=i.intent_id JOIN integration_slots s ON s.intent_id=i.intent_id AND s.repo=i.repo AND s.base_ref=i.base_ref JOIN claims c ON c.intent_id=i.intent_id AND c.state='active' JOIN participants p ON p.home_id=i.home_id JOIN branch_owners b ON b.repo=i.repo AND b.branch=i.branch WHERE i.pr_url=?", (url,)).fetchall()
+        valid = [row for row in rows if row["head_oid"] == head and row["state"] == "attempting" and row["slot_state"] == "attempting" and row["writer_generation"] == row["current_generation"] and row["participant_boot"] == boot_id() and row["boot_id"] == boot_id() and row["expires_mono_ns"] > time.monotonic_ns() and row["claim_id"] == row["branch_claim"]]
+        require(len(valid) == 1, "current integration slot and branch writer generation are required for merge")
+        return {"ok": True, "intent_id": valid[0]["intent_id"], "slot_generation": valid[0]["slot_generation"]}
     if op.startswith("queue-") or op in {"manifest-set", "predecessors-set"}:
         return queue_operation(db, op, p)
     if op == "enroll":
@@ -430,7 +496,10 @@ def run_operation(db, op, p):
         require(len(repos) == len(set(repos)), "duplicate repository scope")
         existing = db.execute("SELECT * FROM participants WHERE home_id=?", (home,)).fetchone()
         if existing:
-            require(json.loads(existing["repos_json"]) == sorted(repos), "existing enrollment has different repository scope")
+            previous_repos = json.loads(existing["repos_json"])
+            require(previous_repos == [] or previous_repos == sorted(repos), "existing enrollment has different repository scope")
+            if previous_repos == []:
+                db.execute("UPDATE participants SET repos_json=? WHERE home_id=?", (compact(sorted(repos)), home))
         else:
             db.execute("INSERT INTO participants(home_id,repos_json) VALUES(?,?)", (home, compact(sorted(repos))))
         event_id = emit(db, "participant-enrolled", request_id, {"home_id": home, "repos": sorted(repos)})
@@ -607,6 +676,9 @@ def run_operation(db, op, p):
 def main():
     db_path, op, raw = sys.argv[1:4]
     try:
+        db_path = str(Path(db_path).resolve())
+        lock_path = Path(db_path + ".authority.lock")
+        anchor_path = Path(db_path + ".authority.json")
         payload = json.loads(raw)
         require(isinstance(payload, dict), "JSON payload must be an object")
         request_payload = compact(payload)
@@ -614,17 +686,37 @@ def main():
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         else:
             require(Path(db_path).is_file(), "database is absent; run init first")
+        with lock_path.open("a+") as lock:
+            lock_wait = float(os.environ.get("FM_COORD_LOCK_WAIT_SECONDS", "5"))
+            require(0 <= lock_wait <= 30, "lock wait must be 0..30 seconds")
+            deadline = time.monotonic() + lock_wait
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise Refusal("coordinator host lock is held by another authority") from exc
+                    time.sleep(0.05)
+            run_locked(db_path, op, payload, request_payload, anchor_path)
+    except (Refusal, ValueError, sqlite3.Error, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"fm-coord: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def run_locked(db_path, op, payload, request_payload, anchor_path):
+    try:
         db = sqlite3.connect(db_path, timeout=10, isolation_level=None)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=10000")
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 2, f"unsupported future schema version: {version}")
-            if version < 2:
+            require(version <= 3, f"unsupported future schema version: {version}")
+            if version < 3:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 3):
+                    for target in range(version + 1, 4):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
                         for statement in schema.read_text(encoding="utf-8").split(";"):
                             if statement.strip():
@@ -636,16 +728,64 @@ def main():
                 except Exception:
                     db.execute("ROLLBACK")
                     raise
-            print(compact({"ok": True, "schema_version": 2, "db": db_path, "mode": "shadow-advisory"}))
+            identity = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
+            if identity is None:
+                identity = str(uuid.uuid4())
+                db.execute("INSERT INTO meta(key,value) VALUES('authority_id',?)", (identity,))
+                db.execute("INSERT INTO meta(key,value) VALUES('authority_path',?)", (db_path,))
+            else:
+                identity = identity[0]
+                bound_path = db.execute("SELECT value FROM meta WHERE key='authority_path'").fetchone()
+                require(bound_path is not None and bound_path[0] == db_path, "database authority is bound to another path")
+                check_authority(db, identity, anchor_path)
+            seal_authority(db, db_path, identity, anchor_path)
+            print(compact({"ok": True, "schema_version": 3, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 2, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "unsupported or uninitialized schema version; run init")
+        identity = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
+        bound_path = db.execute("SELECT value FROM meta WHERE key='authority_path'").fetchone()
+        require(identity is not None and bound_path is not None and bound_path[0] == db_path, "database has no authority binding for this path; manual fenced recovery required")
+        if op == "recover":
+            require(payload.get("confirm") == "FENCE_AND_REENROLL", "manual recovery requires confirm=FENCE_AND_REENROLL")
+            require(anchor_path.is_file(), "authority recovery marker is absent")
+            anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+            require(anchor.get("authority_id") == identity[0] and type(anchor.get("highwater_seq")) is int, "authority marker does not match restored database")
+            seal_authority(db, db_path, identity[0], anchor_path, force=True, pending=True)
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for claim in db.execute("SELECT * FROM claims WHERE state='active'").fetchall():
+                    revoke(db, claim, "revoked", "manual coordinator recovery")
+                for row in db.execute("SELECT home_id,generation FROM participants").fetchall():
+                    generation = max(row["generation"], anchor.get("generations", {}).get(row["home_id"], 0)) + 1
+                    db.execute("UPDATE participants SET generation=?,boot_id=NULL,session_id=NULL WHERE home_id=?", (generation, row["home_id"]))
+                for home, generation in anchor.get("generations", {}).items():
+                    db.execute("INSERT OR IGNORE INTO participants(home_id,repos_json,generation) VALUES(?,'[]',?)", (home, generation + 1))
+                for item in db.execute("SELECT * FROM queue_items WHERE state IN ('syncing','validating','awaiting-checks')").fetchall():
+                    invalidate(db, item, None, "manual coordinator recovery")
+                db.execute("UPDATE queue_items SET state='outcome-unknown' WHERE state='attempting'")
+                db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE state='attempting'")
+                new_identity = str(uuid.uuid4())
+                db.execute("UPDATE meta SET value=? WHERE key='authority_id'", (new_identity,))
+                emit(db, "authority-manually-recovered", None, {"previous_authority_id": identity[0], "authority_id": new_identity})
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                seal_authority(db, db_path, identity[0], anchor_path, force=True)
+                raise
+            seal_authority(db, db_path, new_identity, anchor_path, force=True)
+            print(compact({"ok": True, "authority_id": new_identity, "reenrollment_required": True}))
+            return
+        check_authority(db, identity[0], anchor_path)
+        seal_authority(db, db_path, identity[0], anchor_path, pending=True)
         db.execute("BEGIN IMMEDIATE")
         try:
             reconcile_clock(db, boot_id())
             db.execute("COMMIT")
         except Exception:
             db.execute("ROLLBACK")
+            seal_authority(db, db_path, identity[0], anchor_path, force=True)
             raise
+        seal_authority(db, db_path, identity[0], anchor_path, force=True)
         if op == "queue-reconcile":
             request_id = token(payload.get("request_id"), "request_id")
             digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
@@ -655,6 +795,7 @@ def main():
                 print(prior["result_json"])
                 return
             forge_landing(payload)
+        seal_authority(db, db_path, identity[0], anchor_path, pending=True)
         db.execute("BEGIN IMMEDIATE")
         try:
             if op in MUTATIONS:
@@ -675,11 +816,13 @@ def main():
             db.execute("COMMIT")
         except Exception:
             db.execute("ROLLBACK")
+            seal_authority(db, db_path, identity[0], anchor_path, force=True)
             raise
+        seal_authority(db, db_path, identity[0], anchor_path, force=True)
         print(compact(result))
-    except (Refusal, ValueError, sqlite3.Error, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        print(f"fm-coord: {exc}", file=sys.stderr)
-        sys.exit(1)
+    finally:
+        if 'db' in locals():
+            db.close()
 
 
 if __name__ == "__main__":

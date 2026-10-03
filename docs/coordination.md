@@ -1,13 +1,16 @@
-# Advisory coordination store
+# Coordination store and opt-in enforcement
 
 `bin/fm-coord.sh` implements the shadow coordination store and advisory integration queue.
 It records intents, grants coarse resource claims, serializes final integration decisions, and returns durable receipts from one local SQLite database.
-It is shadow/advisory only: the local adapters below record and warn at dispatch, push, and CI request checkpoints without blocking the selected delivery path.
+It defaults to shadow/advisory: the local adapters below record and warn at dispatch, push, and CI request checkpoints without blocking the selected delivery path.
+One explicit `enforce_repos` switch in each participant home's configuration makes those checkpoints refuse for listed repositories.
 The authority runs on one host with one local database under its `FM_HOME/state/` by default.
 Only trusted callers should invoke it in this increment; enrollment is an administrative record, not remote authentication.
 No network operation occurs in a database transaction.
 The local adapter can invoke this command over batch SSH with fixed, quoted arguments; the SSH account and host trust remain operator configuration.
 A copied database is an archive, not a second live authority.
+The authority binds the database to its absolute path, serializes command invocations with a host lock, and keeps a separate high-water recovery marker beside the database.
+It marks each transaction pending before the SQLite commit and clears the marker afterward, so a crash in that interval requires fenced recovery instead of guessing whether the commit happened.
 
 ## Identity and intent contract
 
@@ -92,7 +95,7 @@ A timeout or lost reply goes to `outcome-unknown`, retaining the slot across pro
 Only that proved landing releases an unknown slot, and the attempt event ID is unique in the terminal-outcome table.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
-The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
+The forge read and database transition are separate, so a direct external base update can still race the decision; repository protection and exact-head forge guards remain necessary.
 
 ## Events, schema and recovery
 
@@ -103,9 +106,10 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema versions 1 and 2 live in `bin/fm-coord-migrations/001.sql` and `002.sql` and are applied transactionally through SQLite `user_version`.
+Schema versions 1 through 3 live in `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
+Version 3 adds one CI pulse authorization per `(repo, base, batch_id)`.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -132,12 +136,14 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `queue-reconcile` also includes the exact `pr_url` and `base`, which are checked against the immutable intent before accepting the live forge observation.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
+`pulse-batch` accepts the current writer claim, `intent_id`, published `head_oid`, and a stable `batch_id`; a second request for that batch receives `batch-already-pulsed`.
+`merge-guard` accepts a PR URL and head OID and confirms an active attempting slot, current writer claim, and exact queued head.
 `inspect` gives a small state summary for operators.
 `view` projects active intents, active claims, recent scope conflicts, the integration queue, and pending central outbox events as one JSON object.
 
 ## Local lifecycle adapter
 
-Each participating home may opt in through the `config/coordination.json` schema in [configuration](configuration.md); both supported modes only record and warn.
+Each participating home may opt in through the `config/coordination.json` schema in [configuration](configuration.md); repositories absent from `enforce_repos` only record and warn.
 The coordinator initializes the database with `bin/fm-coord.sh --db PATH init` before participants submit.
 Same-host participants call the central database directly, while remote homes use the configured batch SSH transport to invoke the central command with quoted fixed arguments and an eight-second upper bound.
 Do not copy a database into a second live authority.
@@ -147,13 +153,49 @@ A ship brief declares exactly one `Coordination resources:` line containing a no
 `fm-spawn.sh` records the pre-dispatch intent and claim from that brief for Claude Code, Codex, omp, and OpenCode workers.
 The launch brief gives every supported harness the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.
 `pre-push` compares the commit diff from the declared base OID to HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head when that fence is live.
-`pre-ci` checks the same fence before a `ci:batch` request.
+`pre-ci TASK [BATCH]` checks the same fence and records one authorization for the stable batch ID before a `ci:batch` request; omitting `BATCH` uses the task ID.
+An enforced repository refuses a second request for the same batch, an unconfirmed request, or a stale writer generation.
+`readmit TASK WORKTREE` explicitly retries a denied claim or scope amendment after the coordinator has resolved the conflict.
+`fm-pr-merge.sh` calls `pre-merge` immediately before the forge merge for an enforced GitHub repository, and refuses an absent, stale, or unreachable integration slot.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
-Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
+Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings in shadow mode and refuse the checkpoint in enforced mode.
+The worker must run `pre-push` before a direct push or a no-mistakes pipeline that pushes on its behalf, and must run `pre-ci` before its CI request.
+The coordinator does not alter repository workflow triggers or GitHub settings.
 
 Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
 Each request is written to the home-local journal named in [configuration](configuration.md) before it is sent with a stable UUID; a lost reply reuses that UUID and receives the stored central receipt.
 The file is serialized with a home-local lock and replaced atomically.
 An offline request remains pending and is never represented as a confirmed claim.
 
-The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh tests/fm-coord-adapter.test.sh`.
+The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh tests/fm-coord-adapter.test.sh tests/fm-coord-enforce.test.sh`.
+
+## Rollout and 48-hour comparison
+
+Start with two independent homes in `shadow` mode and an empty `enforce_repos` list.
+Record all submitted intents, denied claims, amendments, writer generations, outbox deliveries, and integration outcomes without changing the existing merge route.
+Import every current work-in-progress branch as an explicit `submit` intent with its current base, head context, owner, issue, and resource list; leave it unclaimed until its scope has been reviewed and admitted.
+Do not infer ownership from a branch name or silently claim the imported work.
+Resolve overlapping imports with their owners, then select one repository and set `enforce_repos` to that repository in every participating home and integration home.
+Keep all other repositories shadowed.
+Before enforcement, verify that the participating repository's ordinary branch pushes do not trigger workflow fan-out and that CI uses one explicit `ci:batch` pulse per coherent batch.
+The coordinator's `pulse-batch` receipt is a single authorization, not a workflow dispatch; the caller records the workflow run URL against the batch and must not issue a second pulse when the receipt is replayed.
+
+Measure the next fixed 48-hour UTC window with exact start and end timestamps.
+Count forge runs created in each window by conclusion, preserving run URL, head OID, started time, and updated time, and report failed plus cancelled as a count and percentage separately from summed elapsed workflow-hours.
+The prior forensics window was 2026-10-01T09:23:50Z through 2026-10-03T09:23:50Z, with 829 runs, 144 failures, 42 cancellations, and 41.32 summed elapsed hours for those 186 unsuccessful runs.
+That elapsed sum is neither runner cost nor proven avoidable waste.
+Count executed rebases from timestamped command results, deduplicated by task, branch, and event ID; count duplicate work by issue ownership and overlapping accepted intents, with source links.
+The forensics reports did not establish reliable baseline rebase or duplicate-work counts, so reconstruct them with the same method before claiming a before-and-after change.
+Report blocked admission time, useful concurrent work, ordinary-push workflow runs, and number of pulses per batch beside the reliability counts.
+
+## Backup and fenced recovery
+
+Back up a live authority through SQLite's consistent `.backup` operation and retain `coord.sqlite3.authority.json` and the exact backup timestamp with it.
+Keep the host lock file at the canonical path; it is an OS coordination point, not a backup data source.
+An older restored database fails ordinary reads and writes when its event sequence falls behind the marker, an interrupted transaction remains paused, and a copied database at another path fails its path binding.
+Do not lower or replace the marker to make a restore appear current.
+For manual recovery, first stop participant traffic and verify that no coordinator command or forge attempt is still active; preserve the current database, marker, outbox, and any unknown merge attempts before restoring.
+After restoring the selected backup to its original absolute path, run `bin/fm-coord.sh --db PATH recover '{"confirm":"FENCE_AND_REENROLL"}'` only under that fenced maintenance window.
+Recovery revokes all active claims, advances participant generations beyond the marker's recorded high-water generations, invalidates preparation slots, retains uncertain forge attempts as `outcome-unknown`, and creates a new authority identity and marker.
+Re-enroll participant sessions with new request IDs, replay the outbox by stable event ID, reconcile each unknown forge outcome against its exact PR and head, and re-admit intents before enabling integration.
+If the marker is missing or the restored database's authority identity differs, stop and investigate the backup lineage rather than creating a second live authority.

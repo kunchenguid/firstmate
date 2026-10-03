@@ -79,8 +79,11 @@ pass 'repo manifest fails closed and holds refuse a merge decision'
 
 attempt=$(coord queue-attempt "$(printf '{"request_id":"attempt-a","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")")
 attempt_id=$(field "$attempt" attempt_event_id)
+coord merge-guard "$(printf '{"pr_url":"https://github.com/owner/repo/pull/1","head_oid":"%s"}' "$head_a")" > /dev/null || fail 'merge guard must accept the active exact-head slot'
+reject merge-guard "$(printf '{"pr_url":"https://github.com/owner/repo/pull/1","head_oid":"%s"}' "$head_b")" 'merge guard must refuse another head'
 unknown=$(coord queue-result "$(printf '{"request_id":"result-unknown","intent_id":"a","generation":%s,"outcome":"unknown"}' "$gen3")")
 [ "$(field "$unknown" state)" = outcome-unknown ] || fail 'timeout must retain unknown outcome'
+reject merge-guard "$(printf '{"pr_url":"https://github.com/owner/repo/pull/1","head_oid":"%s"}' "$head_a")" 'unknown forge outcome must pause a second merge call'
 reject queue-next '{"request_id":"next-while-unknown","repo":"owner/repo","base":"main"}' 'unknown outcome must occupy slot'
 mkdir "$tmp/bin"
 cat > "$tmp/bin/gh-axi" <<'EOF'
