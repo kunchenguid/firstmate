@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Best-effort local lifecycle adapter for the advisory coordination store.
 
-The config and on-disk request journal are described in docs/coordination.md.
+The config and on-disk request journal are described in docs/configuration.md;
+the lifecycle is described in docs/coordination.md.
 Every central mutation is journaled before invocation so a lost reply is replayed
 with the same request ID. This adapter never treats an offline request as a grant.
 """

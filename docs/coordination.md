@@ -158,7 +158,7 @@ The file is serialized with a home-local lock and replaced atomically; a checkpo
 An offline request remains pending and is never represented as a confirmed claim.
 A refused claim or amendment is dropped from the journal, so the next checkpoint retries it with a new request ID.
 A task whose declaration changes before any central submission is rerecorded with the new declaration.
-When the coordinator reports an expired session generation, the adapter starts a fresh session and resubmits every local task as a new intent; a claim that is no longer active resubmits that task the same way.
+When the coordinator reports an expired session generation, the adapter starts a fresh session and resets every local task to a new intent, which is submitted and claimed at that task's next dispatch or worker checkpoint; a claim that is no longer active resets that task the same way.
 Stale `publish-head` requests are resent only by `pre-push` or `replay` in head order, so the published head chain stays consistent.
 A head already published for the intent, such as after a reset to an earlier commit, is not republished; `pre-push` warns and the next new head chains from the latest central head.
 
