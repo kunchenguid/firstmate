@@ -39,14 +39,14 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v2 database must upgrade through numbered migrations'
+[ "$(field "$upgraded" schema_version)" = 9 ] || fail 'existing v2 database must upgrade through numbered migrations'
 db=$tmp/upgrade-v3.sqlite3
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/003.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('legacy','[\"owner/repo\"]'); PRAGMA user_version=3;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v3 database must upgrade to host-aware schema'
+[ "$(field "$upgraded" schema_version)" = 9 ] || fail 'existing v3 database must upgrade to host-aware schema'
 coord enroll '{"request_id":"bind-legacy-host","home_id":"legacy","repos":["owner/repo"],"host_id":"legacy-test-host"}' > /dev/null
 field "$(coord inspect '{}')" participants | python3 -c 'import ast,sys; assert any(p["home_id"]=="legacy" and p["host_id"]=="legacy-test-host" for p in ast.literal_eval(sys.stdin.read()))' || fail 'an existing participant must bind its host after v3 upgrade'
 
@@ -57,7 +57,7 @@ done
 legacy_host=$(python3 -c 'import socket; print(socket.gethostname())')
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('was-local','[\"owner/repo\"]','$legacy_host'),('was-remote','[\"owner/repo\"]','remote-test-host'),('renamed-local','[\"owner/repo\"]','old-name.local'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('inflight','was-local',1,'owner/repo','main','$base','branch/inflight','inflight','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id,attempt_epoch,wrapper_pid,wrapper_start,wrapper_boot,wrapper_home_id,wrapper_host_id,wrapper_local) VALUES('inflight','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','legacy-attempt',0,1,'legacy-start','synthetic-previous-boot','was-local','$legacy_host',1); PRAGMA user_version=6;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
+[ "$(field "$upgraded" schema_version)" = 9 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
 coord enroll '{"request_id":"enroll-fresh","home_id":"fresh","repos":["owner/repo"]}' > /dev/null
 v4_state() { coord inspect '{}' | python3 -c "import json,sys; s=json.load(sys.stdin); hosts={p['home_id']: p['host_id'] for p in s['participants']}; item=s['queue'][0]; $1"; }
 v4_state 'assert hosts["fresh"].startswith("machine:") and hosts["was-local"] == hosts["fresh"]' || fail 'a v4 participant bound to the coordinator hostname must keep same-host identity'
@@ -82,14 +82,53 @@ for version in 3 4; do
     fenced="INSERT INTO fenced_ci_batches(repo,base_ref,batch_id) VALUES('owner/repo','main','fenced-batch');"
   fi
   sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('step4','[\"owner/repo\"]'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('step4-intent','step4',1,'owner/repo','main','$base','branch/step4','step4','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id) VALUES('step4-intent','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','step4-attempt'); INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES('step4-event','ci-pulse-authorized','{}','2026-01-01T00:00:00+00:00'); INSERT INTO ci_batches(repo,base_ref,batch_id,intent_id,head_oid,event_id) VALUES('owner/repo','main','step4-batch','step4-intent','$head_a','step4-event'); $fenced PRAGMA user_version=$version;"
-  [ "$(field "$(coord init 2> "$tmp/err")" schema_version)" = 8 ] || fail "a step-4 v$version database must upgrade: $(cat "$tmp/err")"
+  [ "$(field "$(coord init 2> "$tmp/err")" schema_version)" = 9 ] || fail "a step-4 v$version database must upgrade: $(cat "$tmp/err")"
   [ "$(sqlite3 "$db" "SELECT batch_id||' '||head_oid||' '||event_id FROM ci_batches")" = "step4-batch $head_a step4-event" ] || fail "a step-4 v$version upgrade must keep its pulsed batches"
   [ "$(sqlite3 "$db" "SELECT intent_id||' '||state||' '||wrapper_host_id FROM queue_items")" = "step4-intent outcome-unknown legacy-coordinator" ] || fail "a step-4 v$version upgrade must keep its queue and mark its attempt legacy"
   [ "$(sqlite3 "$db" "SELECT group_concat(batch_id) FROM fenced_ci_batches")" = "${fenced:+fenced-batch}" ] || fail "a step-4 v$version upgrade must keep its fenced batches"
   coord enroll '{"request_id":"bind-step4","home_id":"step4","repos":["owner/repo"],"host_id":"step4-host"}' > /dev/null || fail "a step-4 v$version participant must bind its host after upgrade"
-  [ "$(field "$(coord init)" schema_version)" = 8 ] || fail "a step-4 v$version database must stay at the current schema on a second init"
+  [ "$(field "$(coord init)" schema_version)" = 9 ] || fail "a step-4 v$version database must stay at the current schema on a second init"
 done
 pass 'step-4 v3 and v4 databases upgrade through the append-only migrations with their data intact'
+
+# The step-3 lineage (v5) and the previous pushed step-4 head (v6, v8) numbered these migrations differently;
+# they upgrade without rebinding host IDs again, gain the CI batch tables they lacked, and keep their CI rows.
+prior_v8_capacity="CREATE TABLE ci_capacity (repo TEXT NOT NULL, base_ref TEXT NOT NULL, capacity INTEGER NOT NULL CHECK (capacity > 0), PRIMARY KEY (repo, base_ref)); CREATE TABLE ci_heads (seq INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, base_ref TEXT NOT NULL, batch_id TEXT NOT NULL, intent_id TEXT NOT NULL REFERENCES intents(intent_id), head_oid TEXT NOT NULL, state TEXT NOT NULL CHECK (state IN ('queued', 'active')), delivered INTEGER NOT NULL DEFAULT 0, event_id TEXT REFERENCES events(event_id), UNIQUE (repo, base_ref, batch_id), UNIQUE (repo, base_ref, head_oid));"
+for lineage in step3-v5 prior-v6 prior-v8; do
+  db=$tmp/$lineage.sqlite3
+  for migration in 001 002 005 006 007; do
+    sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/$migration.sql"
+  done
+  rows="INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('bound','[\"owner/repo\"]','machine:bound'),('remote','[\"owner/repo\"]','remote-test-host'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('prior-intent','bound',1,'owner/repo','main','$base','branch/prior','prior','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO events(event_id,event_type,payload_json,created_at) VALUES('prior-event','ci-pulse-authorized','{}','2026-01-01T00:00:00+00:00'); INSERT INTO requests(actor,request_id,operation,digest,result_json) VALUES('bound','prior-request','pulse-batch','prior-digest','{\"ok\":true}');"
+  version=5
+  if [ "$lineage" != step3-v5 ]; then
+    sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/003.sql"
+    rows="$rows INSERT INTO ci_batches(repo,base_ref,batch_id,intent_id,head_oid,event_id) VALUES('owner/repo','main','prior-batch','prior-intent','$head_a','prior-event');"
+    version=6
+  fi
+  if [ "$lineage" = prior-v8 ]; then
+    sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/004.sql"
+    sqlite3 "$db" "$prior_v8_capacity"
+    rows="$rows INSERT INTO ci_capacity(repo,base_ref,capacity) VALUES('owner/repo','main',2),('owner/repo','release',3); INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state,delivered,event_id) VALUES('owner/repo','main','prior-batch','prior-intent','$head_a','active',1,'prior-event');"
+    version=8
+  fi
+  sqlite3 "$db" "$rows PRAGMA user_version=$version;"
+  [ "$(field "$(coord init 2> "$tmp/err")" schema_version)" = 9 ] || fail "a $lineage database must upgrade: $(cat "$tmp/err")"
+  [ "$(sqlite3 "$db" "SELECT group_concat(home_id||'='||host_id) FROM participants")" = "bound=machine:bound,remote=remote-test-host" ] || fail "a $lineage upgrade must not rebind host IDs a second time"
+  [ "$(sqlite3 "$db" "SELECT count(*) FROM fenced_ci_batches")" = 0 ] || fail "a $lineage upgrade must have fenced CI batches"
+  batches=prior-batch
+  [ "$lineage" != step3-v5 ] || batches=
+  [ "$(sqlite3 "$db" "SELECT group_concat(batch_id) FROM ci_batches")" = "$batches" ] || fail "a $lineage upgrade must keep its pulsed batches"
+  [ "$(sqlite3 "$db" "SELECT request_id||' '||result_json FROM requests")" = 'prior-request {"ok":true}' ] || fail "a $lineage upgrade must keep its request receipts"
+  coord ci-capacity-set '{"request_id":"capacity-prior","repo":"owner/repo","capacity":3}' > /dev/null || fail "a $lineage database must accept per-repository CI capacity"
+  if [ "$lineage" = prior-v8 ]; then
+    [ "$(sqlite3 "$db" "SELECT batch_id||' '||state||' '||(admitted_at>0) FROM ci_heads")" = "prior-batch active 1" ] || fail 'a prior v8 upgrade must keep its active CI head under a slot lease'
+    reject ci-complete "{\"request_id\":\"complete-prior-other\",\"repo\":\"owner/repo\",\"head_oid\":\"$head_a\",\"batch_id\":\"other-batch\",\"conclusion\":\"success\"}" 'a prior v8 CI head must complete only under its own batch'
+    coord ci-complete "{\"request_id\":\"complete-prior\",\"repo\":\"owner/repo\",\"head_oid\":\"$head_a\",\"batch_id\":\"prior-batch\",\"conclusion\":\"success\"}" > /dev/null || fail 'a prior v8 active CI head must complete after upgrade'
+  fi
+  [ "$(field "$(coord init)" schema_version)" = 9 ] || fail "a $lineage database must stay at the current schema on a second init"
+done
+pass 'step-3 v5 and previous step-4 v6 and v8 databases upgrade with host bindings, CI batches, and CI heads intact'
 
 if [ ! -e /etc/machine-id ] && [ "$(uname -s)" = Darwin ]; then
   mkdir -p "$tmp/ioreg-fail" "$tmp/ioreg-empty"
@@ -515,7 +554,7 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT; ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT; INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 8 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
+[ "$(field "$upgraded" schema_version)" = 9 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
 pass 'already patched v2 database upgrades without replaying its columns'
 
 db=$tmp/remote-wrapper.sqlite3

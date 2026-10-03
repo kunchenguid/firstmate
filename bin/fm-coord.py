@@ -512,11 +512,6 @@ def queue_operation(db, op, p):
         require(not missing, "required checks missing or non-green: " + ", ".join(missing))
         db.execute("UPDATE queue_items SET manifest_version=?,updated_at=? WHERE intent_id=?", (manifest["version"], stamp(), item["intent_id"]))
         event_id = emit(db, "checks-passed", request_id, {"intent_id": item["intent_id"], "manifest_version": manifest["version"], "required": sorted(required)})
-        # Observed green required checks are this head's terminal CI run, so its admission slot passes to the next queued head.
-        held = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND state='active'", (item["repo"], item["head_oid"])).fetchone()
-        if held is not None:
-            complete_ci(db, request_id, held, "success")
-            promote_ci(db, request_id, item["repo"])
         return {"ok": True, "state": "awaiting-checks", "manifest_version": manifest["version"], "event_id": event_id}
     if op == "queue-attempt":
         manifest = db.execute("SELECT version FROM check_manifests WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"])).fetchone()
@@ -666,9 +661,9 @@ def run_operation(db, op, p):
             return {"ok": False, "reason": "batch-already-pulsed", "event_id": existing[0]}
         capacity = db.execute("SELECT capacity FROM ci_capacity WHERE repo=?", (key[0],)).fetchone()
         if capacity is not None:
-            # An immutable head is admitted once per repository; completing its run never frees it for another pulse.
-            if db.execute("SELECT 1 FROM ci_heads WHERE repo=? AND head_oid=? UNION ALL SELECT 1 FROM ci_batches WHERE repo=? AND head_oid=?", (key[0], head) * 2).fetchone():
-                return {"ok": False, "reason": "head-already-admitted"}
+            # A head runs one batch at a time; once that batch completes, a new batch ID is its next attempt.
+            if db.execute("SELECT 1 FROM ci_heads WHERE repo=? AND head_oid=?", (key[0], head)).fetchone():
+                return {"ok": False, "reason": "head-batch-in-flight"}
             if db.execute("SELECT COUNT(*) FROM ci_heads WHERE repo=? AND state='active'", (key[0],)).fetchone()[0] >= capacity[0]:
                 emit(db, "ci-pulse-queued", request_id, {"repo": key[0], "base": key[1], "batch_id": batch_id, "intent_id": intent_id, "head_oid": head})
                 db.execute("INSERT INTO ci_heads(repo,base_ref,batch_id,intent_id,head_oid,state) VALUES(?,?,?,?,?,'queued')", (*key, batch_id, intent_id, head))
@@ -689,9 +684,10 @@ def run_operation(db, op, p):
     if op == "ci-complete":
         repo = token(p.get("repo"), "repo")
         head = oid(p.get("head_oid"), "head_oid")
+        batch_id = token(p.get("batch_id"), "batch_id")
         require(p.get("conclusion") in {"success", "failure", "cancelled", "timed_out"}, "conclusion must be a terminal CI state")
-        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND state='active'", (repo, head)).fetchone()
-        require(row is not None, "head holds no active CI slot")
+        row = db.execute("SELECT * FROM ci_heads WHERE repo=? AND head_oid=? AND batch_id=? AND state='active'", (repo, head, batch_id)).fetchone()
+        require(row is not None, "batch holds no active CI slot")
         event_id = complete_ci(db, request_id, row, p["conclusion"])
         return {"ok": True, "released": row["batch_id"], "admitted": promote_ci(db, request_id, repo), "event_id": event_id}
     if op == "merge-guard":
@@ -943,12 +939,14 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 8, f"unsupported future schema version: {version}")
+            require(version <= 9, f"unsupported future schema version: {version}")
             credential = authority_hash()
-            if version < 8:
+            if version < 9:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 9):
+                    # The step-3 lineage, and the step-4 head that followed it, rebound host IDs at version 5 and had no fenced CI batches before version 7.
+                    hosts_rebound = version in (5, 6) and db.execute("SELECT 1 FROM sqlite_master WHERE name='fenced_ci_batches'").fetchone() is None
+                    for target in range(version + 1, 10):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
                         if target == 5:
                             expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
@@ -961,6 +959,8 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                                 for statement in schema.read_text(encoding="utf-8").split(";"):
                                     if statement.strip():
                                         db.execute(statement)
+                        elif target == 7 and hosts_rebound:
+                            pass
                         else:
                             params = {"legacy_host": socket.gethostname(), "machine_host": local_host_id()} if target == 7 else {}
                             for statement in schema.read_text(encoding="utf-8").split(";"):
@@ -1000,9 +1000,9 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                 require(bound_path is not None and bound_path[0] == db_path, "database authority is bound to another path")
                 check_authority(db, identity, anchor_path)
             seal_authority(db, db_path, identity, anchor_path)
-            print(compact({"ok": True, "schema_version": 8, "db": db_path, "mode": "shadow-advisory"}))
+            print(compact({"ok": True, "schema_version": 9, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 8, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 9, "unsupported or uninitialized schema version; run init")
         identity = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
         bound_path = db.execute("SELECT value FROM meta WHERE key='authority_path'").fetchone()
         require(identity is not None and bound_path is not None and bound_path[0] == db_path, "database has no authority binding for this path; manual fenced recovery required")
