@@ -2227,9 +2227,10 @@ signal_files_actionable() {  # <status-file> ...
   return "$found"
 }
 
-# Push only the two additional captain-facing transitions that originate in
-# worker status logs. Captain holds and local PR registration publish directly
-# at their durable mutation sites, where their identities are authoritative.
+# Push the captain-facing transitions that originate in worker status logs:
+# yolo-off PR-ready, plus done/blocked/failed plain reports. Captain holds and
+# local PR registration publish directly at their durable mutation sites,
+# where their identities are authoritative.
 signal_discord_decision_notifications() {  # <status-file> ...
   local f start size chunk line task verb key
   for f in "$@"; do

@@ -8,6 +8,22 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-discord-lib.sh
+. "$SCRIPT_DIR/fm-discord-lib.sh"
+
+# Push a plain one-line message to this home's configured Discord channel,
+# reusing fm-discord-notify.sh --report's send path. Silent no-op when Discord
+# is not configured (fm-discord-notify.sh --report already fails loudly only
+# on a missing token, so the token check here keeps this path a quiet no-op
+# instead of an error on a Discord-less home).
+fm_discord_send_plain_report() {
+  local message=$1 channel_id
+  fm_discord_load_config
+  [ -n "${FM_DISCORD_TOKEN:-}" ] || return 0
+  channel_id=$(fm_discord_trim "${FM_DISCORD_CHANNELS%%,*}")
+  case "$channel_id" in ''|*[!0-9]*) return 0 ;; esac
+  "$SCRIPT_DIR/fm-discord-notify.sh" --report "$channel_id" "$message"
+}
 
 [ "$#" -eq 2 ] || exit 2
 task_id=$1
@@ -60,6 +76,21 @@ case "$verb:$key" in
     [ -z "$url" ] || summary="$summary $url"
     "$SCRIPT_DIR/fm-discord-notify.sh" pr-ready "$route_task_id" "$key" \
       "$summary" "병합|열어 두기" "$task_id"
+    ;;
+  done:*)
+    note=$(status_line_note "$line")
+    note=$(printf '%s' "$note" | tr '\n\r' '  ')
+    fm_discord_send_plain_report "작업 완료 [$task_id]: ${note:-완료}"
+    ;;
+  blocked:*)
+    note=$(status_line_note "$line")
+    note=$(printf '%s' "$note" | tr '\n\r' '  ')
+    fm_discord_send_plain_report "확인 필요(막힘) [$task_id]: ${note:-원인 미기재}"
+    ;;
+  failed:*)
+    note=$(status_line_note "$line")
+    note=$(printf '%s' "$note" | tr '\n\r' '  ')
+    fm_discord_send_plain_report "작업 실패 [$task_id]: ${note:-원인 미기재}"
     ;;
   *) exit 0 ;;
 esac
