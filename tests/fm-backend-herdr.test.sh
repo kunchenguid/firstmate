@@ -1930,12 +1930,36 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
   [ "$(wc -l < "$state/fm-hibit-r1.herdr-presentation" | tr -d '[:space:]')" = 12 ] \
     || fail "version 2 projection journal must have exactly 12 fields"
+  { sed -n '12p' "$state/fm-hibit-r1.herdr-presentation"; sed -n '1,11p' "$state/fm-hibit-r1.herdr-presentation"; } \
+    > "$state/reordered-journal"
+  mv "$state/reordered-journal" "$state/fm-hibit-r1.herdr-presentation"
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
+    "$ROOT" "$state/fm-hibit-r1.herdr-presentation" \
+    || fail "version 2 journal field order changed its meaning"
   printf 'pane_id=duplicate\n' >> "$state/fm-hibit-r1.herdr-presentation"
   if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
     "$ROOT" "$state/fm-hibit-r1.herdr-presentation"; then
     fail "duplicate version 2 journal fields must be ambiguous"
   fi
   pass "herdr presentation journal: version 2 binds exact home/endpoint/parent identities and advances atomically"
+}
+
+test_projection_journal_rejects_custom_legacy_prefix() {
+  local dir state home result
+  dir="$TMP_ROOT/projection-journal-custom-legacy"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$state" "$home"
+  result=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" custom-r1) || exit 1
+    journal="$1/custom-r1.herdr-presentation"
+    fm_backend_herdr_projection_journal_bind \
+      "$journal" custom-r1 "$2" fmtest wchild wchild:t1 wchild:p1 wparent REVIEW \
+      "REVIEW/custom-r1 · p:$token" fm-custom-r1 || exit 1
+    if fm_backend_herdr_projection_journal_snapshot "$journal" custom-r1; then exit 2; fi
+    fm_backend_herdr_projection_owned_children "$1" "$2" fmtest wparent
+  ' "$ROOT" "$state" "$home") || fail "custom-prefix legacy journal was accepted"
+  [ "$result" = '[]' ] || fail "custom-prefix legacy journal granted child ownership: $result"
+  pass "herdr presentation journal: arbitrary custom legacy prefixes grant no ownership"
 }
 
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
@@ -3139,9 +3163,9 @@ SH
 
 test_projection_order_foreign_legacy_child_is_read_only() {
   local dir log resp fb mover out status
-  dir="$TMP_ROOT/projection-order-foreign-legacy"; mkdir -p "$dir/responses"
+  dir="$TMP_ROOT/projection-order-foreign-legacy"; mkdir -p "$dir/responses" "$dir/home/state"
   log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; : > "$log"
-  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-alpha"},{"workspace_id":"w3","label":"2ndmate-bravo/foreign · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w4","label":"└ new-alpha · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"},{"workspace_id":"w2","label":"2ndmate-alpha"},{"workspace_id":"w3","label":"2ndmate-alpha/foreign · p:AbCdEfGhIjKlMnOpQrStUv"},{"workspace_id":"w4","label":"└ new-alpha · p:ZyXwVuTsRqPoNmLkJiHgFe"}]}}' > "$resp/1.out"
   cat > "$mover" <<'SH'
 #!/usr/bin/env bash
 echo called > "$FM_FAKE_MOVER_CALLED"
@@ -3151,7 +3175,7 @@ SH
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_CALLED="$dir/called" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 2ndmate-alpha' "$ROOT" 2>&1)
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest w4 2ndmate-alpha w2 "$1/state" "$1"' "$ROOT" "$dir/home" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "foreign legacy ordering must not fail the spawn"
   assert_contains "$out" "ambiguous workspace layout" "foreign legacy child did not warn"
@@ -3160,6 +3184,188 @@ SH
   assert_not_contains "$(cat "$log")" $'session\x1fdelete' "foreign legacy layout triggered session cleanup"
   assert_not_contains "$(cat "$log")" $'workspace\x1frename' "foreign legacy layout triggered workspace rename"
   pass "herdr presentation ordering: a foreign legacy child is warning-only and read-only"
+}
+
+test_projection_order_renamed_parent_with_journaled_legacy_child() {
+  local dir state home log resp fb mover mover_log out token legacy_label new_label
+  dir="$TMP_ROOT/projection-order-renamed-parent"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" legacy-r1) || exit 1
+    label="firstmate/legacy-r1 · p:$token"
+    fm_backend_herdr_projection_journal_bind \
+      "$1/legacy-r1.herdr-presentation" legacy-r1 "$2" fmtest \
+      wlegacy wlegacy:t1 wlegacy:p1 w1 firstmate "$label" fm-legacy-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home") || fail "could not create journaled legacy child"
+  legacy_label="firstmate/legacy-r1 · p:$token"
+  new_label='└ new-r1 · p:ZyXwVuTsRqPoNmLkJiHgFe'
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wlegacy\",\"label\":\"$legacy_label\"},{\"workspace_id\":\"wother\",\"label\":\"human\"},{\"workspace_id\":\"wnew\",\"label\":\"$new_label\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<SH
+#!/usr/bin/env bash
+printf '%s\\t%s\\t%s\\n' "\$1" "\$2" "\$3" >> "\$FM_FAKE_MOVER_LOG"
+printf '%s\\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w1","label":"FIRSTMATE"},{"workspace_id":"wlegacy","label":"$legacy_label"},{"workspace_id":"wnew","label":"$new_label"},{"workspace_id":"wother","label":"human"}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "wother\\twother:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest wnew FIRSTMATE w1 "$1" "$2"' "$ROOT" "$state" "$home" 2>&1)
+  [ -z "$out" ] || fail "renamed parent ordering warned: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"wnew"$'\t'"2" ] \
+    || fail "renamed parent did not append after its journaled legacy child"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wlegacy\",\"label\":\"FIRSTMATE/legacy-r1 · p:$token\"},{\"workspace_id\":\"wnew\",\"label\":\"$new_label\"}]}}" > "$resp/5.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wnew:t1","label":"fm-new-r1"}]}}' > "$resp/6.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"wnew:p1","tab_id":"wnew:t1"}]}}' > "$resp/7.out"
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_live_binding_matches fmtest ZyXwVuTsRqPoNmLkJiHgFe wnew wnew:t1 wnew:p1 w1 FIRSTMATE "$1" fm-new-r1 "$2" "$3"' "$ROOT" "$new_label" "$state" "$home" \
+    || fail "publication refused the journaled legacy child under the renamed parent"
+  pass "herdr presentation: renamed parent orders and binds after its journaled legacy child"
+}
+
+test_projection_shared_launcher_children_are_read_only() {
+  local dir state home log resp fb out label_a label_b
+  dir="$TMP_ROOT/projection-shared-launcher"; state="$dir/home-b/state"; home="$dir/home-b"
+  mkdir -p "$dir/responses" "$state" "$dir/home-a/state"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  label_a='└ task-a · p:AbCdEfGhIjKlMnOpQrStUv'
+  label_b='└ task-b · p:ZyXwVuTsRqPoNmLkJiHgFe'
+  # Each home keeps its own journal; ordering must not read the other home.
+  : > "$dir/home-a/state/task-a.herdr-presentation"
+  : > "$state/task-b.herdr-presentation"
+  bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_write_v2 "$1/home-a/state/task-a.herdr-presentation" task-a AbCdEfGhIjKlMnOpQrStUv "$1/home-a" fmtest wa wa:t1 wa:p1 wparent FIRSTMATE "$2" fm-task-a
+    fm_backend_herdr_projection_journal_write_v2 "$1/home-b/state/task-b.herdr-presentation" task-b ZyXwVuTsRqPoNmLkJiHgFe "$1/home-b" fmtest wb wb:t1 wb:p1 wparent FIRSTMATE "$3" fm-task-b
+  ' "$ROOT" "$dir" "$label_a" "$label_b" || fail "could not bind shared-launcher fixtures"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"wparent\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wa\",\"label\":\"$label_a\"},{\"workspace_id\":\"wb\",\"label\":\"$label_b\"}]}}" > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wb:t1","label":"fm-task-b"}]}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"wb:p1","tab_id":"wb:t1"}]}}' > "$resp/4.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_order_best_effort fmtest wb FIRSTMATE wparent "$1" "$2"
+    fm_backend_herdr_projection_live_binding_matches fmtest ZyXwVuTsRqPoNmLkJiHgFe wb wb:t1 wb:p1 wparent FIRSTMATE "$3" fm-task-b "$1" "$2" || exit 1
+  ' "$ROOT" "$state" "$home" "$label_b" 2>&1) || fail "second home lost its shared-launcher binding: $out"
+  [ -z "$out" ] || fail "shared-launcher ordering warned: $out"
+  [ "$(wc -l < "$log" | tr -d '[:space:]')" = 4 ] || fail "shared-launcher ordering mutated the layout"
+  # Duplicate foreign tokens remain ambiguous even though the target is exact.
+  rm -f "$resp/.count"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"wparent\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wa\",\"label\":\"$label_a\"},{\"workspace_id\":\"wb\",\"label\":\"$label_b\"},{\"workspace_id\":\"duplicate\",\"label\":\"$label_a\"}]}}" > "$resp/1.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_live_binding_matches fmtest ZyXwVuTsRqPoNmLkJiHgFe wb wb:t1 wb:p1 wparent FIRSTMATE "$1" fm-task-b "$2" "$3"
+  ' "$ROOT" "$label_b" "$state" "$home"; then fail "duplicate foreign token granted a binding"; fi
+  pass "herdr presentation: homes sharing an exact launcher retain bindings without foreign journal authority"
+}
+
+test_projection_foreign_recorded_child_breaks_launcher_block() {
+  local dir state home log resp fb out foreign_token new_token foreign_label new_label
+  dir="$TMP_ROOT/projection-foreign-recorded-child"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  foreign_token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" foreign-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label foreign-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/foreign-r1.herdr-presentation" foreign-r1 "$2" fmtest \
+      wforeign wforeign:t1 wforeign:p1 wreview REVIEW "$label" fm-foreign-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home") || fail "could not bind foreign-parent child"
+  new_token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" new-r1' "$ROOT" "$state") \
+    || fail "could not create new projection journal"
+  foreign_label="└ foreign-r1 · p:$foreign_token"
+  new_label="└ new-r1 · p:$new_token"
+  # The REVIEW child was manually moved between FIRSTMATE and its new projection.
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"wreview\",\"label\":\"REVIEW\"},{\"workspace_id\":\"wlauncher\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wforeign\",\"label\":\"$foreign_label\"},{\"workspace_id\":\"wnew\",\"label\":\"$new_label\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"wnew:t1","label":"fm-new-r1"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"wnew:p1","tab_id":"wnew:t1"}]}}' > "$resp/3.out"
+  cp "$state/foreign-r1.herdr-presentation" "$dir/foreign.before"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_order_best_effort fmtest wnew FIRSTMATE wlauncher "$1" "$2"
+    rm -f "$FM_HERDR_RESPONSES/.count"
+    if fm_backend_herdr_projection_live_binding_matches \
+      fmtest "$3" wnew wnew:t1 wnew:p1 wlauncher FIRSTMATE "$4" fm-new-r1 "$1" "$2"; then
+      exit 3
+    fi
+    fm_backend_herdr_projection_journal_snapshot "$1/new-r1.herdr-presentation" new-r1 || exit 4
+    [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 1 ] || exit 5
+    # Model an already published binding whose sibling is moved before restart.
+    fm_backend_herdr_projection_journal_bind \
+      "$1/new-r1.herdr-presentation" new-r1 "$2" fmtest \
+      wnew wnew:t1 wnew:p1 wlauncher FIRSTMATE "$4" fm-new-r1 || exit 6
+    cp "$1/new-r1.herdr-presentation" "$1/new.before"
+    rm -f "$FM_HERDR_RESPONSES/.count"
+    fm_backend_herdr_projection_reclaim_task \
+      fmtest "$1/new-r1.herdr-presentation" new-r1 "$2" \
+      wnew wnew:t1 wnew:p1 fm-new-r1 "$2"
+    [ "$?" = 2 ] || exit 7
+  ' "$ROOT" "$state" "$home" "$new_token" "$new_label" 2>&1) \
+    || fail "foreign recorded child was accepted by publication or reclaim: $out"
+  assert_contains "$out" "ambiguous workspace layout" "ordering accepted a child recorded under another parent"
+  assert_contains "$out" "non-nested live shape" "reclaim did not refuse the interleaved layout"
+  [ "$(cat "$log")" = "$(printf 'HERDR_SESSION=fmtest\x1fworkspace\x1flist\x1f--session\x1ffmtest\n%.0s' 1 2 3)" ] \
+    || fail "foreign-parent refusal did more than three read-only workspace lists"
+  cmp -s "$dir/foreign.before" "$state/foreign-r1.herdr-presentation" || fail "foreign journal changed"
+  cmp -s "$state/new.before" "$state/new-r1.herdr-presentation" || fail "refused reclaim changed its binding"
+  pass "herdr presentation: a child recorded under another parent breaks the launcher block without mutation"
+}
+
+test_projection_order_traverses_journaled_custom_parent() {
+  local dir state home log resp fb mover mover_log out token review_label layout
+  dir="$TMP_ROOT/projection-order-custom-following-parent"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; mover="$dir/mover"; mover_log="$dir/mover.log"
+  : > "$log"; : > "$mover_log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" review-r1) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label review-r1 "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/review-r1.herdr-presentation" review-r1 "$2" fmtest \
+      wreview-child wreview-child:t1 wreview-child:p1 wreview REVIEW "$label" fm-review-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home") || fail "could not bind the other custom parent's child"
+  review_label="└ review-r1 · p:$token"
+  layout="{\"result\":{\"workspaces\":[{\"workspace_id\":\"wlauncher\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"wreview\",\"label\":\"REVIEW\"},{\"workspace_id\":\"wreview-child\",\"label\":\"$review_label\"},{\"workspace_id\":\"wnew\",\"label\":\"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe\"}]}}"
+  printf '%s\n' "$layout" > "$resp/1.out"
+  printf '%s\n' '{"client":{"version":"0.7.4","protocol":16},"server":{"running":true}}' > "$resp/2.out"
+  # shellcheck disable=SC2016 # $defs is a literal JSON Schema key.
+  printf '%s\n' '{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"workspace.move"}}}],"$defs":{"WorkspaceMoveParams":{"required":["workspace_id","insert_index"],"properties":{"insert_index":{"type":"integer"}}}}}}}' > "$resp/3.out"
+  printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' > "$resp/4.out"
+  cat > "$mover" <<SH
+#!/usr/bin/env bash
+printf '%s\\t%s\\t%s\\n' "\$1" "\$2" "\$3" >> "\$FM_FAKE_MOVER_LOG"
+printf '%s\\n' '{"id":"fm-workspace-move","result":{"type":"workspace_list","workspaces":[{"workspace_id":"wlauncher","label":"FIRSTMATE"},{"workspace_id":"wnew","label":"└ new · p:ZyXwVuTsRqPoNmLkJiHgFe"},{"workspace_id":"wreview","label":"REVIEW"},{"workspace_id":"wreview-child","label":"$review_label"}]}}'
+SH
+  chmod +x "$mover"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "wreview\\twreview:t1"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_order_best_effort fmtest wnew FIRSTMATE wlauncher "$1" "$2"' "$ROOT" "$state" "$home" 2>&1)
+  [ -z "$out" ] || fail "journaled custom parent blocked ordering: $out"
+  [ "$(cat "$mover_log")" = "$(cd /tmp && pwd -P)/fmtest.sock"$'\t'"wnew"$'\t'"1" ] \
+    || fail "journaled custom parent did not preserve its own child block"
+
+  rm -f "$state/review-r1.herdr-presentation" "$resp/.count"
+  : > "$mover_log"
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 \
+    FM_BACKEND_HERDR_WORKSPACE_MOVER="$mover" FM_FAKE_MOVER_LOG="$mover_log" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_order_best_effort fmtest wnew FIRSTMATE wlauncher "$1" "$2"' "$ROOT" "$state" "$home" 2>&1)
+  assert_contains "$out" "ambiguous workspace layout" "unjournaled custom child was accepted"
+  [ ! -s "$mover_log" ] || fail "unjournaled custom child triggered a workspace move"
+  pass "herdr presentation ordering: another custom parent requires its own journaled child"
 }
 
 test_projection_order_allows_intervening_parent_child_block() {
@@ -3457,6 +3663,35 @@ SH
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
 }
 
+test_projection_custom_parent_label_binds_only_its_exact_id() {
+  local dir state home log resp fb result label
+  dir="$TMP_ROOT/projection-custom-parent"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  label='└ custom · p:AbCdEfGhIjKlMnOpQrStUv'
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\"},{\"workspace_id\":\"w1\",\"label\":\"FIRSTMATE\"},{\"workspace_id\":\"w2\",\"label\":\"$label\"}]}}" > "$resp/1.out"
+  cp "$resp/1.out" "$resp/2.out"
+  cp "$resp/1.out" "$resp/3.out"
+  cp "$resp/1.out" "$resp/4.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-custom"}]}}' > "$resp/5.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/6.out"
+  result=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      observed=$(fm_backend_herdr_projection_parent_label_exact fmtest w1) || exit 1
+      [ "$observed" = FIRSTMATE ] || exit 2
+      ! fm_backend_herdr_projection_parent_label_exact fmtest w9 >/dev/null || exit 3
+      ! fm_backend_herdr_projection_live_binding_matches \
+        fmtest AbCdEfGhIjKlMnOpQrStUv w2 w2:t2 w2:p2 w0 firstmate "$1" fm-custom || exit 4
+      fm_backend_herdr_projection_live_binding_matches \
+        fmtest AbCdEfGhIjKlMnOpQrStUv w2 w2:t2 w2:p2 w1 "$observed" "$1" fm-custom || exit 5
+      printf "%s" "$observed"
+    ' "$ROOT" "$label") || fail "custom parent lookup or exact-id topology validation failed"
+  [ "$result" = FIRSTMATE ] || fail "did not preserve the observed parent label"
+  pass "herdr presentation: custom parent label binds by exact id; a different parent is refused"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -3500,7 +3735,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
         }
         set +e
         fm_backend_herdr_projection_reclaim_task \
-          fmtest "$journal" refusal-r1 "$home" w2 w2:t2 w2:p2 firstmate fm-refusal-r1 /tmp/project \
+          fmtest "$journal" refusal-r1 "$home" w2 w2:t2 w2:p2 fm-refusal-r1 /tmp/project \
           >/dev/null 2>&1
         rc=$?
         set -e
@@ -3523,7 +3758,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
 }
 
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
-  local dir state home home_real log resp fb journal token label out calls create_line close_line agent_line boundary_mutations
+  local dir state home home_real log resp fb journal token legacy_token legacy_label label out calls create_line close_line agent_line boundary_mutations
   dir="$TMP_ROOT/projection-reclaim-exact"; state="$dir/state"; home="$dir/home"
   mkdir -p "$dir/responses" "$state" "$home"
   home_real=$(cd "$home" && pwd -P)
@@ -3534,17 +3769,27 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     label=$(fm_backend_herdr_projection_workspace_label fm-hibit-r1 "$token")
     fm_backend_herdr_projection_journal_bind \
       "$1/fm-hibit-r1.herdr-presentation" fm-hibit-r1 "$2" fmtest \
-      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
+      w2 w2:t2 w2:p2 w1 FIRSTMATE "$label" fm-fm-hibit-r1 || exit 1
     printf "%s" "$token"
   ' "$ROOT" "$state" "$home_real") || fail "could not create exact reclaim journal fixture"
+  legacy_token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" legacy-r1) || exit 1
+    label="firstmate/legacy-r1 · p:$token"
+    fm_backend_herdr_projection_journal_bind \
+      "$1/legacy-r1.herdr-presentation" legacy-r1 "$2" fmtest \
+      wlegacy wlegacy:t1 wlegacy:p1 w1 firstmate "$label" fm-legacy-r1 || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create legacy child journal fixture"
+  legacy_label="firstmate/legacy-r1 · p:$legacy_token"
   journal="$state/fm-hibit-r1.herdr-presentation"
   label="└ hibit-r1 · p:$token"
-  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\",\"focused\":false,\"active_tab_id\":\"w0:t1\"},{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\",\"focused\":false,\"active_tab_id\":\"w0:t1\"},{\"workspace_id\":\"w1\",\"label\":\"FIRSTMATE\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"wlegacy\",\"label\":\"$legacy_label\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
   printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/4.out"
   printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/5.out"
-  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/6.out"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"FIRSTMATE\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"wlegacy\",\"label\":\"$legacy_label\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/6.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/7.out"
   printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"},"root_pane":{"pane_id":"w2:p3"}}}' > "$resp/8.out"
   cp "$resp/6.out" "$resp/9.out"
@@ -3574,7 +3819,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     bash -c '
       . "$0/bin/backends/herdr.sh"
       fm_backend_herdr_projection_reclaim_task \
-        fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-r1 /tmp/project || exit 1
+        fmtest "$1" fm-hibit-r1 "$2" w2 w2:t2 w2:p2 fm-fm-hibit-r1 /tmp/project || exit 1
       printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
     ' "$ROOT" "$journal" "$home") || fail "exact agent-free projection reclaim failed"
   [ "$out" = "w2:t3 w2:p3" ] || fail "reclaim did not return exact replacement ids: $out"
@@ -3597,7 +3842,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   assert_not_contains "$calls" $'workspace\x1frename' "reclaim renamed the projected workspace"
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
   assert_not_contains "$calls" $'\x1fw0' "reclaim touched the same-labeled sibling parent"
-  pass "herdr presentation reclaim: exact agent-free husk survives duplicate parent labels while its sibling stays untouched"
+  pass "herdr presentation reclaim: a custom-labeled exact parent replaces only its agent-free husk and leaves the sibling untouched"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -5858,6 +6103,7 @@ test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
+test_projection_journal_rejects_custom_legacy_prefix
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
@@ -5894,6 +6140,10 @@ test_projection_label_builder_uses_corner_and_strips_owner_prefixes
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order
 test_projection_order_secondmate_parent_block
 test_projection_order_foreign_legacy_child_is_read_only
+test_projection_order_renamed_parent_with_journaled_legacy_child
+test_projection_shared_launcher_children_are_read_only
+test_projection_foreign_recorded_child_breaks_launcher_block
+test_projection_order_traverses_journaled_custom_parent
 test_projection_order_allows_intervening_parent_child_block
 test_projection_order_human_spaces_never_move_targets
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure
@@ -5904,6 +6154,7 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
+test_projection_custom_parent_label_binds_only_its_exact_id
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
