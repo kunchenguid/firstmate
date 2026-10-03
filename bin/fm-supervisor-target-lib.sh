@@ -76,3 +76,35 @@ discover_supervisor_backend() {
   printf '%s' "$FM_SUPERVISOR_BACKEND_DEFAULT"
   return 1
 }
+
+# supervisor_pane_hosts_daemon: 0 when THIS process is running inside <target>
+# itself, 1 otherwise.
+#
+# Away mode has two hostings (.agents/skills/afk/SKILL.md step 2). On a harness
+# with a native tracked-background tool the daemon runs as a background job OF
+# THE VERY AGENT it injects into, so the daemon and the supervisor pane share
+# one pane identity; on the terminal-backed path the launcher gives the daemon
+# its own terminal and passes the captain pane in, so the two differ.
+#
+# That distinction matters because a backend's native agent-state answers "is
+# anything running in this pane", not "is the agent mid-turn". A self-hosted
+# daemon is itself something running in that pane, so it pins its own target's
+# native state for as long as away mode lasts. Callers must not read native
+# state as evidence about the AGENT when this returns 0.
+#
+# Detection compares the pane identity the backend exported into this process's
+# environment against the resolved target, composed exactly as
+# discover_supervisor_target composes it, so an explicit FM_SUPERVISOR_TARGET
+# that happens to name this pane is still recognized as self-hosted.
+supervisor_pane_hosts_daemon() {  # <target>
+  local target=$1
+  [ -n "$target" ] || return 1
+  if [ -n "${TMUX_PANE:-}" ] && [ "$TMUX_PANE" = "$target" ]; then
+    return 0
+  fi
+  if [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ] \
+    && [ "${HERDR_SESSION:-default}:$HERDR_PANE_ID" = "$target" ]; then
+    return 0
+  fi
+  return 1
+}
