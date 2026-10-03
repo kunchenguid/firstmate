@@ -35,9 +35,11 @@
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
-#              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent). An endpoint that reads
-#              `missing` is put through the control plane's per-backend absence
+#              the backend's recovery-grade classifier reports the agent gone,
+#              or the recorded endpoint authoritatively absent once the exit
+#              command was delivered (a seat that closed itself on exit is a
+#              stronger stop, never a failure). Already-stopped is success
+#              (idempotent). An endpoint that reads `missing` before exit is put through the control plane's per-backend absence
 #              proof (fm_control_endpoint_absence_verdict) before anything is
 #              claimed about it, because `missing` also covers an endpoint that
 #              is merely unreachable from this seat. That proof exists only on
@@ -51,6 +53,18 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#
+#              Verification is keyed on that POSITIVE stop state with two
+#              bounded waits: the primary exit window, then a shorter confirm
+#              window that catches a stop landing just after the first window
+#              expires. A window's expiry is NOT evidence the action failed -
+#              it only means the stop state was not observed yet - so expiry
+#              reports exit=unconfirmed with the observed state and never a
+#              definite "did not stop" failure claim. Only a definite refusal
+#              before or during delivery reports the action as failed. Reading
+#              a succeeded action as failed is the dangerous direction for
+#              lifecycle control: it aims recovery at a seat that already did
+#              exactly what it was told.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -116,8 +130,11 @@
 #     classifier (tmux, herdr), because without one the "the agent stopped"
 #     postcondition cannot be proven. zellij, orca, and cmux are refused rather
 #     than reported as successful blind.
-#   - An ambiguous or unreadable endpoint state refuses; only a positively
-#     classified state acts.
+#   - An ambiguous or unreadable endpoint state is never sent a lifecycle
+#     command; only a positively classified state receives one. For exit after
+#     a delivered interrupt, such a read is not a refusal: the exit command is
+#     withheld while the same staged waits decide the outcome, and a seat that
+#     settles back to alive still receives its exit command.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
 #
@@ -127,6 +144,8 @@
 #   FM_CONTROL_ARM_WAIT          wait for an armed interrupt's rendered proof
 #                                after the press gap (1.5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
+#   FM_CONTROL_EXIT_CONFIRM_WAIT second bounded wait for the same positive stop
+#                                state after the exit window expires (10)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
 set -eu
@@ -181,6 +200,7 @@ POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
 ARM_WAIT=${FM_CONTROL_ARM_WAIT:-1.5}
 EXIT_WAIT=${FM_CONTROL_EXIT_WAIT:-30}
+EXIT_CONFIRM_WAIT=${FM_CONTROL_EXIT_CONFIRM_WAIT:-10}
 LAUNCH_WAIT=${FM_CONTROL_LAUNCH_WAIT:-90}
 EXIT_RETRIES=${FM_CONTROL_EXIT_RETRIES:-3}
 
@@ -554,6 +574,46 @@ retire_busy_incarnation() {
   fi
 }
 
+# await_positive_stop: run the staged positive-stop waits - the primary exit
+# window, then the shorter confirm window - and report their combined expiry.
+# Window expiry is not evidence the agent kept running, so the report is
+# unconfirmed with the last observed state, never a definite failure claim.
+# Extra positive states the caller can act on end the waits the same way.
+await_positive_stop() {  # <outcome prefix> [extra positive state]...
+  local prefix=$1
+  shift
+  state=$(wait_agent_state "$EXIT_WAIT" dead missing "$@") || {
+    state=$(wait_agent_state "$EXIT_CONFIRM_WAIT" dead missing "$@") || {
+      die "$prefix agent-state=$state exit=unconfirmed; the stop state was not observed within the ${EXIT_WAIT}s exit window and its ${EXIT_CONFIRM_WAIT}s confirm window - a window's expiry is not evidence the agent kept running, so this is unconfirmed rather than failed; read the seat's current state before any recovery action"
+    }
+  }
+  [ "$state" != missing ] || prove_missing_stop "$prefix"
+}
+
+# prove_missing_stop: a `missing` read after lifecycle input is not stop
+# evidence on its own - it also covers an endpoint merely unreachable from this
+# seat - so it goes through the same absence proof as a `missing` read before
+# exit. Proven gone is the stop (state gone, reported `endpoint-gone` exactly as
+# before exit); there after all with no agent is the stop (state dead); an
+# agent that came back reads alive; anything unproven is unconfirmed.
+prove_missing_stop() {  # <outcome prefix>
+  local absence
+  absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+  case "${absence%%$'\t'*}" in
+    gone) state=gone ;;
+    dead) state=dead ;;
+    alive) state=alive ;;
+    *) die "$1 agent-state=missing exit=unconfirmed; task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; a missing read is not stop evidence, so read the seat's current state before any recovery action" ;;
+  esac
+}
+
+# report_stop: retire the finished incarnation and print the stop outcome - a
+# proven-gone endpoint is `endpoint-gone` on every path, anything else `stopped`.
+report_stop() {
+  retire_busy_incarnation
+  if [ "$state" = gone ]; then printf 'endpoint-gone'; else printf 'stopped'; fi
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
@@ -607,15 +667,31 @@ do_exit() {
     busy*)
       cancel=$(deliver_interrupt) || return $?
       state=$(agent_state)
+      [ "$state" != missing ] \
+        || prove_missing_stop "exit-interrupted $ID interrupt=delivered cancel=$cancel exit-command=not-sent"
       case "$state" in
-        dead)
-          retire_busy_incarnation
-          printf 'stopped'
+        dead|gone)
+          report_stop
           return 0
           ;;
         alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
-        missing) die "task $ID's recorded endpoint disappeared after interrupt delivery, so exit cannot prove whether the agent stopped" ;;
-        *) die "task $ID's endpoint reads '$state' after interrupt delivery rather than a positively classified state; exit cannot prove whether the agent stopped" ;;
+        *)
+          # The interrupt landed but the seat cannot be positively attributed
+          # right now. That is neither a refusal nor stop evidence, so the exit
+          # command is withheld (an unattributed endpoint takes no lifecycle
+          # command) and the same staged waits decide the outcome: a positively
+          # observed stop is success, a seat that settles back to alive still
+          # gets its exit command, and only their expiry is unconfirmed.
+          interrupt_result="delivered verified=unattributed cancel=$cancel"
+          await_positive_stop "exit-interrupted $ID interrupt=$interrupt_result exit-command=not-sent" alive
+          case "$state" in
+            alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
+            *)
+              report_stop
+              return 0
+              ;;
+          esac
+          ;;
       esac
       ;;
   esac
@@ -645,13 +721,20 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  # The postcondition is the POSITIVE stop state: the classifier confidently
+  # reads no agent (dead), or the recorded endpoint is PROVEN absent because the
+  # seat closed itself on exit (a `missing` read that passes the absence proof;
+  # an unproven one is unconfirmed, never a stop). Window expiry is a
+  # different thing entirely, so the waits are staged: the primary window,
+  # then a shorter confirm window for a stop that lands just late. Both key on
+  # the same positive state, and only their combined expiry reports unconfirmed
+  # - with the observed state, never a definite "did not stop" failure claim.
+  await_positive_stop "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered"
+  [ "$state" = dead ] || [ "$state" = gone ] \
+    || die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the endpoint read 'missing' but proved to still hold a running agent; read the seat's current state before any recovery action"
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
-  printf 'stopped'
+  report_stop
 }
 
 # --- transactional relaunch -------------------------------------------------

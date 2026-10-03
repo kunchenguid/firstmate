@@ -2001,6 +2001,14 @@ case "${1:-} ${2:-}" in
         "$(cat "$D/herdr-pane")"
     fi
     exit 0 ;;
+  'pane send-keys')
+    # A busy interrupt that takes the whole pane down with its agent.
+    if [ -f "$D/herdr-interrupt-destroys-pane" ]; then
+      rm -f "$D/herdr-agent-live"
+      printf '%s' '%none' > "$D/herdr-pane"
+      : > "$D/herdr-stopped"
+    fi
+    exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
     # makes an agent exist on this pane, so the control plane's alive-wait can
@@ -2302,6 +2310,34 @@ test_herdr_reclaim_keeps_the_task_whole() {
   pass "reclaim: a herdr reclaim rebinds the endpoint and leaves the whole rest of the task alone"
 }
 
+test_herdr_exit_reports_a_proven_gone_endpoint_the_same_on_both_paths() {
+  local dir out rc gen pre post
+  herdr_case_or_skip gone-herdr-pre rl78 fmlab '%none' || {
+    echo "skip - herdr exit needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  pre=$(run_control "$dir" rl78 exit); rc=$?
+  expect_code 0 "$rc" "a proven-gone endpoint before exit is a stop"$'\n'"$pre"
+
+  herdr_case_or_skip gone-herdr-post rl79 || return 0
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  : > "$dir/fake/herdr-agent-live"
+  : > "$dir/fake/herdr-interrupt-destroys-pane"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl79)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/rl79.meta"
+  post=$(run_control "$dir" rl79 exit); rc=$?
+  expect_code 0 "$rc" "a pane proven gone after the busy interrupt is a stop"$'\n'"$post"$'\n'"$(cat "$dir/fake/herdr-log")"
+
+  [ "${pre%% *}" = endpoint-gone ] && [ "${post%% *}" = endpoint-gone ] \
+    || fail "one proven-gone fact must carry one label on both paths: before exit '$pre', after the interrupt '$post'"
+  assert_not_contains "$post" "stopped" "a proven-gone endpoint must not read as an ordinary stop"
+  [ ! -e "$dir/home/state/rl79.busy-gen" ] \
+    || fail "exit should retire busy wiring once the endpoint is proven gone"
+  pass "fm-control exit: a proven-gone endpoint reports endpoint-gone before exit and after the busy interrupt"
+}
+
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause() {
   local dir out rc
   # No HERDR_* env at all, which is how an operator reclaims from ssh or cron.
@@ -2454,6 +2490,7 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
+test_herdr_exit_reports_a_proven_gone_endpoint_the_same_on_both_paths
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it

@@ -107,6 +107,10 @@ install_remote_herdr_fixture "$REMOTE_ROOT" "$HERDR_STATE" "$HERDR_LOG" \
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
+# Newer Git (2.5x) runs detached auto-maintenance after commit; its repack
+# prunes the fixture's loose objects while a provisioning clone copies them.
+git -C "$REMOTE_ROOT" config maintenance.auto false
+git -C "$REMOTE_ROOT" config gc.auto 0
 git -C "$REMOTE_ROOT" add .
 git -C "$REMOTE_ROOT" commit -qm 'remote fixture root'
 REMOTE_ORIGIN="$TMP_ROOT/firstmate-origin.git"
