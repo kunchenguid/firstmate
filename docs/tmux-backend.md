@@ -58,6 +58,8 @@ The foreground probe also reads argv[0] so an exact harness install-path compone
 Either source naming a verified harness is enough for `alive`, because a false `dead` is the one verdict that can start a duplicate agent on a live worktree, while a readable foreground process group settles the negative verdicts.
 
 Scoping the second source to the foreground process group rather than to the pane's descendants is deliberate: a harness-named process left running in the background of an otherwise idle pane must not read as an agent.
+The narrow exception is a foreground shell with a parenthesized wrapper suffix such as `zsh (kiro-cli-term)`: the probe accepts it as a shell only after resolving its executable to a known shell binary, then checks pane descendants before reporting `dead`.
+An attributable agent descendant reports `alive`, and an unrelated descendant keeps the pane `ambiguous`.
 The same scoping covers multi-process launchers without a special case, so the Pi Launcher path is attributed through its `pi-signed` wrapper and `pi` engine even though its title is the exact foreground command `pi-launcher`.
 Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly, and similar or prefixed process names are not accepted through those exact Pi-family entries.
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.

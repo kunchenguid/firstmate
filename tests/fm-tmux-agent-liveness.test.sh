@@ -105,6 +105,9 @@ ln -s "$STANDIN_BIN" "$LAB/bin/musescore"
 ln -s "$STANDIN_BIN" "$LAB/bin/amuse"
 ln -s "$STANDIN_BIN" "$LAB/bin/muse-binary"
 ln -s "$STANDIN_BIN" "$LAB/bin/muse-bind"
+ln -s "$STANDIN_BIN" "$LAB/bin/codex"
+ln -s /bin/sh "$LAB/bin/sh (kiro-cli-term)"
+ln -s "$STANDIN_BIN" "$LAB/bin/sh (impostor-term)"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -285,6 +288,52 @@ pass "tmux liveness: a launcher whose own identity reads as a bare shell classif
 wait_for_state "$SESSION:idle" dead \
   || fail "an idle shell pane must classify dead"
 pass "tmux liveness: an idle shell pane classifies dead"
+
+# A terminal integration may give a real shell a decorated process title.
+# The symlink changes the process name without changing its executable, so the
+# classifier must prove the shell from the executable before accepting death.
+new_window wrapped "$LAB/bin/sh (kiro-cli-term)" -i
+case "$(fm_backend_tmux_foreground_comms "$SESSION:wrapped")" in
+  *'sh (kiro-cli-'*) ;;
+  *) fail "the wrapped-shell process name was not visible in the foreground group" ;;
+esac
+wait_for_state "$SESSION:wrapped" dead \
+  || fail "an idle wrapped shell with a real shell executable must classify dead"
+pass "tmux liveness: an idle wrapped shell classifies dead from its executable"
+
+new_window impostor "$LAB/bin/sh (impostor-term)" 900
+wait_for_state "$SESSION:impostor" ambiguous \
+  || fail "a shell-like title on a non-shell executable must stay ambiguous"
+pass "tmux liveness: a decorated non-shell executable stays ambiguous"
+
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped" "$LAB/bin/codex 900" Enter
+wait_for_state "$SESSION:wrapped" alive \
+  || fail "a wrapped shell with a live Codex-like child must classify alive"
+pass "tmux liveness: a wrapped shell with a Codex-like child classifies alive"
+
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped" C-c
+wait_for_state "$SESSION:wrapped" dead \
+  || fail "the wrapped shell must return to dead after its agent child exits"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped" "$LAB/bin/notaharness 900" Enter
+wait_for_state "$SESSION:wrapped" ambiguous \
+  || fail "a wrapped shell with an unrelated child must classify ambiguous"
+pass "tmux liveness: a wrapped shell with an unrelated child stays ambiguous"
+
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped" C-c
+wait_for_state "$SESSION:wrapped" dead \
+  || fail "the wrapped shell must return to dead after its unrelated child exits"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped" "$LAB/bin/codex 900 &" Enter
+wait_for_state "$SESSION:wrapped" alive \
+  || fail "a wrapped shell with a background Codex-like descendant must classify alive"
+pass "tmux liveness: a wrapped shell retains a live descendant as alive"
+
+new_window wrapped-other "$LAB/bin/sh (kiro-cli-term)" -i
+wait_for_state "$SESSION:wrapped-other" dead \
+  || fail "the second wrapped shell must start idle"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped-other" "$LAB/bin/notaharness 900 &" Enter
+wait_for_state "$SESSION:wrapped-other" ambiguous \
+  || fail "a wrapped shell with an unrelated background descendant must stay ambiguous"
+pass "tmux liveness: a wrapped shell retains an unrelated descendant as ambiguous"
 
 # --- a harness-named BACKGROUND process must not fake an agent --------------
 # Scoping to the foreground process group is what prevents this false alive; a

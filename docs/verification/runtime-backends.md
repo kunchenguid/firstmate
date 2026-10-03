@@ -193,6 +193,30 @@ Run the live guard after any harness upgrade and before trusting or refreshing t
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
+### Wrapped-shell liveness, 2026-10-04
+
+On macOS 26.6.1 with tmux 3.7b, the portable real-process regression launched `/bin/sh` through a `sh (kiro-cli-term)` symlink in a private tmux server.
+The wrapped shell read `dead` while idle, `alive` with a Codex-like child, and `ambiguous` with an unrelated child.
+A shell-like title on a non-shell executable remained `ambiguous`, and a background Codex-like descendant below the wrapped shell remained `alive`.
+
+```sh
+bash tests/fm-tmux-agent-liveness.test.sh
+bash tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+The default-on live guard launched every installed harness both directly and below the wrapped shell without submitting a prompt.
+Observed bounded output:
+
+```text
+ok - wrapped-shell liveness: claude 2.1.288 (Claude Code) reads dead idle and alive with the installed agent
+ok - wrapped-shell liveness: codex codex-cli 0.157.1 reads dead idle and alive with the installed agent
+ok - wrapped-shell liveness: opencode 1.18.34 reads dead idle and alive with the installed agent
+ok - wrapped-shell liveness: kimi 2.1.1 reads dead idle and alive with the installed agent
+ok - wrapped-shell liveness: cursor 2026.09.26-dd393fe reads dead idle and alive with the installed agent
+# unverified on this machine (not installed): pi pi-signed grok muse
+# checked 5 installed harness(es)
+```
+
 ### 2026-09-06 default-on drift refresh, and the Cursor editor CLI collision
 
 Running the guard with no variable set on macOS 26.5.2 arm64 checked 8 installed harnesses and classified every one `alive`:

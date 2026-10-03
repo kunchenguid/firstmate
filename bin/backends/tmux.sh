@@ -258,6 +258,92 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
+# Pair each foreground name with its pid when a decorated shell name needs
+# executable proof. A title such as `zsh (kiro-cli-term)` is writable process
+# text and cannot, on its own, authorize relaunch onto that pane.
+fm_backend_tmux_foreground_pid_comms() {  # <target>
+  local tty pid pgid tpgid comm
+  tty=$(tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
+  [ -n "$tty" ] || return 1
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+    | while read -r pid pgid tpgid comm; do
+        [ -n "$comm" ] || continue
+        [ "$pgid" = "$tpgid" ] || continue
+        printf '%s\t%s\n' "$pid" "$comm"
+      done
+}
+
+fm_backend_tmux_pid_executable() {  # <pid> -> resolved executable path
+  local path
+  if [ -e "/proc/$1/exe" ]; then
+    readlink "/proc/$1/exe" 2>/dev/null && return 0
+  fi
+  command -v lsof >/dev/null 2>&1 || return 1
+  path=$(LC_ALL=C lsof -a -p "$1" -d txt -Fn 2>/dev/null | awk '
+    /^ftxt$/ { executable = 1; next }
+    executable && /^n/ { print substr($0, 2); exit }
+  ') || return 1
+  [ -n "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
+fm_backend_tmux_pid_is_wrapped_shell() {  # <pid> <comm>
+  local base=${2##*/} executable args
+  if ! [[ "$base" =~ ^(sh|bash|zsh|dash|ash|ksh|mksh|tcsh|csh|fish)[[:space:]]+\([^()]+\)$ ]]; then
+    # Linux comm may truncate the suffix. The full leading argv[0] can supply
+    # the decorated name, but the executable check below remains mandatory.
+    args=$(LC_ALL=C ps -p "$1" -o args= 2>/dev/null) || return 1
+    [[ "$args" =~ ^(.*/)?(sh|bash|zsh|dash|ash|ksh|mksh|tcsh|csh|fish)[[:space:]]+\([^()]+\)($|[[:space:]]) ]] || return 1
+  fi
+  executable=$(fm_backend_tmux_pid_executable "$1") || return 1
+  [ "$(fm_agent_process_classify_name "$executable")" = shell ]
+}
+
+# Only a decorated shell takes this additional descendant check. A background
+# child of an ordinary idle shell retains the existing foreground-only rule.
+fm_backend_tmux_wrapped_shell_descendant_state() {  # <target> -> dead|alive|ambiguous
+  local pane_pid rows pids pid comm args argv0 other=0
+  pane_pid=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || { printf ambiguous; return; }
+  [[ "$pane_pid" =~ ^[0-9]+$ ]] || { printf ambiguous; return; }
+  rows=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || { printf ambiguous; return; }
+  pids=$(printf '%s\n' "$rows" | awk -v root="$pane_pid" '
+    { parent[$1] = $2; pid[NR] = $1 }
+    END {
+      if (!(root in parent)) exit 1
+      seen[root] = 1
+      do {
+        changed = 0
+        for (i = 1; i <= NR; i++) {
+          if (!seen[pid[i]] && seen[parent[pid[i]]]) {
+            seen[pid[i]] = 1
+            print pid[i]
+            changed = 1
+          }
+        }
+      } while (changed)
+    }
+  ') || { printf ambiguous; return; }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || { other=1; continue; }
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || { other=1; continue; }
+    argv0=${args%%[[:space:]]*}
+    if [ "$(fm_agent_process_classify_name "$comm" "$argv0")" = agent ] \
+      || [ "$(fm_agent_process_classify_name "$argv0" "$argv0")" = agent ] \
+      || fm_gemini_pid_is_gemini "$pid"; then
+      printf alive
+      return
+    fi
+    if [ "$(fm_agent_process_classify_name "$comm")" != shell ] \
+      && ! fm_backend_tmux_pid_is_wrapped_shell "$pid" "$comm"; then
+      other=1
+    fi
+  done <<EOF
+$pids
+EOF
+  if [ "$other" -eq 1 ]; then printf ambiguous; else printf dead; fi
+}
+
 # The foreground group's full command lines. Needed because a node-bundle
 # harness carries its identity in argv[1] rather than in its command name or
 # argv[0]; bin/fm-gemini-lib.sh owns what counts as evidence inside one.
@@ -321,7 +407,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid fg_seen=0 fg_shell=0 fg_other=0
+  local foreground argv0s name pid descendant_state fg_seen=0 fg_shell=0 fg_other=0 fg_wrapped=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -344,14 +430,21 @@ fm_backend_tmux_agent_state() {  # <target>
     return 0
   fi
 
-  foreground=$(fm_backend_tmux_foreground_comms "$target")
-  while IFS= read -r name; do
+  foreground=$(fm_backend_tmux_foreground_pid_comms "$target")
+  while IFS=$'\t' read -r pid name; do
     [ -n "$name" ] || continue
     fg_seen=1
     case "$(fm_agent_process_classify_name "$name")" in
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
-      *) fg_other=1 ;;
+      *)
+        if fm_backend_tmux_pid_is_wrapped_shell "$pid" "$name"; then
+          fg_shell=1
+          fg_wrapped=1
+        else
+          fg_other=1
+        fi
+        ;;
     esac
   done <<EOF
 $foreground
@@ -405,7 +498,16 @@ EOF
   # A readable foreground process group settles the negative verdicts: only a
   # group that is nothing but shells is confidently agent-free.
   if [ "$fg_seen" -eq 1 ]; then
-    if [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
+    if [ "$fg_wrapped" -eq 1 ]; then
+      descendant_state=$(fm_backend_tmux_wrapped_shell_descendant_state "$target")
+      if [ "$descendant_state" = alive ]; then
+        printf alive
+      elif [ "$fg_other" -eq 1 ]; then
+        printf ambiguous
+      else
+        printf '%s' "$descendant_state"
+      fi
+    elif [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
       printf 'dead'
     else
       printf 'ambiguous'
