@@ -26,16 +26,35 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'existing v2 database must upgrade through numbered migrations'
+[ "$(field "$upgraded" schema_version)" = 5 ] || fail 'existing v2 database must upgrade through numbered migrations'
 db=$tmp/upgrade-v3.sqlite3
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/003.sql"
 sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json) VALUES('legacy','[\"owner/repo\"]'); PRAGMA user_version=3;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'existing v3 database must upgrade to host-aware schema'
+[ "$(field "$upgraded" schema_version)" = 5 ] || fail 'existing v3 database must upgrade to host-aware schema'
 coord enroll '{"request_id":"bind-legacy-host","home_id":"legacy","repos":["owner/repo"],"host_id":"legacy-test-host"}' > /dev/null
 field "$(coord inspect '{}')" participants | python3 -c 'import ast,sys; assert any(p["home_id"]=="legacy" and p["host_id"]=="legacy-test-host" for p in ast.literal_eval(sys.stdin.read()))' || fail 'an existing participant must bind its host after v3 upgrade'
+
+db=$tmp/upgrade-v4.sqlite3
+for migration in 001 002 003 004; do
+  sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/$migration.sql"
+done
+legacy_host=$(python3 -c 'import socket; print(socket.gethostname())')
+sqlite3 "$db" "INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); INSERT INTO participants(home_id,repos_json,host_id) VALUES('was-local','[\"owner/repo\"]','$legacy_host'),('was-remote','[\"owner/repo\"]','remote-test-host'),('renamed-local','[\"owner/repo\"]','old-name.local'); INSERT INTO intents(intent_id,home_id,generation,repo,base_ref,base_oid,branch,task_id,goal,resources_json,read_dependencies_json,predecessors_json,expected_artifacts_json,created_at) VALUES('inflight','was-local',1,'owner/repo','main','$base','branch/inflight','inflight','test','[]','[]','[]','[]','2026-01-01T00:00:00+00:00'); INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,ready_epoch,updated_at,attempt_event_id,attempt_epoch,wrapper_pid,wrapper_start,wrapper_boot,wrapper_home_id,wrapper_host_id,wrapper_local) VALUES('inflight','owner/repo','main','$head_a','outcome-unknown',0,'2026-01-01T00:00:00+00:00','legacy-attempt',0,1,'legacy-start','synthetic-previous-boot','was-local','$legacy_host',1); PRAGMA user_version=4;"
+upgraded=$(coord init)
+[ "$(field "$upgraded" schema_version)" = 5 ] || fail 'existing v4 database must upgrade to machine-bound host identity'
+coord enroll '{"request_id":"enroll-fresh","home_id":"fresh","repos":["owner/repo"]}' > /dev/null
+v4_state() { coord inspect '{}' | python3 -c "import json,sys; s=json.load(sys.stdin); hosts={p['home_id']: p['host_id'] for p in s['participants']}; item=s['queue'][0]; $1"; }
+v4_state 'assert hosts["fresh"].startswith("machine:") and hosts["was-local"] == hosts["fresh"]' || fail 'a v4 participant bound to the coordinator hostname must keep same-host identity'
+v4_state 'assert hosts["was-remote"] is None and hosts["renamed-local"] is None' || fail 'an ambiguous v4 host binding must be cleared for one explicit rebind'
+v4_state "assert item['wrapper_local'] == 1 and item['wrapper_host_id'] == '$legacy_host' and item['state'] == 'outcome-unknown'" || fail 'v4 migration must not reinterpret an in-flight attempt'
+coord enroll '{"request_id":"rebind-renamed","home_id":"renamed-local","repos":["owner/repo"]}' > /dev/null
+coord enroll '{"request_id":"rebind-remote","home_id":"was-remote","repos":["owner/repo"],"host_id":"remote-test-host"}' > /dev/null
+v4_state 'assert hosts["renamed-local"] == hosts["fresh"] and hosts["was-remote"] == "remote-test-host"' || fail 'a cleared v4 participant must rebind its host once through enroll'
+reject enroll '{"request_id":"rebind-remote-again","home_id":"was-remote","repos":["owner/repo"],"host_id":"other-host"}' 'a rebound host must not change again'
+pass 'v4 database migrates hostname bindings to machine identity without reinterpreting attempts'
 db=$main_db
 
 authority_token=test-authority-credential-0123456789abcdef
@@ -440,7 +459,7 @@ sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/001.sql"
 sqlite3 "$db" < "$ROOT/bin/fm-coord-migrations/002.sql"
 sqlite3 "$db" "ALTER TABLE queue_items ADD COLUMN attempt_epoch INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_pid INTEGER; ALTER TABLE queue_items ADD COLUMN wrapper_start TEXT; ALTER TABLE queue_items ADD COLUMN wrapper_boot TEXT; INSERT INTO meta(key,value) VALUES('boot_id','synthetic-previous-boot'); PRAGMA user_version=2;"
 upgraded=$(coord init)
-[ "$(field "$upgraded" schema_version)" = 4 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
+[ "$(field "$upgraded" schema_version)" = 5 ] || fail 'previously patched v2 database must upgrade without duplicate-column failure'
 pass 'already patched v2 database upgrades without replaying its columns'
 
 db=$tmp/remote-wrapper.sqlite3
@@ -464,6 +483,7 @@ remote_attempt=$(coord queue-attempt "{\"request_id\":\"attempt-remote\",$remote
 remote_attempt_id=$(field "$remote_attempt" attempt_event_id)
 [ "$(field "$remote_attempt" state)" = attempting ] || fail 'remote wrapper PID must not be checked on the coordinator host'
 coord queue-result "$(printf '{"request_id":"remote-refused","intent_id":"a","generation":%s,"outcome":"refused"}' "$slot")" > /dev/null
+remote_generation=$(field "$(coord session '{"request_id":"session-remote-restart","home_id":"remote"}')" generation)
 if FM_COORD_QUIET_SECONDS=0 not_landed remote-unattested > "$tmp/unexpected" 2> "$tmp/error"; then
   fail 'a remote wrapper without attested exit must keep the slot outcome-unknown'
 fi

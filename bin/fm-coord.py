@@ -54,7 +54,15 @@ def boot_id():
 
 
 def local_host_id():
-    return token(socket.gethostname(), "coordinator host_id")
+    linux = Path("/etc/machine-id")
+    if linux.exists():
+        return token("machine:" + linux.read_text(encoding="ascii").strip(), "coordinator host_id")
+    if sys.platform == "darwin":
+        result = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True, check=True)
+        match = re.search(r'"IOPlatformUUID" = "([0-9A-Fa-f-]+)"', result.stdout)
+        require(match is not None, "machine identity unavailable")
+        return "machine:" + match.group(1)
+    raise Refusal("machine identity unavailable; /etc/machine-id or macOS IOPlatformUUID is required")
 
 
 def process_start(pid):
@@ -394,7 +402,7 @@ def queue_operation(db, op, p):
     if op == "queue-wrapper-exited":
         require(item["state"] in {"attempting", "outcome-unknown"} and item["wrapper_local"] == 0, "remote wrapper exit attestation requires an unsettled remote attempt")
         participant(db, p, intent["repo"])
-        require(p.get("home_id") == item["wrapper_home_id"] and p.get("generation") == intent["generation"], "wrapper exit must come from the owning participant session")
+        require(p.get("home_id") == item["wrapper_home_id"], "wrapper exit must come from the owning participant session")
         owner = db.execute("SELECT host_id FROM participants WHERE home_id=?", (p["home_id"],)).fetchone()
         require(owner is not None and owner["host_id"] == item["wrapper_host_id"], "participant host changed")
         require(p.get("attempt_event_id") == item["attempt_event_id"], "wrapper exit attempt identity mismatch")
@@ -544,9 +552,9 @@ def run_operation(db, op, p):
         if existing:
             require(json.loads(existing["repos_json"]) == sorted(repos), "existing enrollment has different repository scope")
             require(requested_host is None or existing["host_id"] is None or existing["host_id"] == requested_host, "enrolled host_id cannot change")
-            if existing["host_id"] is None and requested_host is not None:
-                db.execute("UPDATE participants SET host_id=? WHERE home_id=?", (requested_host, home))
-            host_id = requested_host or existing["host_id"]
+            host_id = requested_host or existing["host_id"] or local_host_id()
+            if existing["host_id"] is None:
+                db.execute("UPDATE participants SET host_id=? WHERE home_id=?", (host_id, home))
         else:
             host_id = requested_host or local_host_id()
             db.execute("INSERT INTO participants(home_id,repos_json,host_id) VALUES(?,?,?)", (home, compact(sorted(repos)), host_id))
@@ -738,12 +746,12 @@ def main():
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 4, f"unsupported future schema version: {version}")
+            require(version <= 5, f"unsupported future schema version: {version}")
             credential = authority_hash()
-            if version < 4:
+            if version < 5:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 5):
+                    for target in range(version + 1, 6):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
                         if target == 3:
                             expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
@@ -757,9 +765,10 @@ def main():
                                     if statement.strip():
                                         db.execute(statement)
                         else:
+                            params = {"legacy_host": socket.gethostname(), "machine_host": local_host_id()} if target == 5 else {}
                             for statement in schema.read_text(encoding="utf-8").split(";"):
                                 if statement.strip():
-                                    db.execute(statement)
+                                    db.execute(statement, params)
                         if target == 1:
                             db.execute("INSERT INTO meta(key,value) VALUES('boot_id',?)", (boot_id(),))
                         db.execute(f"PRAGMA user_version={target}")
@@ -779,9 +788,9 @@ def main():
                 except Exception:
                     db.execute("ROLLBACK")
                     raise
-            print(compact({"ok": True, "schema_version": 4, "db": db_path, "mode": "shadow-advisory"}))
+            print(compact({"ok": True, "schema_version": 5, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 4, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 5, "unsupported or uninitialized schema version; run init")
         db.execute("BEGIN IMMEDIATE")
         try:
             reconcile_clock(db, boot_id())
