@@ -107,6 +107,16 @@
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
+#   --allow-api-key opts in to deliberate Anthropic API billing for this
+#   claude worker launch. Without this flag, a claude worker REFUSES to launch
+#   when ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN would reach the worker
+#   through ambient environment inheritance, config/launch-env-allowlist, or
+#   (tmux backend) the tmux session or global environment the new window
+#   inherits, because Claude Code prefers an API key over a claude.ai
+#   subscription login and silently bills the API. A config/claude-account pin
+#   strips both variables, so a pinned launch is not refused. The opt-in is
+#   recorded as api_key=allow in the task metadata and carried by fm-control
+#   relaunch. Does not apply to non-claude harnesses.
 #   A herdr crewmate or scout is placed in the exact workspace of the firstmate
 #   or secondmate process launching it, resolved from that process's own herdr
 #   pane rather than from a workspace label (herdr enforces no label uniqueness,
@@ -664,6 +674,7 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+ALLOW_API_KEY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -725,6 +736,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --allow-api-key) ALLOW_API_KEY=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -1472,6 +1484,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ "$ALLOW_API_KEY" -eq 0 ] || shared_args+=(--allow-api-key)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -2414,6 +2427,84 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
     unset CLAUDE_CONFIG_DIR
+  fi
+fi
+
+# Claude API key guard: refuse to launch a Claude worker when an Anthropic API
+# key would reach the worker, unless the caller explicitly opts in with
+# --allow-api-key. A key set in the spawning environment silently redirects
+# Claude Code to API billing even when the user has a valid claude.ai
+# subscription (issue #5723). The worker-account pin shed
+# (fm_worker_account_claude_shed) strips both ANTHROPIC_API_KEY and
+# ANTHROPIC_AUTH_TOKEN from the launch environment, so the guard does not
+# refuse when a pin is active: the key cannot reach the worker.
+if [ "$HARNESS" = claude ] && [ "$ALLOW_API_KEY" -eq 0 ]; then
+  if [ -z "$WORKER_ACCOUNT" ]; then
+    # No pin shed: determine whether each variable would reach the worker.
+    if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+      route_text=' through config/launch-env-allowlist'
+    else
+      route_text=' through ambient environment inheritance'
+    fi
+    for check_var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; do
+      would_reach=1
+      if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+        case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+        *$'\n'"$check_var"$'\n'*) ;;
+        *) would_reach=0 ;;  # Filtered out by allowlist, no refusal
+        esac
+      fi
+      if [ "$would_reach" -eq 1 ] && [ -n "${!check_var:-}" ]; then
+        echo "error: $check_var is set and would reach the claude worker$route_text; unset it or pass --allow-api-key to deliberately bill the API" >&2
+        exit 1
+      fi
+    done
+  fi
+  # Also check the environment a new tmux window gives the worker. The window
+  # inherits the tmux session environment layered over the tmux global
+  # environment, which can hold a key the spawning process no longer has (the
+  # server started while the shell exported it). A session entry wins, and a
+  # session removal marker (-NAME) means unset; otherwise the global value
+  # applies. The global environment is checked even before the target session
+  # exists, because a session created later inherits it. The pin shed
+  # (WORKER_ACCOUNT) and allowlist (LAUNCH_ENV_ENABLED) filters apply as above.
+  # Pane rc files and direnv .envrc exports are not detected by this check.
+  if [ "$BACKEND" = tmux ] && [ -z "$WORKER_ACCOUNT" ]; then
+    tmux_session=
+    if [ -n "${TMUX:-}" ]; then
+      tmux_session=$(tmux display-message -p '#S' 2>/dev/null) || tmux_session=
+    elif tmux has-session -t firstmate 2>/dev/null; then
+      tmux_session=firstmate
+    fi
+    for check_var in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN; do
+      if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
+        case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
+        *$'\n'"$check_var"$'\n'*) ;;
+        *) continue ;;  # Allowlist filters it out at launch time
+        esac
+      fi
+      tmux_env_scope=
+      if [ -n "$tmux_session" ] \
+         && tmux_env_entry=$(tmux show-environment -t "$tmux_session" "$check_var" 2>/dev/null); then
+        case "$tmux_env_entry" in
+        "$check_var"=?*) tmux_env_scope=session ;;
+        esac
+      elif tmux_env_entry=$(tmux show-environment -g "$check_var" 2>/dev/null); then
+        case "$tmux_env_entry" in
+        "$check_var"=?*) tmux_env_scope=global ;;
+        esac
+      fi
+      case "$tmux_env_scope" in
+      session)
+        echo "error: $check_var is set in the tmux session environment and would reach the claude worker; unset it (tmux set-environment -t $tmux_session -u $check_var) or pass --allow-api-key to deliberately bill the API" >&2
+        exit 1
+        ;;
+      global)
+        echo "error: $check_var is set in the tmux global environment and would reach the claude worker; unset it (tmux set-environment -g -u $check_var) or pass --allow-api-key to deliberately bill the API" >&2
+        exit 1
+        ;;
+      esac
+    done
   fi
 fi
 
@@ -4890,7 +4981,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider api_key busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4913,6 +5004,7 @@ preserve_relaunch_meta() {
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  [ "$ALLOW_API_KEY" -eq 0 ] || echo "api_key=allow"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

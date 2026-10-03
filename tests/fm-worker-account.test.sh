@@ -126,7 +126,9 @@ assert_refused_before_launch() {
 test_absent_pin_keeps_the_launch_unchanged() {
   local out rc id=acct-absent
   new_case absent claude
-  out=$(spawn_ship "$id"); rc=$?
+  # spawn_ship's ambient invoker key reaches an unpinned Claude worker, so the
+  # Claude API key guard refuses the spawn unless it opts in to API billing.
+  out=$(spawn_ship "$id" --allow-api-key); rc=$?
   expect_code 0 "$rc" "an unpinned Claude spawn should succeed: $out"
   assert_not_contains "$out" "account=" "an unpinned spawn must not report an account"
   assert_no_grep "account=" "$HOME_DIR/state/$id.meta" "an unpinned task record must not carry an account"
@@ -350,7 +352,8 @@ test_raw_claude_account_override_is_kept_without_a_pin() {
   local out rc id=acct-raw-unpinned
   new_case raw-unpinned claude
   mkdir -p "$CASE/other"
-  out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
+  out=$(spawn_ship "$id" --allow-api-key \
+    --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
   expect_code 0 "$rc" "an unpinned home should accept a raw Claude account override: $out"
   assert_not_contains "$out" "account=" "an unpinned raw spawn must not report an account"
   run_pane

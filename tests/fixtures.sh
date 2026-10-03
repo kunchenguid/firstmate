@@ -97,7 +97,11 @@ fm_test_fake_gh_axi() {
 # set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
 # is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
 # carry no -l) is appended there instead, one per line in send order. Optional
-# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_DUPLICATE_WINDOW is printed from list-windows. show-environment
+# answers <NAME> from FM_FAKE_TMUX_ENV_<NAME> (session scope, -t) or
+# FM_FAKE_TMUX_GLOBAL_ENV_<NAME> (global scope, -g): a value of "-" prints the
+# removal marker -NAME, any other value prints NAME=value, and an unset knob
+# fails like tmux's "unknown variable".
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -119,6 +123,24 @@ case "${1:-}" in
     exit 0
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  show-environment)
+    knob=FM_FAKE_TMUX_ENV_
+    for a in "$@"; do
+      [ "$a" = -g ] && knob=FM_FAKE_TMUX_GLOBAL_ENV_
+    done
+    name=${!#}
+    knob=$knob$name
+    if [ -z "${!knob+x}" ]; then
+      printf 'unknown variable: %s\n' "$name" >&2
+      exit 1
+    fi
+    if [ "${!knob}" = - ]; then
+      printf -- '-%s\n' "$name"
+    else
+      printf '%s=%s\n' "$name" "${!knob}"
+    fi
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=

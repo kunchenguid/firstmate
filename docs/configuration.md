@@ -879,7 +879,7 @@ The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pi
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
 Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
 
-A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
+A home that authenticates Claude through environment credentials on purpose should leave the pin absent and opt in through the [Claude API key guard](#claude-api-key-guard).
 
 ### Failures, reporting, and inheritance
 
@@ -958,7 +958,7 @@ Choose the minimum additions for the authentication method actually in use:
 | Provider or Git transport | Additional names needed |
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
-| Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
+| Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` (a listed Anthropic key refuses a claude launch without the [Claude API key guard](#claude-api-key-guard) opt-in); a multi-provider tool needs each provider it will actually use. |
 | Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
@@ -995,6 +995,29 @@ A repository whose config sets `core.hooksPath` to the empty string runs no proj
 When stripping is enabled, the hooks directory is read-only, so a hook manager run inside a fleet pane (lefthook's npm postinstall, `pre-commit install`) fails instead of displacing the strip; install a project's hooks from outside the pane, where the wrappers chain them.
 The flag is a home-wide attribution choice, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract and a secondmate's own workers keep AI trailers too.
 Per-machine Cursor `cli-config.json` attribution-off is not this contract: it does not travel with Firstmate, defaults back to on when unset, and only feeds the CLI's request to the server, so it suppresses the trailer rather than preventing it.
+
+### Claude API key guard
+
+Every claude worker Firstmate launches is refused before creation when `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` would reach the worker through ambient environment inheritance or an explicit allowlist entry.
+Claude Code prefers an API key over a claude.ai subscription login and silently bills the API, so this guard prevents accidental API charges when the captain intends subscription billing.
+The refusal names the variable that triggered it; the credential value is never printed or logged.
+
+The guard applies to all claude ship, scout, secondmate, and relaunch launches except when `--allow-api-key` is passed to `fm-spawn.sh`, which affirms that the API key is intentional, or when a `config/claude-account` worker account pin is active: the pin strips both variables from the launch environment, so neither can reach the worker.
+A raw claude launch command (the unverified-adapter escape hatch) is also exempt from the guard.
+
+When `--allow-api-key` is used, `api_key=allow` is recorded in the task metadata, and `fm-control.sh relaunch` carries that opt-in to the replacement launch.
+A direct `fm-spawn.sh --relaunch` without the flag drops the line.
+
+When `config/launch-env-allowlist` is active, a variable name the allowlist does not list is filtered out of the worker environment; the guard does not refuse for a filtered-out variable, because it cannot reach the worker.
+
+On the tmux backend the guard also checks the environment a new worker window inherits, which can differ from `fm-spawn.sh`'s own environment (for example, when the tmux server started while the shell still exported the key).
+It reads the tmux session environment of the session the worker will join, and the tmux global environment: a session entry wins, a session removal marker (`-NAME`) means unset, and otherwise the global value applies.
+The global environment is checked even before the `firstmate` session exists.
+The refusal names the scope and the `tmux set-environment` command that clears it.
+The same pin and allowlist exemptions apply.
+Variables that the pane shell's rc files or a direnv `.envrc` export after the window opens are not detected.
+
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the guard mechanics and `--allow-api-key` flag, with focused regression coverage in [`tests/fm-spawn-claude-api-key-guard.test.sh`](../tests/fm-spawn-claude-api-key-guard.test.sh).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
