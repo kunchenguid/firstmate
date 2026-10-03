@@ -63,7 +63,7 @@ It cannot override a hard-gate failure, and it is never hidden inside a new comp
 
 ### 1. Eligibility
 
-Outside those documented mappings, deterministic shell must not infer a provider family or credential store from a harness, model, or source name.
+Outside those documented mappings, neither you nor deterministic shell may infer a provider family, credential store, or quota mapping from a harness, model, or source name.
 You establish the remaining relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
 Confirm the catalog lists the candidate's model and record the provider family it reports.
