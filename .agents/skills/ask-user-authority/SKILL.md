@@ -21,7 +21,7 @@ By default the implementation worker never decides or answers its own ask-user f
 It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
 A home with the opt-in `config/worker-decides-findings` flag ([`docs/configuration.md`](../../../docs/configuration.md#worker-decides-routine-findings-configworker-decides-findings)) instead lets the worker decide a gate whose every ask-user finding is a step 3 fix or a pure style or preference nit outside accepted intent, which it declines; any step 4 case escalates as before.
 `bin/fm-dod-lib.sh` owns that worker-facing policy text, whose escalate list mirrors step 4 below, so change both together.
-Firstmate audits each self-decided gate from the worker's recorded verdicts against this procedure, and steers a wrong verdict before the run lands.
+Those `working:` audit lines do not wake firstmate; during its ordinary fleet review, firstmate audits each self-decided gate from that line and its findings file against this procedure, and steers the worker on any wrong verdict it finds.
 
 ## Decide
 
