@@ -109,7 +109,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      printf '%s\n' "${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +211,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      echo "${BASHPID:-$(exec /bin/sh -c "echo \$PPID")}" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -228,6 +228,55 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
     sleep 0.02
   done
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
+# Bash 3.2 (stock macOS) has no BASHPID, and under set -u the bare name aborts
+# the call. The command must still run and keep its status from a subshell and
+# from the top shell, and a caller that dies must still end it. Each shell is
+# run twice: its own, and with BASHPID unset so a newer bash behaves as 3.2.
+test_a_shell_without_bashpid_still_bounds_the_command() {
+  local dir shell mode rc out watchdog started
+  dir="$TMP_ROOT/no-bashpid"
+  mkdir -p "$dir"
+  for shell in /bin/bash "$(command -v bash)"; do
+    [ -x "$shell" ] || continue
+    for mode in own unset; do
+      # shellcheck disable=SC2016
+      out=$(PATH=$PERL_ONLY "$shell" -c '
+        set -u
+        [ "$2" != unset ] || unset BASHPID
+        . "$1/bin/fm-timeout-lib.sh"
+        ( fm_exec_timed 30 1 bash -c "sleep 1; echo sub; exit 7" ); echo "sub-rc=$?"
+        fm_exec_timed 30 1 bash -c "sleep 1; echo top; exit 8"
+      ' _ "$ROOT" "$mode" 2>&1) && rc=0 || rc=$?
+      [ "$rc" -eq 8 ] || fail "top-shell call under $shell ($mode) returned $rc: $out"
+      assert_contains "$out" "sub-rc=7" "subshell call under $shell ($mode) lost the command status: $out"
+      assert_contains "$out" "top" "top-shell call under $shell ($mode) never ran the command: $out"
+      case "$out" in *unbound*) fail "BASHPID was read unguarded under $shell ($mode): $out" ;; esac
+
+      rm -f "$dir/watchdog"
+      # shellcheck disable=SC2016
+      PATH=$PERL_ONLY "$shell" -c '
+        set -u
+        [ "$3" != unset ] || unset BASHPID
+        . "$1/bin/fm-timeout-lib.sh"
+        ( fm_exec_timed 60 1 bash -c "echo \$\$ > \"\$1\"; exec sleep 300" _ "$2/watchdog" ) >/dev/null 2>&1 &
+        sleep 1
+        exit 0
+      ' _ "$ROOT" "$dir" "$mode"
+      wait_for_file "$dir/watchdog"
+      watchdog=$(cat "$dir/watchdog")
+      started=$SECONDS
+      while kill -0 "$watchdog" 2>/dev/null; do
+        if [ "$((SECONDS - started))" -ge 15 ]; then
+          kill -KILL "$watchdog" 2>/dev/null || true
+          fail "a command whose caller died under $shell ($mode) ran on toward its bound"
+        fi
+        sleep 0.05
+      done
+    done
+  done
+  pass "fm_exec_timed bounds the command, with the right owner, in a shell that has no BASHPID"
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a
@@ -337,6 +386,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_a_shell_without_bashpid_still_bounds_the_command
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
