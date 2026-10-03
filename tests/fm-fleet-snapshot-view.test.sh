@@ -255,9 +255,30 @@ test_targeted_snapshot_requires_a_value() {
   pass "fleet snapshot rejects malformed targeted reads before broad fallback"
 }
 
+test_scout_report_inventory_is_complete_and_sorted() {
+  local home out index id
+  home=$(make_home report-inventory)
+  for index in $(seq 1 400); do
+    id=$(printf 'report-%03d' "$index")
+    mkdir -p "$home/data/$id"
+    printf '# Report %s\n' "$index" > "$home/data/$id/report.md"
+  done
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) || fail "large scout report inventory failed"
+  printf '%s\n' "$out" | jq -e '
+    (.scout_reports | length) == 400
+      and .scout_reports[0].id == "report-001"
+      and .scout_reports[-1].id == "report-400"
+      and ([.scout_reports[].id] == ([.scout_reports[].id] | sort))
+      and (.scout_reports | all(. as $report | $report.path | endswith("/" + $report.id + "/report.md")))
+  ' >/dev/null || fail "large scout report inventory was incomplete or unsorted"
+  pass "fleet snapshot preserves the complete sorted scout report inventory"
+}
+
 test_empty_snapshot_and_view
 test_main_home_inventory_and_historical_refusal
 test_view_uses_authoritative_task_disposition
 test_removed_home_summary_mode_is_rejected
 test_targeted_snapshot_observes_only_one_task
 test_targeted_snapshot_requires_a_value
+test_scout_report_inventory_is_complete_and_sorted

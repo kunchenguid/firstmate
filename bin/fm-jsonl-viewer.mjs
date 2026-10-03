@@ -36,6 +36,7 @@ const TASK_OVERVIEW_CACHE_TTL_MS = 2000;
 
 let taskOverviewCache = null;
 let taskOverviewInFlight = null;
+let taskOverviewRefreshError = null;
 
 function usage(stream = process.stdout) {
   stream.write("FM_HOME=/absolute/home FM_JSONL_VIEWER_TOKEN_FILE=/private/token-file node bin/fm-jsonl-viewer.mjs [--host HOST] [--port PORT]\n");
@@ -430,14 +431,12 @@ function taskOverview(home, roots, codeRoot) {
   };
 }
 
-async function cachedTaskOverview(home, roots, codeRoot) {
-  const now = Date.now();
-  if (taskOverviewCache
-    && taskOverviewCache.home === home
-    && taskOverviewCache.codeRoot === codeRoot
-    && now - taskOverviewCache.servedAt < TASK_OVERVIEW_CACHE_TTL_MS) {
-    return { ...taskOverviewCache.body, cacheHit: true, cacheAgeMs: now - taskOverviewCache.servedAt };
-  }
+function taskOverviewAgeMs(cache, now = Date.now()) {
+  const generatedAt = Date.parse(cache.body.generatedAt);
+  return Math.max(0, now - (Number.isFinite(generatedAt) ? generatedAt : cache.servedAt));
+}
+
+function startTaskOverviewRefresh(home, codeRoot) {
   if (!taskOverviewInFlight) {
     const workerEnvironment = { ...process.env, FM_HOME: home, FM_JSONL_VIEWER_TASK_WORKER: "1" };
     delete workerEnvironment.FM_JSONL_VIEWER_TOKEN;
@@ -449,11 +448,47 @@ async function cachedTaskOverview(home, roots, codeRoot) {
         timeout: FLEET_SNAPSHOT_TIMEOUT_MS,
         maxBuffer: 32 * 1024 * 1024,
       }, (error, stdout) => error ? reject(error) : resolve(JSON.parse(stdout)));
+    }).then(body => {
+      taskOverviewCache = { home, codeRoot, servedAt: Date.now(), body };
+      taskOverviewRefreshError = null;
+      return body;
+    }, error => {
+      taskOverviewRefreshError = "Task refresh failed; cached snapshot remains visible.";
+      throw error;
     }).finally(() => { taskOverviewInFlight = null; });
   }
-  const body = await taskOverviewInFlight;
-  taskOverviewCache = { home, codeRoot, servedAt: Date.now(), body };
-  return { ...body, cacheHit: false, cacheAgeMs: 0 };
+  return taskOverviewInFlight;
+}
+
+async function cachedTaskOverview(home, roots, codeRoot) {
+  const now = Date.now();
+  const matchingCache = taskOverviewCache
+    && taskOverviewCache.home === home
+    && taskOverviewCache.codeRoot === codeRoot
+    ? taskOverviewCache
+    : null;
+  if (matchingCache && now - matchingCache.servedAt < TASK_OVERVIEW_CACHE_TTL_MS) {
+    return {
+      ...matchingCache.body,
+      cacheHit: true,
+      cacheAgeMs: taskOverviewAgeMs(matchingCache, now),
+      refreshing: false,
+      refreshError: null,
+    };
+  }
+  const refresh = startTaskOverviewRefresh(home, codeRoot);
+  if (matchingCache) {
+    refresh.catch(() => {});
+    return {
+      ...matchingCache.body,
+      cacheHit: true,
+      cacheAgeMs: taskOverviewAgeMs(matchingCache, now),
+      refreshing: true,
+      refreshError: taskOverviewRefreshError,
+    };
+  }
+  const body = await refresh;
+  return { ...body, cacheHit: false, cacheAgeMs: taskOverviewAgeMs(taskOverviewCache), refreshing: false, refreshError: null };
 }
 
 function resolveSelection(roots, source, id) {
@@ -762,7 +797,13 @@ function serve() {
     });
     if (url.pathname === "/api/tasks") {
       cachedTaskOverview(home, roots, codeRoot)
-        .then(body => json(res, 200, body))
+        .then(body => {
+          if (url.searchParams.get("generation") === body.generatedAt) {
+            const { tasks: _tasks, ...metadata } = body;
+            return json(res, 200, { ...metadata, unchanged: true });
+          }
+          return json(res, 200, { ...body, unchanged: false });
+        })
         .catch(() => json(res, 503, { error: "task overview is temporarily unavailable" }));
       return;
     }

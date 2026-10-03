@@ -178,7 +178,7 @@ function delayNextTaskRequest() {
   pendingTaskDelay = { markStarted, released };
   return { started, release };
 }
-await page.route("**/api/tasks", async route => {
+await page.route("**/api/tasks*", async route => {
   if (failNextTaskRequest) {
     failNextTaskRequest = false;
     await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "task overview is temporarily unavailable" }) });
@@ -278,21 +278,25 @@ try {
   if (!await page.getByRole("heading", { name: "Archived task brief" }).isVisible()) throw new Error("collapsing task Sidebar lost the selected task document");
   await page.locator("#sidebar-toggle").click();
   if (await page.locator("#sidebar-toggle").getAttribute("aria-expanded") !== "true") throw new Error("task Sidebar could not be reopened");
+  const dashboardReportCard = page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
+  const dashboardReportCardNode = await dashboardReportCard.elementHandle();
   const refreshTaskDelay = delayNextTaskRequest();
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
   if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "12,2,1") throw new Error("background task refresh did not preserve loaded counts");
-  const dashboardReportCard = page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
+  if (!await dashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("background task refresh replaced the unchanged task generation before the response");
   if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  const selectedDashboardReportCardNode = await dashboardReportCard.elementHandle();
   if (!await page.locator("#task-detail").evaluate(element => {
     const bounds = element.getBoundingClientRect();
     return bounds.top >= 0 && bounds.top < window.innerHeight;
   })) throw new Error("dashboard task click left the rendered report outside the viewport");
   refreshTaskDelay.release();
   await page.locator("#task-status").filter({ hasText: "UTC+8" }).waitFor({ state: "visible", timeout: 5000 });
+  if (!await selectedDashboardReportCardNode.evaluate(node => node.isConnected)) throw new Error("unchanged task generation replaced the Sidebar task cards after the response");
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.getByRole("heading", { name: "Rendered report" }).isVisible()) throw new Error("task refresh replaced the selected report display");
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });

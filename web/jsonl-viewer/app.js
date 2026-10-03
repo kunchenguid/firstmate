@@ -20,6 +20,7 @@ const state = {
   taskRequestGeneration: 0,
   taskLoading: false,
   taskLoaded: false,
+  taskSnapshotGeneration: null,
   taskLoadError: "",
   taskSelectionGeneration: 0,
   taskDocumentLoading: null,
@@ -151,6 +152,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskRequestGeneration += 1;
   state.taskLoading = false;
   state.taskLoaded = false;
+  state.taskSnapshotGeneration = null;
   state.taskLoadError = "";
   state.taskDocumentLoading = null;
   state.authenticated = false;
@@ -884,19 +886,29 @@ async function loadTasks() {
   state.taskLoadError = "";
   elements.taskStatus.textContent = state.taskLoaded ? "Refreshing task status…" : "Loading task status…";
   elements.retryTasks.hidden = true;
-  renderSessions();
+  if (!state.taskLoaded) renderSessions();
   try {
-    const body = await api("/api/tasks");
+    const generationQuery = state.taskSnapshotGeneration
+      ? `?${new URLSearchParams({ generation: state.taskSnapshotGeneration })}`
+      : "";
+    const body = await api(`/api/tasks${generationQuery}`);
     if (requestGeneration !== state.taskRequestGeneration) return;
-    state.tasks = body.tasks;
+    const snapshotGeneration = typeof body.generatedAt === "string" ? body.generatedAt : null;
+    const snapshotChanged = !state.taskLoaded || body.unchanged !== true;
     state.taskLoaded = true;
-    if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
-      state.taskSelectionGeneration += 1;
-      clearTaskDocument("");
+    if (snapshotChanged) {
+      state.tasks = body.tasks;
+      state.taskSnapshotGeneration = snapshotGeneration;
+      if (state.selectedTaskId && !state.tasks.some(task => task.id === state.selectedTaskId)) {
+        state.taskSelectionGeneration += 1;
+        clearTaskDocument("");
+      }
+      renderSessions();
     }
-    renderSessions();
-    const cacheLabel = body.cacheHit ? ` · cached ${Math.round(body.cacheAgeMs / 1000)}s ago` : "";
-    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${body.warning ? ` · ${body.warning}` : ""}`;
+    const cacheLabel = body.cacheHit ? ` · cached snapshot ${Math.round(body.cacheAgeMs / 1000)}s old` : "";
+    const refreshLabel = body.refreshing ? " · refreshing in background" : "";
+    const refreshError = body.refreshError ? ` · ${body.refreshError}` : "";
+    elements.taskStatus.textContent = `${state.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${refreshLabel}${refreshError}${body.warning ? ` · ${body.warning}` : ""}`;
   } catch (error) {
     if (requestGeneration !== state.taskRequestGeneration) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
