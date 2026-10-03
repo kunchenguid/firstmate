@@ -140,6 +140,24 @@ run_update() {
     FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
 }
 
+# The jj colocated fixtures need the real jj binary; a host without it skips
+# these functions rather than failing, matching the optional-tool skip
+# convention. Returns nonzero when jj is absent.
+jj_available() {
+  command -v jj >/dev/null 2>&1
+}
+
+# Build a jj colocated firstmate home: the same world as new_world, then jj
+# manages the main checkout (git.colocate=true), which is the shape
+# /updatefirstmate could not advance before the jj path existed. Echoes the
+# world dir.
+new_jj_world() {
+  local name=$1 w
+  w=$(new_world "$name")
+  ( cd "$w/main" && jj git init --colocate >/dev/null 2>&1 )
+  printf '%s\n' "$w"
+}
+
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
 # Combines the former T1 (fast-forward + reread + nudge signalling) and T2
 # (the advance is a single-parent fast-forward, never a merge commit) into one
@@ -555,6 +573,244 @@ test_primary_update_rebinds_local_watch() {
     || fail "the watch's trust binding was not refreshed to match the updated action bytes"
   pass "T12 a self-update rebinds a locally armed watch on the primary"
 }
+
+# --- JJ1: clean jj colocated home behind its remote advances ----------------
+test_jj_colocated_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj1)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "jj home fast-forwarded"
+  assert_contains "$out" "reread-firstmate: yes" "instruction change triggers reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark not at origin tip"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ1 clean jj home behind remote advances and reports updated"
+}
+
+# --- JJ2: a jj home with unlanded working-copy changes is skipped -----------
+test_jj_dirty_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj2)
+  bump_origin "$w" instr
+  printf 'uncommitted local edit\n' >> "$w/main/AGENTS.md"
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: dirty working tree" "dirty jj home skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "dirty jj home advanced"
+  grep -q 'uncommitted local edit' "$w/main/AGENTS.md" || fail "unlanded jj work discarded"
+  pass "JJ2 dirty jj home skipped, work preserved"
+}
+
+# --- JJ3: a jj home carrying a local commit the target lacks is skipped -----
+test_jj_diverged_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj3)
+  # A local commit on main that origin does not contain, with a clean working copy.
+  printf 'fork work\n' > "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m local-work >/dev/null 2>&1
+  jj -R "$w/main" bookmark set main -r @- >/dev/null 2>&1
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: diverged from main@origin" "diverged jj home skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "diverged jj home advanced"
+  grep -q 'fork work' "$w/main/AGENTS.md" || fail "diverged jj work discarded"
+  pass "JJ3 diverged jj home skipped, local commit preserved"
+}
+
+# --- JJ4: an already-current jj home reports already current -----------------
+test_jj_already_current() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj4)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: already current" "jj home already current"
+  assert_contains "$out" "reread-firstmate: no" "no reread when jj home is current"
+  pass "JJ4 already-current jj home reports already current"
+}
+
+# --- JJ5: a described working-copy commit is skipped and preserved -----------
+test_jj_described_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before
+  w=$(new_jj_world jj5)
+  bump_origin "$w" instr
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  jj -R "$w/main" describe -m wip >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: described working copy commit" \
+    "described jj working copy skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "described jj home advanced"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'description.first_line()' 2>/dev/null)" = "wip" ] \
+    || fail "described working-copy commit was left behind"
+  pass "JJ5 described working-copy commit is skipped and preserved"
+}
+
+# --- JJ6: a working copy parked outside the target is skipped -----------------
+test_jj_parked_outside_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out before parked
+  w=$(new_jj_world jj6)
+  bump_origin "$w" instr
+  before=$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)
+  printf 'parked work\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m parked >/dev/null 2>&1
+  parked=$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: working copy parked outside main@origin" \
+    "parked jj working copy skipped"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = "$before" ] \
+    || fail "parked jj home advanced"
+  [ "$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)" = "$parked" ] \
+    || fail "parked commit was left behind"
+  grep -q 'parked work' "$w/main/AGENTS.md" || fail "parked jj work discarded"
+  pass "JJ6 working copy parked outside the target is skipped, commit preserved"
+}
+
+# --- JJ7: current bookmark with a stale parked working copy advances ---------
+test_jj_stale_parked_wc_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj7)
+  bump_origin "$w" instr
+  jj -R "$w/main" git fetch --remote origin --quiet >/dev/null 2>&1
+  jj -R "$w/main" bookmark set main -r main@origin >/dev/null 2>&1
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "JJ7 fixture did not park the bookmark on the origin tip"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "stale working copy advanced"
+  assert_contains "$out" "(instructions changed: AGENTS.md, bin, .agents/skills)" \
+    "the working-copy file movement turns the reread gate on"
+  assert_contains "$out" "reread-firstmate: yes" "stale working-copy advance triggers reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark moved off the base"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ7 a stale working copy under a current bookmark advances and rereads"
+}
+
+# --- JJ9: reread baselines on the working copy, not the bookmark --------------
+# A behind bookmark whose home parks @ on an older commit: the instruction list
+# and reread verdict must reflect the files actually served (the working copy),
+# even when the bookmark..base range itself touched no instruction file.
+test_jj_reread_baselines_on_working_copy() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj9)
+  bump_origin "$w" instr
+  run_update "$w" >/dev/null
+  jj -R "$w/main" new main@origin- >/dev/null 2>&1
+  bump_origin "$w" readme
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "behind bookmark advanced"
+  assert_contains "$out" "(instructions changed: AGENTS.md, bin, .agents/skills)" \
+    "the instruction list reflects the working-copy baseline"
+  assert_contains "$out" "reread-firstmate: yes" \
+    "working-copy instruction movement turns the reread gate on"
+  grep -q 'v2' "$w/main/AGENTS.md" || fail "jj files not at target content"
+  pass "JJ9 the reread verdict baselines on the working copy for a behind bookmark"
+}
+
+# --- JJ10: a described non-empty working copy reports its description ---------
+test_jj_described_nonempty_reports_description() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj10)
+  printf 'wip edit\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" describe -m wip >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: described working copy commit" \
+    "described working copy reported by its description"
+  assert_not_contains "$out" "firstmate: skipped: dirty working tree" \
+    "described content is not mislabeled as unlanded dirt"
+  grep -q 'wip edit' "$w/main/AGENTS.md" || fail "described work discarded"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'description.first_line()' 2>/dev/null)" = "wip" ] \
+    || fail "described working-copy commit was left behind"
+  pass "JJ10 a described non-empty working copy reports the description reason"
+}
+
+# --- JJ11: a plain jj new above the base advances instead of wedging ----------
+test_jj_plain_new_above_base_advances() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out
+  w=$(new_jj_world jj11)
+  jj -R "$w/main" new >/dev/null 2>&1
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: updated " "plain parked chain above the base advanced"
+  assert_contains "$out" "reread-firstmate: no" "unchanged served files do not reread"
+  [ "$(jj -R "$w/main" log -r main --no-graph -T 'commit_id' 2>/dev/null)" = \
+    "$(jj -R "$w/main" log -r main@origin --no-graph -T 'commit_id' 2>/dev/null)" ] \
+    || fail "jj default bookmark moved off the base"
+  [ "$(jj -R "$w/main" log -r '@' --no-graph -T 'empty' 2>/dev/null)" = "true" ] \
+    || fail "jj working copy not clean after advance"
+  grep -q 'v1' "$w/main/AGENTS.md" || fail "jj files changed unexpectedly"
+  pass "JJ11 a plain jj new above the base advances instead of wedging"
+}
+
+# --- JJ8: current bookmark with a side-commit working copy is skipped --------
+test_jj_side_commit_wc_skipped() {
+  jj_available || { echo "skip: jj not found (jj colocated fixture)"; return 0; }
+  local w out parked
+  w=$(new_jj_world jj8)
+  printf 'side work\n' >> "$w/main/AGENTS.md"
+  jj -R "$w/main" commit -m side >/dev/null 2>&1
+  parked=$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: skipped: working copy parked outside main@origin" \
+    "side-commit working copy skipped"
+  [ "$(jj -R "$w/main" log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)" = "$parked" ] \
+    || fail "side commit was left behind"
+  grep -q 'side work' "$w/main/AGENTS.md" || fail "side work discarded"
+  assert_contains "$out" "reread-firstmate: no" "skipped jj home does not reread"
+  pass "JJ8 a side-commit working copy under a current bookmark is skipped"
+}
+
+test_jj_colocated_advances
+test_jj_dirty_skipped
+test_jj_diverged_skipped
+test_jj_already_current
+test_jj_described_skipped
+test_jj_parked_outside_skipped
+test_jj_stale_parked_wc_advances
+test_jj_side_commit_wc_skipped
+test_jj_reread_baselines_on_working_copy
+test_jj_described_nonempty_reports_description
+test_jj_plain_new_above_base_advances
 
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only

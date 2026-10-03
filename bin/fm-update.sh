@@ -9,7 +9,7 @@
 # fm-fleet-sync.sh: never force, never create a merge commit, never stash.
 # A secondmate divergence whose complete local tree result is already present at
 # the target is reconciled with reset --keep; every other unsafe target is
-# skipped and reported, with divergence recorded durably by fm-ff-lib.sh.
+# skipped and reported, with git-home divergence recorded durably by fm-ff-lib.sh.
 # A tracked-files update never touches the gitignored operational
 # dirs (data/, state/, config/, projects/, .no-mistakes/), so a secondmate's
 # in-flight work is never disrupted. Worktrees of this repo share one object
