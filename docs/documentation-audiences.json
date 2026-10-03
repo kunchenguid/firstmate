@@ -79,6 +79,10 @@
       "target": "docs/verification/supervision.md"
     },
     {
+      "source": "docs/pi-restricted-supervision.md",
+      "target": "docs/verification/supervision.md"
+    },
+    {
       "source": "docs/tmux-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
@@ -390,6 +394,10 @@
     },
     {
       "path": "docs/orca-backend.md",
+      "audience": "operator-current"
+    },
+    {
+      "path": "docs/pi-restricted-supervision.md",
       "audience": "operator-current"
     },
     {
