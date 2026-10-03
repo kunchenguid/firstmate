@@ -152,7 +152,9 @@ a { color: inherit; text-decoration: none; }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.bb-section__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+/* the sub-label may wrap onto its own line on a phone; nowrap here would push the page wider than the viewport */
+.bb-section__head .fm-sign--muted { white-space: normal; min-width: 0; line-height: 1.3; }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
 
 /* ---- Captain's Call: one card at a time, dealt off a visible stack ---- */
