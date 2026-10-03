@@ -197,3 +197,14 @@ assert_error attach-pr "$(printf '{"request_id":"attach-foreign-pr","intent_id":
 own_pr=$(coord attach-pr "$(printf '{"request_id":"attach-own-pr","intent_id":"amend-issue","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"https://github.com/owner/repo/pull/9"}' "$winner" "$new_generation" "$amend_claim" "$amend_fence")")
 [ "$(field "$own_pr" pr_url)" = 'https://github.com/owner/repo/pull/9' ] || fail 'rejected foreign PR must not block the intent repository PR'
 pass 'PR identity must match the intent repository'
+
+coord enroll '{"request_id":"enroll-gitlab","home_id":"gitlab","repos":["group/subgroup/project"]}' > /dev/null
+gl=$(field "$(coord session '{"request_id":"session-gitlab","home_id":"gitlab"}')" generation)
+gitlab_submit() {
+  printf '{"request_id":"submit-%s","intent_id":"%s","home_id":"gitlab","generation":%s,"repo":"group/subgroup/project","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"branch/%s","task_id":"%s","goal":"test","pr_url":"%s","resources":[{"type":"file","name":"src/%s.py"}]}' "$1" "$1" "$gl" "$1" "$1" "$2" "$1"
+}
+assert_error submit "$(gitlab_submit gitlab-parent https://gitlab.example/group/subgroup/-/merge_requests/7)" 'nested project must reject a merge request of its parent group path'
+assert_error submit "$(gitlab_submit gitlab-child https://gitlab.example/group/subgroup/project/child/-/merge_requests/7)" 'nested project must reject a merge request of a project below it'
+gitlab_mr=$(coord submit "$(gitlab_submit gitlab-own https://gitlab.example/group/subgroup/project/-/merge_requests/7)") || fail 'nested GitLab project must accept its own merge request URL'
+[ "$(field "$gitlab_mr" ok)" = True ] || fail 'nested GitLab merge request submission must succeed'
+pass 'nested GitLab merge request URL matches the full project path'

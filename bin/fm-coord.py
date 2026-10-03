@@ -66,7 +66,10 @@ def pr_url(value, repo):
     token(value, "pr_url")
     parsed = urlsplit(value)
     require(parsed.scheme == "https" and parsed.hostname and parsed.path and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and " " not in value, "pr_url must be a canonical full HTTPS URL")
-    require(parsed.path.split("/")[1:3] == repo.split("/"), "pr_url must belong to the intent repository")
+    owner = repo.split("/")
+    segments = parsed.path.split("/")[1:]
+    tail = segments[len(owner):]
+    require(segments[:len(owner)] == owner and tail[:-1] in (["pull"], ["-", "merge_requests"]) and tail[-1].isdigit(), "pr_url must be a pull or merge request of the intent repository")
     return value
 
 
