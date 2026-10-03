@@ -75,6 +75,7 @@ const elements = {
 };
 
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const SUPERVISOR_HIDDEN_EVENT_TYPE = "openai-codex-compat-native-response";
 const displayTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   timeZone: DISPLAY_TIME_ZONE,
   year: "numeric",
@@ -452,7 +453,9 @@ function renderEntriesNewestFirst(anchor = null, anchorTop = undefined) {
 function appendEntries(entries, boundaryMessage = "") {
   const anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
   const anchorTop = anchor?.getBoundingClientRect().top;
-  const prepared = entries.map(entry => ({ ...entry, displayKey: String(++state.entrySequence) }));
+  const prepared = entries
+    .filter(entry => !(state.selected?.source === "supervisor" && entry.value?.customType === SUPERVISOR_HIDDEN_EVENT_TYPE))
+    .map(entry => ({ ...entry, displayKey: String(++state.entrySequence) }));
   state.entries.push(...prepared);
   if (!state.eventSegments.length || boundaryMessage) {
     state.eventSegments.push({ entries: [], boundary: boundaryMessage ? boundaryNode(boundaryMessage) : null });
