@@ -2058,8 +2058,11 @@ test_pending_skips_concurrent_retirement() {
     fm_pf_registry_lock_release "$FM_RACE_HOME/state" pf-race
   ' &
   locker_pid=$!
-  for _ in $(seq 1 100); do [ -e "$home/lock-ready" ] && break; sleep 0.02; done
-  [ -e "$home/lock-ready" ] || fail "race locker did not start"
+  # A generous ceiling, not a measured cost: scheduling the backgrounded
+  # locker before it reaches this checkpoint can take longer than a couple of
+  # seconds on a saturated runner even though the locker itself is fast.
+  for _ in $(seq 1 1000); do [ -e "$home/lock-ready" ] && break; sleep 0.02; done
+  [ -e "$home/lock-ready" ] || fail "race locker did not start within 20s"
 
   real_tasks=$(command -v tasks-axi)
   cat > "$home/fakebin/tasks-axi" <<'SH'
@@ -2075,8 +2078,9 @@ SH
   REAL_TASKS_AXI="$real_tasks" PENDING_LISTED="$home/pending-listed" \
     run_pf "$home" pending > "$home/pending-race.out" 2>&1 &
   pending_pid=$!
-  for _ in $(seq 1 100); do [ -e "$home/pending-listed" ] && break; sleep 0.02; done
-  [ -e "$home/pending-listed" ] || fail "pending did not snapshot the backlog"
+  # Same generous ceiling as the locker checkpoint above.
+  for _ in $(seq 1 1000); do [ -e "$home/pending-listed" ] && break; sleep 0.02; done
+  [ -e "$home/pending-listed" ] || fail "pending did not snapshot the backlog within 20s"
   : > "$home/release-lock"
   wait "$locker_pid" || fail "race retirement failed"
   wait "$pending_pid" || rc=$?
