@@ -25,11 +25,24 @@ const state = {
   taskDocumentLoading: null,
   taskDocumentContent: null,
   timer: null,
+  authenticated: false,
+  sidebarCollapsed: false,
+  requestedPath: `${window.location.pathname}${window.location.search}`,
 };
 
 const TOKEN_STORAGE_KEY = "firstmate.jsonlViewer.accessToken.v1";
 
 const elements = {
+  loginPage: document.getElementById("login-page"),
+  loginStatus: document.getElementById("login-status"),
+  appShell: document.getElementById("app-shell"),
+  viewerLayout: document.getElementById("viewer-layout"),
+  sidebar: document.getElementById("sidebar"),
+  sidebarToggle: document.getElementById("sidebar-toggle"),
+  sidebarEyebrow: document.getElementById("sidebar-eyebrow"),
+  sidebarTitle: document.getElementById("sidebar-title"),
+  pageKind: document.getElementById("page-kind"),
+  dashboardEmpty: document.getElementById("dashboard-empty"),
   token: document.getElementById("token"),
   rememberToken: document.getElementById("remember-token"),
   tokenNote: document.getElementById("token-note"),
@@ -55,6 +68,7 @@ const elements = {
   artifactViewer: document.getElementById("artifact-viewer"),
   taskDashboard: document.getElementById("task-dashboard"),
   taskStatus: document.getElementById("task-status"),
+  retryTasks: document.getElementById("retry-tasks"),
   taskFollow: document.getElementById("task-follow"),
   taskCounts: document.getElementById("task-counts"),
   taskGroups: document.getElementById("task-groups"),
@@ -96,6 +110,8 @@ function displayTime(value) {
 function setStatus(message, error = false) {
   elements.status.textContent = message;
   elements.status.classList.toggle("error", error);
+  elements.loginStatus.textContent = message;
+  elements.loginStatus.classList.toggle("error", error);
 }
 
 async function api(path) {
@@ -136,6 +152,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.taskLoaded = false;
   state.taskLoadError = "";
   state.taskDocumentLoading = null;
+  state.authenticated = false;
   elements.token.value = "";
   elements.rememberToken.checked = false;
   elements.forget.disabled = true;
@@ -144,6 +161,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   renderTaskDashboard();
   setStatus(message, true);
   elements.taskStatus.textContent = message;
+  showLogin(message);
 }
 
 function timestampOf(value) {
@@ -552,6 +570,108 @@ function selectDisplay(reportSelected) {
   elements.loadMore.disabled = reportSelected;
 }
 
+function showLogin(message = "") {
+  elements.loginPage.hidden = false;
+  elements.appShell.hidden = true;
+  if (message) {
+    elements.loginStatus.textContent = message;
+    elements.loginStatus.classList.toggle("error", true);
+  }
+  document.title = "Login · Firstmate Viewer";
+  if (window.location.pathname !== "/login") {
+    state.requestedPath = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState({}, "", `/login?${new URLSearchParams({ return: state.requestedPath })}`);
+  }
+}
+
+function setAuthenticatedShell() {
+  elements.loginPage.hidden = true;
+  elements.appShell.hidden = false;
+  state.authenticated = true;
+}
+
+function setActiveNavigation(route) {
+  for (const link of document.querySelectorAll("nav [data-route]")) link.classList.toggle("active", link.dataset.route === route);
+}
+
+function routePathForSession(session) {
+  if (session.source === "report") return `/report/${encodeURIComponent(session.id)}`;
+  return `/journal/${session.source}/${encodeURIComponent(session.id)}`;
+}
+
+function updateHistory(path, replace = false) {
+  if (`${window.location.pathname}${window.location.search}` === path) return;
+  window.history[replace ? "replaceState" : "pushState"]({}, "", path);
+}
+
+function configurePage(source) {
+  elements.source.value = source;
+  const dashboard = source === "tasks";
+  const report = source === "report";
+  elements.taskDashboard.hidden = !dashboard;
+  elements.artifactViewer.hidden = dashboard;
+  elements.pageKind.textContent = report ? "REPORT" : source === "supervisor" ? "SUPERVISOR WORK JOURNAL" : "WORK JOURNAL";
+  elements.sidebarEyebrow.textContent = dashboard ? "TASKS" : report ? "REPORTS" : "JOURNALS";
+  elements.sidebarTitle.textContent = dashboard ? "Task list" : report ? "Report library" : "Supervisor sessions";
+  elements.sessionSearch.placeholder = dashboard ? "Search tasks" : report ? "Search reports" : "Search sessions";
+  if (!dashboard && state.selected?.source !== source) {
+    state.selectionGeneration += 1;
+    state.selected = null;
+    state.loading = false;
+    elements.sessionTitle.textContent = report ? "Choose a report" : source === "supervisor" ? "Choose a supervisor session" : "Choose a journal";
+    elements.reportRendered.replaceChildren();
+    elements.report.querySelector(".report-source pre").textContent = "";
+    elements.events.replaceChildren();
+    setStatus(report ? "Select a task report from the library." : "Select a work journal from the session list.");
+  }
+  setActiveNavigation(dashboard ? "dashboard" : report ? "reports" : "journal");
+  selectDisplay(report);
+  renderSessions();
+}
+
+async function applyLocation({ replace = false } = {}) {
+  if (!state.authenticated) return;
+  const parts = window.location.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+  if (!parts.length || parts[0] === "login") {
+    updateHistory("/dashboard", replace);
+    configurePage("tasks");
+    document.title = "Dashboard · Firstmate Viewer";
+    return;
+  }
+  if (parts[0] === "dashboard") {
+    configurePage("tasks");
+    document.title = "Dashboard · Firstmate Viewer";
+    const taskId = new URLSearchParams(window.location.search).get("task");
+    const documentType = new URLSearchParams(window.location.search).get("document");
+    if (taskId && state.tasks.some(task => task.id === taskId)) await selectTask(taskId, { updateRoute: false, documentType });
+    return;
+  }
+  if (parts[0] === "reports" || parts[0] === "report") {
+    configurePage("report");
+    document.title = "Reports · Firstmate Viewer";
+    const reportId = parts[0] === "report" ? parts[1] : null;
+    if (reportId) {
+      const report = state.sessions.find(item => item.source === "report" && item.id === reportId);
+      if (report) await selectSession(report, { updateRoute: false });
+      else setStatus(`Report ${reportId} is unavailable.`, true);
+    }
+    return;
+  }
+  if (parts[0] === "journal" && ["supervisor", "short"].includes(parts[1])) {
+    configurePage(parts[1]);
+    document.title = `${parts[1] === "supervisor" ? "Supervisor Work Journal" : "Work Journal"} · Firstmate Viewer`;
+    const sessionId = parts[2];
+    if (sessionId) {
+      const session = state.sessions.find(item => item.source === parts[1] && item.id === sessionId);
+      if (session) await selectSession(session, { updateRoute: false });
+      else setStatus(`Journal ${sessionId} is unavailable.`, true);
+    }
+    return;
+  }
+  updateHistory("/dashboard", true);
+  configurePage("tasks");
+}
+
 const taskGroups = [
   ["processing", "Processing"],
   ["held", "Waiting or blocked"],
@@ -642,6 +762,7 @@ function renderTaskDashboard() {
 function renderTaskDetail() {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   elements.taskDetail.hidden = !task;
+  elements.dashboardEmpty.hidden = Boolean(task);
   if (!task) return;
   elements.taskDetailState.textContent = task.status;
   elements.taskDetailTitle.textContent = task.title;
@@ -724,7 +845,7 @@ async function loadTaskDocument({ resetDisplay = false, preserveViewport = null 
   }
 }
 
-async function selectTask(id) {
+async function selectTask(id, { updateRoute = true, documentType = null } = {}) {
   state.taskSelectionGeneration += 1;
   const selectionGeneration = state.taskSelectionGeneration;
   let revealCancelled = false;
@@ -732,7 +853,8 @@ async function selectTask(id) {
   state.selectedTaskId = id;
   const task = state.tasks.find(item => item.id === id);
   const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
-  state.selectedTaskDocumentType = documentTypes.includes("report") ? "report" : documentTypes[0] || null;
+  state.selectedTaskDocumentType = documentTypes.includes(documentType) ? documentType : documentTypes.includes("report") ? "report" : documentTypes[0] || null;
+  if (updateRoute) updateHistory(`/dashboard?${new URLSearchParams({ task: id, ...(state.selectedTaskDocumentType ? { document: state.selectedTaskDocumentType } : {}) })}`);
   renderSessions();
   elements.taskDetail.scrollIntoView({ block: "start" });
   for (const event of ["keydown", "pointerdown", "touchstart", "wheel"]) window.addEventListener(event, cancelReveal, { passive: true });
@@ -752,6 +874,7 @@ async function selectTaskDocument(type) {
   if (!documentTypes.includes(type) || state.selectedTaskDocumentType === type) return;
   state.taskSelectionGeneration += 1;
   state.selectedTaskDocumentType = type;
+  updateHistory(`/dashboard?${new URLSearchParams({ task: task.id, document: type })}`);
   renderTaskDetail();
   await loadTaskDocument({ resetDisplay: true });
 }
@@ -762,6 +885,7 @@ async function loadTasks() {
   state.taskLoading = true;
   state.taskLoadError = "";
   elements.taskStatus.textContent = state.taskLoaded ? "Refreshing task status…" : "Loading task status…";
+  elements.retryTasks.hidden = true;
   renderSessions();
   try {
     const body = await api("/api/tasks");
@@ -782,6 +906,7 @@ async function loadTasks() {
     else {
       state.taskLoadError = error.message;
       elements.taskStatus.textContent = error.message;
+      elements.retryTasks.hidden = false;
     }
   } finally {
     if (requestGeneration === state.taskRequestGeneration) {
@@ -792,11 +917,12 @@ async function loadTasks() {
 }
 
 function showSelectedView() {
-  const dashboard = elements.source.value === "tasks";
-  elements.taskDashboard.hidden = !dashboard;
-  elements.artifactViewer.hidden = dashboard;
-  if (!dashboard) state.taskSelectionGeneration += 1;
-  renderSessions();
+  const source = elements.source.value;
+  state.taskSelectionGeneration += 1;
+  if (source === "tasks") updateHistory("/dashboard");
+  else if (source === "report") updateHistory("/reports");
+  else updateHistory(`/journal/${source === "all" ? "supervisor" : source}`);
+  configurePage(source === "all" ? "supervisor" : source);
 }
 
 function renderSessions() {
@@ -839,9 +965,10 @@ function renderSessions() {
   }
 }
 
-async function selectSession(session) {
+async function selectSession(session, { updateRoute = true } = {}) {
   state.selectionGeneration += 1;
   state.selected = session;
+  if (updateRoute) updateHistory(routePathForSession(session));
   state.loading = false;
   elements.sessionTitle.textContent = session.label;
   renderSessions();
@@ -867,10 +994,14 @@ async function connect({ restored = false } = {}) {
     if (elements.rememberToken.checked) storedToken("set", state.token);
     else storedToken("remove");
     elements.forget.disabled = false;
-    renderSessions();
+    setAuthenticatedShell();
     setStatus(`${body.sessions.length} journals and ${body.reports.length} reports available.`);
     await loadTasks();
-    if (elements.source.value !== "tasks" && !state.selected && state.sessions.length) await selectSession(state.sessions[0]);
+    if (window.location.pathname === "/login") {
+      const returnPath = new URLSearchParams(window.location.search).get("return");
+      updateHistory(/^\/(?!\/)/.test(returnPath || "") ? returnPath : state.requestedPath !== "/" ? state.requestedPath : "/dashboard", true);
+    }
+    await applyLocation();
   } catch (error) {
     if (error.status === 401) invalidateCredential(restored ? "Saved access token was rejected. Enter a valid token to continue." : "Access token was rejected.");
     else {
@@ -900,13 +1031,26 @@ elements.taskDocumentBrief.addEventListener("click", () => selectTaskDocument("b
 elements.taskDocumentReport.addEventListener("click", () => selectTaskDocument("report"));
 elements.openTaskReport.addEventListener("click", () => {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
-  if (task?.documentType !== "report") return;
-  elements.source.value = "report";
-  showSelectedView();
+  const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
+  if (!documentTypes.includes("report")) return;
+  configurePage("report");
   selectSession({ source: "report", id: task.id, label: task.id });
 });
 elements.token.addEventListener("keydown", event => { if (event.key === "Enter") connect(); });
 elements.source.addEventListener("change", showSelectedView);
+elements.retryTasks.addEventListener("click", loadTasks);
+elements.sidebarToggle.addEventListener("click", () => {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  elements.viewerLayout.classList.toggle("sidebar-collapsed", state.sidebarCollapsed);
+  elements.sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
+  elements.sidebarToggle.setAttribute("aria-label", state.sidebarCollapsed ? "Open task list" : "Collapse task list");
+});
+for (const link of document.querySelectorAll("[data-route]")) link.addEventListener("click", event => {
+  event.preventDefault();
+  updateHistory(link.getAttribute("href"));
+  applyLocation();
+});
+window.addEventListener("popstate", () => applyLocation());
 elements.sessionSearch.addEventListener("input", renderSessions);
 elements.eventSearch.addEventListener("input", applyFilters);
 elements.roleFilter.addEventListener("change", applyFilters);
@@ -927,10 +1071,9 @@ state.timer = window.setInterval(() => {
   else if (state.eof || state.partialBytes > 0) loadEvents();
 }, 1000);
 
-showSelectedView();
 const savedToken = storedToken("get");
 if (savedToken) {
   elements.token.value = savedToken;
   elements.rememberToken.checked = true;
   connect({ restored: true });
-}
+} else showLogin();

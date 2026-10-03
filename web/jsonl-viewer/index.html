@@ -3,118 +3,82 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Firstmate Agent Viewer</title>
+    <title>Firstmate Viewer</title>
     <link rel="stylesheet" href="/style.css">
   </head>
   <body>
-    <header>
-      <div>
-        <p class="eyebrow">FIRSTMATE</p>
-        <h1>Task dashboard and agent records</h1>
-      </div>
-      <div class="connection">
-        <div class="token-entry">
-          <label for="token">Access token</label>
-          <input id="token" type="password" autocomplete="off" spellcheck="false">
-          <label class="remember-token"><input id="remember-token" type="checkbox"> Remember access token</label>
-          <small id="token-note">Remembering grants access to anyone using this browser profile. Leave it off on shared devices.</small>
-        </div>
-        <button id="connect" type="button">Connect</button>
-        <button id="forget" class="secondary" type="button" disabled>Forget / log out</button>
-      </div>
-    </header>
-    <main>
-      <aside>
-        <label for="source">View</label>
-        <select id="source">
-          <option value="tasks">Task dashboard</option>
-          <option value="all">All</option>
-          <option value="short">Short agents</option>
-          <option value="supervisor">Supervisor sessions</option>
-          <option value="report">Task reports</option>
-        </select>
-        <label for="session-search">Find task or item</label>
-        <input id="session-search" type="search" placeholder="Task, session, or date">
-        <div id="sessions" class="sessions" aria-live="polite"></div>
-      </aside>
-      <section class="journal">
-        <section id="task-dashboard" class="task-dashboard" aria-live="polite">
-          <div class="task-dashboard-heading">
-            <div>
-              <p class="eyebrow">TASK OVERVIEW</p>
-              <h2>Work across this Firstmate home</h2>
-              <p id="task-status" class="status">Connect to load task status.</p>
-            </div>
-            <label><input id="task-follow" type="checkbox" checked> Refresh statuses and documents</label>
+    <section id="login-page" class="login-page">
+      <main class="login-card" aria-labelledby="login-title">
+        <p class="eyebrow">FIRSTMATE VIEWER</p>
+        <h1 id="login-title">Reconnect to your fleet</h1>
+        <p class="login-copy">A private, read-only view of tasks, reports, and supervisor work.</p>
+        <label for="token">Access token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false" autofocus>
+        <label class="remember-token"><input id="remember-token" type="checkbox"> Remember on this browser</label>
+        <small id="token-note">Remembering grants access to anyone using this browser profile. Leave it off on shared devices.</small>
+        <button id="connect" type="button">Open viewer</button>
+        <p id="login-status" class="status" role="status"></p>
+      </main>
+    </section>
+
+    <div id="app-shell" class="app-shell" hidden>
+      <header class="app-header">
+        <a class="brand" href="/dashboard" data-route="dashboard"><span class="brand-mark">F</span><span><strong>Firstmate</strong><small>Viewer</small></span></a>
+        <nav aria-label="Viewer pages">
+          <a href="/dashboard" data-route="dashboard">Dashboard</a>
+          <a href="/reports" data-route="reports">Reports</a>
+          <a href="/journal/supervisor" data-route="journal">Supervisor Work Journal</a>
+        </nav>
+        <button id="forget" class="quiet" type="button" disabled>Log out</button>
+      </header>
+
+      <div id="viewer-layout" class="viewer-layout">
+        <aside id="sidebar" class="sidebar">
+          <div class="sidebar-heading">
+            <div><p id="sidebar-eyebrow" class="eyebrow">TASKS</p><h2 id="sidebar-title">Task list</h2></div>
+            <button id="sidebar-toggle" class="icon-button" type="button" aria-expanded="true" aria-controls="sidebar-body" aria-label="Collapse task list">‹</button>
           </div>
-          <div id="task-counts" class="task-counts"></div>
-          <div id="task-groups" class="task-groups"></div>
-          <article id="task-detail" class="task-detail" hidden>
-            <div class="task-detail-heading">
-              <div>
-                <p id="task-detail-state" class="eyebrow"></p>
-                <h2 id="task-detail-title"></h2>
-                <p id="task-detail-meta" class="status"></p>
-                <p id="task-detail-wait" class="task-wait" hidden></p>
-                <p id="task-detail-warning" class="task-warning" hidden></p>
-                <button id="open-task-report" class="secondary" type="button" hidden>Open task report</button>
+          <div id="sidebar-body" class="sidebar-body">
+            <label class="search-field"><span class="sr-only">Find task or item</span><input id="session-search" type="search" placeholder="Search tasks"></label>
+            <select id="source" class="legacy-source" aria-label="View">
+              <option value="tasks">Task dashboard</option><option value="all">All</option><option value="short">Short agents</option><option value="supervisor">Supervisor sessions</option><option value="report">Task reports</option>
+            </select>
+            <div id="sessions" class="sessions" aria-live="polite"></div>
+          </div>
+        </aside>
+
+        <main class="workspace">
+          <section id="task-dashboard" class="task-dashboard" aria-live="polite">
+            <div class="page-heading">
+              <div><p class="eyebrow">DASHBOARD</p><h1>Fleet work</h1><p id="task-status" class="status">Connect to load task status.</p><button id="retry-tasks" class="secondary" type="button" hidden>Retry task loading</button></div>
+              <label class="follow-control"><input id="task-follow" type="checkbox" checked> Live refresh</label>
+            </div>
+            <div id="task-counts" class="task-counts"></div>
+            <div id="task-groups" class="task-groups legacy-task-groups"></div>
+            <section id="dashboard-empty" class="empty-state"><span>↖</span><h2>Select a task</h2><p>Choose a task from the sidebar to inspect its exact identity, state, brief, and report.</p></section>
+            <article id="task-detail" class="task-detail" hidden>
+              <div class="task-detail-heading">
+                <div><p id="task-detail-state" class="eyebrow"></p><h2 id="task-detail-title"></h2><p id="task-detail-meta" class="status"></p><p id="task-detail-wait" class="task-wait" hidden></p><p id="task-detail-warning" class="task-warning" hidden></p></div>
+                <div class="detail-actions"><button id="open-task-report" class="secondary" type="button" hidden>Read full report</button><button id="close-task" class="quiet" type="button">Close</button></div>
               </div>
-              <button id="close-task" class="secondary" type="button">Close details</button>
-            </div>
-            <div id="task-document" class="task-document">
-              <div id="task-document-tabs" class="task-document-tabs" role="tablist" aria-label="Task documents">
-                <button id="task-document-brief" class="secondary" type="button" role="tab">Brief unavailable</button>
-                <button id="task-document-report" class="secondary" type="button" role="tab">Report unavailable</button>
+              <div id="task-document" class="task-document">
+                <div id="task-document-tabs" class="task-document-tabs" role="tablist" aria-label="Task documents"><button id="task-document-brief" class="secondary" type="button" role="tab">Brief unavailable</button><button id="task-document-report" class="secondary" type="button" role="tab">Report unavailable</button></div>
+                <p id="task-document-type" class="eyebrow" hidden></p><p id="task-document-empty" class="empty"></p><div id="task-document-rendered" class="markdown-body"></div>
+                <details id="task-document-source" class="report-source" hidden><summary>Plain source</summary><pre></pre></details>
               </div>
-              <p id="task-document-type" class="eyebrow" hidden></p>
-              <p id="task-document-empty" class="empty"></p>
-              <div id="task-document-rendered" class="markdown-body"></div>
-              <details id="task-document-source" class="report-source" hidden>
-                <summary>Plain source</summary>
-                <pre></pre>
-              </details>
-            </div>
-          </article>
-        </section>
-        <div id="artifact-viewer" hidden>
-        <div class="toolbar">
-          <div>
-            <p id="session-title" class="session-title">Enter the access token to begin.</p>
-            <p id="status" class="status" role="status"></p>
-          </div>
-          <div id="journal-filters" class="filters">
-            <input id="event-search" type="search" placeholder="Search visible events">
-            <select id="role-filter" aria-label="Filter by role"><option value="all">All roles</option></select>
-            <select id="type-filter" aria-label="Filter by type"><option value="all">All types</option></select>
-          </div>
-        </div>
-        <div class="actions">
-          <span id="journal-actions">
-            <button id="from-start" type="button" disabled>Load from start</button>
-            <button id="load-more" type="button" disabled>Load more</button>
-          </span>
-          <label><input id="follow" type="checkbox" checked> Follow changes</label>
-        </div>
-        <div id="notice" class="notice" hidden></div>
-        <div id="events" class="events" aria-live="polite"></div>
-        <article id="report" class="report" aria-live="polite" hidden>
-          <div id="report-rendered" class="markdown-body"></div>
-          <details class="report-source">
-            <summary>Plain source</summary>
-            <pre></pre>
-          </details>
-        </article>
-        </div>
-      </section>
-    </main>
-    <template id="event-template">
-      <article class="event-card">
-        <div class="event-meta"><time></time><span class="badge role"></span><span class="badge type"></span></div>
-        <p class="event-summary"></p>
-        <div class="event-content"></div>
-        <details class="raw"><summary>Raw JSON</summary><pre></pre></details>
-      </article>
-    </template>
+            </article>
+          </section>
+
+          <section id="artifact-viewer" class="artifact-viewer" hidden>
+            <div class="page-heading journal-heading"><div><p id="page-kind" class="eyebrow">WORK JOURNAL</p><h1 id="session-title">Choose a journal</h1><p id="status" class="status" role="status"></p></div><label class="follow-control"><input id="follow" type="checkbox" checked> Follow changes</label></div>
+            <div class="toolbar"><div id="journal-filters" class="filters"><input id="event-search" type="search" placeholder="Search visible entries"><select id="role-filter" aria-label="Filter by role"><option value="all">All roles</option></select><select id="type-filter" aria-label="Filter by type"><option value="all">All types</option></select></div><div id="journal-actions" class="actions"><button id="from-start" type="button" disabled>Load from start</button><button id="load-more" type="button" disabled>Load more</button></div></div>
+            <div id="notice" class="notice" hidden></div><div id="events" class="events" aria-live="polite"></div>
+            <article id="report" class="report" aria-live="polite" hidden><div id="report-rendered" class="markdown-body"></div><details class="report-source"><summary>Plain source</summary><pre></pre></details></article>
+          </section>
+        </main>
+      </div>
+    </div>
+    <template id="event-template"><article class="event-card"><div class="event-meta"><time></time><span class="badge role"></span><span class="badge type"></span></div><p class="event-summary"></p><div class="event-content"></div><details class="raw"><summary>Raw JSON</summary><pre></pre></details></article></template>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
