@@ -3507,22 +3507,39 @@ test_required_producer_identity() {
   pass "fm-pr-merge enforces required producer identity and named waivers"
 }
 
-# A commit status carries no app id to compare, so an app-bound required context
-# that arrives as a green status matches by name, while the same context left
-# unreported still refuses.
-test_app_bound_required_status_context_matches_by_name() {
-  local case_dir head kind variant
+# A required check bound to a GitHub App is satisfied only by verifiable
+# producer evidence at the verified head: a green same-name commit status
+# carries no app id to compare and satisfies nothing, and a check run from
+# another app satisfies nothing, while a check run from the bound app satisfies
+# and an unbound requirement still matches a status by name. The attended
+# named --allow-missing waiver remains the explicit path for a bound
+# requirement whose producer evidence is missing.
+test_app_bound_required_status_requires_producer_evidence() {
+  local case_dir head spec kind variant
   head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
-  for kind in classic ruleset; do
-    for variant in reported absent; do
-      case_dir=$(make_case "required-app-status-$kind-$variant")
-      add_gh_mocks "$case_dir" "$head"
-      if [ "$variant" = reported ]; then
+  for spec in classic:status ruleset:status classic:absent ruleset:absent \
+    classic:unbound ruleset:unbound classic:wrong-app classic:correct-app classic:waived; do
+    kind=${spec%%:*}
+    variant=${spec#*:}
+    case_dir=$(make_case "required-app-evidence-$kind-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    case "$variant" in
+      absent)
+        # The default live rollup holds only the green ci check run.
+        ;;
+      wrong-app|correct-app)
+        write_github_rollup_json "$case_dir" "$head" \
+          "$(check_run ci COMPLETED SUCCESS)" \
+          "$(check_run license/cla COMPLETED SUCCESS)"
+        ;;
+      *)
         write_github_rollup_json "$case_dir" "$head" \
           "$(check_run ci COMPLETED SUCCESS)" \
           "$(status_context 'license/cla' SUCCESS)"
-      fi
-      write_github_required "$case_dir" "$kind:license/cla"
+        ;;
+    esac
+    write_github_required "$case_dir" "$kind:license/cla"
+    if [ "$variant" != unbound ]; then
       if [ "$kind" = classic ]; then
         jq '.protection.required_status_checks.checks[0].app_id = 865473' \
           "$case_dir/github-branch.json" > "$case_dir/updated.json"
@@ -3532,22 +3549,43 @@ test_app_bound_required_status_context_matches_by_name() {
           "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
         mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
       fi
-      printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
-        "$head" > "$case_dir/github-runs.json"
-      run_required_case "$case_dir" 111
-      if [ "$variant" = reported ]; then
-        expect_code 0 "$RC" "app-status-$kind-reported: a green app-bound status must merge: $(cat "$case_dir/stderr")"
-        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
-      else
-        expect_code 1 "$RC" "app-status-$kind-absent: an unreported app-bound status must refuse"
+    fi
+    case "$variant" in
+      wrong-app)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"},{"name":"license/cla","app":{"id":42},"head_sha":"%s"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+        ;;
+      correct-app)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"},{"name":"license/cla","app":{"id":865473},"head_sha":"%s"}]}\n' \
+          "$head" "$head" > "$case_dir/github-runs.json"
+        ;;
+      *)
+        printf '{"check_runs":[{"name":"ci","app":{"id":42},"head_sha":"%s"}]}\n' \
+          "$head" > "$case_dir/github-runs.json"
+        ;;
+    esac
+    case "$variant" in
+      waived)
+        run_required_case "$case_dir" 111 --attended-override --allow-missing license/cla -- --admin
+        expect_code 0 "$RC" "app-evidence-$kind-$variant: the named waiver must merge: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 111 example/repo --squash --admin
+        ;;
+      status|wrong-app|absent)
+        run_required_case "$case_dir" 111
+        expect_code 1 "$RC" "app-evidence-$kind-$variant: an app-bound requirement without producer evidence must refuse: $(cat "$case_dir/stderr")"
         assert_grep "required check 'license/cla' has not reported" "$case_dir/stderr" \
-          "app-status-$kind-absent: the unreported status was not named"
+          "app-evidence-$kind-$variant: the unverified requirement was not named"
         assert_no_grep 'pr merge' "$case_dir/gh.log" \
-          "app-status-$kind-absent: gh pr merge ran with the status unreported"
-      fi
-    done
+          "app-evidence-$kind-$variant: gh pr merge ran without producer evidence"
+        ;;
+      unbound|correct-app)
+        run_required_case "$case_dir" 111
+        expect_code 0 "$RC" "app-evidence-$kind-$variant: $(cat "$case_dir/stderr")"
+        assert_logged_gh_merge "$case_dir" 111 example/repo --squash
+        ;;
+    esac
   done
-  pass "fm-pr-merge matches an app-bound required commit status by name"
+  pass "fm-pr-merge requires producer evidence for app-bound required checks"
 }
 
 test_required_partial_reads_report_all_failures() {
@@ -3884,5 +3922,5 @@ test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
 
 test_required_producer_identity
-test_app_bound_required_status_context_matches_by_name
+test_app_bound_required_status_requires_producer_evidence
 test_required_partial_reads_report_all_failures

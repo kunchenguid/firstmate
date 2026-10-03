@@ -26,12 +26,12 @@
 # required set from classic branch protection and active rulesets. Check-run
 # requirements retain their producer app binding: a same-named check run from another app cannot
 # satisfy them, and a duplicate name-only entry cannot weaken that binding.
-# Unbound requirements match by name. A bound requirement reported as a check
-# run also needs a matching producer in the check-runs read at the verified
-# head, while one reported as a commit status matches by name, because the
-# status carries no app id to compare. Status-creator app binding is not verified
-# here, so an attended --attended-override -- --admin merge can bypass that
-# protection without a missing-check waiver when a same-named status reported.
+# Unbound requirements match by name. A bound requirement is satisfied only by
+# a check run from the bound app, proven by the producer read at the verified
+# head. A commit status carries no app id to compare, so it never satisfies a
+# bound requirement, and app ownership is not inferred from a status creator.
+# The attended --allow-missing <context> remains the explicit waiver for a
+# bound requirement whose producer evidence is missing.
 # An unreadable producer read still refuses.
 # Successfully read requirements remain checked even if another
 # source fails, so known missing checks and all read errors are reported together.
@@ -708,7 +708,7 @@ github_required_checks_missing() {
             .name == $requirement.context
             and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
           else
-            .context == $requirement.context
+            false
           end) | not)
       | .context) | unique[]
   ' 2>/dev/null || return 1
