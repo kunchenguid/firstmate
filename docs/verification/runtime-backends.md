@@ -695,6 +695,19 @@ It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact fl
 It spends no model tokens, so it runs by default wherever Codex is installed.
 The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
 
+Maintainer-verified 2026-10-03 on codex-cli 0.160.0, Linux, with `hooks = true` in the machine's `~/.codex/config.toml`: hook trust granted in a repository checkout carries to that repository's linked worktrees.
+The operator first trusted the project hooks interactively in the main checkout, `/home/aalsalman/firstmate/projects/starwell-ts`.
+Plain Codex was then launched in a linked worktree of that repository carrying an identical `.codex/hooks.json`:
+
+```sh
+cd /home/aalsalman/.treehouse/starwell-ts-933448/1/starwell-ts
+codex
+```
+
+It opened straight to the prompt, with no "Hooks need review" modal and no folder-trust dialog.
+This is the precondition the `config/codex-crew-hooks` opt-in in [configuration](../configuration.md#codex-crew-hooks) relies on.
+It was a manual observation with no refreshing test, and it covers unchanged hooks content only: a changed hooks file needs trust again, and an untrusted one still parks the launch on the modal above.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.

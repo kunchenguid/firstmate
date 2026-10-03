@@ -98,10 +98,12 @@ Each effective `FM_HOME` contains private operational directories.
 
 The optional, local, gitignored `config/codex-crew-hooks` file controls Codex lifecycle hooks for crewmate and scout launches.
 When the file is absent or contains the single token `off`, Firstmate passes `--disable hooks`, preserving the default hook-free launch.
-When it contains the single token `on`, Firstmate leaves Codex hooks enabled and records `codex_hooks=on` in the task metadata.
-Any other content produces a `BOOTSTRAP: invalid config/codex-crew-hooks` diagnostic and launches with hooks disabled.
-The operator must first trust the project's hooks interactively in Codex from the project checkout.
-This setting does not answer or bypass Codex's "Hooks need review" modal; untrusted hooks still park the worker on that modal.
+When it contains the single token `on`, Firstmate leaves Codex hooks enabled.
+Any other content makes `bin/fm-spawn.sh` print a `warning: invalid config/codex-crew-hooks` diagnostic at launch and launch with hooks disabled.
+The precondition is hook trust the operator grants once, interactively in Codex, in the repository checkout.
+That trust holds for linked worktrees of the repository carrying the same `.codex/hooks.json` content, which is where crewmates and scouts launch ([verification](verification/runtime-backends.md#codex-hook-trust)).
+A changed hooks file needs trust again, and the machine's own `~/.codex/hooks.json` hooks must be trusted the same way.
+This setting never answers or bypasses Codex's "Hooks need review" modal; an untrusted hooks file still parks the worker on that modal.
 Firstmate never writes Codex's trust store and never uses `--dangerously-bypass-hook-trust`.
 Secondmate launches are unchanged, and this setting is not inherited into secondmate homes.
 

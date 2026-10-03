@@ -26,7 +26,7 @@ A second dialog, "Hooks need review - N hooks are new or changed", appears whene
 It is unanswerable rather than merely inconvenient: its selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries Enter, Escape and Ctrl-C with no arrow navigation.
 Writing Codex's own trust store to pre-accept it would manufacture an operator consent that was never given.
 So crewmate and scout launches disable Codex's hook layer by default (`bin/fm-spawn.sh`'s launch template owns the flag), which is the opposite of `--dangerously-bypass-hook-trust` - that flag RUNS the untrusted hooks.
-The local `config/codex-crew-hooks=on` opt-in in [configuration](../../../../../docs/configuration.md#codex-crew-hooks) is for hooks the operator has already trusted interactively in the project checkout; it does not answer or bypass this modal, which still parks a launch while hooks remain untrusted.
+The local `config/codex-crew-hooks=on` opt-in in [configuration](../../../../../docs/configuration.md#codex-crew-hooks) is for hooks the operator has already trusted interactively in the repository checkout, which holds for linked worktrees carrying the same `.codex/hooks.json` content; it does not answer or bypass this modal, which still parks a launch while hooks remain untrusted.
 A crewmate loses nothing: its turn-end signal is the `-c notify=` program on the same launch, and the Firstmate hooks in a project's `.codex/hooks.json` are primary-session infrastructure that stands down in a child worktree.
 A secondmate is a primary in its own home and keeps its hooks, so an unanswerable modal there is still possible and is the operator's own hook review to settle.
 

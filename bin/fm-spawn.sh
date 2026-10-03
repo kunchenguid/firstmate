@@ -2026,10 +2026,11 @@ launch_template() {
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
   # and Ctrl-C with no arrow navigation, so the selection cannot be moved.
   # The local config/codex-crew-hooks=on opt-in omits that flag only after the
-  # operator has trusted the project's hooks interactively in Codex; it never
+  # operator has trusted the hooks interactively in the repository checkout,
+  # which holds for linked worktrees carrying the same hooks content; it never
   # answers or bypasses the trust modal, which still parks a launch if hooks are
   # untrusted. Firstmate never writes Codex's trust store or uses the bypass.
-  # pre-accepting the prompt by writing codex's own trust store would manufacture
+  # Pre-accepting the prompt by writing codex's own trust store would manufacture
   # an operator consent that was never given. The hooks it asks about are the
   # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
   # .codex/hooks.json, and a crewmate needs none of them: its turn-end signal is
@@ -4894,7 +4895,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx codex_hooks", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4912,7 +4913,7 @@ if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
       :
     else
       CODEX_HOOKS=off
-      echo "BOOTSTRAP: invalid config/codex-crew-hooks - expected one line containing on or off" >&2
+      echo "warning: invalid config/codex-crew-hooks - expected one line containing on or off; launching with Codex hooks disabled" >&2
     fi
   fi
   [ "$CODEX_HOOKS" = on ] || CODEX_HOOKS_FLAG='--disable hooks '
@@ -4930,7 +4931,6 @@ fi
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  [ "$HARNESS" != codex ] || [ "$KIND" = secondmate ] || echo "codex_hooks=$CODEX_HOOKS"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"

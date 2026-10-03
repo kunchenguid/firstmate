@@ -593,8 +593,6 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--disable hooks" \
     "codex crewmate launch did not disable the hook layer that blocks it on a trust modal"
-  assert_grep 'codex_hooks=off' "$HOME_DIR/state/$id.meta" \
-    "codex crewmate metadata did not record the default hooks-off choice"
   # The opposite posture: this flag RUNS the untrusted hooks instead of
   # disabling them, so a launch must never reach for it.
   assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
@@ -618,7 +616,6 @@ test_codex_crew_hooks_opt_in_and_invalid_fallback() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" "hooks-on opt-in still disabled the hook layer"
   assert_contains "$launch" 'notify=' "hooks-on opt-in changed Codex's turn-end notify program"
-  assert_grep 'codex_hooks=on' "$HOME_DIR/state/$id.meta" "codex metadata did not record hooks-on"
 
   id=profile-codex-scout-hooks-on-z4e2
   rec=$(make_spawn_case profile-codex-scout-hooks-on codex "$id")
@@ -629,7 +626,6 @@ test_codex_crew_hooks_opt_in_and_invalid_fallback() {
   expect_code 0 "$status" "codex scout hooks-on spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" "hooks-on opt-in still disabled hooks for a Codex scout"
-  assert_grep 'codex_hooks=on' "$HOME_DIR/state/$id.meta" "Codex scout metadata did not record hooks-on"
 
   id=profile-codex-hooks-invalid-z4f
   rec=$(make_spawn_case profile-codex-hooks-invalid codex "$id")
@@ -638,11 +634,10 @@ test_codex_crew_hooks_opt_in_and_invalid_fallback() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
   status=$?
   expect_code 0 "$status" "invalid hooks config should fail closed without refusing the launch"$'\n'"$out"
-  assert_contains "$out" 'BOOTSTRAP: invalid config/codex-crew-hooks' "invalid hooks config did not emit an actionable diagnostic"
+  assert_contains "$out" 'warning: invalid config/codex-crew-hooks' "invalid hooks config did not emit an actionable diagnostic"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "--disable hooks" "invalid hooks config did not fall back to hooks-off"
-  assert_grep 'codex_hooks=off' "$HOME_DIR/state/$id.meta" "invalid hooks config metadata did not record hooks-off"
-  pass "Codex crew hook opt-in enables hooks, records metadata, and invalid content falls back with a diagnostic"
+  pass "Codex crew hook opt-in enables hooks, and invalid content falls back with a diagnostic"
 }
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
