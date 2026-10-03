@@ -882,19 +882,17 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
       }'
 }
 
-scout_report_lines() {
-  local report id
+scout_reports_json() {
   if [ ! -d "$DATA" ]; then
     jq -n '[]'
     return 0
   fi
+  # Feed every discovered path to one jq process. Large operational homes may
+  # retain hundreds of reports, so starting one jq per report makes unrelated
+  # task-overview reads scale with historical report count.
   LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
-    | sort \
-    | while IFS= read -r report; do
-      id=$(basename "$(dirname "$report")")
-      jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}'
-    done \
-    | jq -s 'sort_by(.id)'
+    | LC_ALL=C sort \
+    | jq -Rn '[inputs | {id:(split("/") | .[-2]),path:.}] | sort_by(.id)'
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
@@ -913,7 +911,7 @@ printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary task file write failed" >&2; exit 1; }
 
-scout_report_lines > "$SCOUT_REPORTS_JSON_FILE" \
+scout_reports_json > "$SCOUT_REPORTS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: scout report snapshot failed" >&2; exit 1; }
 main_inventory_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" > "$MAIN_INVENTORY_JSON_FILE" \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }

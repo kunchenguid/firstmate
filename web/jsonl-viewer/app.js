@@ -774,8 +774,10 @@ async function loadTasks() {
       clearTaskDocument("");
     }
     renderSessions();
-    const cacheLabel = body.cacheHit ? ` · cached ${Math.round(body.cacheAgeMs / 1000)}s ago` : "";
-    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${body.warning ? ` · ${body.warning}` : ""}`;
+    const cacheLabel = body.cacheHit ? ` · cached snapshot ${Math.round(body.cacheAgeMs / 1000)}s old` : "";
+    const refreshLabel = body.refreshing ? " · refreshing in background" : "";
+    const refreshError = body.refreshError ? ` · ${body.refreshError}` : "";
+    elements.taskStatus.textContent = `${body.tasks.length} tasks · refreshed ${displayTime(body.generatedAt)}${cacheLabel}${refreshLabel}${refreshError}${body.warning ? ` · ${body.warning}` : ""}`;
   } catch (error) {
     if (requestGeneration !== state.taskRequestGeneration) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");

@@ -136,6 +136,10 @@ case "$(cat "$FM_HOME/snapshot-mode")" in
     sleep 0.2
     printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-01T00:00:00Z","main_inventory":{"valid":true},"backlog":{"records":[]},"tasks":[]}'
     ;;
+  next)
+    sleep 0.2
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-01T00:01:00Z","main_inventory":{"valid":true},"backlog":{"records":[{"structured":true,"id":"next-task","title":"Next task","state":"in_flight","kind":"ship","repo":"viewer"}]},"tasks":[]}'
+    ;;
   hang)
     exec sleep 10
     ;;
@@ -163,15 +167,55 @@ status=$(curl -sS -o "$TMP_ROOT/timeout-slow.json" -w '%{http_code}' -H "Authori
 [ "$status" = 200 ] || fail "slow fleet snapshot returned HTTP $status"
 jq -e '.generatedAt == "2026-10-01T00:00:00Z" and .tasks == []' "$TMP_ROOT/timeout-slow.json" >/dev/null \
   || fail "slow fleet snapshot response was not preserved"
+printf 'next\n' > "$TIMEOUT_HOME/snapshot-mode"
+sleep 2.1
+started_at=$(date +%s)
+status=$(curl --max-time 2 -sS -o "$TMP_ROOT/timeout-stale.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
+elapsed=$(( $(date +%s) - started_at ))
+[ "$status" = 200 ] || fail "expired successful snapshot returned HTTP $status"
+[ "$elapsed" -lt 2 ] || fail "expired successful snapshot blocked on its background refresh"
+jq -e '.generatedAt == "2026-10-01T00:00:00Z" and .tasks == [] and .cacheHit == true and .refreshing == true and .cacheAgeMs > 0' "$TMP_ROOT/timeout-stale.json" >/dev/null \
+  || fail "expired successful snapshot was not returned with truthful stale freshness"
+for _ in $(seq 1 50); do
+  curl -sS -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks" > "$TMP_ROOT/timeout-next.json"
+  jq -e '.generatedAt == "2026-10-01T00:01:00Z" and (.tasks | any(.id == "next-task"))' "$TMP_ROOT/timeout-next.json" >/dev/null && break
+  sleep 0.05
+done
+jq -e '.generatedAt == "2026-10-01T00:01:00Z" and (.tasks | any(.id == "next-task"))' "$TMP_ROOT/timeout-next.json" >/dev/null \
+  || fail "completed background refresh did not atomically publish its new generation"
 printf 'hang\n' > "$TIMEOUT_HOME/snapshot-mode"
-sleep 6
+sleep 2.1
 started_at=$(date +%s)
 status=$(curl --max-time 4 -sS -o "$TMP_ROOT/timeout-hang.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
 elapsed=$(( $(date +%s) - started_at ))
-[ "$status" = 503 ] || fail "hanging fleet snapshot returned HTTP $status"
+[ "$status" = 200 ] || fail "hanging background refresh hid the last successful snapshot with HTTP $status"
 [ "$elapsed" -lt 4 ] || fail "hanging fleet snapshot exceeded its finite timeout"
-jq -e '.error == "task overview is temporarily unavailable"' "$TMP_ROOT/timeout-hang.json" >/dev/null \
-  || fail "hanging fleet snapshot did not return the honest unavailable response"
+jq -e '.generatedAt == "2026-10-01T00:01:00Z" and (.tasks | any(.id == "next-task")) and .cacheHit == true and .refreshing == true' "$TMP_ROOT/timeout-hang.json" >/dev/null \
+  || fail "hanging background refresh did not preserve and label the last successful generation"
+sleep 1.1
+curl -sS -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks" > "$TMP_ROOT/timeout-failed-stale.json"
+jq -e '.generatedAt == "2026-10-01T00:01:00Z" and .cacheHit == true and .refreshing == true and (.refreshError | contains("refresh failed"))' "$TMP_ROOT/timeout-failed-stale.json" >/dev/null \
+  || fail "failed background refresh was not disclosed alongside the preserved snapshot"
+kill "$TIMEOUT_SERVER_PID" 2>/dev/null || true
+wait "$TIMEOUT_SERVER_PID" 2>/dev/null || true
+TIMEOUT_SERVER_PID=
+
+# A process with no successful snapshot must still fail closed instead of
+# presenting an unavailable generation as cached data.
+FM_HOME="$TIMEOUT_HOME" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
+  node "$TIMEOUT_CODE_ROOT/bin/fm-jsonl-viewer.mjs" > "$TIMEOUT_LOG" 2>&1 &
+TIMEOUT_SERVER_PID=$!
+for _ in $(seq 1 100); do
+  timeout_port=$(sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' "$TIMEOUT_LOG")
+  [ -n "$timeout_port" ] && break
+  sleep 0.05
+done
+[ -n "${timeout_port:-}" ] || fail "cold-timeout viewer did not report its bound port"
+timeout_base="http://127.0.0.1:$timeout_port"
+status=$(curl --max-time 4 -sS -o "$TMP_ROOT/timeout-cold-hang.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$timeout_base/api/tasks")
+[ "$status" = 503 ] || fail "cold hanging fleet snapshot returned HTTP $status"
+jq -e '.error == "task overview is temporarily unavailable"' "$TMP_ROOT/timeout-cold-hang.json" >/dev/null \
+  || fail "cold hanging fleet snapshot did not return the honest unavailable response"
 kill "$TIMEOUT_SERVER_PID" 2>/dev/null || true
 wait "$TIMEOUT_SERVER_PID" 2>/dev/null || true
 TIMEOUT_SERVER_PID=
@@ -322,6 +366,13 @@ sed -i 's/## In flight/## In flight\n\n## Done/; /task-one - Processing task/d' 
 sed -i '/Accepted completed task/a\- [x] task-one - Processing task (repo: viewer) (kind: ship)' "$HOME_FIXTURE/data/backlog.md"
 sleep 6
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
+jq -e '.cacheHit == true and .refreshing == true and (.tasks | any(.id == "task-one" and .category == "processing"))' "$TMP_ROOT/tasks-refreshed.json" >/dev/null \
+  || fail "expired task snapshot did not remain useful while its refresh started"
+for _ in $(seq 1 100); do
+  curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-refreshed.json"
+  jq -e '.tasks | any(.id == "task-one" and .category == "completed" and .status == "Completed")' "$TMP_ROOT/tasks-refreshed.json" >/dev/null && break
+  sleep 0.05
+done
 jq -e '.tasks | any(.id == "task-one" and .category == "completed" and .status == "Completed")' "$TMP_ROOT/tasks-refreshed.json" >/dev/null || fail "task status refresh did not replace processing with accepted completion"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$SHORT_ID&cursor=0" > "$TMP_ROOT/short-page.json"
