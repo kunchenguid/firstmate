@@ -1417,14 +1417,17 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
 # each task's status log through status_open_decisions_incremental instead of
 # the whole-file status_open_decisions, so a fleet-wide per-drain scan stays
 # bounded by new appends rather than total lifetime log size across every task.
-scan_open_decisions_incremental() {  # <state>
-  local state=$1 f task open line exclude
+# A file whose fold fails is skipped; with --strict the walk still prints every
+# other file's decisions but returns 3, so a caller that treats absence as
+# closure can tell an incomplete set from a complete one.
+scan_open_decisions_incremental() {  # <state> [--strict]
+  local state=$1 strict=${2:-} f task open line exclude incomplete=0
   exclude=$(status_scan_parent_channel_exclude "$state")
   for f in "$state"/*.status; do
     [ -e "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
-    open=$(status_open_decisions_incremental "$f") || continue
+    open=$(status_open_decisions_incremental "$f") || { incomplete=1; continue; }
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -1433,6 +1436,7 @@ scan_open_decisions_incremental() {  # <state>
 $open
 EOF
   done
+  [ "$strict" = --strict ] && [ "$incomplete" -eq 1 ] && return 3
   return 0
 }
 

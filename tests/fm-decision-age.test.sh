@@ -107,7 +107,7 @@ test_torn_down_status_does_not_wake() {
 }
 
 test_secondmate_second_reraise_escalates_to_parent_once() {
-  local dir mate state fakebin out pid now channel
+  local dir mate state fakebin out pid now channel escalated_age real_mv
   dir=$(make_case secondmate-escalation); mate="$dir/mate"; state="$mate/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   channel="$dir/parent/state/mate.status"
   mkdir -p "$mate"/{state,data,config,projects} "$dir/parent/state"
@@ -124,18 +124,44 @@ test_secondmate_second_reraise_escalates_to_parent_once() {
     || fail "the first re-raise escalated to the parent early"
   ack_wake "$state" || fail "first re-raise could not be acknowledged"
 
-  sleep 2
+  # The second re-raise is due threshold plus twice the threshold after the
+  # opener (45 minutes at the 900s default); one threshold later is too early.
   watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 1
+  kill -0 "$pid" 2>/dev/null || fail "the second re-raise fired after only one threshold of backoff"
+  ! grep -F 'decision unanswered' "$channel" >/dev/null 2>&1 \
+    || fail "the parent escalation fired before the second re-raise"
   wait_for_exit "$pid" 100 || fail "second re-raise did not wake the secondmate"
   [ "$(grep -c 'decision unanswered' "$channel" 2>/dev/null)" = 1 ] \
     || fail "second re-raise did not escalate exactly once: $(cat "$channel" 2>/dev/null)"
   grep -E '^needs-decision \[key=decision-unanswered-[0-9a-f]+\].*: decision unanswered [0-9]+s: docs dlp-clean$' "$channel" >/dev/null \
     || fail "parent escalation line lost its key, age, task, or decision key: $(cat "$channel")"
+  escalated_age=$(sed -n 's/.*: decision unanswered \([0-9][0-9]*\)s: docs dlp-clean$/\1/p' "$channel")
+  [ "${escalated_age:-0}" -ge 24 ] \
+    || fail "the parent escalation reported age ${escalated_age:-none}s, before opener age plus three thresholds"
   ack_wake "$state" || fail "second re-raise could not be acknowledged"
 
-  sleep 4
+  # A status log whose open-decision cursor cannot be persisted is missing
+  # from that tick's open set; its escalation must not be closed on that basis.
+  real_mv=$(command -v mv)
+  # shellcheck disable=SC2016 # The fake mv expands its own arguments.
+  printf '#!/usr/bin/env bash\ncase "${*: -1}" in */.docs.open-decisions-cursor) exit 1 ;; esac\nexec %s "$@"\n' "$real_mv" > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  printf 'working [at=%s]: still waiting on the answer\n' "$(date +%s)" >> "$state/docs.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/docs.status"
   watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
-  wait_for_exit "$pid" 100 || fail "third re-raise did not wake the secondmate"
+  sleep 3
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -f "$fakebin/mv"
+  grep -F 'open-decision fold incomplete' "$state/.watch-triage.log" >/dev/null \
+    || fail "the cursor persistence failure did not reach the decision-age tick: $(cat "$out")"
+  ! grep -F 'resolved [key=decision-unanswered-' "$channel" >/dev/null \
+    || fail "an incomplete fold closed the parent escalation of a still-open decision"
+  ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "an incomplete fold removed a live age marker"
+
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 150 || fail "third re-raise did not wake the secondmate"
   [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a later re-raise duplicated the parent escalation"
   ack_wake "$state" || fail "third re-raise could not be acknowledged"
 

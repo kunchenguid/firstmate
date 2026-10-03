@@ -86,8 +86,9 @@
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: decision unanswered <age>s: <task> <key> after
 #                          FM_DECISION_AGE_SECS (default 900); per-key opener
-#                          backoff rechecks after 15, 30, then 60 minutes at
-#                          the default threshold, until a matching resolution;
+#                          backoff rechecks 30, then every 60 minutes later at
+#                          the default threshold (re-raises at 15, 45, 105...
+#                          minutes of age), until a matching resolution;
 #                          in a secondmate home the second re-raise also
 #                          publishes one parent-channel line
 #                          needs-decision [key=decision-unanswered-<id>],
@@ -1069,7 +1070,8 @@ EOF
 # Markers for keys no longer open on a live task are removed every tick, after
 # the parent escalation they carried, if any, is closed with a matching
 # resolution; a failure on one key is logged and skipped so supervision keeps
-# running.
+# running. A tick in which any status log failed to fold has no evidence that
+# a missing key was answered, so it removes no marker and closes nothing.
 decision_age_close_escalation() { # <marker>
   local marker=$1 identity count rc=0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
@@ -1086,11 +1088,20 @@ decision_age_close_escalation() { # <marker>
 decision_age_tick() {
   local now threshold cap open task key verb note origin epoch position age meta generation identity marker queue_key
   local recorded next interval next_interval count queued tmp current current_key current_verb still_open
-  local live=' ' f rc
+  local live=' ' f rc complete=1
   now=$(date +%s)
   threshold=$(fm_decision_age_threshold)
   cap=$((threshold * 4))
-  open=$(scan_open_decisions_incremental "$STATE") || return 1
+  rc=0
+  open=$(scan_open_decisions_incremental "$STATE" --strict) || rc=$?
+  case "$rc" in
+    0) ;;
+    3)
+      complete=0
+      triage_log "decision-age: open-decision fold incomplete; keeping markers and parent escalations this tick"
+      ;;
+    *) return 1 ;;
+  esac
   while IFS=$'\t' read -r task key verb note; do
     [ "$verb" = needs-decision ] || continue
     case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
@@ -1099,10 +1110,12 @@ decision_age_tick() {
   done <<EOF
 $open
 EOF
-  for f in "$STATE"/.decision-age-*; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    case "$live" in *" ${f##*/} "*) ;; *) decision_age_close_escalation "$f" && rm -f "$f" ;; esac
-  done
+  if [ "$complete" -eq 1 ]; then
+    for f in "$STATE"/.decision-age-*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      case "$live" in *" ${f##*/} "*) ;; *) decision_age_close_escalation "$f" && rm -f "$f" ;; esac
+    done
+  fi
   while IFS=$'\t' read -r task key verb note; do
     marker="$STATE/.decision-age-$(printf '%s' "$task|$key" | hash_pane)"
     case "$live" in *" ${marker##*/} "*) ;; *) continue ;; esac
@@ -1125,13 +1138,13 @@ EOF
       decision_age_close_escalation "$marker" || continue
     fi
     next=0
-    interval=$threshold
+    interval=$((threshold * 2))
     count=0
     if [ "${recorded%% *}" = "$identity" ]; then
       read -r _ next interval count <<EOF
 $recorded
 EOF
-      case "$next:$interval:$count" in *[!0-9:]*|:*|*::*|*:) next=0; interval=$threshold; count=0 ;; esac
+      case "$next:$interval:$count" in *[!0-9:]*|:*|*::*|*:) next=0; interval=$((threshold * 2)); count=0 ;; esac
     fi
     [ "$now" -ge "$next" ] || continue
     # The cursor snapshot and the append are separate reads. Recheck due keys
