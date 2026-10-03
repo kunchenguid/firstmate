@@ -4,7 +4,9 @@
 # Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
-#   target. fm-send refuses unresolved guesses rather than falling back to a
+#   target. The selector rule behind that resolution (prefix strip, candidate
+#   order, id-shape classes) has one contract source:
+#   bin/fm-task-id-rule.conf. fm-send refuses unresolved guesses rather than falling back to a
 #   tmux window search, because a "successful" send to the wrong endpoint is
 #   worse than a loud failure.
 # The text must be nonempty: an empty or whitespace-only message is refused
@@ -383,18 +385,16 @@ fm_send_resolve_target() { # <raw-target>
     return 0
   fi
 
-  case "$raw" in
-  fm-*:*)
-    # A named Herdr session may itself begin with "fm-". Keep that explicit
-    # session:pane target on the validated backend-target path below rather
-    # than mistaking it for an unresolved task selector.
-    ;;
-  fm-*)
-    RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/${raw#fm-}.meta; backend=none"
+  # A prefixed selector whose metadata lookup failed is an error; a prefixed
+  # colon target stays an explicit session:pane target on the validated
+  # backend-target path below rather than an unresolved task selector. The
+  # prefix decision comes from bin/fm-task-id-rule.conf through its bash
+  # loader, so no second copy of the rule lives here.
+  if fm_task_id_rule_is_prefixed "$raw" && ! fm_task_id_rule_rejected "$raw"; then
+    RESOLUTION_TRIED="meta=$STATE/$raw.meta; legacy-meta=$STATE/$(fm_task_id_rule_strip "$raw").meta; backend=none"
     echo "error: no metadata for $raw in $STATE (tried $RESOLUTION_TRIED); pass a well-formed explicit backend target only when targeting outside this firstmate home" >&2
     return 1
-    ;;
-  esac
+  fi
 
   pane_meta=$(fm_send_meta_for_key_value "$STATE" herdr_pane_id "$raw" 2>/dev/null || true)
   if [ -n "$pane_meta" ]; then

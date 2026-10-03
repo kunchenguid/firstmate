@@ -54,6 +54,8 @@ make_fake_root() {
   # test cannot depend on or mutate a host tmux server. Teardown still refuses
   # unless every sibling the real tmux adapter sources is present.
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-task-id-rule-lib.sh" "$fake/bin/fm-task-id-rule-lib.sh"
+  ln -s "$ROOT/bin/fm-task-id-rule.conf" "$fake/bin/fm-task-id-rule.conf"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH
@@ -162,6 +164,8 @@ test_teardown_skips_gracefully_without_tasktmp() {
   mkdir -p "$fake/bin/backends" "$fake/state" "$fake/data"
   ln -s "$TEARDOWN" "$fake/bin/fm-teardown.sh"
   ln -s "$ROOT/bin/fm-backend.sh" "$fake/bin/fm-backend.sh"
+  ln -s "$ROOT/bin/fm-task-id-rule-lib.sh" "$fake/bin/fm-task-id-rule-lib.sh"
+  ln -s "$ROOT/bin/fm-task-id-rule.conf" "$fake/bin/fm-task-id-rule.conf"
   cat > "$fake/bin/backends/tmux.sh" <<'SH'
 fm_backend_tmux_kill() { return 0; }
 SH

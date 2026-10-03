@@ -50,6 +50,10 @@
 FM_BACKEND_SCRIPT=${BASH_SOURCE[0]:-$0}
 FM_BACKEND_LIB_DIR="$(cd "$(dirname "$FM_BACKEND_SCRIPT")" && pwd)"
 unset FM_BACKEND_SCRIPT
+# The fm- task-id prefix rule is single-sourced in bin/fm-task-id-rule.conf
+# (contract: its header); this loader is generic load code for it.
+# shellcheck source=bin/fm-task-id-rule-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-task-id-rule-lib.sh"
 FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -566,23 +570,9 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
 }
 
 fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
-  local raw=$1 state=$2 id
-  case "$raw" in
-    *:*) return 1 ;;
-  esac
-  if [ -f "$state/$raw.meta" ]; then
-    printf '%s' "$raw"
-    return 0
-  fi
-  case "$raw" in
-    fm-*)
-      id=${raw#fm-}
-      [ -f "$state/$id.meta" ] || return 1
-      printf '%s' "$id"
-      return 0
-      ;;
-  esac
-  return 1
+  # Thin view over the shared rule (bin/fm-task-id-rule.conf): reject, then
+  # walk the rule's candidate ids and return the first with a meta record.
+  fm_task_id_rule_task_id "$1" "$2"
 }
 
 fm_backend_meta_for_selector() {  # <raw-target> <state-dir>
@@ -701,9 +691,9 @@ fm_backend_source() {  # <name>
 #                      against a live backend inventory (matches today's
 #                      behavior: tmux window names can be trusted from meta
 #                      without a live re-check).
-#   "fm-<id>"          legacy task window label fallback routed through
-#                      <state-dir>/<id>.meta when no exact
-#                      <state-dir>/fm-<id>.meta exists.
+#   prefixed selector  resolved by the shared rule in
+#                      bin/fm-task-id-rule.conf (exact record first, then its
+#                      derived candidates).
 #   anything else      first matched against recorded `window=`/`terminal=`
 #                      metadata, then treated as an ad hoc bare window name and
 #                      resolved by searching the legacy tmux live inventory.
@@ -722,23 +712,19 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
     printf '%s' "$window"
     return 0
   fi
-  case "$raw" in
-    fm-*)
-      echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
-      return 1
-      ;;
-    *)
-      meta=$(fm_backend_meta_for_window "$raw" "$state" 2>/dev/null || true)
-      if [ -n "$meta" ]; then
-        window=$(fm_backend_target_of_meta "$meta")
-        [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
-        printf '%s' "$window"
-        return 0
-      fi
-      fm_backend_source tmux || return 1
-      fm_backend_tmux_resolve_bare_selector "$raw"
-      ;;
-  esac
+  if fm_task_id_rule_is_prefixed "$raw"; then
+    echo "error: no metadata for $raw in $state; pass session:window to target a window outside this firstmate home" >&2
+    return 1
+  fi
+  meta=$(fm_backend_meta_for_window "$raw" "$state" 2>/dev/null || true)
+  if [ -n "$meta" ]; then
+    window=$(fm_backend_target_of_meta "$meta")
+    [ -n "$window" ] || { echo "error: no backend target recorded in $meta" >&2; return 1; }
+    printf '%s' "$window"
+    return 0
+  fi
+  fm_backend_source tmux || return 1
+  fm_backend_tmux_resolve_bare_selector "$raw"
 }
 
 # --- generic per-op dispatch -------------------------------------------------
