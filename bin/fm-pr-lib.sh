@@ -78,6 +78,10 @@ FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
 FM_PR_POLL_REARM_DATA_IDENTITY=
 FM_PR_POLL_REARM_CHECK_IDENTITY=
+# Diagnostic class for a poll rejected by the strict artifact validator.
+# This never authorizes execution; fm_pr_poll_artifacts_valid remains the
+# single authentication boundary.
+FM_PR_POLL_REJECTION_CLASS=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -702,6 +706,72 @@ fm_pr_poll_artifacts_content_valid() {
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+}
+
+# Classify why a strict PR poll validation failed without granting any execution
+# authority. The order matters: a coherent registration whose recorded hash or
+# file identity no longer matches is positive authentication-failure evidence;
+# a record that cannot be parsed does not prove that and stays malformed; and
+# coherent poll artifacts naming a different PR than metadata prove only an
+# incomplete publication generation.
+fm_pr_poll_rejection_classify() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device check data registration meta
+  local data_hash template_hash data_identity check_identity
+  FM_PR_POLL_REJECTION_CLASS=malformed-or-unsupported
+  fm_pr_task_id_valid "$id" || return 0
+  [ -d "$state" ] && [ ! -L "$state" ] || return 0
+  state_device=$(fm_pr_file_device "$state") || return 0
+  check="$state/$id.check.sh"
+  data="$state/$id.pr-poll"
+  registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
+
+  if [ ! -e "$check" ] || [ ! -e "$data" ] || [ ! -e "$registration" ] || [ ! -e "$meta" ]; then
+    FM_PR_POLL_REJECTION_CLASS=publication-incomplete
+    return 0
+  fi
+  if ! fm_pr_private_file_valid "$check" 600 "$state_device"; then
+    FM_PR_POLL_REJECTION_CLASS=authentication-failed
+    return 0
+  fi
+  fm_pr_private_file_valid "$data" 600 "$state_device" || return 0
+  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 0
+  fm_pr_poll_data_parse "$data" || return 0
+  fm_pr_poll_registration_parse "$registration" || return 0
+
+  data_hash=$(fm_pr_sha256 "$data") || return 0
+  template_hash=$(fm_pr_sha256 "$check") || return 0
+  data_identity=$(fm_pr_file_identity "$data") || return 0
+  check_identity=$(fm_pr_file_identity "$check") || return 0
+  if [ "$FM_PR_REG_DATA_HASH" != "$data_hash" ] \
+    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$template_hash" ] \
+    || [ "$FM_PR_REG_DATA_IDENTITY" != "$data_identity" ] \
+    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$check_identity" ] \
+    || ! cmp -s "$template" "$check"; then
+    FM_PR_POLL_REJECTION_CLASS=authentication-failed
+    return 0
+  fi
+  if [ "$FM_PR_REG_ID" != "$id" ] \
+    || [ "$FM_PR_REG_PROVIDER" != "$FM_PR_DATA_PROVIDER" ] \
+    || [ "$FM_PR_REG_URL" != "$FM_PR_DATA_URL" ] \
+    || [ "$FM_PR_REG_HOST" != "$FM_PR_DATA_HOST" ] \
+    || [ "$FM_PR_REG_PATH" != "$FM_PR_DATA_PATH" ] \
+    || [ "$FM_PR_REG_NUMBER" != "$FM_PR_DATA_NUMBER" ]; then
+    return 0
+  fi
+  fm_pr_metadata_identity_parse "$meta" || return 0
+  if [ "$FM_PR_META_PROVIDER" != "$FM_PR_DATA_PROVIDER" ] \
+    || [ "$FM_PR_META_URL" != "$FM_PR_DATA_URL" ] \
+    || [ "$FM_PR_META_HOST" != "$FM_PR_DATA_HOST" ] \
+    || [ "$FM_PR_META_PATH" != "$FM_PR_DATA_PATH" ] \
+    || [ "$FM_PR_META_NUMBER" != "$FM_PR_DATA_NUMBER" ]; then
+    FM_PR_POLL_REJECTION_CLASS=publication-incomplete
+    return 0
+  fi
+  # shellcheck disable=SC2034 # Read by the watcher after this sourced function returns.
+  FM_PR_POLL_REJECTION_CLASS=malformed-or-unsupported
 }
 
 # A registration armed before a volume remount can name a device number the
