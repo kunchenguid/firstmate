@@ -120,8 +120,10 @@
 # cleanup: that ref preserves committed work without reading the reused slot,
 # and its absence refuses even with --force. Uncommitted work already lost at
 # slot reassignment cannot be reconstructed by inspecting the new claimant's
-# copy. Refusing every reassigned record would strand it, because
-# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
+# copy. Ordinary cleanup keeps the branch until task-record removal succeeds,
+# so a failed removal after slot return leaves the branch available to prove
+# custody on a reassigned retry. Refusing every reassigned record would strand
+# it, because bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
 # unconditionally, so there is no line an operator could clear to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
