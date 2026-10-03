@@ -1475,20 +1475,41 @@ detect_local_config() {
   detect_home_summary_publication
 }
 
-# Shadow-backlog check. When this home's data directory is not the code root's,
+# Shadow-backlog check. When this home's data directory is not its code root's,
 # a code-root data/backlog.md or data/done-archive.md that is not this home's
-# own file is a queue a cwd-relative tasks-axi write has already forked; a link
-# into the home does not survive such a write (docs/configuration.md "Backlog
+# own file may be a queue a cwd-relative tasks-axi write forked, or another
+# home's live record; a link into the home does not survive such a write
+# (docs/configuration.md "Backlog
 # backend" owns why). Detect-only: neither copy is a safe winner, so nothing is
-# merged here.
+# merged here. Path containment does not prove a file is unused: even a
+# checkout home's normal data may still serve sessions without FM_DATA_OVERRIDE.
+#
+# The code root is the one this home's own sessions run from, not the checkout
+# this script happens to live in. A home that is itself a Firstmate checkout
+# (its own AGENTS.md and bin/fm-bootstrap.sh, as a leased secondmate worktree
+# is) runs its own scripts and so is its own code root; the invoking checkout's
+# data/ is then another home's live backlog, never a fork of this one. Any
+# other home borrows the invoking code root - including one that carries its
+# own .tasks.toml only to select a backlog adapter, because its sessions still
+# run tasks-axi from that code root.
+home_code_root() {
+  if [ -f "$FM_HOME/AGENTS.md" ] && [ -f "$FM_HOME/bin/fm-bootstrap.sh" ]; then
+    printf '%s\n' "$FM_HOME"
+  else
+    printf '%s\n' "$FM_ROOT"
+  fi
+}
+
 detect_code_root_backlog_fork() {
-  local name root_copy
-  [ "$FM_ROOT/data" -ef "$DATA" ] && return 0
+  local name code_root root_copy remedy
+  code_root=$(home_code_root)
+  [ "$code_root/data" -ef "$DATA" ] && return 0
   for name in backlog.md done-archive.md; do
-    root_copy="$FM_ROOT/data/$name"
+    root_copy="$code_root/data/$name"
     [ -e "$root_copy" ] || [ -L "$root_copy" ] || continue
     [ "$root_copy" -ef "$DATA/$name" ] && continue
-    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; tasks-axi wrote the code root instead of this home, so rows in it may be missing here - merge it into this home's copy and move it aside"
+    remedy="this check cannot tell whether that file is another home's live record or is still used by this home's normal-data sessions, so never move, rewrite, or delete it on this line alone; a matching task id alone is not ownership evidence; copy into $DATA/$name only rows corroborated as the same task by this home's records (state/<id>.* or data/<id>/ contents here) and whose id has no record in $code_root; leave ambiguous rows untouched and report them to the captain, including every row both homes' records claim or neither home's records claim (queued rows may have no records yet); run every later backlog command through bin/fm-tasks-axi.sh"
+    echo "BACKLOG_RECONCILE: code-root $root_copy is not this home's $DATA/$name; a tasks-axi write may have landed there instead of this home, so rows may be missing here - $remedy"
   done
 }
 
