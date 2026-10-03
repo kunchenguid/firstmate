@@ -61,8 +61,11 @@ test_worker_decides_findings_flag() {
     "the self-decision policy lost its style-nit decline class"
   assert_grep 'Escalate the whole gate instead when you are unsure' "$ship" \
     "the self-decision policy lost its escalation boundary"
-  assert_grep 'repeats the causal theme of a finding already fixed this run, or is destructive, irreversible, or security-sensitive' "$ship" \
-    "the self-decision policy lost the repeated-theme and destructive escalation cases"
+  assert_grep 'repeats the causal theme of a finding already fixed this run where those fixes are preserving a questionable design or abstraction rather than closing independent in-scope defects, or is destructive, irreversible, or security-sensitive' "$ship" \
+    "the self-decision policy lost the narrowed repeated-theme and destructive escalation cases"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'firstmate reviews every self-decided gate file against `ask-user-authority` before the PR may merge' "$ship" \
+    "the self-decision policy lost the required pre-merge firstmate review"
   # shellcheck disable=SC2016 # Backticks and placeholders are literal generated Markdown.
   assert_grep '`working [at=<epoch>]: ask-user self-decided run=<run> step=<step> fixed=<ids|none> declined=<ids|none> file=<that nm-<run>-<step>-<epoch>-findings.txt path>`' "$ship" \
     "the self-decision policy lost its one-line audit record"

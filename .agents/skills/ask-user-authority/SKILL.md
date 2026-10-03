@@ -22,6 +22,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 A home with the opt-in `config/worker-decides-findings` flag ([`docs/configuration.md`](../../../docs/configuration.md#worker-decides-routine-findings-configworker-decides-findings)) instead lets the worker decide a gate whose every ask-user finding is a step 3 fix or a pure style or preference nit outside accepted intent, which it declines; any step 4 case escalates as before.
 `bin/fm-dod-lib.sh` owns that worker-facing policy text, whose escalate list mirrors step 4 below, so change both together.
 Those `working:` audit lines do not wake firstmate; during its ordinary fleet review, firstmate audits each self-decided gate from that line and its findings file against this procedure, and steers the worker on any wrong verdict it finds.
+Reviewing every self-decided gate findings file the task's status log names is a required step before that task's PR may merge.
 
 ## Decide
 
