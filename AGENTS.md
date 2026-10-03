@@ -219,6 +219,10 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor.
+Local commits are cheap checkpoints, so keep them focused and granular.
+Batch obvious local corrections before a remote push.
+Match CI, no-mistakes, and Greptile depth to the change level, then run each remote check against a stable coherent head.
+Do not reduce commit count just to reduce remote validation.
 When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
 Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
