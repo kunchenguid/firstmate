@@ -1212,6 +1212,8 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=9
 
+# The one owner of the persisted cursor version string; every cursor writer and
+# reader, including the legacy presented-offset reader, compares against it.
 _fm_open_decisions_fold_version() {  # <kind> <resolve-verb> <held-verb>
   printf '%s:%s' "$FM_OPEN_DECISIONS_FOLD_VERSION" "$1"
   if [ "$2" != "$FM_CLASSIFY_RESOLVE_VERB_DEFAULT" ] \
@@ -1936,7 +1938,9 @@ status_open_decisions_cursor_offset() {  # <status-file>
   local f=$1 cf offset=0 ident='' version='' cursor_data first rest open=''
   local offset_line ident_line cur_ident size fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")"
+  fold_version=$(_fm_open_decisions_fold_version "$(_fm_status_kind "$f")" \
+    "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" \
+    "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}")
   cf=$(_fm_open_decisions_cursor_path "$f")
   if [ -e "$cf" ] || [ -L "$cf" ]; then
     [ -f "$cf" ] && [ -r "$cf" ] && [ ! -L "$cf" ] || return 1

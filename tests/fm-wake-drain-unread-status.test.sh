@@ -82,6 +82,33 @@ test_already_presented_notes_are_not_replayed() {
   pass "already-presented note: lines are not re-surfaced on the next drain"
 }
 
+# A home with no presentation manifest reads the open-decisions cursor as its
+# presented offset, so a cursor written under configured decision verbs must
+# still be accepted there.
+test_manifest_less_home_with_custom_verbs_does_not_replay() {
+  local dir state out status
+  dir=$(make_case no-replay-custom-verbs)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task2.status"
+  printf 'note: bootstrap cursor line\n' > "$status"
+  printf 'note: captain said use REST not RPC\n' >> "$status"
+  FM_CLASSIFY_RESOLVE_VERB=settled FM_CLASSIFY_CAPTAIN_HELD_VERB=parked-with-captain \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "first drain of unread notes failed"
+  grep -F 'captain said use REST not RPC' "$out" >/dev/null \
+    || fail "setup error: first drain did not surface the answer note"
+  rm -f "$state/.status-presentation-cursor"
+  [ -f "$state/.task2.open-decisions-cursor" ] \
+    || fail "setup error: the drain left no open-decisions cursor to read as the presented offset"
+
+  FM_CLASSIFY_RESOLVE_VERB=settled FM_CLASSIFY_CAPTAIN_HELD_VERB=parked-with-captain \
+    FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after presentation failed"
+  if grep -F 'captain said use REST not RPC' "$out" >/dev/null; then
+    fail "a manifest-less home with configured verbs replayed a presented note: $(cat "$out")"
+  fi
+  pass "a manifest-less home with configured decision verbs keeps its presented offset"
+}
+
 test_brand_new_note_after_presentation_is_surfaced() {
   local dir state out status
   dir=$(make_case brand-new-note)
@@ -451,6 +478,7 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
 
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
+test_manifest_less_home_with_custom_verbs_does_not_replay
 test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
