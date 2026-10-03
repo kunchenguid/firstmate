@@ -341,6 +341,49 @@ assert_contains "$out" 'entrypoint=yes' "the remote doctor did not detect its en
 assert_contains "$out" 'required git=' "the remote doctor did not report the required tool"
 pass "the remote doctor reports the same PATH the entrypoint hands its children"
 
+# A host is checked before it is seeded, so no record selects its alias yet.
+mv "$LOCAL_HOME/data/secondmates.md" "$TMP_ROOT/secondmates.unseeded"
+set +e
+out=$(fm_on --root "$REMOTE_ROOT" --home "$REMOTE_HOME/unseeded" remote-mac fm-remote-doctor.sh 2>/dev/null)
+set -e
+assert_contains "$out" 'entrypoint=yes' "the explicit pre-seed route did not reach the doctor through the entrypoint"
+assert_contains "$out" "path=$EXPECTED_PATH" "the explicit pre-seed route did not report the entrypoint child PATH"
+ssh_before_explicit_refusals=$(cat "$SSH_COUNT")
+if fm_on --root "$REMOTE_ROOT" --home "$REMOTE_HOME" remote-mac fm-probe-two.sh >/dev/null 2>&1; then
+  fail "the explicit route ran a command other than the doctor"
+fi
+if fm_on --root "$REMOTE_ROOT" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "the explicit route was accepted without a remote home"
+fi
+if fm_on --root relative/root --home "$REMOTE_HOME" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "the explicit route accepted a relative remote root"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_explicit_refusals" ] || fail "a refused explicit route reached SSH"
+if out=$(fm_on remote-mac fm-remote-doctor.sh 2>&1); then
+  fail "an unregistered alias was routed without an explicit root and home"
+fi
+assert_contains "$out" 'pass --root and --home' "the missing-registry refusal did not name the pre-seed route"
+mv "$TMP_ROOT/secondmates.unseeded" "$LOCAL_HOME/data/secondmates.md"
+if out=$(fm_on other-host fm-remote-doctor.sh 2>&1); then
+  fail "an unregistered alias was routed without an explicit root and home"
+fi
+assert_contains "$out" 'pass --root and --home' "the unregistered-alias refusal did not name the pre-seed route"
+# Supplied but empty paths are still an explicit route, never a silent fallback
+# to the registered route for the same alias.
+ssh_before_empty_refusals=$(cat "$SSH_COUNT")
+if out=$(fm_on --root '' --home '' remote-mac fm-probe-two.sh 2>&1); then
+  fail "empty explicit paths fell back to the registered route for a non-doctor command"
+fi
+assert_contains "$out" 'needs both --root and --home' "the empty explicit route was not refused as incomplete"
+if fm_on --root '' --home '' ios fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "empty explicit paths fell back to the registered route for the doctor"
+fi
+if fm_on --root '' --home "$REMOTE_HOME" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "an empty explicit root was accepted"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_empty_refusals" ] || fail "an empty explicit route reached SSH"
+pass "an explicit root and home check an unseeded host with the doctor only"
+
 fm_on ios fm-probe-two.sh >/dev/null
 : > "$TOOL_PROBE_LOG"
 set +e
@@ -356,6 +399,10 @@ DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"
 mkdir -p "$DOCTOR_BIN" "$DOCTOR_HOME"
 ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
+# Hide any managed tool or harness the runner host installed system-wide, so
+# the doctor sees only what this fixture provides.
+DOCTOR_SYS_PATH=$(fm_test_base_path_sans /usr/bin:/bin:/usr/sbin:/sbin \
+  herdr tasks-axi treehouse claude codex opencode pi pi-signed grok kimi)
 # Report a non-darwin host so this file keeps testing tool resolution alone and
 # never reads or writes the real account's launch agents.
 cat > "$DOCTOR_BIN/uname" <<'SH'
@@ -365,7 +412,7 @@ printf 'Linux\n'
 SH
 chmod +x "$DOCTOR_BIN/uname"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:$DOCTOR_SYS_PATH" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "the remote doctor passed with a missing required tool"
@@ -391,11 +438,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/treehouse"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$DOCTOR_BIN/claude"
 chmod +x "$DOCTOR_BIN/jq" "$DOCTOR_BIN/herdr" "$DOCTOR_BIN/tasks-axi" "$DOCTOR_BIN/treehouse" "$DOCTOR_BIN/claude"
 set +e
-out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
+out=$(HOME="$DOCTOR_HOME" PATH="$DOCTOR_BIN:$DOCTOR_SYS_PATH" "$ROOT/bin/fm-remote-doctor.sh" 2>&1)
 rc=$?
 set -e
 assert_contains "$out" "required git=$DOCTOR_BIN/git" "the remote doctor did not report where the required tool resolved"
-doctor_tmux=$(PATH="$DOCTOR_BIN:/usr/bin:/bin:/usr/sbin:/sbin" command -v tmux 2>/dev/null || true)
+doctor_tmux=$(PATH="$DOCTOR_BIN:$DOCTOR_SYS_PATH" command -v tmux 2>/dev/null || true)
 if [ -n "$doctor_tmux" ]; then
   assert_contains "$out" "optional tmux=$doctor_tmux" "the remote doctor did not report the resolved optional tool"
 else
