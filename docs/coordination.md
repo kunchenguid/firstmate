@@ -11,6 +11,7 @@ The local adapter can invoke this command over batch SSH with fixed, quoted argu
 A copied database is an archive, not a second live authority.
 The authority binds the database to its absolute path, serializes command invocations with a host lock, and keeps a separate high-water recovery marker beside the database.
 It marks each transaction pending before the SQLite commit and clears the marker afterward, so a crash in that interval requires fenced recovery instead of guessing whether the commit happened.
+The host-lock wait defaults to two seconds and `FM_COORD_LOCK_WAIT_SECONDS` accepts 0 to 3, below the adapter's five-second direct-call bound, so a contended caller refuses before its client can kill it inside that interval.
 
 ## Identity and intent contract
 
@@ -106,10 +107,11 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema versions 1 through 3 live in `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
+Schema versions 1 through 4 live in `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
 Version 3 adds one CI pulse authorization per `(repo, base, batch_id)`.
+Version 4 adds fenced CI batch identities that manual recovery restores from the marker.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -156,6 +158,9 @@ The launch brief gives every supported harness the same `pre-push`, `pre-ci`, an
 `pre-ci TASK [BATCH]` checks the same fence and records one authorization for the stable batch ID before a `ci:batch` request; omitting `BATCH` uses the task ID.
 An enforced repository refuses a second request for the same batch, an unconfirmed request, or a stale writer generation.
 `readmit TASK WORKTREE` explicitly retries a denied claim or scope amendment after the coordinator has resolved the conflict.
+When the central claim is no longer active after lease expiry, a coordinator reboot or manual recovery, `readmit` opens a new session with new request IDs if the home's generation changed, then submits and claims a fresh intent for the task.
+A journaled `pre-ci` request without a reply is replayed with its original request ID on the next `pre-ci` for that batch.
+A lifecycle checkpoint for a repository outside `enforce_repos` warns and exits 0 on any adapter error; an enforced repository or an unreadable coordination config refuses.
 `fm-pr-merge.sh` calls `pre-merge` immediately before the forge merge for an enforced GitHub repository, and refuses an absent, stale, or unreachable integration slot.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings in shadow mode and refuse the checkpoint in enforced mode.
@@ -196,6 +201,7 @@ An older restored database fails ordinary reads and writes when its event sequen
 Do not lower or replace the marker to make a restore appear current.
 For manual recovery, first stop participant traffic and verify that no coordinator command or forge attempt is still active; preserve the current database, marker, outbox, and any unknown merge attempts before restoring.
 After restoring the selected backup to its original absolute path, run `bin/fm-coord.sh --db PATH recover '{"confirm":"FENCE_AND_REENROLL"}'` only under that fenced maintenance window.
-Recovery revokes all active claims, advances participant generations beyond the marker's recorded high-water generations, invalidates preparation slots, retains uncertain forge attempts as `outcome-unknown`, and creates a new authority identity and marker.
+The marker also records high-water marks for migration allocation counters, integration slot generations, and authorized CI batch IDs.
+Recovery revokes all active claims, advances participant generations beyond the marker's recorded high-water generations, advances every allocation counter and slot generation past its recorded high-water mark plus a gap of ten, refuses every recorded CI batch ID, invalidates preparation slots, retains uncertain forge attempts as `outcome-unknown`, and creates a new authority identity and marker.
 Re-enroll participant sessions with new request IDs, replay the outbox by stable event ID, reconcile each unknown forge outcome against its exact PR and head, and re-admit intents before enabling integration.
 If the marker is missing or the restored database's authority identity differs, stop and investigate the backup lineage rather than creating a second live authority.

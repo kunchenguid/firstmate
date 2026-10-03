@@ -70,6 +70,7 @@ def declared(brief):
 class Adapter:
     def __init__(self, home):
         self.home = home
+        self.repo = None
         config_path = Path(os.environ.get("FM_COORD_CONFIG", home / "config/coordination.json"))
         self.enabled = config_path.exists()
         if not self.enabled:
@@ -148,12 +149,20 @@ class Adapter:
                 self.save()
         return item.get("reply")
 
+    def session_key(self):
+        epoch = self.state.get("session_epoch", 0)
+        return f"session:{epoch}" if epoch else "session"
+
     def setup(self):
         home_id = self.config["home_id"]
-        if self.send("enroll", "enroll", {"home_id": home_id, "repos": self.config["repos"]}) is None:
+        epoch = self.state.get("session_epoch", 0)
+        if self.send(f"enroll:{epoch}" if epoch else "enroll", "enroll", {"home_id": home_id, "repos": self.config["repos"]}) is None:
             return None
-        session = self.send("session", "session", {"home_id": home_id})
+        session = self.send(self.session_key(), "session", {"home_id": home_id})
         return session["generation"] if session else None
+
+    def key(self, task_id, task):
+        return f"{task_id}#{task['admission']}" if task.get("admission") else task_id
 
     def ensure_task(self, task_id):
         task = self.state["tasks"][task_id]
@@ -162,12 +171,12 @@ class Adapter:
             warn(f"{task_id}: offline intent pending; no claim granted")
             return task
         common = {"intent_id": task["intent_id"], "home_id": self.config["home_id"], "generation": generation}
-        submitted = self.send(f"{task_id}:submit", "submit", {**common, "repo": task["repo"], "base": task["base"], "base_oid": task["base_oid"], "branch": task["branch"], "task_id": task_id, "goal": task["goal"], "resources": task["declared"], **({"issue": task["issue"]} if task["issue"] else {})})
+        submitted = self.send(f"{self.key(task_id, task)}:submit", "submit", {**common, "repo": task["repo"], "base": task["base"], "base_oid": task["base_oid"], "branch": task["branch"], "task_id": task_id, "goal": task["goal"], "resources": task["declared"], **({"issue": task["issue"]} if task["issue"] else {})})
         if submitted is None:
             warn(f"{task_id}: intent pending; no claim granted")
             return task
         attempt = task.get("claim_attempt", 0)
-        claim = self.send(f"{task_id}:claim" + (f":{attempt}" if attempt else ""), "claim", {**common, "version": submitted["version"]})
+        claim = self.send(f"{self.key(task_id, task)}:claim" + (f":{attempt}" if attempt else ""), "claim", {**common, "version": submitted["version"]})
         if claim is None:
             warn(f"{task_id}: claim pending; no grant assumed")
         elif not claim["ok"]:
@@ -181,7 +190,8 @@ class Adapter:
         return task
 
     def dispatch(self, task_id, project, brief, branch, harness):
-        repo = self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
+        self.repo = self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
+        repo = self.repo
         if harness not in {"claude", "codex", "omp", "opencode"}:
             warn(f"{task_id}: {harness} has no coordination adapter; dispatch continues without a grant")
             self.required(repo, False, f"{harness} has no coordination adapter")
@@ -210,7 +220,7 @@ class Adapter:
         if not claim:
             warn(f"{task_id}: branch writer has no confirmed claim")
             return None
-        payload = {"home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}
+        payload = {"home_id": self.config["home_id"], "generation": self.setup(), "claim_id": claim["claim_id"], "fence": claim["fence"]}
         checked = self.call("check", payload)
         if checked is None:
             warn(f"{task_id}: branch writer generation cannot be checked; no grant assumed")
@@ -236,7 +246,7 @@ class Adapter:
         if live and undeclared:
             payload = {**live, "intent_id": task["intent_id"], "version": task["version"], "resources": [{"type": kind, "name": value} for kind, value in task["resources"]] + [{"type": "file", "name": p} for p in undeclared if not covered(p)]}
             attempt = task.get("amend_attempt", 0)
-            key = f"{task_id}:amend:{task['version']}" + (f":{attempt}" if attempt else "")
+            key = f"{self.key(task_id, task)}:amend:{task['version']}" + (f":{attempt}" if attempt else "")
             if key in self.state["requests"]:
                 prior = self.state["requests"][key]["payload"]
                 payload = {k: v for k, v in prior.items() if k != "request_id"}
@@ -258,7 +268,7 @@ class Adapter:
         head = git(worktree, "rev-parse", "HEAD")
         if head != task.get("published_head"):
             previous = task.get("published_head")
-            reply = self.send(f"{task_id}:head:{head}", "publish-head", {**live, "intent_id": task["intent_id"], "head_oid": head, "expected_previous_oid": previous})
+            reply = self.send(f"{self.key(task_id, task)}:head:{head}", "publish-head", {**live, "intent_id": task["intent_id"], "head_oid": head, "expected_previous_oid": previous})
             if reply:
                 task["published_head"] = head
                 task.pop("pending_head", None)
@@ -288,9 +298,21 @@ class Adapter:
         task = self.state["tasks"].get(task_id)
         if not task:
             raise ValueError(f"{task_id}: no local intent to readmit")
+        claim = task.get("claim")
+        central = self.call("inspect", {}) if claim else None
+        if central is not None and not any(c["claim_id"] == claim["claim_id"] and c["state"] == "active" for c in central["claims"]):
+            home_id = self.config["home_id"]
+            session = self.state["requests"].get(self.session_key(), {}).get("reply", {})
+            if not any(p["home_id"] == home_id and p["generation"] == session.get("generation") and p["session_id"] == session.get("session_id") for p in central["participants"]):
+                self.state["session_epoch"] = self.state.get("session_epoch", 0) + 1
+            task["admission"] = task.get("admission", 0) + 1
+            task["intent_id"] = f"{home_id}:{task['repo']}:{task_id}:{task['admission']}"
+            for field in ("claim", "claim_attempt", "version", "resources", "published_head"):
+                task.pop(field, None)
+            self.save()
         if not task.get("claim", {}).get("ok"):
             attempt = task.get("claim_attempt", 0)
-            key = f"{task_id}:claim" + (f":{attempt}" if attempt else "")
+            key = f"{self.key(task_id, task)}:claim" + (f":{attempt}" if attempt else "")
             if "reply" in self.state["requests"].get(key, {}):
                 task["claim_attempt"] = attempt + 1
                 self.save()
@@ -304,7 +326,7 @@ class Adapter:
         match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+", url)
         if not match:
             return
-        repo = f"{match[1]}/{match[2]}"
+        repo = self.repo = f"{match[1]}/{match[2]}"
         if repo not in self.enforced_repos:
             return
         if not OID.fullmatch(head):
@@ -317,8 +339,10 @@ class Adapter:
         if not task:
             raise ValueError(f"{task_id}: no local intent record for CI pulse")
         key = f"{task_id}:pulse:{batch_id}"
-        self.required(task["repo"], key not in self.state["requests"], f"batch {batch_id} pulse was already requested")
-        if key in self.state["requests"]:
+        prior = self.state["requests"].get(key)
+        answered = prior is not None and "reply" in prior
+        self.required(task["repo"], not answered, f"batch {batch_id} pulse was already requested")
+        if answered:
             return
         task["pending_ci"] = True
         self.save()
@@ -329,7 +353,8 @@ class Adapter:
         if not task.get("published_head"):
             self.required(task["repo"], False, f"{task_id} CI pulse has no published head")
             return
-        receipt = self.send(key, "pulse-batch", {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id})
+        payload = {k: v for k, v in prior["payload"].items() if k != "request_id"} if prior else {**live, "intent_id": task["intent_id"], "head_oid": task["published_head"], "batch_id": batch_id}
+        receipt = self.send(key, "pulse-batch", payload)
         self.required(task["repo"], receipt is not None and receipt.get("ok") is True, f"batch {batch_id} pulse is unconfirmed or already issued")
         if receipt and receipt.get("ok") is True:
             task.pop("pending_ci", None)
@@ -364,11 +389,14 @@ def main():
     if not home:
         warn("FM_HOME is required")
         return 1
+    command = sys.argv[1]
+    adapter = None
     try:
         adapter = Adapter(Path(home))
         if not adapter.enabled:
             return 0
-        command = sys.argv[1]
+        if command in {"pre-push", "pre-ci", "heartbeat"} and len(sys.argv) > 2:
+            adapter.repo = adapter.state["tasks"].get(sys.argv[2], {}).get("repo")
         if command == "dispatch" and len(sys.argv) == 7:
             adapter.dispatch(*sys.argv[2:])
         elif command == "pre-push" and len(sys.argv) == 4:
@@ -395,7 +423,7 @@ def main():
         return 0
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         warn(str(exc))
-        return 1
+        return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos else 1
 
 
 if __name__ == "__main__":

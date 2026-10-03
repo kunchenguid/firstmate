@@ -16,6 +16,8 @@ printf 'base\n' > "$repo/src/base.py"
 git -C "$repo" add .
 git -C "$repo" commit -qm base
 coord() { "$ROOT/bin/fm-coord.sh" --db "$db" "$@"; }
+field() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$1" "$2"; }
+outbox_ids() { coord outbox '{"limit":1000}' | python3 -c 'import json,sys; print(" ".join(e["event_id"] for e in json.load(sys.stdin)["events"]))'; }
 adapter() { FM_HOME=$1 python3 "$ROOT/bin/fm-coord-adapter.py" "${@:2}"; }
 home() {
   mkdir -p "$tmp/$1/config" "$tmp/$1/state"
@@ -66,16 +68,25 @@ config['db']=sys.argv[2]
 json.dump(config,open(path,'w'))
 PY
 adapter "$tmp/a" pre-ci a batch-one > /dev/null || fail 'one batch pulse must be authorized'
+python3 - "$tmp/a/state/fm-coord-adapter.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+state=json.load(open(path))
+state['requests']['a:pulse:batch-one'].pop('reply')
+state['tasks']['a']['pending_ci']=True
+json.dump(state,open(path,'w'))
+PY
+adapter "$tmp/a" pre-ci a batch-one > /dev/null 2> "$tmp/err" || fail "lost pulse reply must replay its stored central receipt: $(cat "$tmp/err")"
+python3 - "$(adapter "$tmp/a" view)" "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'lost pulse reply replay must clear the CI checkpoint without a second pulse'
+import json,sys
+assert not json.loads(sys.argv[1])['local_tasks']['a'].get('pending_ci')
+assert sum(e['type']=='ci-pulse-authorized' for e in json.loads(sys.argv[2])['events'])==1
+PY
 if adapter "$tmp/a" pre-ci a batch-one > "$tmp/out" 2> "$tmp/err"; then
   fail 'second pulse for the same batch must be refused'
 fi
 case "$(cat "$tmp/err")" in *'already requested'*) ;; *) fail 'duplicate pulse must name batch' ;; esac
-pass 'enforcement pauses offline dispatch and undeclared push until re-admission; one CI pulse per batch'
-
-before=$(coord outbox '{"limit":1000}')
-after=$(coord outbox '{"limit":1000}')
-[ "$before" = "$after" ] || fail 'unacknowledged outbox replay must keep event IDs and order'
-pass 'outbox replay preserves event IDs across coordinator invocations'
+pass 'enforcement pauses offline dispatch and undeclared push until re-admission; one CI pulse per batch survives a lost reply'
 
 if adapter "$tmp/a" pre-merge https://github.com/owner/repo/pull/1 "$(git -C "$repo" rev-parse HEAD)" > "$tmp/out" 2> "$tmp/err"; then
   fail 'merge without a live integration slot must be refused'
@@ -99,6 +110,24 @@ wait "$holder"
 case "$(cat "$tmp/err")" in *'host lock is held'*) ;; *) fail 'host lock refusal must be explicit' ;; esac
 pass 'host lock excludes a second coordinator copy'
 
+base_r=$(git -C "$repo" rev-parse HEAD)
+coord enroll '{"request_id":"enroll-r","home_id":"r","repos":["owner/repo"]}' > /dev/null
+coord migration-seed '{"request_id":"seed-r","repo":"owner/repo","namespace":"db","next_number":7}' > /dev/null
+admit_r() {
+  gen_r=$(field "$(coord session "{\"request_id\":\"session-r$1\",\"home_id\":\"r\"}")" generation)
+  coord submit "$(printf '{"request_id":"submit-r%s","intent_id":"r%s","home_id":"r","generation":%s,"repo":"owner/repo","base":"main","base_oid":"%s","branch":"branch/r","task_id":"r","goal":"recovery","resources":[{"type":"file","name":"src/r.py"},{"type":"migration-sequence","name":"db"}]}' "$1" "$1" "$gen_r" "$base_r")" > /dev/null
+  grant=$(coord claim "$(printf '{"request_id":"claim-r%s","intent_id":"r%s","home_id":"r","generation":%s,"version":1}' "$1" "$1" "$gen_r")")
+  live_r=$(printf '"intent_id":"r%s","home_id":"r","generation":%s,"claim_id":"%s","fence":%s' "$1" "$gen_r" "$(field "$grant" claim_id)" "$(field "$grant" fence)")
+  coord attach-pr "{\"request_id\":\"pr-r$1\",$live_r,\"pr_url\":\"https://github.com/owner/repo/pull/9\"}" > /dev/null
+  coord publish-head "{\"request_id\":\"head-r$1\",$live_r,\"head_oid\":\"$base_r\",\"expected_previous_oid\":null}" > /dev/null
+}
+issue_r() {
+  number_r=$(field "$(coord reserve "{\"request_id\":\"reserve-r$1\",$live_r,\"namespace\":\"db\"}")" number)
+  coord queue-ready "{\"request_id\":\"ready-r$1\",$live_r,\"head_oid\":\"$base_r\"}" > /dev/null
+  slot_r=$(field "$(coord queue-next "{\"request_id\":\"next-r$1\",\"repo\":\"owner/repo\",\"base\":\"main\"}")" generation)
+  pulse_r=$(field "$(coord pulse-batch "{\"request_id\":\"pulse-r$1\",$live_r,\"head_oid\":\"$base_r\",\"batch_id\":\"batch-r\"}")" ok)
+}
+admit_r 1
 python3 - "$db" "$tmp/older.sqlite3" <<'PY'
 import sqlite3,sys
 with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as target:
@@ -106,6 +135,10 @@ with sqlite3.connect(sys.argv[1]) as source, sqlite3.connect(sys.argv[2]) as tar
 PY
 coord enroll '{"request_id":"later-enrollment","home_id":"later","repos":["owner/repo"]}' > /dev/null
 coord session '{"request_id":"later-session","home_id":"later"}' > /dev/null
+issue_r 1
+lost_number=$number_r
+lost_slot=$slot_r
+[ "$pulse_r" = True ] || fail 'batch-r must be authorized once before the restore'
 mv "$tmp/older.sqlite3" "$db"
 if coord session '{"request_id":"stale-session","home_id":"a"}' > "$tmp/out" 2> "$tmp/err"; then
   fail 'restored older database must not re-grant an old generation'
@@ -128,6 +161,21 @@ if coord submit "$(printf '{"request_id":"old-writer","intent_id":"old-writer","
   fail 'manual recovery must not accept an old participant generation'
 fi
 pass 'manual fenced recovery retains old-generation refusal'
+
+admit_r 2
+issue_r 2
+[ "$number_r" -gt "$lost_number" ] || fail "restore after reserving migration $lost_number must never hand it out again"
+[ "$pulse_r" = False ] || fail 'pre-restore batch must not authorize a second pulse'
+[ "$slot_r" != "$lost_slot" ] || fail 'recovery must not reissue a pre-restore slot generation'
+if coord queue-abort "{\"request_id\":\"abort-stale-slot\",\"intent_id\":\"r2\",\"slot_generation\":$lost_slot,\"reason\":\"stale\"}" > "$tmp/out" 2> "$tmp/err"; then
+  fail 'pre-restore slot generation must be rejected'
+fi
+case "$(cat "$tmp/err")" in *'integration generation mismatch'*) ;; *) fail 'stale slot refusal must name the generation' ;; esac
+pass 'manual recovery fences migration numbers, slot generations, and CI batches issued after the backup'
+
+acked=$(coord outbox '{"limit":1}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["events"][0]["event_id"])')
+coord ack "{\"request_id\":\"ack-before-crash\",\"event_id\":\"$acked\"}" > /dev/null
+before=$(outbox_ids)
 python3 - "$db.authority.json" <<'PY'
 import json,sys
 path=sys.argv[1]
@@ -142,3 +190,24 @@ fi
 case "$(cat "$tmp/err")" in *'interrupted transaction'*) ;; *) fail 'interrupted transaction refusal must be explicit' ;; esac
 coord recover '{"confirm":"FENCE_AND_REENROLL"}' > /dev/null || fail 'manual recovery must clear an interrupted transaction marker'
 pass 'interrupted transaction requires manual fenced recovery'
+after=$(outbox_ids)
+case "$after" in "$before "*) ;; *) fail 'unacknowledged events must keep their IDs and order across interrupted-transaction recovery' ;; esac
+case " $after " in *" $acked "*) fail 'acknowledged event must not reappear after recovery' ;; esac
+pass 'outbox replay after interrupted-transaction recovery keeps unacknowledged event IDs and order'
+
+adapter "$tmp/a" readmit a "$repo" > /dev/null 2> "$tmp/err" || fail "readmit must recover a task fenced by manual recovery: $(cat "$tmp/err")"
+adapter "$tmp/a" pre-push a "$repo" > /dev/null 2> "$tmp/err" || fail "readmitted writer must publish under its new generation: $(cat "$tmp/err")"
+pass 'readmit opens a new session and intent after recovery revokes the claim'
+
+mkdir -p "$tmp/shadow/config" "$tmp/shadow/state"
+printf '{"mode":"shadow","home_id":"shadow","repos":["owner/repo"],"db":"%s"}\n' "$db" > "$tmp/shadow/config/coordination.json"
+printf 'Coordination resources: []\n' > "$tmp/empty.brief"
+adapter "$tmp/shadow" dispatch shadow "$repo" "$tmp/empty.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'shadow dispatch with the scaffolded empty declaration must only warn'
+case "$(cat "$tmp/err")" in *'nonempty JSON array'*) ;; *) fail 'shadow declaration problem must stay visible' ;; esac
+adapter "$tmp/shadow" pre-push shadow "$repo" > /dev/null 2> "$tmp/err" || fail 'shadow push without a local intent must only warn'
+printf '{"mode":"shadow","home_id":"shadow","repos":["other/repo"],"db":"%s"}\n' "$db" > "$tmp/shadow/config/coordination.json"
+adapter "$tmp/shadow" dispatch shadow "$repo" "$tmp/b.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'dispatch outside coordination enrollment must only warn'
+if adapter "$tmp/b" dispatch b2 "$repo" "$tmp/empty.brief" branch/b2 codex > /dev/null 2> "$tmp/err"; then
+  fail 'enforced dispatch must refuse an empty declaration'
+fi
+pass 'shadow repositories warn and continue; enforced repositories refuse'

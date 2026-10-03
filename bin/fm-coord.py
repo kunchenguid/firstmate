@@ -22,6 +22,7 @@ MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+RECOVERY_GAP = 10
 
 
 class Refusal(Exception):
@@ -128,23 +129,31 @@ def check_authority(db, identity, anchor_path):
     require(authority_seq(db) >= anchor["highwater_seq"], "restored database is older than authority marker; manual fenced recovery required")
 
 
+def highwater(db):
+    return {"generations": {row["home_id"]: row["generation"] for row in db.execute("SELECT home_id,generation FROM participants")},
+            "allocation_counters": [list(row) for row in db.execute("SELECT repo,namespace,next_number FROM allocation_counters ORDER BY repo,namespace")],
+            "integration_generations": [list(row) for row in db.execute("SELECT repo,base_ref,generation FROM integration_generations ORDER BY repo,base_ref")],
+            "ci_batches": [list(row) for row in db.execute("SELECT repo,base_ref,batch_id FROM ci_batches UNION SELECT repo,base_ref,batch_id FROM fenced_ci_batches ORDER BY 1,2,3")]}
+
+
 def seal_authority(db, db_path, identity, anchor_path, force=False, pending=False):
     if anchor_path.exists():
         if not force:
             check_authority(db, identity, anchor_path)
         prior = json.loads(anchor_path.read_text(encoding="utf-8"))
-        old = prior["highwater_seq"]
     else:
         prior = {}
-        old = -1
-    seq = authority_seq(db)
-    generations = {row["home_id"]: row["generation"] for row in db.execute("SELECT home_id,generation FROM participants")}
-    if not force and seq == old and generations == prior.get("generations", {}) and pending == prior.get("pending", False):
+    marker = {"authority_id": identity, "highwater_seq": authority_seq(db), **highwater(db), "pending": pending}
+    if not force and marker == prior:
         return
+    write_marker(db_path, anchor_path, marker)
+
+
+def write_marker(db_path, anchor_path, marker):
     fd, name = tempfile.mkstemp(prefix=".authority-", dir=Path(db_path).parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as out:
-            out.write(compact({"authority_id": identity, "highwater_seq": seq, "generations": generations, "pending": pending}) + "\n")
+            out.write(compact(marker) + "\n")
             out.flush()
             os.fsync(out.fileno())
         os.replace(name, anchor_path)
@@ -474,7 +483,7 @@ def run_operation(db, op, p):
         head = oid(p.get("head_oid"), "head_oid")
         latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (intent_id,)).fetchone()
         require(latest is not None and latest[0] == head, "CI pulse requires the current published writer head")
-        existing = db.execute("SELECT event_id FROM ci_batches WHERE repo=? AND base_ref=? AND batch_id=?", (intent["repo"], intent["base_ref"], batch_id)).fetchone()
+        existing = db.execute("SELECT event_id FROM ci_batches WHERE repo=? AND base_ref=? AND batch_id=? UNION ALL SELECT NULL FROM fenced_ci_batches WHERE repo=? AND base_ref=? AND batch_id=?", (intent["repo"], intent["base_ref"], batch_id) * 2).fetchone()
         if existing:
             return {"ok": False, "reason": "batch-already-pulsed", "event_id": existing[0]}
         event_id = emit(db, "ci-pulse-authorized", request_id, {"repo": intent["repo"], "base": intent["base_ref"], "batch_id": batch_id, "intent_id": intent_id, "head_oid": head})
@@ -687,8 +696,8 @@ def main():
         else:
             require(Path(db_path).is_file(), "database is absent; run init first")
         with lock_path.open("a+") as lock:
-            lock_wait = float(os.environ.get("FM_COORD_LOCK_WAIT_SECONDS", "5"))
-            require(0 <= lock_wait <= 30, "lock wait must be 0..30 seconds")
+            lock_wait = float(os.environ.get("FM_COORD_LOCK_WAIT_SECONDS", "2"))
+            require(0 <= lock_wait <= 3, "lock wait must be 0..3 seconds")
             deadline = time.monotonic() + lock_wait
             while True:
                 try:
@@ -712,11 +721,11 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 3, f"unsupported future schema version: {version}")
-            if version < 3:
+            require(version <= 4, f"unsupported future schema version: {version}")
+            if version < 4:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 4):
+                    for target in range(version + 1, 5):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
                         for statement in schema.read_text(encoding="utf-8").split(";"):
                             if statement.strip():
@@ -739,9 +748,9 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                 require(bound_path is not None and bound_path[0] == db_path, "database authority is bound to another path")
                 check_authority(db, identity, anchor_path)
             seal_authority(db, db_path, identity, anchor_path)
-            print(compact({"ok": True, "schema_version": 3, "db": db_path, "mode": "shadow-advisory"}))
+            print(compact({"ok": True, "schema_version": 4, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 3, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 4, "unsupported or uninitialized schema version; run init")
         identity = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
         bound_path = db.execute("SELECT value FROM meta WHERE key='authority_path'").fetchone()
         require(identity is not None and bound_path is not None and bound_path[0] == db_path, "database has no authority binding for this path; manual fenced recovery required")
@@ -750,9 +759,17 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
             require(anchor_path.is_file(), "authority recovery marker is absent")
             anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
             require(anchor.get("authority_id") == identity[0] and type(anchor.get("highwater_seq")) is int, "authority marker does not match restored database")
-            seal_authority(db, db_path, identity[0], anchor_path, force=True, pending=True)
+            write_marker(db_path, anchor_path, {**anchor, "pending": True})
             db.execute("BEGIN IMMEDIATE")
             try:
+                for repo, namespace, number in anchor.get("allocation_counters", []):
+                    db.execute("INSERT INTO allocation_counters(repo,namespace,next_number) VALUES(?,?,?) ON CONFLICT(repo,namespace) DO UPDATE SET next_number=MAX(next_number,excluded.next_number)", (repo, namespace, number))
+                db.execute("UPDATE allocation_counters SET next_number=next_number+?", (RECOVERY_GAP,))
+                for repo, base, generation in anchor.get("integration_generations", []):
+                    db.execute("INSERT INTO integration_generations(repo,base_ref,generation) VALUES(?,?,?) ON CONFLICT(repo,base_ref) DO UPDATE SET generation=MAX(generation,excluded.generation)", (repo, base, generation))
+                db.execute("UPDATE integration_generations SET generation=generation+?", (RECOVERY_GAP,))
+                for repo, base, batch_id in anchor.get("ci_batches", []):
+                    db.execute("INSERT OR IGNORE INTO fenced_ci_batches(repo,base_ref,batch_id) VALUES(?,?,?)", (repo, base, batch_id))
                 for claim in db.execute("SELECT * FROM claims WHERE state='active'").fetchall():
                     revoke(db, claim, "revoked", "manual coordinator recovery")
                 for row in db.execute("SELECT home_id,generation FROM participants").fetchall():
@@ -770,7 +787,7 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
-                seal_authority(db, db_path, identity[0], anchor_path, force=True)
+                write_marker(db_path, anchor_path, anchor)
                 raise
             seal_authority(db, db_path, new_identity, anchor_path, force=True)
             print(compact({"ok": True, "authority_id": new_identity, "reenrollment_required": True}))
