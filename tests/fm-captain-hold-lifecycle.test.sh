@@ -1323,7 +1323,7 @@ test_completion_keeps_an_armed_poll_record_identity_parseable() {
     || fail "the identity block was rewritten rather than left in place: $(cat "$meta")"
   [ "$(tail -n 1 "$meta")" = "pr_head=$head" ] \
     || fail "the identity block is no longer the tail of the record: $(cat "$meta")"
-  [ "$(/usr/bin/stat -f %Lp "$meta" 2>/dev/null || stat -c %a "$meta")" = 600 ] \
+  [ "$(fm_pr_file_mode "$meta")" = 600 ] \
     || fail "the completion rewrite changed the record mode"
 
   run_captain "$home" complete "$id" --none >/dev/null 2>&1 \

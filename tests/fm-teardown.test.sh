@@ -1713,7 +1713,16 @@ SH
   chmod +x "$case_dir/fakebin/perl"
   cat > "$case_dir/fakebin/cp" <<SH
 #!/usr/bin/env bash
-for a in "\$@"; do case "\$a" in *.legacy-prestamp) exit 1 ;; esac; done
+first_operand() {
+  while [ \$# -gt 0 ]; do
+    case "\$1" in
+      --) printf '%s' "\${2-}"; return ;;
+      -*) shift ;;
+      *) printf '%s' "\$1"; return ;;
+    esac
+  done
+}
+case "\$(first_operand "\$@")" in *.legacy-prestamp) exit 1 ;; esac
 exec "$real_cp" "\$@"
 SH
   chmod +x "$case_dir/fakebin/cp"

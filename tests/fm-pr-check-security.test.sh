@@ -3341,9 +3341,9 @@ test_refused_poll_names_the_task_in_the_triage_log() {
     *) fail "the broken-meta poll was not refused: $out" ;;
   esac
   [ ! -s "$dir/gh.log" ] || fail "the refused poll reached the forge CLI"
-  grep -F "PR poll for task-a refused" "$state/.watch-triage.log" \
+  grep -F "check for task-a refused" "$state/.watch-triage.log" \
     || fail "the refused poll left no triage record naming the task"
-  grep -F "trusted-path validation failed" "$state/.watch-triage.log" \
+  grep -F "PR poll trusted-path validation failed" "$state/.watch-triage.log" \
     || fail "the triage record did not name the trusted-path validation failure"
   pass "a refused PR poll names its task and failure mode in the triage log"
 }

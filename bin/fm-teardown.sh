@@ -3531,7 +3531,7 @@ teardown_legacy_stamp_rollback() {
         TEARDOWN_LEGACY_STAMP_FAILED=backup
         TEARDOWN_LEGACY_PRESTAMP_BACKUP=
       else
-        TEARDOWN_LEGACY_STAMP_MODE=$(/usr/bin/stat -f %Lp "$META" 2>/dev/null || stat -c %a "$META" 2>/dev/null)
+        TEARDOWN_LEGACY_STAMP_MODE=$(fm_pr_file_mode "$META")
         TEARDOWN_LEGACY_STAMP_TMP=$(umask 077; mktemp "$(dirname "$META")/.fm-teardown-meta.XXXXXX" 2>/dev/null) || TEARDOWN_LEGACY_STAMP_TMP=
         if [ -n "$TEARDOWN_LEGACY_STAMP_TMP" ]; then
           if ! awk -v gen="$TEARDOWN_META_SPAWN_GEN" '
