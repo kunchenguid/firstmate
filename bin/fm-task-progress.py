@@ -112,7 +112,7 @@ def render(values: dict[str, object], context: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read or replace the compact progress block in an existing task body.")
-    parser.add_argument("action", choices=("read", "replace"))
+    parser.add_argument("action", choices=("read", "values", "replace"))
     parser.add_argument("--task", required=True)
     parser.add_argument("--goal", required=True)
     parser.add_argument("--state", required=True)
@@ -129,6 +129,10 @@ def main() -> int:
         current = projection(args.task, goal, args.state, args.held, args.blocked, body, args.context)
         if args.action == "read":
             print(json.dumps(current, ensure_ascii=False, separators=(",", ":")))
+            return 0
+        if args.action == "values":
+            values, _, _ = parse(body)
+            print(json.dumps(values, ensure_ascii=False, separators=(",", ":")))
             return 0
         if not args.expected_token or args.expected_token != current["record_token"]:
             raise Refusal("task record changed; read current progress before updating")

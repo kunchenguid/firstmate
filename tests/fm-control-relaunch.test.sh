@@ -1262,6 +1262,27 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_relaunch_refuses_terminal_task_before_stopping_agent() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so terminal disposition is unavailable"
+    return 0
+  }
+  dir=$(new_case terminal rl42)
+  add_ship_task "$dir" rl42 pi
+  seed_backlog "$dir" rl42 in_flight
+  tasks-axi "done" rl42 --file "$dir/home/data/backlog.md" >/dev/null \
+    || fail "terminal relaunch fixture could not complete its task row"
+
+  out=$(run_control "$dir" rl42 relaunch --note "must not resume terminal work") || rc=$?
+  expect_code 6 "$rc" "relaunch should refuse an explicitly terminal task"$'\n'"$out"
+  assert_contains "$out" 'explicitly terminal (done)' \
+    "terminal relaunch refusal did not name the task disposition"
+  ! grep -Fxq '/exit' "$dir/fake/literal" || fail "terminal relaunch stopped the retained agent"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "terminal relaunch changed the retained agent"
+  pass "fm-control relaunch: terminal work refuses before any process effect"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -1304,3 +1325,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_refuses_terminal_task_before_stopping_agent

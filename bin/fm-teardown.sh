@@ -573,6 +573,13 @@ if [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
     teardown_completed_task
     exit $?
   fi
+  # Retained rich data is no longer an engine, but an exact open disposition
+  # remains a safety fact when the original task row is absent. Do not let the
+  # legacy no-row path turn that open history into implicit completion.
+  if [ -e "$DATA/$ID/lifecycle.json" ] || [ -L "$DATA/$ID/lifecycle.json" ]; then
+    fm_cleanup_completion_guard "$ID" "$completed_generation"
+    exit $?
+  fi
 fi
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this

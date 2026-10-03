@@ -753,6 +753,100 @@ EOF
   pass 'fm-teardown: open goals retain endpoint, slot, worktree and records even with a partial report or force'
 }
 
+test_done_row_with_raw_open_gap_stays_unfinished() {
+  local dir id=done-open-gap current rc
+  dir=$(make_case done-open-gap)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Deliver the complete requested result\n' >"$dir/home/data/$id/brief.md"
+  printf 'Partial report only\n' >"$dir/home/data/$id/report.md"
+  cat >"$dir/home/.tasks.toml" <<'EOF'
+backend = "markdown"
+[markdown]
+path = "data/backlog.md"
+EOF
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$dir/home/data/backlog.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" 'Done with open gap' \
+    --kind scout --body 'Keep working until MAIN accepts the result.' --start >/dev/null \
+    || fail 'done-open-gap task creation failed'
+  current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
+    || fail 'done-open-gap progress read failed'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
+    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
+    --progress '{"acceptance":"MAIN reviews the complete result","current_state":"Only a partial report exists","remaining_gap":"The complete result is still missing","next_step":"Continue the authorized work"}' \
+    >/dev/null || fail 'done-open-gap progress update failed'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" "done" "$id" \
+    --report "data/$id/report.md" >/dev/null || fail 'done-open-gap row could not move to Done'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
+
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    >"$dir/stdout" 2>"$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'Done row with a raw open gap reached cleanup'
+  assert_contains "$(cat "$dir/stderr")" 'compact task done-open-gap is not MAIN-accepted' \
+    'Done-row refusal did not preserve the raw compact gap'
+  assert_present "$dir/home/state/$id.meta" 'Done-row refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'Done-row refusal reached the endpoint'
+  pass 'fm-teardown: moving a row to Done never hides its nonempty compact gap'
+}
+
+test_explicit_archive_skips_success_delivery_gate() {
+  local dir id=archived-without-delivery rc
+  dir=$(make_case archived-without-delivery)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Stopped before a successful report\n' >"$dir/home/data/$id/brief.md"
+  cat >"$dir/home/.tasks.toml" <<'EOF'
+backend = "markdown"
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+EOF
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$dir/home/data/backlog.md"
+  printf '%s\n' '## Archived 2026-10' '' \
+    '- [x] archived-without-delivery - Explicitly stopped scout (kind: scout)' \
+    >"$dir/home/data/done-archive.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
+
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    >"$dir/stdout" 2>"$dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || fail "explicit archive incorrectly required successful delivery: $(cat "$dir/stderr")"
+  assert_present "$dir/runtime.log.w1:p-$id.closed" 'explicit archive did not close its exact endpoint'
+  assert_absent "$dir/home/data/$id/report.md" 'archive cleanup fabricated a successful report'
+  pass 'fm-teardown: explicit archive remains distinct from successful delivery'
+}
+
+test_absent_current_row_with_open_history_refuses() {
+  local dir id=historical-open rc before
+  dir=$(make_case historical-open)
+  write_herdr_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  mkdir -p "$dir/home/data/$id"
+  printf 'Retained historical task\n' >"$dir/home/data/$id/brief.md"
+  jq -n --arg id "$id" --arg generation "s-$id" \
+    '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:$generation,disposition:"open"}' \
+    >"$dir/home/data/$id/lifecycle.json"
+  before=$(shasum "$dir/home/data/$id/lifecycle.json")
+
+  rc=0
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --endpoint-only --expect-spawn-gen "s-$id" \
+    >"$dir/stdout" 2>"$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'open retained history fell through to legacy teardown'
+  assert_contains "$(cat "$dir/stderr")" 'neither MAIN-accepted compact progress nor explicit archived completion' \
+    'open-history refusal did not preserve the missing terminal fact'
+  [ "$(shasum "$dir/home/data/$id/lifecycle.json")" = "$before" ] \
+    || fail 'open-history refusal rewrote private lifecycle evidence'
+  assert_present "$dir/home/state/$id.meta" 'open-history refusal removed task metadata'
+  [ ! -s "$dir/runtime.log" ] || fail 'open-history refusal reached the endpoint'
+  pass 'fm-teardown: absent current rows require exact terminal history before cleanup'
+}
+
 test_completed_endpoint_ignores_historical_admission_gates() {
   local dir id variant rc
   for variant in uncertain missing-journal malformed-journal wrong-task wrong-generation shared-endpoint; do
@@ -962,6 +1056,9 @@ test_completed_copy_preservation_ignores_force
 test_completed_endpoint_ignores_historical_admission_gates
 
 test_open_goal_preserves_resources_before_cleanup
+test_done_row_with_raw_open_gap_stays_unfinished
+test_explicit_archive_skips_success_delivery_gate
+test_absent_current_row_with_open_history_refuses
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

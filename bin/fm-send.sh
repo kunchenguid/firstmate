@@ -563,6 +563,18 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    # Resources may intentionally outlive business completion. Revalidate the
+    # configured disposition while the target metadata lock is held so a new
+    # steer cannot silently resume a Done or explicitly archived task.
+    # shellcheck source=bin/fm-task-disposition-lib.sh
+    . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+    disposition_rc=0
+    fm_task_disposition_effect_guard "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$INBOX_TASK_ID" steer \
+      || disposition_rc=$?
+    if [ "$disposition_rc" -ne 0 ]; then
+      fm_lock_release "$INBOX_META_LOCK"
+      exit "$disposition_rc"
+    fi
     if [ -n "$COMPACT_PROGRESS_TOKEN" ]; then
       branch_locked_progress=$(fm_task_progress_read "$INBOX_TASK_ID") || {
         fm_lock_release "$INBOX_META_LOCK"

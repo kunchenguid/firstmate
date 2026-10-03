@@ -56,6 +56,11 @@ write_legacy_ida_version() {
 new_task() {
   local home=$1 id=$2 content=${3:-"PRIVATE_PROMPT_alpha OECID_sensitive"}
   mkdir -p "$home/data/$id"
+  if [ ! -f "$home/data/backlog.md" ]; then
+    printf '%s\n' '# Tasks' '' '## In flight' '' '## Queued' '' '## Done' >"$home/data/backlog.md"
+  fi
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Remote research $id" --kind scout --start \
+    --file "$home/data/backlog.md" >/dev/null || fail "could not add remote fixture task $id"
   printf '# Brief\n' >"$home/data/$id/brief.md"
   printf '%s\n' "$content" >"$home/data/$id/instructions.txt"
   chmod 0600 "$home/data/$id/instructions.txt"
@@ -1559,12 +1564,77 @@ test_followup_identity_and_unknown_submission() {
   pass 'lost followup response remains unknown; replay performs reads only and never repeats create'
 }
 
+test_terminal_disposition_guards_remote_effects() {
+  local home fakebin id rc creates
+
+  id=ida-terminal-dispatch
+  home=$(new_home terminal-dispatch); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail 'terminal-dispatch task could not become Done'
+  rc=0
+  dispatch_ida "$home" "$fakebin" "$id" >"$home/dispatch.out" 2>"$home/dispatch.err" || rc=$?
+  [ "$rc" -eq 6 ] || fail "terminal iDA dispatch exited $rc instead of 6"
+  assert_grep 'explicitly terminal (done)' "$home/dispatch.err" 'terminal iDA dispatch lost its disposition blocker'
+  assert_absent "$(state_file "$home" "$id")" 'terminal iDA dispatch created provider state'
+  [ ! -s "$home/bytedcli.log" ] || fail 'terminal iDA dispatch reached the provider'
+
+  id=ida-terminal-followup
+  home=$(new_home terminal-followup); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'terminal-followup initial dispatch failed'
+  wait_phase "$home" "$id" terminal-success || fail 'terminal-followup initial turn did not finish'
+  printf 'This archived task must not continue.\n' >"$home/data/$id/followup.txt"
+  chmod 600 "$home/data/$id/followup.txt"
+  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail 'terminal-followup task could not become Done'
+  rc=0
+  run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" \
+    --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" \
+    >"$home/followup.out" 2>"$home/followup.err" || rc=$?
+  [ "$rc" -eq 6 ] || fail "terminal iDA followup exited $rc instead of 6"
+  assert_grep 'explicitly terminal (done)' "$home/followup.err" 'terminal iDA followup lost its disposition blocker'
+  creates=$(grep -F -c 'command:ida-region-sg-deep-research-create' "$home/bytedcli.log" || true)
+  [ "$creates" -eq 1 ] || fail 'terminal iDA followup issued another provider create'
+
+  id=ida-historical-retire
+  home=$(new_home historical-retire); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  dispatch_ida "$home" "$fakebin" "$id" >/dev/null || fail 'historical-retire dispatch failed'
+  wait_phase "$home" "$id" terminal-success || fail 'historical-retire turn did not finish'
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  jq -n --arg id "$id" '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:"remote-1",disposition:"open"}' \
+    >"$home/data/$id/lifecycle.json"
+  rc=0
+  run_ida "$home" "$fakebin" retire "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'iDA retirement accepted open retained history'
+  assert_grep 'neither MAIN-accepted compact progress nor explicit archived completion' "$home/retire.err" \
+    'iDA historical retirement lost its terminal-fact blocker'
+  assert_present "$(state_file "$home" "$id")" 'iDA historical retirement removed provider state'
+
+  id=ida-retained-execution
+  home=$(new_home retained-execution); fakebin=$(make_fake_bytedcli "$home"); write_ida_config "$home"; new_task "$home" "$id"
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  jq -n --arg id "$id" '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:"remote-7",disposition:"archived"}' \
+    >"$home/data/$id/lifecycle.json"
+  : >"$home/bytedcli.log"; : >"$home/sessions.tsv"
+  rc=0
+  dispatch_ida "$home" "$fakebin" "$id" >"$home/redispatch.out" 2>"$home/redispatch.err" || rc=$?
+  [ "$rc" -eq 6 ] || fail "retained-execution redispatch exited $rc instead of 6"
+  assert_grep 'already has a retained execution identity' "$home/redispatch.err" \
+    'retained-execution redispatch lost its identity blocker'
+  assert_absent "$(state_file "$home" "$id")" 'retained-execution redispatch replaced provider state'
+  [ ! -s "$home/bytedcli.log" ] || fail 'retained-execution redispatch reached the provider'
+  pass 'iDA terminal admission blocks dispatch, followup, retirement, and task-id reuse without provider replay'
+}
+
 if [ "${FM_REMOTE_TEST_CASE:-}" = followup ]; then
   test_followup_identity_and_unknown_submission
   exit 0
 fi
 
 test_followup_identity_and_unknown_submission
+test_terminal_disposition_guards_remote_effects
 test_artifact_discovery_projects_before_stdout
 test_dispatch_model_selection_and_validation
 test_ida_usage_help_boundary

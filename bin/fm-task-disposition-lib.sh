@@ -137,3 +137,47 @@ $snapshot
 EOF
   return 1
 }
+
+# Refuse only a positively identified business-terminal task. Unknown legacy
+# records remain operable, while a current Done row or unique checked archive
+# can never gain a new steer, handoff, worker or provider effect merely because
+# its endpoint/resource record was retained for cleanup.
+fm_task_disposition_effect_guard() { # <data-dir> <task-id> [operation]
+  local data=$1 task=$2 operation=${3:-effect} snapshot disposition
+  snapshot=$(fm_task_disposition_snapshot "$data") || return 1
+  disposition=$(fm_task_disposition_for "$snapshot" "$task" 2>/dev/null || true)
+  case "$disposition" in
+    done|archive_done)
+      printf 'REFUSED: task %s is explicitly terminal (%s); %s cannot start new work\n' \
+        "$task" "$disposition" "$operation" >&2
+      return 6
+      ;;
+  esac
+  return 0
+}
+
+# A retired remote id must not be reused when old private history proves that
+# it already owned an execution. This is a read-only immutable identity fact,
+# not active lifecycle admission or progress.
+fm_task_historical_execution_guard() { # <data-dir> <task-id>
+  local data=$1 task=$2 record="$1/$2/lifecycle.json"
+  [ -e "$record" ] || [ -L "$record" ] || return 0
+  [ -f "$record" ] && [ ! -L "$record" ] || {
+    echo "REFUSED: task $task has unsafe retained execution history" >&2
+    return 6
+  }
+  if jq -e --arg task "$task" '
+      (.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and
+      .task_id == $task and (.execution_generation | type == "string") and
+      .execution_generation != "unassigned-g1"
+    ' "$record" >/dev/null 2>&1; then
+    echo "REFUSED: task $task already has a retained execution identity; use a separately authorized new task" >&2
+    return 6
+  fi
+  jq -e --arg task "$task" '
+    (.schema == "fm-task-lifecycle.v1" or .schema == "fm-task-lifecycle.v2") and .task_id == $task
+  ' "$record" >/dev/null 2>&1 || {
+    echo "REFUSED: task $task retained execution history is unreadable or mismatched" >&2
+    return 6
+  }
+}

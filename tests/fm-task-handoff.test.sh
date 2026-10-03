@@ -131,6 +131,35 @@ test_restart_sweep_recovers_pending_handoff() {
   pass "task-handoff: restart recovery delivers without conversation memory after the lease is gone"
 }
 
+test_pending_handoff_rejects_target_archived_before_retry() {
+  local dir home fakebin id rc out
+  dir="$TMP_ROOT/archive-before-retry"
+  fakebin=$(make_fake_backend "$dir")
+  home=$(make_home "$dir" source target)
+  id=archive-before-retry
+  mkdir -p "$home/data"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$home/.tasks.toml"
+  printf '%s\n' '## In flight' '- [ ] target - Target task (kind: ship)' '' \
+    '## Queued' '' '## Done' >"$home/data/backlog.md"
+  PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ \
+    "$LEASE" claim target --actor branch || fail "archive-before-retry lease failed"
+  rc=0
+  PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=main \
+    "$HANDOFF" send source target --id "$id" "retain this exact rejected body" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 6 ] || fail "archive-before-retry fixture did not stop at the owner conflict"
+  tasks-axi "done" target --file "$home/data/backlog.md" >/dev/null \
+    || fail "archive-before-retry target could not become terminal"
+
+  PATH="$fakebin:$PATH" PI_CODING_AGENT=true FM_HOME="$home" FM_SUPERVISION_ACTOR=branch \
+    "$LEASE" release target --actor branch >/dev/null || fail "terminal target owner release failed"
+  [ ! -d "$home/state/target.inbox" ] || fail "pending handoff resumed a terminal target"
+  out=$(FM_HOME="$home" "$HANDOFF" inspect "$id") || fail "terminal handoff rejection was not inspectable"
+  assert_contains "$out" 'state=rejected' "terminal retry did not persist a rejection"
+  assert_contains "$out" 'is explicitly terminal' "terminal retry lost its disposition blocker"
+  assert_contains "$out" 'retain this exact rejected body' "terminal retry lost the handoff body"
+  pass "task-handoff: archival between retention and retry rejects without losing the request"
+}
+
 test_sweep_without_handoffs_is_a_noop() {
   local dir home
   dir="$TMP_ROOT/empty-sweep"
@@ -265,6 +294,7 @@ test_same_task_send_and_reminder_contract_stay_ordinary() {
 
 test_conflict_preserves_then_delivers_exactly_once
 test_restart_sweep_recovers_pending_handoff
+test_pending_handoff_rejects_target_archived_before_retry
 test_sweep_without_handoffs_is_a_noop
 test_local_runtime_backend_matrix_uses_one_durable_plane
 test_uncertain_handoff_persists_recovery_before_suppression

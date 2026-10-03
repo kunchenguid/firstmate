@@ -443,6 +443,25 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_terminal_task_refuses_new_steer() {
+  local dir err rc
+  dir=$(setup_case terminal-task)
+  err="$dir/send.err"
+  mkdir -p "$dir/home/data"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
+  printf '%s\n' '## In flight' '' '## Queued' '' '## Done' '' \
+    '- [x] t1 - Explicitly terminal fixture (kind: ship)' >"$dir/home/data/backlog.md"
+
+  run_send "$dir" "$err" -- t1 "must not resume terminal work"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "terminal steer exited $rc instead of 6: $(cat "$err")"
+  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+    "terminal steer refusal did not name the authoritative disposition"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "terminal steer created an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "terminal steer reached the endpoint"
+  pass "fm-send: retained terminal resources reject new steers before enqueue"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -457,3 +476,4 @@ test_key_path_never_touches_inbox
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_terminal_task_refuses_new_steer

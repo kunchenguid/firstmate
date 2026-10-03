@@ -422,6 +422,10 @@ cmd_dispatch() {
   lock=$(fm_aime_task_lock_path "$id")
   fm_lock_acquire_wait "$lock" || die "cannot lock AIME task $id"
   trap 'fm_lock_release "$lock"; fm_lease_guard_release' EXIT
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "$DATA" "$id" 'remote dispatch' || exit $?
+  fm_task_historical_execution_guard "$DATA" "$id" || exit $?
   cmd_dispatch_locked "$id" "$instructions" "$result_mode"
   dispatch_rc=$?
   fm_lock_release "$lock"
@@ -443,6 +447,11 @@ cmd_adopt_locked() {
   phase=$AIME_STATE_PHASE
   case "$phase" in
     create-not-started|created)
+      # Adoption may issue the first provider write. Retained provider state is
+      # not authority to resume a Done or explicitly archived task.
+      # shellcheck source=bin/fm-task-disposition-lib.sh
+      . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+      fm_task_disposition_effect_guard "$DATA" "$id" 'remote adoption' || exit $?
       ;;
   esac
   case "$phase" in
@@ -745,12 +754,16 @@ cmd_cancel() {
 }
 
 cmd_retire() {
-  local id=${1-} source lock report meta_lock
+  local id=${1-} source lock report meta_lock generation
   [ "$#" -eq 1 ] || usage
   fm_aime_task_id_valid "$id" || die "invalid task id"
-  # shellcheck source=bin/fm-task-progress-lib.sh
-  . "$SCRIPT_DIR/fm-task-progress-lib.sh"
-  fm_task_progress_completion_guard "$id" || die 'AIME goal is unfinished; MAIN must clear the compact remaining gap before retirement'
+  fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
+  generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
+  [ -n "$generation" ] || die 'AIME execution generation is missing'
+  # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+  . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+  fm_cleanup_completion_guard "$id" "$generation" \
+    || die 'AIME goal is unfinished; MAIN must accept or explicitly archive it before retirement'
   "$SCRIPT_DIR/fm-procevent-aime.sh" prepare-retire "$id" >/dev/null \
     || die "AIME task retirement preparation failed"
   lock=$(fm_aime_task_lock_path "$id")
@@ -761,7 +774,8 @@ cmd_retire() {
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"' EXIT
     fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
-    fm_task_progress_completion_guard "$id" || die 'compact goal changed before retirement'
+    generation=$(jq -r '.execution_generation // empty' "$AIME_STATE_FILE")
+    fm_cleanup_completion_guard "$id" "$generation" || die 'goal disposition changed before retirement'
     case "$AIME_STATE_PHASE" in
       terminal-success|terminal-failure) ;;
       *) die "AIME task is not safely terminal: phase=$AIME_STATE_PHASE" ;;

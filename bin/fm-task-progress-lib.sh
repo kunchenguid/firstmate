@@ -88,6 +88,21 @@ fm_task_progress_read() ( # <task>
     --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
 )
 
+# Read only the four compact fields from the current task body. Unlike the
+# admission projection, this deliberately ignores the context digest so a Done
+# row can still prove that MAIN cleared its gap before the row moved sections.
+# Emits JSON null for historical rows that never adopted compact progress.
+fm_task_progress_values() ( # <task>
+  local context
+  # shellcheck disable=SC2030,SC2031 # This reader is intentionally isolated in a subshell.
+  local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
+  fm_task_progress_detail "$1" || return $?
+  context=$(fm_task_progress_context "$1") || return $?
+  printf '%s' "$FM_TASK_PROGRESS_BODY" | python3 "$FM_TASK_PROGRESS_BIN/fm-task-progress.py" \
+    values --task "$1" --goal "$FM_TASK_PROGRESS_GOAL" --state "$FM_TASK_PROGRESS_STATE" \
+    --held "$FM_TASK_PROGRESS_HELD" --blocked "$FM_TASK_PROGRESS_BLOCKED" --context "$context"
+)
+
 fm_task_progress_execution_generation() { # <task>
   local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
   local state=${FM_STATE_OVERRIDE:-${FM_HOME:?}/state} meta executor provider generation

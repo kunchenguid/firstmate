@@ -720,6 +720,12 @@ do_relaunch() {
       ;;
   esac
 
+  # Interrupt and exit remain available for residual cleanup, but retained
+  # terminal resources can never authorize a replacement worker.
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "$DATA" "$ID" relaunch || exit $?
+
   if [ -n "$NOTE" ]; then
     note_line="note_file=$NOTE_FILE"
   else

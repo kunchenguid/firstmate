@@ -192,6 +192,10 @@ cmd_dispatch() {
   lock=$(fm_remote_task_lock_path "$id")
   fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
   trap 'fm_lock_release "$lock"' EXIT
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  fm_task_disposition_effect_guard "$DATA" "$id" 'remote dispatch' || exit $?
+  fm_task_historical_execution_guard "$DATA" "$id" || exit $?
   [ ! -e "$STATE/$id.meta" ] && [ ! -L "$STATE/$id.meta" ] || die "task metadata already exists; dispatch refuses to replace another executor"
   fm_remote_state_initialize "$id" ida "$task_type" "$instructions" "$sha" "$provider_state" || die "cannot initialize iDA task state"
   if ! fm_remote_meta_write "$id" ida "$task_type"; then
@@ -262,6 +266,9 @@ cmd_followup() (
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure) ;; *) die 'followup requires the expected terminal execution; cancellation is not restart authority' ;; esac
     session=$IDA_STATE_SESSION_ID; parent_task=$IDA_STATE_TASK_ID
     [ -n "$session" ] && [ -n "$parent_task" ] || die 'original session/turn identity missing'
+    # shellcheck source=bin/fm-task-disposition-lib.sh
+    . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+    fm_task_disposition_effect_guard "$DATA" "$id" 'remote followup' || exit $?
     fm_run_timed 30 "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities-followup > "$root/capabilities" 2> "$root/error" || die 'unsupported-continuation: official same-session create/list/get capability unavailable'
     fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg deep-research list --session-id "$session" > "$root/baseline" 2> "$root/error" || die 'cannot establish original turn baseline'
     fm_ida_structured_success "$root/baseline" || die 'turn baseline unavailable'
@@ -569,7 +576,7 @@ cmd_abandon() (
 )
 
 cmd_retire() {
-  local id=${1-} report source lock meta_lock
+  local id=${1-} report source lock meta_lock generation
   [ "$#" -eq 1 ] || usage
   lock=$(fm_remote_task_lock_path "$id")
   (
@@ -581,10 +588,12 @@ cmd_retire() {
     trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"; fm_lease_guard_release' EXIT
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
-    # shellcheck source=bin/fm-task-progress-lib.sh
-    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
-    fm_task_progress_completion_guard "$id" || die 'iDA goal is unfinished; MAIN must clear the compact remaining gap before retirement'
     fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
+    generation=$(jq -r '.generation // 1' "$REMOTE_STATE_FILE")
+    # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+    . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+    fm_cleanup_completion_guard "$id" "remote-$generation" \
+      || die 'iDA goal is unfinished; MAIN must accept or explicitly archive it before retirement'
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) ;; *) die "iDA task is not safely terminal: phase=$REMOTE_STATE_PHASE" ;; esac
     report=$(fm_remote_report_path "$id") || die "cannot resolve report path"
     fm_remote_report_safe "$id" && [ "$REMOTE_STATE_REPORT_PATH" = "$report" ] || die "iDA task has no safe report at data/$id/report.md"

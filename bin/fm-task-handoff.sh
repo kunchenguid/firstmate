@@ -300,6 +300,18 @@ _handoff_deliver_locked() {  # <id>
     handoff_reject_locked "$id" "target '$target' retired or changed route during delivery validation"
     return $?
   fi
+  # Stable handoff identity prevents duplicate delivery; it does not authorize
+  # a stale instruction after the target became business-terminal.
+  # shellcheck source=bin/fm-task-disposition-lib.sh
+  . "$SCRIPT_DIR/fm-task-disposition-lib.sh"
+  effect_rc=0
+  fm_task_disposition_effect_guard "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$target" handoff \
+    || effect_rc=$?
+  if [ "$effect_rc" -ne 0 ]; then
+    fm_lock_release "$meta_lock"
+    handoff_reject_locked "$id" "target '$target' is explicitly terminal; retained handoff will not resume it"
+    return $?
+  fi
   # The original handoff record and exact inbox id are the no-replay authority.
   # A delivered retry above is readback only, never another enqueue.
   inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$(fm_meta_get "$meta" spawn_gen)") || write_rc=$?

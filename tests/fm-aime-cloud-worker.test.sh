@@ -57,6 +57,11 @@ EOF
 new_task() { # <home> <id> [instruction]
   local home=$1 id=$2 instruction=${3:-"Research the requested topic and return a cited report."}
   mkdir -p "$home/data/$id"
+  if [ ! -f "$home/data/backlog.md" ]; then
+    printf '%s\n' '# Tasks' '' '## In flight' '' '## Queued' '' '## Done' >"$home/data/backlog.md"
+  fi
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Remote research $id" --kind scout --start \
+    --file "$home/data/backlog.md" >/dev/null || fail "could not add AIME fixture task $id"
   printf '# Brief for %s\n' "$id" >"$home/data/$id/brief.md"
   printf '%s\n' "$instruction" >"$home/data/$id/instructions.txt"
   chmod 0600 "$home/data/$id/instructions.txt"
@@ -1430,12 +1435,55 @@ test_cloud_retirement_preserves_report() {
   pass "terminal AIME success and failure retirement enforce report and decision safety while preserving ordinary provider failures"
 }
 
+test_terminal_disposition_guards_aime_effects() {
+  local home fakebin id rc generation
+
+  id=aime-terminal-dispatch
+  home=$(new_home terminal-dispatch)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  new_task "$home" "$id"
+  : >"$home/bytedcli.log"
+  tasks-axi "done" "$id" --file "$home/data/backlog.md" >/dev/null \
+    || fail 'terminal AIME dispatch task could not become Done'
+  rc=0
+  dispatch_aime "$home" "$fakebin" "$id" >"$home/dispatch.out" 2>"$home/dispatch.err" || rc=$?
+  [ "$rc" -eq 6 ] || fail "terminal AIME dispatch exited $rc instead of 6"
+  assert_grep 'explicitly terminal (done)' "$home/dispatch.err" \
+    'terminal AIME dispatch lost its disposition blocker'
+  assert_absent "$(state_file "$home" "$id")" 'terminal AIME dispatch created provider state'
+  [ ! -s "$home/bytedcli.log" ] || fail 'terminal AIME dispatch reached the provider'
+
+  id=aime-historical-retire
+  home=$(new_home historical-retire)
+  fakebin=$(make_fake_bytedcli "$home")
+  write_config "$home" true
+  new_task "$home" "$id"
+  : >"$home/bytedcli.log"
+  dispatch_aime "$home" "$fakebin" "$id" >/dev/null || fail 'historical AIME retirement dispatch failed'
+  wait_phase "$home" "$id" terminal-success 400
+  generation=$(jq -r '.execution_generation' "$(state_file "$home" "$id")")
+  [ -n "$generation" ] && [ "$generation" != null ] || fail 'AIME fixture lost execution generation'
+  printf '## In flight\n\n## Queued\n\n## Done\n' >"$home/data/backlog.md"
+  jq -n --arg id "$id" --arg generation "$generation" \
+    '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:$generation,disposition:"open"}' \
+    >"$home/data/$id/lifecycle.json"
+  rc=0
+  run_aime "$home" "$fakebin" retire "$id" >"$home/retire.out" 2>"$home/retire.err" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'AIME retirement accepted open retained history'
+  assert_grep 'neither MAIN-accepted compact progress nor explicit archived completion' "$home/retire.err" \
+    'AIME historical retirement lost its terminal-fact blocker'
+  assert_present "$(state_file "$home" "$id")" 'AIME historical retirement removed provider state'
+  pass 'AIME terminal admission blocks dispatch and retirement without provider replay'
+}
+
 test_local_executor_wrappers_delegate_unchanged() {
   local root="$TMP_ROOT/wrapper-root" out
   mkdir -p "$root/bin" "$root/home/state"
   cp "$ROOT/bin/fm-task-dispatch.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-state.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-retire.sh" "$root/bin/"
+  cp "$ROOT/bin/fm-cleanup-receipt-lib.sh" "$root/bin/"
   cat >"$root/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'spawn'
@@ -1481,6 +1529,7 @@ test_acceptance_unknown_and_explicit_failures
 test_document_mode_and_terminal_result_failures
 test_transient_readback_rearms_and_state_is_unknown
 test_cloud_retirement_preserves_report
+test_terminal_disposition_guards_aime_effects
 test_local_executor_wrappers_delegate_unchanged
 
 echo "# fm-aime-cloud-worker.test.sh: all assertions passed"
