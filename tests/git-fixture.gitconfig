@@ -1,0 +1,11 @@
+# tests/git-fixture.gitconfig - the global Git layer every fixture Git process
+# reads instead of the host's (see tests/git-config-helpers.sh). Fixtures never
+# write it.
+#
+# A commit that leaves enough loose objects starts a detached `git maintenance
+# run --auto`, which packs and deletes those loose files moments later. A local
+# `git clone` of that fixture copies object files one by one, so the background
+# repack races it and fails with "failed to copy file ... No such file or
+# directory". Disabling automatic maintenance prevents that commit/clone race.
+[maintenance]
+	auto = false

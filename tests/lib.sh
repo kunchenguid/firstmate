@@ -38,6 +38,12 @@ umask 022
 # shellcheck source=tests/git-config-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
 
+# fm_test_remove_tree and fm_test_remove_spawn_launch_dirs, which remove a
+# fixture tree even when it holds a spawn-owned read-only directory, along with
+# the launch directories its real spawns staged outside it.
+# shellcheck source=tests/fixture-tree-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixture-tree-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -207,26 +213,20 @@ fm_test_reap_watchers() {
 FM_TEST_STUB_MAX_BLOCK_SECONDS=${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}
 export FM_TEST_STUB_MAX_BLOCK_SECONDS
 
-# Remove a fixture tree even when it holds a read-only directory, such as the
-# spawn-owned state/<id>.git-hooks strip directory.
-fm_test_remove_tree() {
-  local dir=$1
-  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
-    find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
-  fi
-  rm -rf "$dir"
-}
-
 fm_test_cleanup() {
   local d
   fm_test_reap_watchers
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && fm_test_remove_tree "$d"
+    [ -n "$d" ] || continue
+    fm_test_remove_spawn_launch_dirs "$d"
+    fm_test_remove_tree "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && fm_test_remove_tree "$d"
+      [ -n "$d" ] || continue
+      fm_test_remove_spawn_launch_dirs "$d"
+      fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -280,6 +280,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
+    fm_test_remove_spawn_launch_dirs "$dir"
     fm_test_remove_tree "$dir"
   done
 }

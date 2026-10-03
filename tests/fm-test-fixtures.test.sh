@@ -26,7 +26,7 @@ test_git_config_isolation() (
   git -C "$dir/caller" config commit.gpgsign false
   cd "$dir/caller" || exit 1
   cp "$ROOT/bin/fm-test-run.sh" "$ROOT/bin/fm-timeout-lib.sh" "$dir/runner/bin/"
-  cp "$ROOT/tests/git-config-helpers.sh" "$dir/runner/tests/"
+  cp "$ROOT/tests/git-config-helpers.sh" "$ROOT/tests/git-fixture.gitconfig" "$dir/runner/tests/"
   fakebin=$(fm_fakebin "$dir/standalone")
   fm_fake_exit0 "$fakebin" pi
   cat > "$fakebin/tmux" <<'SH'
@@ -49,6 +49,7 @@ trap 'rm -rf "$repo"' EXIT
 git init -q "$repo"
 git -C "$repo" config user.name 'Runner Fixture'
 git -C "$repo" config user.email runner@example.invalid
+[ "$(git -C "$repo" config --bool --get maintenance.auto)" = false ]
 git -C "$repo" commit -q --allow-empty -m initial
 [ "$(git -C "$repo" log -1 --format='%s:%an:%ae')" = 'initial:Runner Fixture:runner@example.invalid' ]
 [ "$(git -C "$repo" config --get fixture.input)" = preserved ]
@@ -168,6 +169,24 @@ test_touch_epoch_preserves_repeated_dst_hour() {
   pass "fm_touch_epoch preserves both epochs in the repeated DST hour"
 }
 
+# A commit that leaves many loose objects must not start background maintenance
+# in a fixture repository: its detached repack deletes loose files that an
+# immediate local `git clone` of the fixture is still copying.
+test_fixture_commit_starts_no_background_maintenance() {
+  local repo="$TMP_ROOT/maintenance" trace="$TMP_ROOT/maintenance.trace" i
+  fm_git_init_commit "$repo"
+  for i in $(seq 1 300); do printf '%s\n' "$i" > "$repo/file-$i"; done
+  git -C "$repo" add .
+  GIT_TRACE="$trace" git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm many || fail "fixture commit with many objects failed"
+  if grep -E 'run_command: git (maintenance run|gc) --auto' "$trace" >/dev/null; then
+    fail "fixture commit started background maintenance: $(grep -E 'maintenance|gc' "$trace")"
+  fi
+  git clone --quiet -- "$repo" "$TMP_ROOT/maintenance-clone" \
+    || fail "local clone of a fresh fixture commit failed"
+  pass "a fixture commit starts no background maintenance that a local clone could race"
+}
+
 test_no_mistakes_version_constant() {
   local fakebin out
   fakebin=$(fm_fakebin "$TMP_ROOT/nm")
@@ -279,8 +298,97 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+# The real strip-hook installer leaves its directory read-only, which a plain
+# `rm -rf` cannot remove; fm_test_remove_tree must remove the whole tree while
+# leaving a read-only directory reached only through a symlink untouched.
+test_remove_tree_clears_read_only_strip_hooks() {
+  local tree="$TMP_ROOT/remove-tree" outside="$TMP_ROOT/remove-tree-outside" mode
+  if [ "$(id -u)" = 0 ]; then
+    pass "fm_test_remove_tree removes a tree holding read-only strip hooks (skipped as root)"
+    return 0
+  fi
+  mkdir -p "$tree/home/state" "$outside/locked"
+  fm_git_init_commit "$tree/wt"
+  "$ROOT/bin/fm-git-strip-ai-trailers.sh" install "$tree/home/state/anchor.git-hooks" "$tree/wt" \
+    || fail "strip-hook installer failed"
+  [ -w "$tree/home/state/anchor.git-hooks" ] \
+    && fail "strip-hook directory should be read-only, so this case would be vacuous"
+  chmod 500 "$outside/locked"
+  ln -s "$outside/locked" "$tree/home/state/outside-link"
+  fm_test_remove_tree "$tree" || fail "fm_test_remove_tree reported failure"
+  [ ! -e "$tree" ] && [ ! -L "$tree" ] || fail "fm_test_remove_tree left $tree behind"
+  mode=$(stat -c %a "$outside/locked" 2>/dev/null || stat -f %Lp "$outside/locked")
+  [ "$mode" = 500 ] || fail "fm_test_remove_tree changed a directory outside the tree to $mode"
+  chmod 700 "$outside/locked"
+  pass "fm_test_remove_tree removes a tree holding read-only strip hooks and leaves outside targets alone"
+}
+
+# Most fixture homes stage no launch directory; a suite that exits under
+# `set -e` must still finish its exit cleanup and keep its own exit status.
+test_exit_cleanup_under_errexit_without_launch_dirs() {
+  local out rc root
+  # shellcheck disable=SC2016
+  out=$(FM_TEST_SKIP_ORPHAN_REAP=1 bash -c '
+    . "$1/tests/fixtures.sh"
+    root=$(fm_test_tmproot fm-test-fixture-errexit) || fail "could not create the child fixture root"
+    mkdir -p "$root/home/state"
+    printf "%s\n" "$root"
+    set -e
+    fm_test_remove_spawn_launch_dirs "$root"
+    exit 0
+  ' child "$ROOT")
+  rc=$?
+  root=$(printf '%s\n' "$out" | tail -n 1)
+  [ "$rc" = 0 ] || fail "a set -e suite with no launch directories exited $rc from cleanup"
+  [ -n "$root" ] || fail "child suite reported no fixture root: $out"
+  [ ! -e "$root" ] || fail "a set -e suite's exit cleanup left $root behind"
+  pass "a set -e suite with no staged launch directories finishes exit cleanup and exits 0"
+}
+
+# A real spawn that is never torn down leaves its read-only strip hooks inside
+# the fixture and its staged launch directory outside it; a suite's own exit
+# cleanup must remove both even after the task record is gone.
+test_remove_tree_clears_untorn_spawn() {
+  local id="fixtreespawn$$" out root launch_dir
+  if [ "$(id -u)" = 0 ]; then
+    pass "suite exit cleanup removes an untorn spawn's read-only strip hooks and staged launch directory (skipped as root)"
+    return 0
+  fi
+  # shellcheck disable=SC2016
+  out=$(FM_TEST_SKIP_ORPHAN_REAP=1 bash -c '
+    . "$1/tests/fixtures.sh"
+    id=$2
+    root=$(fm_test_tmproot fm-test-fixture-spawn) || fail "could not create the child fixture root"
+    home="$root/home"
+    fakebin=$(make_spawn_fakebin "$root/fake" claude)
+    fm_test_spawn_home "$home" claude
+    fm_git_worktree "$root/project" "$root/wt" "wt-$id"
+    fm_test_spawn_brief "$home" "$id"
+    spawn_out=$(fm_test_run_spawn "$home" "$root/wt" "$fakebin" "$id" "$root/project" --mode no-mistakes --yolo off) \
+      || fail "fixture spawn failed: $spawn_out"
+    [ -w "$home/state/$id.git-hooks" ] \
+      && fail "spawn should leave its strip-hook directory read-only, so this case would be vacuous"
+    hash=$(fm_test_home_hash "$home") || fail "could not hash the fixture home path"
+    launch_dir="/tmp/fm-$id+$hash"
+    [ -d "$launch_dir" ] || fail "spawn staged no launch directory $launch_dir, so this case would be vacuous"
+    rm -f "$home/state/$id.meta"
+    printf "%s\n%s\n" "$root" "$launch_dir"
+  ' child "$ROOT" "$id") || fail "child suite failed: $out"
+  root=$(printf '%s\n' "$out" | tail -n 2 | sed -n 1p)
+  launch_dir=$(printf '%s\n' "$out" | tail -n 1)
+  [ -n "$root" ] && [ -n "$launch_dir" ] || fail "child suite reported no fixture paths: $out"
+  [ ! -e "$root" ] || fail "suite exit cleanup left $root behind"
+  [ ! -e "$launch_dir" ] || fail "suite exit cleanup left $launch_dir behind"
+  rmdir "/tmp/fm-$id/gotmp" "/tmp/fm-$id" 2>/dev/null || true
+  pass "suite exit cleanup removes an untorn spawn's read-only strip hooks and staged launch directory"
+}
+
 test_git_config_isolation || fail "Git fixture config isolation"
+test_remove_tree_clears_untorn_spawn
+test_exit_cleanup_under_errexit_without_launch_dirs
+test_remove_tree_clears_read_only_strip_hooks
 test_touch_epoch_preserves_repeated_dst_hour
+test_fixture_commit_starts_no_background_maintenance
 test_no_mistakes_version_constant
 test_no_mistakes_init_doctor_markers
 test_fake_gh_and_gh_axi
