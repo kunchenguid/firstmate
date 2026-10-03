@@ -3080,6 +3080,8 @@ fm_backend_herdr_prepare_shell() ( # <target> <command>
   local polls=${FM_HERDR_SHELL_READY_POLLS:-100}
   case "$polls" in ''|*[!0-9]*|0) return 1 ;; esac
   probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-ready.XXXXXXXX") || return 1
+  # The pane may start in a different cwd, including with a relative TMPDIR.
+  case "$probe_dir" in /*) ;; *) probe_dir="$PWD/$probe_dir" ;; esac
   trap 'rm -rf -- "$probe_dir"' EXIT
   trap 'exit 1' HUP INT TERM
   quoted=${probe_dir//\'/\'\\\'\'}

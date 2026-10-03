@@ -80,6 +80,7 @@ if [ -n "${FM_HERDR_READY_MODE:-}" ] && [ "${1:-} ${2:-}" = 'pane run' ]; then
     never) printf '%s\n' "$4"; exit 0 ;;
     drop-two) [ "$count" -gt 2 ] || { printf '%s\n' "$4"; exit 0; } ;;
   esac
+  cd -- "$FM_HERDR_READY_CWD" || exit 1
   exec bash -c "$4"
 fi
 n=$next
@@ -3815,23 +3816,30 @@ test_current_path_reads_cwd() {
 }
 
 test_shell_preparation_requires_execution_and_never_retries_allocation() {
-  local mode dir resp fb out rc probes allocations
-  for mode in drop-two never send-fail allocation-fail; do
-    dir="$TMP_ROOT/shell-ready-$mode"
+  local tmp_kind=$1 mode dir resp fb out rc probes allocations tmp_dir
+  for mode in ready drop-two never send-fail allocation-fail; do
+    dir="$TMP_ROOT/shell-ready-$tmp_kind-$mode"
     resp="$dir/responses"
-    mkdir -p "$resp" "$dir/tmp with ' quote"
+    mkdir -p "$resp" "$dir/tmp with ' quote" "$dir/pane"
+    tmp_dir="$dir/tmp with ' quote"
+    [ "$tmp_kind" != relative ] || tmp_dir="./tmp with ' quote"
     fb=$(make_herdr_fakebin "$dir")
     out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$dir/log" FM_HERDR_RESPONSES="$resp" \
       FM_HERDR_READY_MODE="$mode" FM_HERDR_SHELL_READY_POLLS=4 \
-      TMPDIR="$dir/tmp with ' quote" bash -c '
+      FM_HERDR_READY_CWD="$dir/pane" TMPDIR="$tmp_dir" bash -c '
         . "$0/bin/backends/herdr.sh"
+        cd -- "$1" || exit 1
         fm_backend_herdr_prepare_shell default:w1:p2 "treehouse get"
-      ' "$ROOT" 2>&1)
+      ' "$ROOT" "$dir" 2>&1)
     rc=$?
     probes=$(wc -l < "$resp/probes" | tr -d ' ')
     allocations=0
     [ ! -e "$resp/allocations" ] || allocations=$(wc -l < "$resp/allocations" | tr -d ' ')
     case "$mode" in
+      ready)
+        expect_code 0 "$rc" "$tmp_kind TMPDIR should acknowledge from a different pane cwd"
+        [ "$probes:$allocations" = 1:1 ] || fail "expected one probe then one allocation, got $probes:$allocations"
+        ;;
       drop-two)
         expect_code 0 "$rc" "lost early probes should recover"
         [ "$probes:$allocations" = 3:1 ] || fail "expected three probes then one allocation, got $probes:$allocations"
@@ -3851,10 +3859,11 @@ test_shell_preparation_requires_execution_and_never_retries_allocation() {
         ;;
     esac
     [ -z "$(find "$dir/tmp with ' quote" -mindepth 1 -print)" ] || fail "readiness probe leaked its private directory"
-    bash -c "$(cat "$resp/last-probe")" || fail "late readiness probe should be harmless after cleanup"
+    (cd -- "$dir/pane" && bash -c "$(cat "$resp/last-probe")") \
+      || fail "late readiness probe should be harmless after cleanup"
     [ -z "$(find "$dir/tmp with ' quote" -mindepth 1 -print)" ] || fail "late probe recreated readiness state"
   done
-  pass "Herdr shell preparation requires execution, bounds input-loss retries, and submits allocation exactly once"
+  pass "Herdr shell preparation ($tmp_kind TMPDIR, different pane cwd) requires execution, bounds input-loss retries, and submits allocation exactly once"
 }
 
 # --- busy_state (semantic agent state) ---------------------------------------
@@ -6067,4 +6076,5 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
-test_shell_preparation_requires_execution_and_never_retries_allocation
+test_shell_preparation_requires_execution_and_never_retries_allocation absolute
+test_shell_preparation_requires_execution_and_never_retries_allocation relative
