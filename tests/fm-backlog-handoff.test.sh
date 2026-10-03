@@ -53,7 +53,7 @@ inbox_record_count() { # <state-dir> <task-id>
 }
 
 doorbell_count() { # <backend-log>
-  grep -cF 'Firstmate instruction waiting:' "$1" 2>/dev/null || true
+  grep -cF 'Firstmate instruction waiting in ' "$1" 2>/dev/null || true
 }
 
 # A live local receiver gets the routed-work instruction through its durable
@@ -559,7 +559,7 @@ EOF
   cat > "$blockbin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"Firstmate instruction waiting:"*)
+  *"Firstmate instruction waiting in "*)
     if mkdir "$FM_BLOCK_WAKE_ONCE" 2>/dev/null; then
       touch "$FM_BLOCK_WAKE_ENTERED"
       while [ ! -f "$FM_BLOCK_WAKE_RELEASE" ]; do sleep 0.02; done
@@ -633,7 +633,7 @@ EOF
   cat > "$blockbin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  *"Firstmate instruction waiting:"*)
+  *"Firstmate instruction waiting in "*)
     touch "$FM_BLOCK_WAKE_ENTERED"
     while [ ! -f "$FM_BLOCK_WAKE_RELEASE" ]; do sleep 0.02; done
     ;;
