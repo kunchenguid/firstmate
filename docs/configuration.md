@@ -9,7 +9,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | --- | --- |
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
-| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
+| Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
@@ -948,8 +948,24 @@ Firstmate retains basic home, executable search, terminal, locale, temporary-dir
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
 
-Allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
+Unless the Orca environment source below is configured, allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
+
+On the Orca backend the destination is an Orca terminal whose environment comes from the Orca app and your shell startup files, not from Firstmate or its tmux session.
+Allowlisted names there resolve to whatever that terminal has, often your personal credentials or nothing, so a spawn with a nonempty allowlist prints a warning unless the Orca environment source below is configured.
+
+### Orca environment source (config/launch-env-tmux-session)
+
+An Orca home can opt in to taking allowlisted values from one named tmux session instead of the Orca terminal.
+Create the local, gitignored `config/launch-env-tmux-session` containing that session's name, and keep the session running for subsequent Orca spawns.
+The source requires `config/launch-env-allowlist` and reads only its names from the session's local environment (`tmux set-environment -t <session>`), so tmux's automatic values such as `SSH_AUTH_SOCK` are never forwarded unless listed.
+A listed name missing from the session, an unreadable session, or a malformed selector stops the spawn before Orca creates the worktree or terminal; a name removed with `tmux set-environment -r` stays deliberately unset.
+Source mode also sets `GIT_CONFIG_NOSYSTEM=1`, so a system Git credential helper cannot answer with personal credentials.
+Values travel only in the owner-only staged launch file, never terminal input, and the pane deletes that file before the worker starts.
+The source applies to fresh Orca spawns; `--relaunch` is refused on Orca because it has no recovery-grade agent-state classifier.
+The selector is not inherited into secondmate homes, and other backends ignore it.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the snapshot and launch-file mechanics.
+Project and harness sandbox settings still own filesystem access to personal credential stores.
 
 ### Authentication requirements
 
@@ -973,7 +989,7 @@ Raw launch commands run under noninteractive POSIX `sh` with this option and mus
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 
-Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh), and the Orca environment source in [`tests/fm-spawn-orca-worktree.test.sh`](../tests/fm-spawn-orca-worktree.test.sh).
 
 ### Compact adviser setting
 
