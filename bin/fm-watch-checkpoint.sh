@@ -3,8 +3,8 @@
 # rely on background-task completion to wake the model.
 #
 # SUPERVISION HOST. A home opted in with config/supervision-host
-# (docs/configuration.md "Supervision host" owns the gate; an `off` file opts
-# out, and a Codex home without the file does not run the host) runs
+# (docs/configuration.md "Supervision host" owns the gate;
+# config/supervision-host-off opts out, and a Codex home without the file does not run the host) runs
 # bin/fm-supervision-host.sh in the watcher's place for the checkpoint's bound,
 # as the host's park boundary; the host takes away-posture wakes itself and
 # returns only when main is needed (its header owns the output read here).

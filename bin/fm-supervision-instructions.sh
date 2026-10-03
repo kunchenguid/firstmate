@@ -4,7 +4,7 @@
 # with a supervision protocol (claude, cursor, opencode, omp, grok, codex) whose
 # home runs the supervision host (fm_supervision_host_enabled in
 # bin/fm-supervision-engine-lib.sh: by default on Claude, by
-# config/supervision-host elsewhere, never with an `off` file), the block
+# config/supervision-host elsewhere, never with config/supervision-host-off), the block
 # adds one state line and the host's main-side protocol
 # (docs/supervision-protocols/supervision-host.md, whose lines tagged
 # "{<harness>,...} " render only for the listed harnesses), and Grok's arm
