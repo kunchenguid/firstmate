@@ -127,8 +127,7 @@ ok - explicit local base launches from the verified non-main default tip with ze
 The live case uses a private tmux socket, real interactive Treehouse acquisition, an unreachable fixture origin, and a local shell worker without model calls.
 Its Git shim records and rejects transport attempts, and Treehouse's update check is disabled.
 The mechanics and limitations of `--local-base` belong to `bin/fm-spawn.sh --help`; the portable cases in the same regression retain isolation, cleanliness, ownership, unsupported-backend, and default-fetch refusals.
-The acquisition and freshness path precedes harness-specific launch commands and is shared by the Treehouse-backed tmux, Herdr, Zellij, and cmux integrations; Orca owns acquisition itself and explicitly refuses this option.
-This live result proves the tmux integration only, not a live run on the other three integrations, and local verification does not prove the remote has not advanced since the last authorized sync.
+This live result proves the tmux integration only; Herdr, Zellij, and cmux were not exercised live here.
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
 

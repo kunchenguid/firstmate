@@ -251,7 +251,7 @@
 #   --local-base <full-commit-sha> explicitly opts a fresh ship/scout into locally
 #   verified freshness on Treehouse-backed tmux/herdr/zellij/cmux only, never
 #   Orca, secondmates, relaunch, or batch. Requires a clean spawning project,
-#   a locally available commit exactly matching the symbolic origin/HEAD tip,
+#   a full lowercase SHA of a locally available commit exactly matching the symbolic origin/HEAD tip,
 #   and Treehouse get support for --no-fetch and --base. Acquisition passes both
 #   flags with the verified default branch (Treehouse accepts branch names, not
 #   raw SHAs); any same-named local branch must also match the SHA. Treehouse's
@@ -264,13 +264,14 @@
 #   publication/validation routes are unchanged; network failure never opts in.
 #
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. Without --local-base, when an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   task worktree. Without --local-base, when an origin configuration is detected,
+#   spawn fetches it, resolves the current remote default branch, and resets to
+#   its tip. When none is detected, spawn skips that remote freshness check and
+#   launches from the clean worktree's current HEAD. Relaunch reuses the recorded
+#   worktree without fetching or resetting its base. Without --local-base, an
+#   unreachable detected origin or unresolved remote default branch refuses a
+#   fresh spawn rather than risking a PR based on stale history. A non-clean
+#   task worktree refuses either fresh-launch path rather than discarding local work.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
