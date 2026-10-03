@@ -136,9 +136,9 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 BACKLOG="$DATA/backlog.md"
 # The Done archive tasks-axi writes: the [markdown] archive key of the home's
-# .tasks.toml, else of $HOME/.tasks-axi/config.toml, relative to the data
-# directory's parent where tasks-axi runs, else the tracked default beside the
-# backlog.
+# .tasks.toml, else of $HOME/.tasks-axi/config.toml, relative to the resolved
+# data directory's parent where tasks-axi runs (fm_backlog_root), else the
+# tracked default beside the backlog.
 toml_markdown_archive() {  # <toml-path>
   [ -f "$1" ] || return 0
   LC_ALL=C awk '
@@ -170,7 +170,7 @@ toml_markdown_archive() {  # <toml-path>
 }
 done_archive_path() {
   local root archive
-  root=$(dirname "$DATA")
+  root=$(fm_backlog_root "$DATA") || return 0
   archive=$(toml_markdown_archive "$root/.tasks.toml")
   [ -n "$archive" ] || [ -z "${HOME:-}" ] || archive=$(toml_markdown_archive "$HOME/.tasks-axi/config.toml")
   case "$archive" in
@@ -179,7 +179,6 @@ done_archive_path() {
     *) printf '%s\n' "$root/$archive" ;;
   esac
 }
-DONE_ARCHIVE=$(done_archive_path)
 SNAPSHOT_NOW=${FM_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ -n "${FM_SNAPSHOT_NOW_EPOCH:-}" ]; then
   SNAPSHOT_EPOCH=$FM_SNAPSHOT_NOW_EPOCH
@@ -279,6 +278,9 @@ esac
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 # shellcheck source=bin/fm-hold-reason-lib.sh
 . "$SCRIPT_DIR/fm-hold-reason-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"  # fm_backlog_root: the root tasks-axi resolves .tasks.toml from
+DONE_ARCHIVE=$(done_archive_path)
 
 usage() {
   cat <<'EOF'

@@ -638,6 +638,44 @@ EOF
   pass "without a project archive key, the last [markdown] archive key in the global tasks-axi config decides the archive"
 }
 
+test_symlinked_data_dir_resolves_archive_from_target_root() {
+  local home fakebin out
+  home=$(make_home symlinked-data)
+  mkdir -p "$home/storage/records" "$home/records"
+  mv "$home/data" "$home/storage/data"
+  ln -s storage/data "$home/data"
+  printf '[markdown]\narchive = "records/done.md"\n' > "$home/.tasks.toml"
+  printf '[markdown]\narchive = "records/done.md"\n' > "$home/storage/.tasks.toml"
+  cat > "$home/storage/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] target-hold - Depends on a blocker archived under the resolved root blocked-by: target-blocker (repo: alpha) (kind: captain) (hold: waiting on target blocker) (hold-kind: captain)
+- [ ] link-hold - Depends on a blocker only under the symlink's parent blocked-by: link-blocker (repo: alpha) (kind: captain) (hold: waiting on link blocker) (hold-kind: captain)
+
+## Done
+EOF
+  cat > "$home/storage/records/done.md" <<'EOF'
+
+## Archived 2026-07-15
+- [x] target-blocker - Blocker archived where tasks-axi resolves it (repo: alpha) (kind: ship) (done 2026-07-01)
+EOF
+  cat > "$home/records/done.md" <<'EOF'
+
+## Archived 2026-07-15
+- [x] link-blocker - Blocker in an archive beside the unresolved symlink (repo: alpha) (kind: ship) (done 2026-07-01)
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" HOME="$home" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    (.backlog.records[] | select(.id == "target-hold")) as $target
+    | (.backlog.records[] | select(.id == "link-hold")) as $link
+    | $target.unresolved_blocker_ids == [] and $target.hold_bucket == "live"
+      and $link.unresolved_blocker_ids == ["link-blocker"] and $link.hold_bucket == "blocked"
+  ' >/dev/null || fail "the snapshot did not resolve the archive from the symlinked data directory's target root: $out"
+  pass "a data -> storage/data symlink resolves the archive from storage, where tasks-axi reads .tasks.toml"
+}
+
 test_event_hints_follow_reconciled_current_state() {
   local home fakebin out hint_gen
   home=$(make_home event-hints)
@@ -1331,6 +1369,7 @@ test_archived_done_blocker_resolves_alongside_live_and_dangling
 test_configured_done_archive_path_resolves_blockers
 test_quoted_archive_path_keeps_hash
 test_global_config_archive_path_resolves_blockers
+test_symlinked_data_dir_resolves_archive_from_target_root
 test_event_hints_follow_reconciled_current_state
 test_open_decision_survives_later_unrelated_event
 test_secondmate_open_decision_survives_live_endpoint
