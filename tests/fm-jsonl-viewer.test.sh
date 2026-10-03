@@ -21,8 +21,9 @@ PORT_FILE="$TMP_ROOT/port"
 SERVER_LOG="$TMP_ROOT/server.log"
 SERVER_PID=
 TIMEOUT_SERVER_PID=
+CANDIDATE_SERVER_PID=
 cleanup() {
-  for pid in "$SERVER_PID" "$TIMEOUT_SERVER_PID"; do
+  for pid in "$SERVER_PID" "$TIMEOUT_SERVER_PID" "$CANDIDATE_SERVER_PID"; do
     [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
     [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
   done
@@ -169,6 +170,62 @@ kill "$TIMEOUT_SERVER_PID" 2>/dev/null || true
 wait "$TIMEOUT_SERVER_PID" 2>/dev/null || true
 TIMEOUT_SERVER_PID=
 
+# Exercise the candidate classification through its public HTTP API with
+# retained nonterminal or ambiguous observations and disconfirming controls.
+CANDIDATE_CODE_ROOT="$TMP_ROOT/candidate-code"
+CANDIDATE_HOME="$TMP_ROOT/candidate-home"
+CANDIDATE_LOG="$TMP_ROOT/candidate-server.log"
+mkdir -p "$CANDIDATE_CODE_ROOT/bin" "$CANDIDATE_CODE_ROOT/web" "$CANDIDATE_HOME/data" "$CANDIDATE_HOME/state"
+cp "$ROOT/bin/fm-jsonl-viewer.mjs" "$CANDIDATE_CODE_ROOT/bin/fm-jsonl-viewer.mjs"
+cp "$ROOT/web/jsonl-viewer/"* "$CANDIDATE_CODE_ROOT/web/"
+cat > "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+cat <<'JSON'
+{"schema":"fm-fleet-snapshot.v1","generated":"2026-10-03T00:00:00Z","main_inventory":{"valid":true},"backlog":{"records":[
+{"structured":true,"id":"archive-working","title":"Archived while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"archive-ambiguous","title":"Archived with unknown remote","state":"queued","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"accepted-working","title":"Accepted while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"record-archive-working","title":"Record archive while remote works","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"invalid-archive","title":"Invalid archive authority","state":"in_flight","kind":"ship","repo":"viewer"},
+{"structured":true,"id":"active-working","title":"Active work","state":"in_flight","kind":"ship","repo":"viewer"}]},"tasks":[
+{"id":"archive-working","record_disposition":"active","lifecycle_disposition":"archived","current_state":{"state":"working"}},
+{"id":"archive-ambiguous","record_disposition":"active","lifecycle_disposition":"archived","current_state":{"state":"unknown"}},
+{"id":"accepted-working","record_disposition":"active","lifecycle_disposition":"accepted","current_state":{"state":"working"}},
+{"id":"record-archive-working","record_disposition":"archive_done","lifecycle_disposition":"legacy","current_state":{"state":"working"}},
+{"id":"invalid-archive","record_disposition":"active","lifecycle_disposition":"unknown","current_state":{"state":"working"}},
+{"id":"active-working","record_disposition":"active","lifecycle_disposition":"open","current_state":{"state":"working"}}]}
+JSON
+SH
+chmod +x "$CANDIDATE_CODE_ROOT/bin/fm-fleet-snapshot.sh"
+cat > "$CANDIDATE_CODE_ROOT/bin/fm-task-disposition-lib.sh" <<'SH'
+fm_task_disposition_snapshot() { :; }
+SH
+FM_HOME="$CANDIDATE_HOME" FM_JSONL_VIEWER_TOKEN="$TOKEN" FM_JSONL_VIEWER_PORT=0 \
+  node "$CANDIDATE_CODE_ROOT/bin/fm-jsonl-viewer.mjs" > "$CANDIDATE_LOG" 2>&1 &
+CANDIDATE_SERVER_PID=$!
+for _ in $(seq 1 100); do
+  CANDIDATE_PORT=$(sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' "$CANDIDATE_LOG")
+  [ -n "${CANDIDATE_PORT:-}" ] && break
+  sleep 0.05
+done
+[ -n "${CANDIDATE_PORT:-}" ] || fail "candidate viewer did not report its bound port"
+CANDIDATE_BASE="http://127.0.0.1:$CANDIDATE_PORT"
+curl -sS -H "Authorization: Bearer $TOKEN" "$CANDIDATE_BASE/api/tasks" > "$TMP_ROOT/candidate-tasks.json"
+jq -e '
+  (.tasks | any(.id == "archive-working" and .category == "history" and .status == "Cancelled"
+    and .warning == "Remote status unconfirmed; archive reflects business disposition only."))
+  and (.tasks | any(.id == "archive-ambiguous" and .category == "history" and (.warning | contains("Remote status unconfirmed"))))
+  and (.tasks | any(.id == "accepted-working" and .category == "held" and .status == "Completion conflict" and .warning == null))
+  and (.tasks | any(.id == "record-archive-working" and .category == "held" and .status == "Completion conflict"))
+  and (.tasks | any(.id == "invalid-archive" and .category == "processing" and .warning == null))
+  and (.tasks | any(.id == "active-working" and .category == "processing"))
+  and ([.tasks[] | .category] | sort | group_by(.) | map({(.[0]): length}) | add == {held:2,history:2,processing:2})
+' "$TMP_ROOT/candidate-tasks.json" >/dev/null || fail "candidate archive classification or controls were incorrect"
+kill "$CANDIDATE_SERVER_PID" 2>/dev/null || true
+wait "$CANDIDATE_SERVER_PID" 2>/dev/null || true
+CANDIDATE_SERVER_PID=
+
 FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN_FILE="$TOKEN_FILE" FM_JSONL_VIEWER_PORT=0 \
   node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
@@ -210,7 +267,7 @@ jq -e '
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
     and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled"))
     and (.tasks | any(.id == "invalid-lifecycle-task" and .category == "held" and .status == "Needs reconciliation"))
-    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait"]))
+    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait","warning"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"

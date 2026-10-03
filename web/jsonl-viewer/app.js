@@ -59,6 +59,7 @@ const elements = {
   taskDetailTitle: document.getElementById("task-detail-title"),
   taskDetailMeta: document.getElementById("task-detail-meta"),
   taskDetailWait: document.getElementById("task-detail-wait"),
+  taskDetailWarning: document.getElementById("task-detail-warning"),
   taskDocumentType: document.getElementById("task-document-type"),
   taskDocumentEmpty: document.getElementById("task-document-empty"),
   taskDocumentRendered: document.getElementById("task-document-rendered"),
@@ -499,7 +500,7 @@ const taskGroups = [
 ];
 
 function taskMatches(task, query) {
-  return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""}`.toLowerCase().includes(query);
+  return `${task.id} ${task.title} ${task.status} ${task.kind || ""} ${task.project || ""} ${task.wait || ""} ${task.warning || ""}`.toLowerCase().includes(query);
 }
 
 function taskEmptyMessage(query, loadedMessage) {
@@ -528,6 +529,12 @@ function taskCard(task) {
   const documentLabel = task.documentType === "report" ? "Task report" : task.documentType === "brief" ? "Task brief" : "No document";
   metadata.textContent = [task.project, task.kind, documentLabel].filter(Boolean).join(" · ");
   button.append(badge, title, id, metadata);
+  if (task.warning) {
+    const warning = document.createElement("small");
+    warning.className = "task-warning";
+    warning.textContent = task.warning;
+    button.append(warning);
+  }
   button.addEventListener("click", () => selectTask(task.id));
   return button;
 }
@@ -578,6 +585,8 @@ function renderTaskDetail() {
   elements.taskDetailMeta.textContent = [task.id, task.project, task.kind].filter(Boolean).join(" · ");
   elements.taskDetailWait.hidden = !task.wait;
   elements.taskDetailWait.textContent = task.wait || "";
+  elements.taskDetailWarning.hidden = !task.warning;
+  elements.taskDetailWarning.textContent = task.warning || "";
   elements.openTaskReport.hidden = task.documentType !== "report";
 }
 

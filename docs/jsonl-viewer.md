@@ -28,6 +28,7 @@ Binding to every interface can expose private conversations, tool output, and th
 
 Open `http://SERVER:17847/`, enter the token in the page, and choose the task dashboard, a journal, or a task report.
 The dashboard separates processing, waiting or blocked, completed, and archived or cancelled tasks.
+An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
 `Processing` counts tasks marked active, in flight, or working only when no hold condition applies.
 `Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or need lifecycle reconciliation, so they are excluded from `Processing` even if another current record still says working.
 Each task opens its canonical Markdown report when present, otherwise its canonical brief, and labels which document type is shown.
