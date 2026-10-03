@@ -47,6 +47,11 @@ def clean_progress(value: Any) -> dict[str, str]:
     if not isinstance(value, dict) or set(value) != set(PROGRESS_FIELDS):
         raise Refusal("progress must contain exactly acceptance, current_state, remaining_gap and next_step")
     clean = {name: text(value[name], name, empty=True) for name in PROGRESS_FIELDS}
+    for name, field in clean.items():
+        if "\n" in field or "\r" in field:
+            raise Refusal(f"{name} must be one line")
+        if len(field.encode("utf-8")) > 1200:
+            raise Refusal(f"{name} exceeds 1200 UTF-8 bytes")
     if any(clean.values()) and (not clean["acceptance"] or not clean["current_state"]):
         raise Refusal("acceptance and current_state must be present once progress is recorded")
     if bool(clean["remaining_gap"]) != bool(clean["next_step"]):
@@ -75,8 +80,14 @@ def validate(record: Any, expected_id: str | None = None) -> dict[str, Any]:
     hold = record.get("hold")
     if hold is not None and (not isinstance(hold, dict) or not isinstance(hold.get("reason"), str)
                              or not isinstance(hold.get("kind"), str)
-                             or not isinstance(hold.get("until"), (str, type(None)))):
+                             or not isinstance(hold.get("until"), (str, type(None)))
+                             or not isinstance(hold.get("set"), (str, type(None)))):
         raise Refusal("hold is invalid")
+    completion = record.get("completion")
+    if completion is not None and (not isinstance(completion, dict)
+                                   or completion.get("verb") not in ("done", "merged", "reported")
+                                   or not isinstance(completion.get("date"), str)):
+        raise Refusal("completion is invalid")
     return {
         "schema": "fm-task.v1", "id": task_id,
         "title": text(record.get("title"), "title"),
@@ -86,6 +97,7 @@ def validate(record: Any, expected_id: str | None = None) -> dict[str, Any]:
         "priority": text(record.get("priority", ""), "priority", empty=True),
         "created": text(record.get("created"), "created"),
         "closed": record.get("closed") if isinstance(record.get("closed"), str) else None,
+        "completion": completion,
         "hold": hold, "deferred_until": record.get("deferred_until") if isinstance(record.get("deferred_until"), str) else None,
         "blocked_by": blocked_by, "links": links, "history": history,
         "progress": clean_progress(record.get("progress")),
@@ -214,7 +226,7 @@ def new_record(task_id: str, title: str, args: argparse.Namespace) -> dict[str, 
     return {"schema": "fm-task.v1", "id": task_id, "title": title, "body": body.strip(),
             "state": "in_flight" if args.start else "queued", "kind": args.kind or "task",
             "repo": args.repo or "", "priority": args.priority or "", "created": date.today().isoformat(),
-            "closed": None, "hold": None, "deferred_until": None, "blocked_by": [], "links": {},
+            "closed": None, "completion": None, "hold": None, "deferred_until": None, "blocked_by": [], "links": {},
             "history": [], "progress": {name: "" for name in PROGRESS_FIELDS}, "updated_at": now}
 
 
@@ -316,12 +328,17 @@ def import_snapshot(data: Path, snapshot_path: Path, archived: bool) -> int:
         hold = None
         if row.get("hold_reason"):
             hold = {"reason": str(row["hold_reason"]), "kind": str(row.get("hold_kind") or "captain"),
-                    "until": row.get("hold_until") if isinstance(row.get("hold_until"), str) else None}
+                    "until": row.get("hold_until") if isinstance(row.get("hold_until"), str) else None,
+                    "set": row.get("hold_set") if isinstance(row.get("hold_set"), str) else None}
+        completion = row.get("completion") if isinstance(row.get("completion"), dict) else None
+        if not completion or completion.get("verb") not in ("done", "merged", "reported") or not isinstance(completion.get("date"), str):
+            completion = None
+        closed = completion["date"] if completion else None
         record = {"schema": "fm-task.v1", "id": task_id, "title": text(row.get("title"), "legacy title"),
                   "body": "\n".join(str(item) for item in body_lines), "state": state,
                   "kind": str(row.get("kind") or "task"), "repo": str(row.get("repo") or ""),
                   "priority": str(row.get("priority") or ""), "created": str(row.get("since") or date.today().isoformat()),
-                  "closed": str(row.get("done")) if row.get("done") else None, "hold": hold,
+                  "closed": closed, "completion": completion, "hold": hold,
                   "deferred_until": row.get("hold_until") if isinstance(row.get("hold_until"), str) else None,
                   "blocked_by": [str(item) for item in row.get("blocked_by_ids", [])],
                   "links": links, "history": [str(item) for item in body_lines],
@@ -395,11 +412,26 @@ def main() -> int:
         if args.command == "update" and args.archive_body and record["body"] != old_body and old_body and old_body not in record["history"]:
             record["history"].append(old_body)
             changed = True
-        if args.command == "start": record["state"] = "in_flight"; record["closed"] = None; changed = True
-        elif args.command == "done": record["state"] = "done"; record["closed"] = date.today().isoformat(); changed = True
-        elif args.command == "reopen": record["state"] = "queued"; record["closed"] = None; changed = True
-        elif args.command == "archive": record["state"] = "archived"; record["closed"] = date.today().isoformat(); changed = True
-        elif args.command == "hold": record["hold"] = {"reason": args.reason, "kind": args.kind, "until": args.until}; changed = True
+        if args.command == "start":
+            if record["state"] != "in_flight" or record["closed"] is not None or record["completion"] is not None:
+                record["state"] = "in_flight"; record["closed"] = None; record["completion"] = None; changed = True
+        elif args.command == "done":
+            if record["state"] != "done":
+                closed = date.today().isoformat()
+                verb = "merged" if getattr(args, "pr", None) else "reported" if getattr(args, "report", None) else "done"
+                record["state"] = "done"; record["closed"] = closed
+                record["completion"] = {"verb": verb, "date": closed}; changed = True
+        elif args.command == "reopen":
+            if record["state"] != "queued" or record["closed"] is not None or record["completion"] is not None:
+                record["state"] = "queued"; record["closed"] = None; record["completion"] = None; changed = True
+        elif args.command == "archive":
+            if record["state"] != "archived":
+                record["state"] = "archived"; record["closed"] = record["closed"] or date.today().isoformat(); changed = True
+        elif args.command == "hold":
+            new_hold = {"reason": args.reason, "kind": args.kind, "until": args.until,
+                        "set": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")}
+            if record["hold"] is None or any(record["hold"].get(key) != new_hold[key] for key in ("reason", "kind", "until")):
+                record["hold"] = new_hold; changed = True
         elif args.command == "unhold": record["hold"] = None; changed = True
         elif args.command == "block":
             if args.by not in record["blocked_by"]: record["blocked_by"].append(args.by); changed = True

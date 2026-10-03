@@ -54,6 +54,9 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
     if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = archived ]; then
       printf 'archived\n'; return 0
     fi
+    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ]; then
+      printf 'accepted\n'; return 0
+    fi
     if printf '%s' "$projection" | jq -e '
       .recorded == true and .task_state == "in_flight" and .task_held == "no" and
        .task_blocked == "no" and .remaining_gap == "" and .next_step == ""' >/dev/null; then
@@ -67,10 +70,6 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
         '(.context_relation == "exact" or .context_relation == "disposition_only") and
          .acceptance != "" and .current_state != "" and
          .remaining_gap == "" and .next_step == ""' >/dev/null; then
-      printf 'accepted\n'; return 0
-    fi
-    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ] && \
-        [ "$values" = null ]; then
       printf 'accepted\n'; return 0
     fi
     echo "REFUSED: compact task $id is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2

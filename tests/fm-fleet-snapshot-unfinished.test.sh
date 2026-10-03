@@ -10,6 +10,8 @@ HOME_DIR="$TMP_ROOT/home"
 mkdir -p "$HOME_DIR/data" "$HOME_DIR/state" "$HOME_DIR/config" "$HOME_DIR/fakebin"
 export FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_ROOT_OVERRIDE="$ROOT"
 TASKS="$ROOT/bin/fm-tasks-axi.sh"
+printf '## In flight\n\n## Queued\n\n## Done\n\nmalformed retained terminal history\n' \
+  > "$HOME_DIR/data/backlog.md"
 
 for spec in 'active:in_flight' 'queued:queued' 'held:queued' 'blocked:in_flight' 'done:done' 'archived:archived'; do
   id=${spec%%:*}; state=${spec#*:}
@@ -52,6 +54,8 @@ assert_equals $'active\nblocked\nheld\nqueued' \
   "unfinished snapshot membership was wrong"
 printf '%s' "$unfinished" | jq -e '.query.unfinished_only==true' >/dev/null \
   || fail "unfinished snapshot did not identify its query mode"
+printf '%s' "$unfinished" | jq -e 'all(.backlog.records[];.structured==true)' >/dev/null \
+  || fail "unfinished snapshot retained malformed structural Done history"
 printf '%s' "$unfinished" | jq -e '.backlog.records|any(.[];.id=="held" and .hold_kind=="captain")' >/dev/null \
   || fail "unfinished snapshot lost a held task"
 printf '%s' "$unfinished" | jq -e '.backlog.records|any(.[];.id=="blocked" and (.blocked_by_ids|length)==1)' >/dev/null \
@@ -69,7 +73,8 @@ assert_no_grep 'done sentinel\|archived sentinel' "$FM_QUERY_LOG" \
 full=$("$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "full historical snapshot failed"
 printf '%s' "$full" | jq -e '
   .query.unfinished_only==false and
-  (.backlog.records|map(.id)|sort)==["active","archived","blocked","done","held","queued"] and
+  (.backlog.records|map(select(.structured)|.id)|sort)==["active","archived","blocked","done","held","queued"] and
+  any(.backlog.records[];.structured==false and .state=="done") and
   (.scout_reports|map(.id)|sort)==["active","archived","done"]' >/dev/null \
   || fail "full snapshot no longer preserved terminal history"
 
@@ -88,7 +93,7 @@ for mode in full unfinished; do
   done
 done
 [ "$(cut -f2 "$TMP_ROOT/unfinished.timings" | sort -u)" = 4 ] || fail "unfinished timing fixture count drifted"
-[ "$(cut -f2 "$TMP_ROOT/full.timings" | sort -u)" = 6 ] || fail "full timing fixture count drifted"
+[ "$(cut -f2 "$TMP_ROOT/full.timings" | sort -u)" = 7 ] || fail "full timing fixture count drifted"
 
 for mode in full unfinished; do
   sorted=$(cut -f1 "$TMP_ROOT/$mode.timings" | sort -n)

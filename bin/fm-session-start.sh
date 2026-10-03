@@ -579,10 +579,21 @@ print_backlog_tasks_axi_compact() {
 }
 
 print_backlog_compact() {
-  local path=$1 label=$2
+  local path=$1 label=$2 canonical_ids mixed
   subsection "$label"
   if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
     print_backlog_tasks_axi_compact "$path"
+    if [ -s "$path" ]; then
+      canonical_ids=$(python3 "$FM_ROOT/bin/fm-task-record.py" --data "$DATA" inventory \
+        | jq -c '[.tasks[].id]') || return 1
+      mixed=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+        FM_CONFIG_OVERRIDE="$CONFIG" "$FM_ROOT/bin/fm-fleet-snapshot.sh" --json --unfinished) || return 1
+      printf 'legacy-only unfinished tasks retained during partial migration:\n'
+      printf '%s' "$mixed" | jq -r --argjson canonical "$canonical_ids" '
+        [.backlog.records[] | select(.structured == true and (.id as $id | $canonical | index($id) | not))]
+        | if length == 0 then "(none)"
+          else .[] | "  " + .id + "," + .state + "," + .title end'
+    fi
     print_backlog_pointer
     return
   fi

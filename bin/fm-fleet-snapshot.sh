@@ -283,7 +283,15 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
   local backlog=${1:-$BACKLOG} canonical_json='' legacy_json
   if find "$DATA" -mindepth 2 -maxdepth 2 -type f -name task.json -print -quit 2>/dev/null | grep -q .; then
     canonical_json=$(python3 "$SCRIPT_DIR/fm-task-record.py" --data "$DATA" inventory | jq -c \
-      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" '
+      --arg path "$DATA" --arg today "$SNAPSHOT_TODAY" \
+      --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
+      def timestamp_epoch($d):
+        if ($d | type) != "string" then null
+        elif ($d | test("T")) then try ($d | fromdateiso8601) catch null
+        else try (($d + "T00:00:00Z") | fromdateiso8601) catch null end;
+      def days_between($from; $to):
+        (timestamp_epoch($from)) as $a | (timestamp_epoch($to)) as $b
+        | if $a == null or $b == null then null else (($b - $a) / 86400 | floor) end;
       .tasks as $tasks
       | (reduce $tasks[] as $task ({};
           .[$task.id] = ($task.state == "done" or $task.state == "archived"))) as $resolved
@@ -295,9 +303,9 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           priority:(if .priority == "" then null else .priority end),
           hold_reason:(.hold.reason // null),hold_kind:(.hold.kind // null),
           hold_until:(.hold.until // .deferred_until // null),
-          hold_set:null,blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
+          hold_set:(.hold.set // null),blocked_by:(.blocked_by[0] // null),blocked_by_ids:.blocked_by,
           unresolved_blocker_ids:$unresolved,blocked_reason:null,since:.created,merged:null,reported:null,
-          done:.closed,completion:{verb:(if .closed then "done" else null end),date:.closed},
+          done:.closed,completion:(.completion // {verb:(if .closed then "done" else null end),date:.closed}),
           links:(.links|to_entries|map(.value)),pr_url:(.links.pr // null),report_path:(.links.report // null),
           local_note:null,raw:null,body_lines:(.body|split("\n")),body_excerpt:(.body[:240]),
           compact_progress:.progress,
@@ -306,13 +314,18 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
                         elif .state == "in_flight" then "worker"
                         elif .state == "queued" then "queued" else "done" end),
           requires_child_metadata:(.state == "in_flight" and .hold == null and .kind != "program"),
-          hold_age_days:null,
+          hold_age_days:days_between((.hold.set // .created); $today),
           hold_bucket:(if .hold.kind != "captain" then null
                        elif ($unresolved|length) > 0 then "blocked"
                        elif (.hold.until // .deferred_until // null) > $today then "dated"
+                       elif (.hold.until // .deferred_until // null) == null
+                            and days_between((.hold.set // .created); $today) != null
+                            and days_between((.hold.set // .created); $today) >= $age_days then "aged"
                        else "live" end),
           captain_actionable:(.hold.kind == "captain" and ($unresolved|length) == 0
-                              and ((.hold.until // .deferred_until // null) <= $today))
+                              and ((.hold.until // .deferred_until // null) <= $today)
+                              and ((.hold.until // .deferred_until // null) != null
+                                   or days_between((.hold.set // .created); $today) < $age_days))
         }]}') || return 1
   fi
   if [ ! -f "$backlog" ]; then
@@ -966,7 +979,7 @@ if [ "$UNFINISHED_ONLY" = 1 ]; then
   UNFINISHED_TASK_IDS=$(printf '%s' "$BACKLOG_JSON" | jq -r \
     '.records[] | select(.structured and (.state == "queued" or .state == "in_flight")) | .id') || exit 1
   BACKLOG_JSON=$(printf '%s' "$BACKLOG_JSON" | jq -c \
-    '.records |= map(select(.structured != true or .state == "queued" or .state == "in_flight"))') || exit 1
+    '.records |= map(select(.state == "queued" or .state == "in_flight"))') || exit 1
   TASK_DISPOSITIONS=$(printf '%s' "$BACKLOG_JSON" | jq -r '.records[] | [.id,.state] | @tsv') || exit 1
 else
   TASK_DISPOSITIONS=$(fm_task_disposition_snapshot "$DATA" 2>/dev/null || true)

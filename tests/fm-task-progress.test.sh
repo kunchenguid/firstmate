@@ -59,6 +59,19 @@ rc=$?
 expect_code 6 "$rc" "branch progress update"
 assert_contains "$out" "task progress belongs to MAIN" "MAIN-only refusal was lost"
 
+rc=0
+out=$("$STATE" update-progress first --progress \
+  '{"acceptance":"line one\nline two","current_state":"state","remaining_gap":"gap","next_step":"step"}' 2>&1) || rc=$?
+expect_code 6 "$rc" "multiline progress update"
+assert_contains "$out" 'must be one line' 'multiline progress was not bounded'
+oversized=$(printf 'x%.0s' $(seq 1 1201))
+oversized_json=$(jq -cn --arg value "$oversized" \
+  '{acceptance:$value,current_state:"state",remaining_gap:"gap",next_step:"step"}')
+rc=0
+out=$("$STATE" update-progress first --progress "$oversized_json" 2>&1) || rc=$?
+expect_code 6 "$rc" "oversized progress update"
+assert_contains "$out" 'exceeds 1200 UTF-8 bytes' 'oversized progress was not bounded'
+
 changed='{"acceptance":"The requested behavior passes","current_state":"A later result exists","remaining_gap":"Final review remains","next_step":"Run final review"}'
 before=$(sha256sum "$first" | awk '{print $1}')
 out=$(FM_TASK_RECORD_TEST_FAIL_BEFORE_REPLACE=1 "$STATE" update-progress first --progress "$changed" 2>&1)
@@ -84,6 +97,11 @@ assert_equals first "$("$STATE" progress-list | jq -r '.tasks[]')" \
 held=$("$STATE" progress first) || fail "held progress read failed"
 printf '%s' "$held" | jq -e '.task_held=="yes" and .recorded==false and .next_step=="Run final review"' >/dev/null \
   || fail "held task lost progress or remained routeable"
+aged_snapshot=$(FM_SNAPSHOT_NOW=2026-11-30T00:00:00Z "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+  || fail "aged canonical hold snapshot failed"
+printf '%s' "$aged_snapshot" | jq -e '
+  any(.backlog.records[];.id=="first" and .hold_set!=null and .hold_bucket=="aged" and .captain_actionable==false)' \
+  >/dev/null || fail "canonical captain hold lost its age classification"
 "$TASKS" unhold first >/dev/null || fail "unhold failed"
 "$TASKS" block first --by second >/dev/null || fail "dependency block failed"
 blocked=$("$STATE" progress first) || fail "blocked progress read failed"
@@ -112,6 +130,12 @@ FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_
   '. "$1"; fm_cleanup_completion_mode first g1' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
   || fail "cleanup consumer rejected semantic acceptance"
 "$TASKS" 'done' first >/dev/null || fail "completion failed"
+done_date=$(jq -r '.closed' "$first")
+done_mtime=$(stat -c %Y "$first")
+sleep 1
+"$TASKS" 'done' first >/dev/null || fail "idempotent completion replay failed"
+assert_equals "$done_date" "$(jq -r '.closed' "$first")" "done replay moved the close date"
+assert_equals "$done_mtime" "$(stat -c %Y "$first")" "done replay rewrote an unchanged record"
 "$TASKS" archive second >/dev/null || fail "archive failed"
 assert_equals 0 "$("$STATE" progress-list | jq '.tasks | length')" \
   "terminal task records remained eligible for continuation"
