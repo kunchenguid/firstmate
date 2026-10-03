@@ -145,7 +145,7 @@ lock_acquire_bounded() {  # <lock>
 emit_followup() {  # <kind> <body> [reset-budget]
   local kind=$1 body=$2 reset_budget=${3-} encoded response
   fm_operational_input_encode "$kind" "$body" encoded || exit 0
-  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
+  response=$(printf '%s' "$encoded" | jq -Rs '{followup_message:.}' 2>/dev/null) || exit 0
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then
     fm_lock_release "$OWNER_LOCK"
@@ -211,7 +211,7 @@ $arm_tail
 
 $reason"
   fm_operational_input_encode turn-end-guard "$body" encoded || exit 0
-  response=$(jq -n --arg m "$encoded" '{followup_message:$m}' 2>/dev/null) || exit 0
+  response=$(printf '%s' "$encoded" | jq -Rs '{followup_message:.}' 2>/dev/null) || exit 0
 
   lock_acquire_bounded "$OWNER_LOCK" || exit 0
   if ! park_still_ours || ! current_session_still_ours || [ -e "$STATE/.afk" ]; then

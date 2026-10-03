@@ -226,7 +226,7 @@ if [ "$GUARD_RC" -eq 4 ]; then
   case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
   CATCHUP_REASON=""
   case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
-  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
+  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --rawfile reason <(printf '%s' "$CATCHUP_REASON") \
     '{pending:true,blockers:$blockers,reason:$reason}')
 fi
 
@@ -326,7 +326,7 @@ EOF
       cnt=$(printf '%s' "$repo_rows" | jq 'length')
       [ "$returned" -gt "$FM_BEARINGS_PR_LIMIT" ] && ncapped=$((ncapped + 1))
       npr=$((npr + cnt))
-      rows=$(jq -n --argjson a "$rows" --argjson b "$repo_rows" '$a + $b')
+      rows=$(printf '%s\n%s\n' "$rows" "$repo_rows" | jq -s 'add')
     done
     rm -f "$tasks_file"
     PR_REPOS_SHOWN=$nrepos
@@ -351,7 +351,8 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
-MODEL=$(printf '%s' "$SNAP" | jq \
+# Stream API-derived PR rows alongside the snapshot rather than through argv.
+MODEL=$(printf '%s\n%s\n' "$SNAP" "$CANDIDATE_PRS" | jq -s \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg today "$BEARINGS_TODAY" \
@@ -379,9 +380,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson return_catchup "$RETURN_CATCHUP" \
-  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
-  def trunc($n): if . == null then null else
+  --rawfile return_catchup <(printf '%s' "$RETURN_CATCHUP") \
+  "$FM_LANDED_JQ_DEFS"'
+  ($return_catchup | fromjson) as $return_catchup
+  | def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
   def fit($n):
     tostring | gsub("\\s+"; " ")
@@ -438,7 +440,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | $groups[]
        | select(length > $i)
        | .[$i]][:$n];
-  ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
+  .[1] as $candidate_prs
+  | .[0]
+  | ($fields | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != ""))) as $fl
   | (($fl | index("bodies")) != null) as $f_bodies
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
