@@ -341,17 +341,66 @@ fm_backend_cmux_surface_id_for_workspace() {  # <workspace_id>
     | jq -r '.panes[0] // {} | .selected_surface_id // (.surface_ids[0] // empty)' 2>/dev/null
 }
 
+# fm_backend_cmux_workspace_id_for_ref: the live workspace uuid whose
+# short ref (e.g. `workspace:32`) equals <ref>, or empty. Refs are only listed
+# under `--id-format both` (verified live on 0.64.25: `--id-format uuids` sets
+# every `ref` to null).
+fm_backend_cmux_workspace_id_for_ref() {  # <ref>
+  local ref=$1
+  fm_backend_cmux_cli workspace list --json --id-format both 2>/dev/null \
+    | jq -r --arg want "$ref" '.workspaces[]? | select(.ref == $want) | .id' 2>/dev/null | head -1
+}
+
+# fm_backend_cmux_created_workspace_ref: the `workspace:<n>` ref that
+# new-workspace prints on success (`OK workspace:32`, verified live on
+# 0.64.25 whatever `--id-format` says), or empty when the output has none.
+fm_backend_cmux_created_workspace_ref() {  # <new-workspace-output>
+  printf '%s\n' "$1" | sed -n 's/^OK \(workspace:[0-9][0-9]*\).*$/\1/p' | tail -1
+}
+
+# fm_backend_cmux_resolve_created_workspace: the uuid of the workspace just
+# created, resolved only from the ref cmux printed at creation. A scoped-title
+# lookup is deliberately not used: cmux does not enforce unique titles, so a
+# concurrent client's workspace could match. A freshly created workspace can
+# lag in `workspace list` (verified live: a lookup right after new-workspace
+# returned empty and succeeded about half a second later), so the ref lookup
+# is retried up to 15 times, 0.2s apart. Fails at once without a printed ref.
+fm_backend_cmux_resolve_created_workspace() {  # <ref-or-empty>
+  local ref=$1 i wsid
+  [ -n "$ref" ] || return 1
+  i=0
+  while [ "$i" -lt 15 ]; do
+    [ "$i" -eq 0 ] || sleep 0.2
+    wsid=$(fm_backend_cmux_workspace_id_for_ref "$ref")
+    if [ -n "$wsid" ]; then
+      printf '%s' "$wsid"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # fm_backend_cmux_create_task: create the task's workspace (one surface),
 # refusing an existing live <label> (finding #6: cmux enforces no uniqueness
-# itself). Resolves the fresh workspace's default surface via one list-panes
-# call (finding: a freshly created workspace already has exactly one surface,
-# so no separate new-surface call is needed). --focus false is passed for
-# defense in depth though verified to already be the default (finding:
-# workspace/surface/pane create all default focus to false) - no
-# focus-restore dance is needed, unlike zellij. Echoes "<workspace_id>
-# <surface_id>" on success.
+# itself). Resolves the fresh workspace's id from the ref new-workspace
+# prints (fm_backend_cmux_resolve_created_workspace), then its default
+# surface via one list-panes call (finding: a freshly created workspace
+# already has exactly one surface, so no separate new-surface call is
+# needed). --focus false is passed for defense in depth though verified to
+# already be the default (finding: workspace/surface/pane create all default
+# focus to false) - no focus-restore dance is needed, unlike zellij. When
+# creation succeeds but the printed ref never resolves, the workspace is
+# closed best-effort by that printed ref, and the error names the leftover
+# title only if that close does not report success. Without a printed ref,
+# nothing is closed (a title match is never trusted for a close) and the error
+# names the leftover title. When the surface fails to resolve, the
+# ref-resolved workspace is closed by uuid through
+# fm_backend_cmux_close_workspace, so a retry is not refused on its leftover
+# duplicate title.
+# Echoes "<workspace_id> <surface_id>" on success.
 fm_backend_cmux_create_task() {  # <label> <cwd>
-  local label=$1 cwd=$2 title dup out wsid sfid
+  local label=$1 cwd=$2 title dup out ref wsid sfid
   title=$(fm_backend_cmux_scoped_title "$label")
   dup=$(fm_backend_cmux_workspace_id_for_label "$title")
   if [ -n "$dup" ]; then
@@ -362,10 +411,21 @@ fm_backend_cmux_create_task() {  # <label> <cwd>
     echo "error: cmux new-workspace failed for '$title': $out" >&2
     return 1
   }
-  wsid=$(fm_backend_cmux_workspace_id_for_label "$title")
-  [ -n "$wsid" ] || { echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2; return 1; }
+  ref=$(fm_backend_cmux_created_workspace_ref "$out")
+  wsid=$(fm_backend_cmux_resolve_created_workspace "$ref") || {
+    if [ -n "$ref" ] && fm_backend_cmux_cli close-workspace --workspace "$ref" >/dev/null 2>&1; then
+      echo "error: could not resolve a cmux workspace id for '$title' after creation" >&2
+    else
+      echo "error: could not resolve a cmux workspace id for '$title' after creation; close the leftover cmux workspace '$title' by hand" >&2
+    fi
+    return 1
+  }
   sfid=$(fm_backend_cmux_surface_id_for_workspace "$wsid")
-  [ -n "$sfid" ] || { echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2; return 1; }
+  [ -n "$sfid" ] || {
+    fm_backend_cmux_close_workspace "$wsid"
+    echo "error: could not resolve the default surface for cmux workspace '$title' ($wsid)" >&2
+    return 1
+  }
   printf '%s %s' "$wsid" "$sfid"
 }
 
@@ -616,13 +676,20 @@ fm_backend_cmux_window_of_workspace() {  # <workspace_id> -> "<window_id> <count
 # leaving that window a fresh default workspace (never an fm-<home>- title, so
 # recovery/list_live ignore it) - cmux's own "closed the last tab" outcome.
 fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
-  local expected_label=${3:-} wsid wininfo win count
+  local expected_label=${3:-}
   if [ -n "$expected_label" ]; then
     fm_backend_cmux_target_ready "$1" "$expected_label" || return 0
   else
     fm_backend_cmux_parse_target "$1" || return 0
   fi
-  wsid=$FM_BACKEND_CMUX_WORKSPACE
+  fm_backend_cmux_close_workspace "$FM_BACKEND_CMUX_WORKSPACE"
+}
+
+# fm_backend_cmux_close_workspace: best-effort close of one workspace by uuid,
+# adding the throwaway sibling first when it is the last in its window (see
+# fm_backend_cmux_kill).
+fm_backend_cmux_close_workspace() {  # <workspace_id>
+  local wsid=$1 wininfo win count
   wininfo=$(fm_backend_cmux_window_of_workspace "$wsid")
   win=${wininfo%% *}
   count=${wininfo##* }
