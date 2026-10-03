@@ -69,6 +69,8 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   keys     every named key send, one per line.
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
+#   cursor   optional zero-based cursor row for that pane, so a modelled
+#            screen can park the cursor inside the shape under test.
 #   key-times  every named key with its wall-clock send time.
 #   devin    optional Devin screen model, which capture-pane renders as the
 #            rows devin 3000.11.1 draws: `running`, `armed`, `cancelled`,
@@ -165,6 +167,8 @@ case "${1:-}" in
           # A modelled Devin screen parks the cursor on its composer row.
           if [ -f "$D/devin" ]; then
             devin_screen "$(cat "$D/devin")" | awk '/^❭ /{ print NR - 1; exit }'
+          elif [ -f "$D/cursor" ]; then
+            cat "$D/cursor"; printf '\n'
           else
             printf '1\n'
           fi
@@ -853,6 +857,75 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+# Issue #5000: a Pi worker parked on Codex's usage-limit banner, whose
+# recorded status never followed the failed turn. The modelled pane is the
+# shape pi 0.85.1 draws (banner, blank, solid rule, blank composer, solid
+# rule, footer) with a stale `Working...` transcript row above it, which is
+# what makes the tmux identity probe report the pi as working - the same stale
+# status herdr's integration leaves behind. exit must still type /quit: the
+# banner over the empty pair proves the turn ended. The counter-case pins the
+# boundary the banner does not cross: the same stale status over any other
+# error text keeps refusing without typing a byte.
+test_pi_parked_on_codex_usage_limit_banner_still_exits() {
+  local dir out rc banner
+  banner='Error: Codex error: The usage limit has been reached'
+  dir=$(new_case pibanner)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
+  printf '6' > "$dir/fake/cursor"
+  # The modelled screen is pi 0.85.1's, so pin the adapter to that release
+  # rather than to whatever pi this machine happens to have installed.
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a pi parked on the Codex usage-limit banner should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = "/quit" ] || fail "the exit command should be typed over the settled banner, got: $(literals "$dir")"
+  # The same screen under a pi release outside the adapter's pin set is not
+  # proof: the version-pinned adapter refuses and nothing is typed.
+  dir=$(new_case pibanner-unpinned)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
+  printf '6' > "$dir/fake/cursor"
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.0.1 run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "an unpinned pi release must not prove the banner screen empty"$'\n'"$out"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed under an unpinned pi release, got: $(literals "$dir")"
+  # With no override, fm-control names the task's recorded Pi executable to the
+  # adapter, so only that executable's release decides. A pi-signed worker on a
+  # pinned pi-signed exits over the banner even beside an unpinned pi, and a pi
+  # worker on that same install keeps the refusal.
+  local exe_harness want_quit
+  for exe_harness in pi-signed pi; do
+    dir=$(new_case "pibanner-recorded-$exe_harness")
+    add_task "$dir" t1 "$exe_harness"
+    alive_as "$dir" pi
+    printf 'Working...\n hello there\n\n %s\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' "$banner" > "$dir/fake/pane"
+    printf '6' > "$dir/fake/cursor"
+    printf '#!/bin/sh\nprintf "%%s\\n" 9.9.9\n' > "$dir/fakebin/pi"
+    printf '#!/bin/sh\nprintf "%%s\\n" 1.0.0\n' > "$dir/fakebin/pi-signed"
+    chmod +x "$dir/fakebin/pi" "$dir/fakebin/pi-signed"
+    out=$(unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE; run_control "$dir" t1 exit); rc=$?
+    want_quit=0
+    [ "$exe_harness" = pi-signed ] && want_quit=1
+    if [ "$want_quit" = 1 ]; then
+      expect_code 0 "$rc" "a recorded pi-signed worker on a pinned pi-signed should exit over the banner"$'\n'"$out"
+      [ "$(literals "$dir")" = "/quit" ] || fail "the pi-signed worker should receive /quit, got: $(literals "$dir")"
+    else
+      [ "$rc" -ne 0 ] || fail "a recorded pi worker on an unpinned pi must keep the refusal"$'\n'"$out"
+      [ -z "$(literals "$dir")" ] || fail "nothing may be typed for the unpinned pi worker, got: $(literals "$dir")"
+    fi
+  done
+  dir=$(new_case pibanner-other)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf 'Working...\n hello there\n\n Error: Codex error: Something else went wrong\n\n────────────────────────\n\n────────────────────────\n/wt\n0.0%%/272k (auto)   gpt-5.5 • medium\n' > "$dir/fake/pane"
+  printf '6' > "$dir/fake/cursor"
+  out=$(FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1 run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale working status over an unrecognized error must still refuse"$'\n'"$out"
+  assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be typed into an unproven composer, got: $(literals "$dir")"
+  pass "fm-control exit: a pi parked on the Codex usage-limit banner with a stale working status still receives /quit on a pinned pi release, while any other error text or an unpinned release keeps the refusal"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -1100,6 +1173,7 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_pi_parked_on_codex_usage_limit_banner_still_exits
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

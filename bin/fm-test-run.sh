@@ -357,6 +357,7 @@ family_for_basename() {
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
+    fm-composer-pi-codex-banner-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
     fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
@@ -730,6 +731,7 @@ tests/fm-codex-continuity-live-e2e.test.sh 108
 tests/fm-codex-hook-layer-live-e2e.test.sh 108
 tests/fm-composer-codex-idle-live-e2e.test.sh 77
 tests/fm-composer-matrix-live-e2e.test.sh 51
+tests/fm-composer-pi-codex-banner-live-e2e.test.sh 60
 tests/fm-contributions.test.sh 140911
 tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794

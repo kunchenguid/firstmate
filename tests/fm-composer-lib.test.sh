@@ -21,6 +21,10 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
+# Pin the Pi banner adapter to a verified release for portable fixtures.
+# The live guard supplies the installed `pi --version` instead.
+FM_COMPOSER_PI_ADAPTER_VERSION=${FM_COMPOSER_PI_ADAPTER_VERSION:-0.85.1}
+
 # classify <bordered> <content> [idle_re] -> echoes the verdict.
 classify() { fm_composer_classify_content "$@"; }
 
@@ -670,6 +674,155 @@ test_matrix_pi_dollar_status_footer_is_empty() {
   pass "matrix: a dollar-first pi status footer reads empty; dead shells still refuse"
 }
 
+test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status() {
+  # Issue #5000: pi ended its turn on Codex's usage-limit banner (rendered
+  # live by pi 0.85.1 as `Error: Codex error: The usage limit has been
+  # reached`, red, directly above the separator pair). Herdr learns pi's
+  # status only from pi's own lifecycle integration, so a status that never
+  # followed the failed turn stays `working` (or herdr's `unknown`
+  # placeholder) for as long as the worker sits there, and the pair used to
+  # read `unknown` on exactly the pane fm-control must reclaim. The banner
+  # plus a solid opening rule plus an empty interior is the settled-turn proof
+  # the status failed to deliver, so every registered status now reads empty.
+  local banner screen st id out
+  banner='Error: Codex error: The usage limit has been reached'
+  screen=$' hello there\n\n '"$banner"$'\n\n────────────────────────\n\n────────────────────────\n/path/to/worktree\n0.0%/272k (auto)   gpt-5.5 • medium'
+  for st in idle 'done' working unknown blocked; do
+    id=$(printf 'pi\t%s' "$st")
+    assert_screen "banner over an empty pair with pi $st on herdr" empty "$CAPS_STYLED" "$screen" '' "$id"
+    assert_screen "banner over an empty pair with pi $st on tmux" empty "$CAPS_TMUX" "$screen" 5 "$id"
+  done
+  # The styled row pi actually draws: a red truecolor banner. Styling neither
+  # hides the banner nor is required for it.
+  assert_screen "styled red banner with a stale working status" empty "$CAPS_STYLED" \
+    $' hello there\n\n \e[38;2;204;102;102m'"$banner"$'\e[39m\n\n────────────────────────\n\n────────────────────────\n/path\n0.0%/272k (auto)' \
+    '' "$(printf 'pi\tworking')"
+  # What the banner does NOT relax: the identity must still name a live pi.
+  # A dead shell replaying this screen has no pi identity, and a foreign
+  # identity is not pi's composer.
+  assert_screen "banner with the probe absent" unknown "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "banner with a non-pi identity" unknown "$CAPS_STYLED" "$screen" '' "$(printf 'zsh\t')"
+  assert_screen "banner without identity capability" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "banner on a plain backend" unknown "$CAPS_PLAIN" "$screen"
+  # pi 0.87.1 draws a fixed bug-report hint directly below EVERY error banner
+  # ("If this looks like a pi bug, /bug sends a report to the developers."),
+  # so it now sits between the banner and the separator pair on live pi. That
+  # hint is vendor boilerplate attached to the banner itself, not a real
+  # transcript row, so one occurrence of it is tolerated and the banner
+  # beneath it still settles a stale status.
+  hint='If this looks like a pi bug, /bug sends a report to the developers.'
+  screen_hint=$' hello there\n\n '"$banner"$'\n '"$hint"$'\n\n────────────────────────\n\n────────────────────────\n/path/to/worktree\n0.0%/272k (auto)   gpt-5.5 • medium'
+  for st in idle 'done' working unknown blocked; do
+    id=$(printf 'pi\t%s' "$st")
+    assert_screen "banner with the bug-report hint over an empty pair with pi $st" empty \
+      "$CAPS_STYLED" "$screen_hint" '' "$id"
+  done
+  # Two hints in a row are not tolerated: only one boilerplate row is ever
+  # drawn per error, so a second one is real content and keeps refusing.
+  assert_screen "two bug-report hints in a row stay unknown" unknown "$CAPS_STYLED" \
+    "${screen_hint/$hint/$hint$'\n'  $hint}" '' "$(printf 'pi\tworking')"
+  # A stale status is the ONLY thing the banner settles: a different error
+  # text, a near-miss spelling, or the banner in a transcript row that is not
+  # the last one above the pair keep the strict rule. Every divergence case
+  # is asserted so the banner match cannot go quietly vacuous.
+  id=$(printf 'pi\tworking')
+  assert_screen "another provider error stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/Error: Anthropic error: The usage limit has been reached}" '' "$id"
+  assert_screen "a near-miss banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/Error: Codex error: The usage limit has been reached. Try again later}" '' "$id"
+  assert_screen "a case-changed banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/error: codex error: the usage limit has been reached}" '' "$id"
+  assert_screen "a worker discussing the banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/I saw: Error: Codex error: The usage limit has been reached}" '' "$id"
+  assert_screen "a transcript row under the banner stays unknown" unknown "$CAPS_STYLED" \
+    "${screen/$banner/$banner$'\n'  retrying with a fresh prompt}" '' "$id"
+  # A RUNNING pi retitles its opening rule (`── ⠏ Working ──`, live pi
+  # 0.85.1), which is no longer a solid separator: the pair dissolves and the
+  # banner above it proves nothing, so an active turn can never read empty.
+  assert_screen "a working title in the opening rule stays unknown" unknown "$CAPS_STYLED" \
+    $' '"$banner"$'\n\n── ⠏ Working ──────────────\n\n────────────────────────\n/path' '' "$id"
+  # Typed text under the banner is still pending, never empty.
+  assert_screen "typed text under the banner stays pending" pending "$CAPS_STYLED" \
+    $' '"$banner"$'\n\n────────────────────────\nfix the flaky test\n────────────────────────\n/path' '' "$id"
+  # The exact banner is declared once; a caller that respells it drifts.
+  out=$(printf '%s' "$banner" | grep -cE "$FM_COMPOSER_PI_TERMINAL_ERROR_RE_DEFAULT")
+  [ "$out" = 1 ] || fail "the declared banner pattern must match pi's rendering exactly, got $out matches"
+  pass "matrix: pi's Codex usage-limit banner over an empty pair settles a stale status; probe-absent, foreign, near-miss, displaced, running, and typed shapes keep refusing"
+}
+
+test_matrix_pi_codex_banner_requires_pinned_adapter_version() {
+  # Outside the pin set the named adapter must refuse the banner-as-empty
+  # verdict so an unpinned Pi rendering cannot prove emptiness.
+  local banner screen id out
+  banner='Error: Codex error: The usage limit has been reached'
+  screen=$' hello there\n\n '"$banner"$'
+\n────────────────────────\n\n────────────────────────\n/path\n0.0%'
+  id=$(printf 'pi\tworking')
+  FM_COMPOSER_PI_ADAPTER_VERSION=0.0.0
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  [ "$out" = unknown ] \
+    || fail "unpinned adapter version must not settle a stale status via the banner, got '$out'"
+  FM_COMPOSER_PI_ADAPTER_VERSION=0.85.1
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id")
+  [ "$out" = empty ] \
+    || fail "pinned adapter version must still settle the banner, got '$out'"
+  # Production callers never set the override: the adapter reads the installed
+  # `pi --version` itself, so a pinned install settles the banner and an
+  # unpinned or absent pi keeps refusing.
+  # Hermetic PATH: a private dir holding only the fake Pi executables plus the
+  # host tools the classifier needs, so no host pi or pi-signed is ever found.
+  local fakebin tool src pi_v signed_v exe want n case_
+  fakebin=$(mktemp -d "${TMPDIR:-/tmp}/fm-composer-pi-version.XXXXXX")
+  for tool in head tr sed awk grep cat wc cut env dirname basename sort uniq; do
+    src=$(command -v "$tool" 2>/dev/null) || continue
+    case "$src" in /*) ln -s "$src" "$fakebin/$tool" ;; esac
+  done
+  # Fields: installed pi version, installed pi-signed version, the executable a
+  # caller that knows the task names in FM_COMPOSER_PI_EXECUTABLE ('-' = unset,
+  # the all-installed-pinned fallback), and the expected verdict.
+  for case_ in "0.87.1 absent - empty" "1.0.0 absent - empty" "9.9.9 absent - unknown" \
+    "absent 0.99.2 - empty" "absent 9.9.9 - unknown" "0.99.2 9.9.9 - unknown" \
+    "9.9.9 0.99.2 - unknown" "0.85.1 1.0.0 - empty" "absent absent - unknown" \
+    "9.9.9 0.99.2 pi-signed empty" "0.99.2 9.9.9 pi empty" \
+    "0.99.2 9.9.9 pi-signed unknown" "9.9.9 0.99.2 pi unknown" \
+    "0.99.2 absent pi-signed unknown" "absent 1.0.0 pi-signed empty"; do
+    read -r pi_v signed_v exe want <<< "$case_"
+    rm -f "$fakebin/pi" "$fakebin/pi-signed" "$fakebin/count"
+    if [ "$pi_v" != absent ]; then
+      printf '#!/bin/sh\necho pi >> "%s/count"\nprintf "%%s\\n" %s\n' "$fakebin" "$pi_v" > "$fakebin/pi"
+      chmod +x "$fakebin/pi"
+    fi
+    if [ "$signed_v" != absent ]; then
+      printf '#!/bin/sh\necho signed >> "%s/count"\nprintf "%%s\\n" %s\n' "$fakebin" "$signed_v" > "$fakebin/pi-signed"
+      chmod +x "$fakebin/pi-signed"
+    fi
+    out=$(
+      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      # shellcheck disable=SC2030 # each case runs in its own subshell on purpose
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
+      PATH="$fakebin"
+      fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id"
+    )
+    [ "$out" = "$want" ] \
+      || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v executable=$exe must read '$want', got '$out'"; }
+    # Each executable runs once per process across two classifications.
+    rm -f "$fakebin/count"
+    (
+      unset FM_COMPOSER_PI_ADAPTER_VERSION FM_COMPOSER_PI_EXECUTABLE _FM_COMPOSER_PI_VERSION_PI _FM_COMPOSER_PI_VERSION_SIGNED
+      # shellcheck disable=SC2031 # each case runs in its own subshell on purpose
+      [ "$exe" = - ] || export FM_COMPOSER_PI_EXECUTABLE="$exe"
+      PATH="$fakebin"
+      fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
+      fm_composer_classify_screen "$CAPS_STYLED" "$screen" '' "$id" >/dev/null
+    )
+    n=$(sort "$fakebin/count" 2>/dev/null | uniq -c | awk '$1 != 1' | wc -l | tr -d ' ')
+    [ "$n" = 0 ] \
+      || { rm -rf "$fakebin"; fail "pi=$pi_v pi-signed=$signed_v: each Pi executable must run at most once per process"; }
+  done
+  rm -rf "$fakebin"
+  pass 'pi codex banner adapter requires a pinned version: only the named Pi executable when the caller knows it, every installed one otherwise'
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -1033,6 +1186,8 @@ test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
+test_matrix_pi_codex_usage_limit_banner_settles_a_stale_status
+test_matrix_pi_codex_banner_requires_pinned_adapter_version
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
