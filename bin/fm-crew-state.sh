@@ -16,8 +16,13 @@
 # The determinism lives entirely here - run-step / pane / log reads, fixed
 # mapping logic, and terminal passed-run PR detail from bounded evidence only,
 # with no heuristics and no LLM.
-# For a terminal passed no-mistakes run, a matching merge-poll retirement
+# A run record states only what that run did; it never claims a forge outcome
+# or "green" itself. For a terminal passed no-mistakes run, the PR disposition
+# is read for the task's recorded pr= identity: a matching merge-poll retirement
 # receipt is local merged evidence; otherwise a 5s-bounded forge read is tried.
+# Each disposition names its source. Without a recorded pr=, the run's own PR
+# may be read for open or closed but never proves a merge, and a run PR that
+# differs from the recorded one is a conflict (pr_disposition owns the rule).
 # FM_CREW_STATE_NO_FORGE=1 keeps the receipt read but skips the forge fallback.
 # An absent or unreadable PR identity yields an honest unknown, never an
 # optimistic merged claim.
@@ -39,6 +44,14 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
+#      Code identity alone is not enough either: every route first requires the
+#      run to belong to this task's incarnation, created at or after the task's
+#      task_started= (else spawn_gen=) epoch (fm_nm_run_in_incarnation in
+#      bin/fm-nm-run-lib.sh). A refresh task that reuses an existing PR branch at
+#      an unchanged head otherwise reads the earlier task's finished run as its
+#      own result. When the branch's newest run predates the task, no run is
+#      attributed, current pane or status evidence answers, and that line names
+#      the ignored run.
 #      A run EXECUTING on this crew's branch (pending, running, fixing or ci -
 #      the detail-object vocabulary, which carries all four; the selected route
 #      re-reads it by id and the legacy route passes the same detail SHAPE, and
@@ -97,27 +110,37 @@
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed/passed-with-override/passed-with-skips -> done,
-#      failed -> failed, cancelled -> unknown (no verdict unless the green
+#      failed -> failed, cancelled -> unknown (no verdict unless the passed-CI
 #      delivery safeguard below applies). A cancelled outcome takes precedence
 #      over an interrupted step's failed status or outstanding gate findings;
-#      it does not rewrite historical events or backlog records.
+#      it does not rewrite historical events or backlog records. Its recorded
+#      reason stays visible, so a deliberate abort reads as one and never as a
+#      failure (cancelled_run_detail).
 #      passed-with-override is a passing outcome
 #      carrying an explicitly approved Test or CI exception (no-mistakes' own
-#      vocabulary), read identically to a clean passed. passed-with-skips is
+#      vocabulary), read as done like a clean passed but with the exception
+#      and its reason kept visible, never as green. passed-with-skips is
 #      also a passing outcome (publication or CI verification was
 #      automatically skipped, no-mistakes' own vocabulary), read as done but
 #      with that skip kept visible in the detail, unlike a clean passed.
 #      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
-#      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
-#      a check of the full ci-step log overrides working -> done once checks read
-#      green, so a green PR is never silently read as still-validating. And a
+#      checks" from "checks passed, waiting on merge" (see nm_ci_checks_state) -
+#      a check of the full ci-step log overrides working -> done once the log
+#      reports checks passed, so a ready PR is never silently read as
+#      still-validating. A log reporting no CI checks at all stays working as a
+#      wait: CI that has not run is never green. And a
 #      terminal failed or cancelled run whose only unfinished step is the ci
 #      monitor, after every substantive step completed (an explicitly skipped
-#      rebase is allowed) and the ci log's last marker reads checks green,
+#      rebase is allowed) and the ci log's last marker reports checks passed,
 #      also reads done only when the bounded forge read confirms the PR is
-#      open (held-for-merge) or merged. Closed, missing, unreadable, or skipped
-#      forge evidence leaves the original failed or unknown classification.
+#      open (held-for-merge) or, for the recorded pr=, merged. Closed, missing,
+#      unreadable, or skipped forge evidence leaves the original failed or
+#      unknown classification.
+#      A finished run's record is not the worker's current word: when the
+#      resolved status declaration was written after the run started and maps to
+#      a different state, it is shown beside the run-step verdict with its
+#      source.
 #      A monitor whose only remaining job is to observe a merge decision must not
 #      convert the absence of that decision into a failure verdict
 #      (nm_reclassify_failed_run_as_held_green). In the
@@ -203,10 +226,13 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line and exit 0. Detail is optional. EMIT_NOTE, when
+# set, is appended as its own component to whichever line answers.
+EMIT_NOTE=""
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
+  [ -n "$EMIT_NOTE" ] && line="$line${SEP}$EMIT_NOTE"
   printf '%s\n' "$line"
   exit 0
 }
@@ -224,6 +250,18 @@ KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 REMOTE_HOST=$(meta_value remote_host)
 [ -n "$KIND" ] || KIND=ship
+# The task incarnation's start epoch (bin/fm-spawn.sh records task_started= on a
+# fresh spawn and carries it across relaunches). A record without it falls back
+# to its spawn_gen= epoch; neither leaves attribution unbounded.
+TASK_START=$(meta_value task_started)
+case "$TASK_START" in
+  ''|*[!0-9]*)
+    TASK_START=$(meta_value spawn_gen)
+    TASK_START=${TASK_START#s}
+    TASK_START=${TASK_START%%.*}
+    case "$TASK_START" in ''|*[!0-9]*) TASK_START='' ;; esac
+    ;;
+esac
 
 # A torn-down (or never-created) worktree has no current state to read. A
 # remote secondmate's recorded worktree is a path on ITS host, so the local
@@ -411,94 +449,112 @@ change_read_record_bounded() {  # <host> <number>
   FM_PR_RECORD_MERGED=$merged
 }
 
-passed_pr_detail() {
-  local provider url host path number owner repo raw_pr state_lc
+# The PR disposition a finished run is reported with, as PR_DISPOSITION
+# (open|merged|closed|other|unknown) and PR_DISPOSITION_TEXT, which always names
+# where the claim came from. A run record never claims a forge outcome itself:
+# the PR is read from the forge (or a merge-poll retirement receipt, which is
+# the merge poll's own forge observation), and a merged claim needs the task's
+# recorded pr= identity. The run's own PR field may identify the PR only while
+# no pr= is recorded, and then never proves a merge; a run PR that differs from
+# the recorded one is a conflict, never either PR's state.
+pr_disposition() {
+  local provider url host path number raw_pr label state_lc run_url=''
+  PR_DISPOSITION=unknown
   raw_pr=$(strip_quotes "$(nm_field pr)")
   if fm_pr_url_parse "$raw_pr"; then
+    run_url=$FM_PR_URL
     provider=$FM_PR_PROVIDER
     url=$FM_PR_URL
     host=$FM_PR_HOST
     path=$FM_PR_PATH
     number=$FM_PR_NUMBER
-  elif fm_pr_metadata_identity_parse "$META"; then
+    label='run PR'
+  fi
+  if fm_pr_metadata_identity_parse "$META"; then
+    if [ -n "$run_url" ] && { [ "$FM_PR_META_PROVIDER" != "$provider" ] || [ "$FM_PR_META_HOST" != "$host" ] \
+      || [ "$FM_PR_META_PATH" != "$path" ] || [ "$FM_PR_META_NUMBER" != "$number" ]; }; then
+      PR_DISPOSITION_TEXT="PR state unknown (run PR $run_url differs from recorded PR $FM_PR_META_URL)"
+      return
+    fi
     provider=$FM_PR_META_PROVIDER
     url=$FM_PR_META_URL
     host=$FM_PR_META_HOST
     path=$FM_PR_META_PATH
     number=$FM_PR_META_NUMBER
-  else
-    printf 'run passed: PR state unknown (no PR identity)'
+    label='recorded PR'
+  elif [ -z "$run_url" ]; then
+    PR_DISPOSITION_TEXT='PR state unknown (no PR identity)'
     return
   fi
-  if fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
+  if [ "$label" = 'recorded PR' ] \
+    && fm_pr_poll_retirement_receipt_valid "$STATE" "$ID" \
     && [ "$FM_PR_RETIRE_PROVIDER" = "$provider" ] \
     && [ "$FM_PR_RETIRE_URL" = "$url" ] \
     && [ "$FM_PR_RETIRE_HOST" = "$host" ] \
     && [ "$FM_PR_RETIRE_PATH" = "$path" ] \
     && [ "$FM_PR_RETIRE_NUMBER" = "$number" ]; then
-    printf 'run passed: PR merged'
+    PR_DISPOSITION=merged
+    PR_DISPOSITION_TEXT='recorded PR merged (merge receipt)'
     return
   fi
   if [ "${FM_CREW_STATE_NO_FORGE:-0}" = 1 ]; then
-    printf 'run passed: PR state unknown (forge read skipped)'
+    PR_DISPOSITION_TEXT="$label state unknown (forge read skipped)"
     return
   fi
 
   case "$provider" in
-    github)
-      owner=${path%%/*}
-      repo=${path#*/}
-      if ! pr_read_record_bounded "$owner" "$repo" "$number"; then
-        printf 'run passed: PR state unknown (unreadable)'
-        return
-      fi
-      if [ "$FM_PR_RECORD_MERGED" = true ]; then
-        printf 'run passed: PR merged'
-        return
-      fi
-      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
-      case "$state_lc" in
-        open)   printf 'run passed: PR open' ;;
-        closed) printf 'run passed: PR closed' ;;
-        *)      printf 'run passed: PR state %s' "$state_lc" ;;
-      esac
-      ;;
-    gitlab)
-      if ! mr_read_record_bounded "$host" "$path" "$number"; then
-        printf 'run passed: PR state unknown (unreadable)'
-        return
-      fi
-      if [ "$FM_PR_RECORD_MERGED" = true ]; then
-        printf 'run passed: PR merged'
-        return
-      fi
-      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
-      case "$state_lc" in
-        open|opened) printf 'run passed: PR open' ;;
-        closed)      printf 'run passed: PR closed' ;;
-        *)           printf 'run passed: PR state %s' "$state_lc" ;;
-      esac
-      ;;
-    gerrit)
-      if ! change_read_record_bounded "$host" "$number"; then
-        printf 'run passed: PR state unknown (unreadable)'
-        return
-      fi
-      if [ "$FM_PR_RECORD_MERGED" = true ]; then
-        printf 'run passed: PR merged'
-        return
-      fi
-      # Gerrit spells an open change NEW and a closed one ABANDONED.
-      state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
-      case "$state_lc" in
-        new)       printf 'run passed: PR open' ;;
-        abandoned) printf 'run passed: PR closed' ;;
-        *)         printf 'run passed: PR state %s' "$state_lc" ;;
-      esac
-      ;;
+    github) pr_read_record_bounded "${path%%/*}" "${path#*/}" "$number" ;;
+    gitlab) mr_read_record_bounded "$host" "$path" "$number" ;;
+    gerrit) change_read_record_bounded "$host" "$number" ;;
+    *) false ;;
+  esac || {
+    PR_DISPOSITION_TEXT="$label state unknown (unreadable)"
+    return
+  }
+  if [ "$FM_PR_RECORD_MERGED" = true ]; then
+    if [ "$label" = 'recorded PR' ]; then
+      PR_DISPOSITION=merged
+      PR_DISPOSITION_TEXT='recorded PR merged (forge)'
+    else
+      PR_DISPOSITION_TEXT='run PR merge unconfirmed (no recorded PR identity)'
+    fi
+    return
+  fi
+  # GitLab spells an open merge request opened; Gerrit spells an open change NEW
+  # and a closed one ABANDONED.
+  state_lc=$(printf '%s' "$FM_PR_RECORD_STATE" | tr '[:upper:]' '[:lower:]')
+  case "$state_lc" in
+    open|opened|new) PR_DISPOSITION=open; PR_DISPOSITION_TEXT="$label open (forge)" ;;
+    closed|abandoned) PR_DISPOSITION=closed; PR_DISPOSITION_TEXT="$label closed (forge)" ;;
+    *) PR_DISPOSITION=other; PR_DISPOSITION_TEXT="$label state $state_lc (forge)" ;;
+  esac
+}
+
+# The finished passing run's detail: what the run did, then the PR disposition
+# with its source. An override is an approved exception, never green.
+passed_run_detail() {  # <outcome>
+  local reason
+  pr_disposition
+  case "$1" in
+    passed-with-override)
+      reason=$(strip_quotes "$(nm_field ci_override_reason)")
+      printf 'run passed-with-override (approved exception, not green%s): %s' "${reason:+: $reason}" "$PR_DISPOSITION_TEXT" ;;
+    passed-with-skips)
+      printf 'run passed-with-skips: %s (publication/CI verification skipped)' "$PR_DISPOSITION_TEXT" ;;
     *)
-      printf 'run passed: PR state unknown (unreadable: %s)' "$url"
-      ;;
+      printf 'run passed: %s' "$PR_DISPOSITION_TEXT" ;;
+  esac
+}
+
+# A cancelled run carries no verdict; its recorded reason says whether it was a
+# deliberate abort, which is never a failure, or another cancellation.
+cancelled_run_detail() {
+  local error
+  error=$(strip_quotes "$(nm_field error)")
+  case "$error" in
+    "cancelled: aborted by user") printf 'run cancelled: no verdict (deliberately aborted, not a failure)' ;;
+    "cancelled: "?*) printf 'run cancelled: no verdict (%s)' "${error#cancelled: }" ;;
+    *) printf 'run cancelled: no verdict' ;;
   esac
 }
 # Finding count from a findings[N]{...} table header; empty when none.
@@ -715,15 +771,16 @@ nm_run_activity_is_recent() {
 }
 
 # 0 when a terminal failed or cancelled run ended at the ci monitor and the
-# ci log's last recognized marker reads checks green. Requires the exact
+# ci log's last recognized marker reports CI checks passed. Requires the exact
 # shape, all on positive evidence: a steps[] table where every step completed
 # except `ci` failed/cancelled and an optional skipped rebase (any other
-# non-completed step disqualifies), plus nm_ci_checks_state=green (a genuinely red
-# check, or an unreadable ci log, cannot prove delivery). This is the
-# orphaned-CI-monitor gap (2026-09-05 jr-voice): a run held for a captain
-# merge decision polls until the shared daemon restarts under it and marks
-# the run failed, although GitHub's own check state - the actual shippability
-# authority - is green and every substantive step completed.
+# non-completed step disqualifies), plus nm_ci_checks_state=passed (a genuinely
+# red check, no reported checks, or an unreadable ci log cannot prove
+# delivery). This is the orphaned-CI-monitor gap (2026-09-05 jr-voice): a
+# run held for a captain merge decision polls until the shared daemon restarts
+# under it and marks the run failed, although GitHub's own check state - the
+# actual shippability authority - is green and every substantive step
+# completed.
 nm_failed_run_is_green_held_ci() {
   local rows row rest step status saw_ci_failed
   rows=$(nm_steps_rows)
@@ -751,18 +808,18 @@ nm_failed_run_is_green_held_ci() {
 $rows
 EOF
   [ "$saw_ci_failed" = 1 ] || return 1
-  [ "$(nm_ci_checks_state)" = green ]
+  [ "$(nm_ci_checks_state)" = passed ]
 }
 
-# Apply the header's terminal-delivery safeguard. The earlier green log cannot
+# Apply the header's terminal-delivery safeguard. The earlier passed log cannot
 # prove current PR disposition: a subsequent close can itself end the monitor.
-nm_reclassify_failed_run_as_held_green() {
+nm_reclassify_failed_run_as_held_green() {  # <failed|cancelled>
   nm_failed_run_is_green_held_ci || return 1
-  local disposition pr_url
-  disposition=$(passed_pr_detail)
-  case "$disposition" in
-    "run passed: PR open") RUN_DETAIL="checks green: PR held for merge (ci monitor ended)" ;;
-    "run passed: PR merged") RUN_DETAIL="checks green: PR merged (ci monitor ended)" ;;
+  local pr_url
+  pr_disposition
+  case "$PR_DISPOSITION" in
+    open) RUN_DETAIL="PR held for merge: run $1 at the ci monitor after its ci log reported CI checks passed (required checks not verified); $PR_DISPOSITION_TEXT" ;;
+    merged) RUN_DETAIL="run $1 at the ci monitor after its ci log reported CI checks passed; $PR_DISPOSITION_TEXT" ;;
     *) return 1 ;;
   esac
   RUN_STATE="done"
@@ -852,14 +909,17 @@ nm_effective_ci_step_status() {
 # ~/.no-mistakes/logs/*/ci.log on the installed v1.32.2 binary, including the
 # actual PR #252 run). Reads the ci step's log via `axi logs --full` and scans
 # it for the MOST RECENT recognized marker (the log is append-only/chronological,
-# so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# so the last match is current) and prints passed, none-reported, not-ready, or
+# unknown. passed with nothing red after it means the run saw its checks pass,
+# still only waiting on merge/close. none-reported is kept apart from passed:
+# CI that has not run (a fork's workflow runs held for maintainer approval
+# report no checks at all) is a wait, never green.
 # "base branch advanced (..), re-arming CI monitor timeout" is deliberately NOT
 # a marker: the monitor logs a checks state only when that state changes, and a
 # base advance re-arms only its idle timeout without clearing readiness, so the
-# green marker before it is still current (no-mistakes' own ci-log parser
+# passed marker before it is still current (no-mistakes' own ci-log parser
 # ignores the line the same way, v1.32.2 through v1.79.0). Reading it as
-# not-ready held a green PR at working for as long as main kept advancing.
+# not-ready held a passed PR at working for as long as main kept advancing.
 nm_ci_checks_state() {
   local run_id ci_log marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -870,7 +930,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'passed' ;;
+    *"no CI checks reported - still monitoring"*) printf 'none-reported' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -924,6 +985,17 @@ NM_DAEMON_ANSWER=""
 RUN_DEAD_DAEMON=""
 COARSE_STATUS=""
 SELECTED_RUN_ID=""
+# The id of this branch's newest run when it is not this task incarnation's own
+# (fm_nm_run_in_incarnation in bin/fm-nm-run-lib.sh). It is named on whichever
+# current-evidence line answers instead, so the ignored record stays visible.
+RUN_BEFORE_TASK=""
+note_unattributed_run() {  # <run-id>
+  if fm_nm_run_created_epoch "$1" >/dev/null; then
+    EMIT_NOTE="run $1 predates this task: not attributed"
+  else
+    EMIT_NOTE="run $1 creation time unreadable: not attributed"
+  fi
+}
 # Scouts and secondmates never drive a no-mistakes validation of their own
 # worktree, so skip the lookup for them and read state from pane/log directly.
 if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
@@ -952,6 +1024,17 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
+        # The newest same-branch run is from before this task started: no run of
+        # this incarnation exists, so current evidence below answers.
+        if ! fm_nm_run_in_incarnation "$selected_id" "$TASK_START"; then
+          note_unattributed_run "$selected_id"
+          RUN_BEFORE_TASK=$selected_id
+          run_choice=earlier
+        fi
+        ;;
+    esac
+    case "$run_choice" in
+      selected\|*)
         RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
           || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
         if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
@@ -971,7 +1054,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
-            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
+            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")" "$TASK_START")" = running ]; then
             # The anchor PROVED code identity; only liveness can still fail, so
             # a dead daemon is reported as such rather than as an identity
             # failure, and a parked run keeps its gate and findings.
@@ -986,8 +1069,17 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         SELECTED_RUN_ID=$selected_id
         ;;
     esac
-    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
+    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ] && [ -z "$RUN_BEFORE_TASK" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
+      # This branch's current record is from before this task started, so no
+      # newer run of this incarnation exists for the ledger to find either.
+      if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
+        && ! fm_nm_run_in_incarnation "$(strip_quotes "$(nm_field id)")" "$TASK_START"; then
+        RUN_BEFORE_TASK=$(strip_quotes "$(nm_field id)")
+        note_unattributed_run "$RUN_BEFORE_TASK"
+      fi
+    fi
+    if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ] && [ -z "$RUN_BEFORE_TASK" ]; then
       # Head equality, the pipeline-owned parked-run exemption, or executing
       # regardless of head: a live run on this branch is current even after a
       # rebase, and while the pipeline owns this branch a parked run binds
@@ -1003,7 +1095,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$TASK_START")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -1025,7 +1117,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$TASK_START")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -1087,16 +1179,15 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        passed|passed-with-override|passed-with-skips) RUN_STATE="done"; RUN_DETAIL=$(passed_run_detail "$outcome") ;;
+        checks-passed) RUN_STATE="done"; RUN_DETAIL="run reports CI checks passed (required checks not verified)" ;;
         failed)
-          if nm_reclassify_failed_run_as_held_green; then :; else
+          if nm_reclassify_failed_run_as_held_green failed; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
           fi ;;
         cancelled)
-          if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+          if nm_reclassify_failed_run_as_held_green cancelled; then :; else
+            RUN_STATE=unknown; RUN_DETAIL=$(cancelled_run_detail)
           fi ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -1124,12 +1215,12 @@ if [ "$HAVE_RUN" = 1 ]; then
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
         completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
         failed)
-          if nm_reclassify_failed_run_as_held_green; then :; else
+          if nm_reclassify_failed_run_as_held_green failed; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
           fi ;;
         cancelled)
-          if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+          if nm_reclassify_failed_run_as_held_green cancelled; then :; else
+            RUN_STATE=unknown; RUN_DETAIL=$(cancelled_run_detail)
           fi ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;
@@ -1139,14 +1230,19 @@ if [ "$HAVE_RUN" = 1 ]; then
         case "$CI_STEP_STATUS" in
           running)
             CI_LOG_STATE=$(nm_ci_checks_state)
-            if [ "$CI_LOG_STATE" = green ]; then
-              RUN_STATE="done"
-              RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
-              # The run's own PR URL makes this reading actionable even when
-              # the worker never reported it and no pr= was recorded.
-              ci_pr_url=$(strip_quotes "$(nm_field pr)")
-              [ -z "$ci_pr_url" ] || RUN_DETAIL="$RUN_DETAIL: $ci_pr_url"
-            fi
+            case "$CI_LOG_STATE" in
+              passed)
+                RUN_STATE="done"
+                RUN_DETAIL="run ci log reports CI checks passed (required checks not verified; still monitoring for merge/close)"
+                # The run's own PR URL makes this reading actionable even when
+                # the worker never reported it and no pr= was recorded.
+                ci_pr_url=$(strip_quotes "$(nm_field pr)")
+                [ -z "$ci_pr_url" ] || RUN_DETAIL="$RUN_DETAIL: $ci_pr_url"
+                ;;
+              none-reported)
+                RUN_DETAIL="ci running: no CI checks reported (waiting for checks, not green)"
+                ;;
+            esac
             ;;
           fixing)
             CI_LOG_STATE=not-ready
@@ -1168,7 +1264,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     elif [ "$CI_STEP_STATUS" = fixing ]; then
       CI_LOG_STATE=not-ready
     fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
+    if [ "$CI_LOG_STATE" = none-reported ]; then
+      emit_ship_status_done "run still monitoring PR; run ci log: no CI checks reported (not green)"
+    elif [ "$CI_LOG_STATE" != not-ready ]; then
       emit_ship_status_done "run still monitoring PR"
     fi
   fi
@@ -1216,6 +1314,27 @@ if [ "$HAVE_RUN" = 1 ]; then
           fi
         else
           RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded (run $RUN_STATE)"
+        fi
+      fi
+      ;;
+  esac
+
+  # A finished run's record says what that run did, not what the worker is
+  # doing now. When the worker's own resolved status declaration (the classifier
+  # owns which line that is) was written after the run started and disagrees
+  # with it, both are shown with their sources rather than one silently
+  # outranking the other: the run record carries no local last-update time, so
+  # neither witness can be proven newer than the other's final word.
+  case "$LOG_VERB" in
+    ''|needs-decision|blocked) ;;
+    *)
+      if [ "$RUN_SOURCE" = full ] && [ -z "$RUN_DEAD_DAEMON" ] && ! fm_nm_run_is_active "$RUN_OUT"; then
+        LOG_TIP_STATE=$(map_log_state "$LOG_LINE")
+        if [ "$LOG_TIP_STATE" != unknown ] && [ "$LOG_TIP_STATE" != "$RUN_STATE" ] \
+          && run_created=$(fm_nm_run_created_epoch "$(strip_quotes "$(nm_field id)")") \
+          && log_at=$(status_line_at_epoch "$LOG_LINE") \
+          && [ "$log_at" -ge "$run_created" ]; then
+          RUN_DETAIL="$RUN_DETAIL${SEP}status-log since run start: $LOG_TIP_STATE: $(status_line_note "$LOG_LINE")"
         fi
       fi
       ;;

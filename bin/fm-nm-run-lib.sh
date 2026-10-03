@@ -112,6 +112,43 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
 }
 
+# Task incarnation: code identity alone cannot tell this task's run from one an
+# earlier task finished on the same branch at the same head, which is exactly
+# what a refresh task reusing an existing PR branch sees. A run created before
+# the task's start epoch is therefore never the task's result. no-mistakes run
+# ids are ULIDs, whose first ten Crockford base32 characters encode the creation
+# time in milliseconds (the same instant as the database's created_at).
+# Prints the creation epoch in whole seconds; nonzero when $1 is not a ULID.
+fm_nm_run_created_epoch() {  # <run-id>
+  local id alphabet=0123456789ABCDEFGHJKMNPQRSTVWXYZ ms=0 i prefix
+  id=$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')
+  [ "${#id}" -eq 26 ] || return 1
+  case "$id" in [0-7]*) ;; *) return 1 ;; esac
+  case "$id" in *[!0-9ABCDEFGHJKMNPQRSTVWXYZ]*) return 1 ;; esac
+  for ((i = 0; i < 10; i++)); do
+    prefix=${alphabet%%"${id:i:1}"*}
+    ms=$((ms * 32 + ${#prefix}))
+  done
+  printf '%s' $((ms / 1000))
+}
+
+# 0 when run $1 belongs to the task incarnation that started at epoch $2: no
+# recorded start (no bound), or a creation time at or after it. A run whose
+# creation time cannot be read cannot be proven to be the task's own and is
+# refused whenever a start is recorded.
+fm_nm_run_in_incarnation() {  # <run-id> <task-start-epoch>
+  local created
+  [ -n "${2:-}" ] || return 0
+  created=$(fm_nm_run_created_epoch "$1") || return 1
+  [ "$created" -ge "$2" ]
+}
+
+# Local "YYYY-MM-DD HH:MM" of epoch $1, the resolution and timezone of the
+# `no-mistakes runs` creation column (the CLI runs in this process's timezone).
+fm_nm_epoch_ledger_minute() {  # <epoch>
+  date -r "$1" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$1" '+%Y-%m-%d %H:%M' 2>/dev/null
+}
+
 # Liveness class of a recorded ledger status word.
 # The coarse `no-mistakes runs` ledger emits database status words; an
 # `axi status` run object reports its terminal result through its own outcome
@@ -440,13 +477,22 @@ fm_nm_run_is_executing() {  # <toon-output>
 # name matches. The one live bind is the EXECUTING record on the `axi status`
 # route (fm_nm_run_is_executing above), which the caller pairs with its own
 # liveness evidence.
+# When optional task start epoch $5 is supplied, the answering row must have been
+# created in a minute after that start's minute (fm_nm_run_in_incarnation above
+# owns the rule): a newest row from before the task started is an earlier task's
+# history, and a row from the start's own minute cannot prove it is not, so
+# either prints nothing. The anchor row is exempt; it proves code identity only.
 # Read-only: git reads resolve objects in place; custody never changes.
-fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
-  local wt=$1 branch=$2 list=$3 expected_head=${4:-}
+fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head] [task-start-epoch]
+  local wt=$1 branch=$2 list=$3 expected_head=${4:-} task_start=${5:-} start_minute=''
   local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
   local decided=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
+  if [ -n "$task_start" ]; then
+    start_minute=$(fm_nm_epoch_ledger_minute "$task_start") || return 0
+    [ -n "$start_minute" ] || return 0
+  fi
   while IFS= read -r row; do
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
@@ -484,6 +530,9 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
       if [ "$(fm_nm_resolve_commit "$wt" "$sha")" = "$local_full" ]; then
         decided=$pending_st
       fi
+      break
+    fi
+    if [ -n "$start_minute" ] && ! [[ "$start_minute" < "$day $clock" ]]; then
       break
     fi
     if [ -n "$expected_head" ]; then
