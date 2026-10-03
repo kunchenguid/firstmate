@@ -23,11 +23,12 @@
 # worker's orphan recovery.
 #
 # The serving loop does not busy-poll an idle queue. After a lane starts or is
-# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for 20 passes, so a home
+# reaped it rescans every FM_REMOTE_JOB_POLL_SECONDS for four passes, so a home
 # whose lane just finished starts its next job promptly; otherwise it sleeps
-# one second between passes. That bound is how long newly staged or cancelled
-# work, a lane that died, an orphaned claim, or an expired queue deadline can
-# wait for the next pass, and it refreshes the readiness heartbeat about once
+# one second between passes. Work arriving after the four-pass burst may wait
+# for that quiet scan. Newly staged or cancelled work, a lane that died, an
+# orphaned claim, or an expired queue deadline can wait that interval plus
+# scan work and scheduling time. It refreshes the readiness heartbeat about once
 # per second, far inside the probe's 10-second freshness bound. The stale
 # sweep, whose state preparation also re-applies the queue directories' 0700
 # modes, runs at startup and then at most every 60 seconds, never more rarely
@@ -61,7 +62,7 @@ FM_REMOTE_JOB_ORPHAN_GRACE_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_ORP
 FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_RESTARTS:-}" 20)
 FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_MAX_BACKOFF_SECONDS:-}" 5)
 FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS=$(worker_bounded_setting "${FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS:-}" 10)
-WORKER_FAST_PASSES=20
+WORKER_FAST_PASSES=4
 WORKER_IDLE_WAIT_SECONDS=1
 WORKER_SWEEP_SECONDS=60
 
@@ -739,7 +740,7 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
       fi
       next_check=$((SECONDS + 1))
     fi
-    sleep "$FM_REMOTE_JOB_POLL_SECONDS"
+    sleep "$FM_REMOTE_JOB_ACTIVE_POLL_SECONDS"
   done
   wait "$group_pid" 2>/dev/null
   rc=$?
@@ -750,25 +751,49 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   return "$rc"
 }
 
-worker_job_command() { # <job-dir>; the first argv element of a staged record
-  local job=$1 first=
-  fm_remote_job_regular_bounded "$job/argv" "$FM_REMOTE_JOB_MAX_BYTES" || return 1
-  IFS= read -r -d '' first < "$job/argv" || [ -n "$first" ] || return 1
-  printf '%s\n' "$first"
-}
-
 worker_preempting_waiter_exists() { # <lane-home>
-  local lane_home=$1 job state command job_home
+  local lane_home=$1 job state command job_home field_terminated remaining chunk
+  # The argv byte bound counts with read -n and ${#...}, which count bytes only
+  # in the C locale.
+  local LC_ALL=C
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
-    state=$(fm_remote_job_read_state "$job" 2>/dev/null || true)
+    fm_remote_job_read_state "$job" state 2>/dev/null || continue
     [ "$state" = queued ] || continue
     fm_remote_job_cancelled "$job" && continue
     # Lanes are per home, so only a waiter for this lane's own home may
-    # preempt; another home's queue drains through its own lane.
-    job_home=$(worker_read_text "$job" home 8192 2>/dev/null || true)
+    # preempt; another home's queue drains through its own lane. The record
+    # fields are read with builtins only: this scan runs once a second in
+    # every lane that executes a preemptible long poll, so no field read may
+    # spawn a child process.
+    fm_remote_job_read_line "$job/home" 8192 job_home 2>/dev/null || job_home=
     [ "$job_home" = "$lane_home" ] || continue
-    command=$(worker_job_command "$job" 2>/dev/null || true)
+    # The staged argv record must fit within FM_REMOTE_JOB_MAX_BYTES: bound
+    # the first NUL-delimited field, then walk the remaining NUL-terminated
+    # fields and any unterminated tail, still with builtins only. -d '' -n
+    # is the bounded read on the macOS stock bash (3.2 has -n but no -N);
+    # never pass -n 0, whose behavior diverges across bash versions.
+    command=
+    if [ -f "$job/argv" ] && [ ! -L "$job/argv" ]; then
+      { field_terminated=
+        IFS= read -r -d '' -n "$((FM_REMOTE_JOB_MAX_BYTES + 1))" command && field_terminated=1
+        if [ -n "$field_terminated" ]; then
+          if [ "${#command}" -gt "$FM_REMOTE_JOB_MAX_BYTES" ]; then
+            false
+          else
+            remaining=$((FM_REMOTE_JOB_MAX_BYTES - ${#command} - 1))
+            chunk=
+            while [ "$remaining" -ge 0 ] && IFS= read -r -d '' -n "$((remaining + 1))" chunk; do
+              [ "${#chunk}" -le "$remaining" ] || break
+              remaining=$((remaining - ${#chunk} - 1))
+            done
+            remaining=$((remaining - ${#chunk}))
+            [ "$remaining" -ge 0 ]
+          fi
+        else
+          [ -n "$command" ]
+        fi; } < "$job/argv" 2>/dev/null || command=
+    fi
     fm_remote_job_command_preemptible "$command" || return 0
   done
   return 1

@@ -33,12 +33,12 @@ For captain-held rechecks under quiet, see [architecture](../../../docs/architec
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
    does, with `FM_AFK_MODE=quiet` set first.**
    Follow the `afk` skill's record entry, daemon launch, and announcement steps,
-   except that on an opted-in host home its `/afk` no-daemon rule does not apply
+   except that on a home that runs the supervision host its `/afk` no-daemon rule does not apply
    after `quiet-check` exits 1. Never arm a separate `fm-watch.sh`. Export
    `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh enter`
    and `start` (or `start-native`), so the record notes quiet mode and
    `state/.afk`'s first line reads `quiet` instead of `away`.
-   On a home with `config/supervision-host`, launch the daemon on the path
+   On a home that runs the supervision host, launch the daemon on the path
    this harness uses without the host; `start` and `start-native` take quiet
    mode from the record `enter` wrote.
    Keep `FM_AFK_MODE=quiet` on a quiet refresh: an `/afk` entry, even without new words, replaces a quiet record with an away record and starts hold-for-return.

@@ -732,6 +732,51 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
+  local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
+  case_dir=$(make_case tasks-axi-close-gerrit)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
+  # GitHub pull request, so this case keeps reproducing whatever the installed
+  # release accepts.
+  real_tasks_axi=$(command -v tasks-axi)
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+previous=
+for arg in "\$@"; do
+  if [ "\$previous" = --pr ] && ! [[ "\$arg" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+\$ ]]; then
+    echo "error: \"Task pr link must be a canonical pull request URL\""
+    exit 1
+  fi
+  previous=\$arg
+done
+exec "$real_tasks_axi" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed Gerrit task failed: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown left a landed Gerrit task's backlog item at $(backlog_row_state "$case_dir"): $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" --full \
+    | grep -F "body: \"Gerrit change $gerrit_url\"" >/dev/null \
+    || fail "closed Gerrit backlog item did not record its change URL as a note"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "a landed Gerrit close left its pending-close record behind"
+
+  case_dir=$(make_case tasks-axi-close-github-under-refusal)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  cp "$TMP_ROOT/tasks-axi-close-gerrit/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
+  out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed GitHub task failed: $out"
+  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
+    | grep -F 'links: "pr:https://github.com/example/repo/pull/7"' >/dev/null \
+    || fail "a GitHub pull request no longer closed as the item's pr link"
+  pass "teardown closes a landed Gerrit task with its change URL as a note and a GitHub task with --pr"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -4069,59 +4114,6 @@ relocate_wt_into_pool_slot() {
 # Stale-record hatch (teardown-slot-collision): a task whose recorded pool slot
 # was handed to another live task retires only its own records, gated on the
 # existing landed-work proof; unlanded slot content still refuses.
-test_stale_record_reused_slot_retires_records_only_when_landed() {
-  local case_dir slot rc
-  case_dir=$(make_case stale-slot-landed)
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  slot=$(relocate_wt_into_pool_slot "$case_dir")
-  # Land the slot content into local main, as a merged local-only task would be.
-  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$slot" rev-parse HEAD)"
-  # Prove the slot itself is never returned: log every treehouse invocation.
-  cat > "$case_dir/fakebin/treehouse" <<SH
-#!/usr/bin/env bash
-printf 'treehouse %s\n' "\$*" >> "$case_dir/treehouse-calls"
-exit 0
-SH
-  chmod +x "$case_dir/fakebin/treehouse"
-
-  set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 0 "$rc" "stale-slot-landed: teardown should retire the stale record: $(cat "$case_dir/stderr")"
-  assert_no_grep "REFUSED" "$case_dir/stderr" "stale-slot-landed: teardown printed a REFUSED line"
-  assert_grep "only its own records are retired" "$case_dir/stderr" \
-    "stale-slot-landed: no records-only warning"
-  assert_grep "left to task task-x2" "$case_dir/stdout" \
-    "stale-slot-landed: completion did not name the slot holder"
-  assert_absent "$case_dir/state/task-x1.meta" "stale-slot-landed: the stale record was not retired"
-  assert_present "$case_dir/state/task-x2.meta" "stale-slot-landed: the successor record was touched"
-  [ "$(cat "$slot/feature.txt")" = hello ] \
-    || fail "stale-slot-landed: the slot copy was touched"
-  assert_grep "task=task-x2" "$case_dir/pool/s1/.fm-slot-owner" \
-    "stale-slot-landed: the slot-owner claim was touched"
-  assert_absent "$case_dir/treehouse-calls" "stale-slot-landed: treehouse was asked to return the slot"
-
-  # Same setup with unlanded slot content still refuses and retains everything.
-  case_dir=$(make_case stale-slot-unlanded)
-  wt_commit_file "$case_dir" feature.txt hello "add feature"
-  slot=$(relocate_wt_into_pool_slot "$case_dir")
-
-  set +e
-  FM_HOME="$case_dir/home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  [ "$rc" -ne 0 ] || fail "stale-slot-unlanded: teardown retired a stale record over unlanded slot content"
-  assert_grep "REFUSED" "$case_dir/stderr" "stale-slot-unlanded: no REFUSED line in stderr"
-  assert_present "$case_dir/state/task-x1.meta" "stale-slot-unlanded: refusal did not retain the stale record"
-  assert_present "$case_dir/state/task-x2.meta" "stale-slot-unlanded: refusal touched the successor record"
-  [ "$(cat "$slot/feature.txt")" = hello ] \
-    || fail "stale-slot-unlanded: refusal touched the slot copy"
-  pass "a stale record on a reused slot retires records-only when landed and refuses when unlanded"
-}
-
 test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   local case_dir rc head pid abort_log
   case_dir=$(make_case abort-then-reap-then-remove-order)
@@ -4346,6 +4338,7 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
@@ -4440,4 +4433,3 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
-test_stale_record_reused_slot_retires_records_only_when_landed

@@ -3508,6 +3508,11 @@ fm_backend_herdr_proof_lines() {  # <text>
 # Submit enables refusal-only diagnostics for its post-literal read: capture
 # availability or the shared selector's fixed predicate/numeric geometry from
 # that exact frame, before the existing clear path changes the display.
+# This read serves only the Claude payload proof, so the grok-tuned
+# dark-truecolor ghost strip is off (FM_COMPOSER_GHOST_LUMA_MAX=0): Claude
+# 2.1.283 draws a typed slash command in muted grey 38;2;112;112;112 (verified
+# live), which that strip dropped, judging a typed /exit unsent. Claude's own
+# ghost suggestion is SGR-2 dim and is still stripped.
 fm_backend_herdr_composer_content() {  # <target> [diagnostics=0]
   local target=$1 cap caps diagnostics=${2:-0} capture=styled ansi=0
   if cap=$(fm_backend_herdr_visible_capture_ansi "$target" 2>/dev/null) && [ -n "$cap" ]; then
@@ -3521,7 +3526,7 @@ fm_backend_herdr_composer_content() {  # <target> [diagnostics=0]
     fi
     return 1
   fi
-  if fm_composer_extract_selected_content "$caps" "$cap" "$diagnostics"; then
+  if FM_COMPOSER_GHOST_LUMA_MAX=0 fm_composer_extract_selected_content "$caps" "$cap" "$diagnostics"; then
     return 0
   fi
   if [ "$diagnostics" = 1 ]; then
