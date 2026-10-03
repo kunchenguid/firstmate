@@ -329,3 +329,26 @@ coord release "$(printf '{"request_id":"release-unsettled","home_id":"a","genera
 ga=$(field "$(coord session '{"request_id":"session-recovery-5","home_id":"a"}')" generation)
 reject claim "$(printf '{"request_id":"reclaim-unsettled","intent_id":"expired","home_id":"a","generation":%s,"version":1}' "$ga")" 'unsettled intent must not be reclaimed'
 pass 'claim revocation cannot release or re-admit an unsettled merge attempt'
+
+db=$tmp/reboot.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-reboot","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-reboot-1","home_id":"a"}')" generation)
+candidate reboot a "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reboot","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = reboot ] || fail 'reboot candidate must hold the pre-attempt slot'
+python3 - "$db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE meta SET value='synthetic-previous-boot' WHERE key='boot_id'")
+PY
+[ "$(slot_count)" = 0 ] || fail 'coordinator reboot must free a pre-attempt slot after claim revocation'
+[ "$(queue_state reboot)" = repair-needed ] || fail 'reboot-revoked work must be re-admittable'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="slot-claim-revoked" and e["payload"]["intent_id"]=="reboot" and e["payload"]["reason"]=="coordinator reboot" for e in json.load(sys.stdin)["events"])' || fail 'reboot slot release needs a durable event'
+ga=$(field "$(coord session '{"request_id":"session-reboot-2","home_id":"a"}')" generation)
+reclaim reboot "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reboot-reclaimed","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = reboot ] || fail 'reboot-revoked intent must re-enter under the new session generation'
+pass 'coordinator reboot releases pre-attempt slot and permits fenced re-admission'
