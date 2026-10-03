@@ -1045,7 +1045,7 @@ This section is the single owner of the canonical schema and its per-field seman
 
 **Fields applied only by typed resolution**
 
-Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-optional-system-one-provider) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 
 - `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
@@ -1064,7 +1064,7 @@ Set it high when a wrong pick is costly and low when the rule is a safe runner-u
 **Provider identifiers and mappings**
 
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
-Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
+Bootstrap validates resolver-only `approval`, `min_confidence`, `floor`, and present `provider` values only while typed resolution is active, through a TypeSafe key or explicit Laya selection; otherwise those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
 
@@ -1073,7 +1073,7 @@ Typed resolution additively recognizes `gemini` because AGENTS.md section 4 veri
 | `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, `muse` | The resolver has an authoritative single-provider mapping. |
 | Every other verified harness | Must declare `provider` explicitly; this includes multi-provider `pi`, `pi-signed`, `omp`, and `opencode`, and unmapped `gemini`, `rovo`, and `devin`; omission is an actionable configuration error before any request. |
 
-This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
+This single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter that helper's routing.
 
 **Profile quota floors**
 
@@ -1098,7 +1098,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 - Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-- While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+- While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; otherwise those inert declarations preserve the pre-existing bootstrap behavior.
 - Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 - While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 
@@ -1106,12 +1106,16 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
-## Typed dispatch resolution (.env TYPESAFE_API_KEY)
+## Typed dispatch resolution (optional System One provider)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with a typed System One model, keeping the rule match to one decision request.
+The default provider remains TypeSafe's hosted Jev API and is off unless the effective `TYPESAFE_API_KEY` is non-empty, read from the calling environment when set and otherwise from the home's gitignored `.env`.
+Set `DISPATCH_SYSTEMONE_PROVIDER=laya` explicitly in the environment or the home's gitignored `.env` to select the canonical Laya server instead; the environment wins and Laya requires `LAYA_SYSTEMONE_BASE_URL`, with an optional `LAYA_API_KEY` for bearer authentication.
 
-Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
+With the default TypeSafe provider and no key, off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
+Explicitly empty environment settings override home `.env` values: an empty provider selects the TypeSafe default, an empty TypeSafe key keeps that provider off, an empty Laya key omits authentication, and an empty Laya URL returns an error.
+Loopback requests bypass HTTP proxies.
+Selecting Laya never falls back to TypeSafe: an absent or invalid Laya endpoint, HTTP failure, or invalid response returns `status: error`.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
@@ -1122,17 +1126,36 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 
 **When firstmate invokes the resolver**
 
-Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
+Firstmate invokes the resolve path directly after writing the brief, without a preflight; the default provider's absent-key off line is handled exactly like every other non-clear outcome.
 
 **What the model receives**
 
-When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or confidence floors.
+When on and at least one rule exists, the tool sends the project name and the brief's task-specific text as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never receives quota or account data, provider credentials in its JSON state, catalogs, `why`, `use`, approvals, or confidence floors.
 The task-specific text is the brief's `## Captain's intent` and `## Firstmate spec` sections under `# Task` that `bin/fm-brief.sh` scaffolds, read by the same parser that feeds `fm-spawn.sh` validation and the no-mistakes `--intent` contract; a brief with neither section is sent whole.
 
 When the sections are sent from a scout brief, the line `Brief kind: scout (report only)` comes first, taken from the scaffold's scout contract line; ship briefs and briefs sent whole get no kind line.
 A ship brief's delivery mode is deliberately not sent, because in live runs naming it pushed a routine ship brief toward the hardest tier (see [the verification record](verification/dispatch-resolve.md)).
 
 The scaffold's standard setup, rules, and definition-of-done text is the same in every brief, so leaving it out keeps its safety language from reading as a signal about the task.
+
+**Use a Laya endpoint**
+
+The canonical [NandhaKishorM/laya project](https://github.com/NandhaKishorM/laya) includes the optional `laya[serve]` HTTP server, whose `POST /v1/systemone` interface is compatible with the request and answer shape used by Jev.
+Install it in the endpoint's own environment with `python -m pip install 'laya[serve]'`, then run `laya-serve` with `LAYA_HOST=127.0.0.1` for a same-machine endpoint and `LAYA_API_KEY` set if bearer authentication is enabled.
+The server defaults to `0.0.0.0:8000`, so bind it to loopback for local use or place a non-loopback endpoint behind HTTPS and an access-controlled network.
+Configure Firstmate's effective home `.env` with the explicit provider and server origin; the resolver appends `/v1/systemone`:
+
+```text
+DISPATCH_SYSTEMONE_PROVIDER=laya
+LAYA_SYSTEMONE_BASE_URL=http://127.0.0.1:8000
+LAYA_API_KEY=replace-with-the-server-token
+```
+
+The endpoint setting accepts an HTTPS origin or loopback HTTP origin, with no credentials, path, query, or fragment.
+Laya ignores the resolver's `jev-latest` model id and routes the request with its own Router.
+The resolver uses a 30-second request timeout for Laya; a timeout or any provider failure returns `status: error` without changing provider.
+The current TypeSafe provider remains the default, and Laya must be selected separately in each home whose operator intends to use it.
+No Firstmate dispatch-quality or latency benchmark has been run against Laya; results depend on the operator's rules, model checkpoint, hardware, preload settings, and network path, so measure a representative local brief set before relying on it for dispatch.
 
 **Never-send list (config/dispatch-never-send)**
 
@@ -1201,7 +1224,7 @@ No qualifying option, or two equally probable qualifying options, produces `ambi
 Every result above exits 0.
 
 - Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+- Only a usage or configuration error exits 2: an unsupported `DISPATCH_SYSTEMONE_PROVIDER`, an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
@@ -1213,9 +1236,10 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 **Key handling and fixed settings**
 
-- The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-- The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-- The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+- The resolver and bootstrap keep TypeSafe and Laya keys in non-exported private variables and unset their source environment names before launching child processes.
+- The resolver sends a provider key to `curl` only as an Authorization header read from a file descriptor, never on argv or in the JSON state.
+- A selected provider key containing a carriage return or newline returns `status: error` before any network call.
+- TypeSafe uses `https://api.typesafe.ai/v1/systemone`, model `jev-latest`, the 0.6 default confidence floor, and a 5-second request timeout.
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
@@ -2329,7 +2353,10 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+DISPATCH_SYSTEMONE_PROVIDER=  # This setting selects typesafe (default) or laya for System One, from the environment or .env.
+LAYA_SYSTEMONE_BASE_URL=      # Set in the environment or .env; required when laya is selected and must be an HTTPS origin or loopback HTTP origin.
+LAYA_API_KEY=                 # This optional environment or .env setting supplies bearer authentication to the Laya server.
+TYPESAFE_API_KEY=             # The default TypeSafe provider key comes from the environment or .env; without it, the default provider is off, but explicit Laya selection can still run (see "Typed dispatch resolution").
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
