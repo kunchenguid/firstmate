@@ -1291,6 +1291,18 @@ while kill -0 "$watch_pid" 2>/dev/null && [ "$watch_wait" -lt 1500 ]; do
 done
 if kill -0 "$watch_pid" 2>/dev/null; then
   kill "$watch_pid" 2>/dev/null || true
+  if [ -n "${NM_WATCH_DEBUG:-}" ]; then
+    mkdir -p "$NM_WATCH_DEBUG"
+    cp "$TMP_ROOT/watch-liveness.out" "$TMP_ROOT/watch-liveness.err" "$NM_WATCH_DEBUG/" 2>/dev/null || true
+    cp -R "$WATCH_STATE" "$NM_WATCH_DEBUG/watch-state" 2>/dev/null || true
+    # awk with the bracketed self-exclusion instead of `ps | grep`: same matched
+    # process lines, and it keeps the canonical lint roots SC2009-clean
+    # (bin/fm-lint.sh's local exclusion list does not cover SC2009).
+    ps aux | awk '/[f]m-watch|[f]m-spawn|[f]m-remote/' > "$NM_WATCH_DEBUG/ps.txt" 2>/dev/null || true
+    cp "$HERDR_LOG" "$NM_WATCH_DEBUG/herdr.log" 2>/dev/null || true
+    cp "$SSH_COUNT" "$NM_WATCH_DEBUG/ssh.count" 2>/dev/null || true
+    cp "$TMP_ROOT/watch-liveness-state/.wake-queue" "$NM_WATCH_DEBUG/wake-queue" 2>/dev/null || true
+  fi
   fail "the watcher did not exit on its auto-relaunch wake within the bound"
 fi
 wait "$watch_pid" \
@@ -1457,7 +1469,7 @@ SIBLING_PANE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.root_pane.pane_id'
 printf 'kind=ship\n' > "$REMOTE_HOME/state/child.meta"
 rm -rf "$PARENT/state/procevent"
 : > "$PARENT/state/procevent"
-if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+if remote_env "$ROOT/bin/fm-teardown.sh" ios --retire-secondmate ios >/dev/null 2>&1; then
   fail "remote retirement ignored in-flight child work"
 fi
 assert_present "$REMOTE_HOME" "refused remote retirement removed the home"
@@ -1473,7 +1485,7 @@ resolve_ios_pending
 rm -f "$REMOTE_HOME/state/child.meta"
 mkdir -p "$PARENT/data/handoff"
 ln -s "$TMP_ROOT/missing-outbox-target" "$PARENT/data/handoff/ios.outbox.md"
-if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+if remote_env "$ROOT/bin/fm-teardown.sh" ios --retire-secondmate ios >/dev/null 2>&1; then
   fail "remote retirement accepted an unsafe backlog outbox"
 fi
 assert_present "$REMOTE_HOME" "unsafe backlog outbox retirement removed the remote home"
@@ -1482,7 +1494,7 @@ mkdir -p "$TMP_ROOT/external-pending"
 printf 'task_id=ios\nphase=resolved\n' > "$TMP_ROOT/external-pending/escape"
 mv "$PARENT/state/pending-replies" "$PARENT/state/pending-replies.safe"
 ln -s "$TMP_ROOT/external-pending" "$PARENT/state/pending-replies"
-if remote_env "$ROOT/bin/fm-teardown.sh" ios >/dev/null 2>&1; then
+if remote_env "$ROOT/bin/fm-teardown.sh" ios --retire-secondmate ios >/dev/null 2>&1; then
   fail "remote retirement accepted a symlinked pending-replies directory"
 fi
 assert_present "$REMOTE_HOME" "unsafe pending-replies retirement removed the remote home"
@@ -1562,7 +1574,7 @@ while [ ! -f "$TMP_ROOT/launch.entered" ]; do
   [ "$launch_wait" -le 1500 ] || fail "remote respawn never reached its blocked launch"
   sleep 0.02
 done
-remote_env "$ROOT/bin/fm-teardown.sh" ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
+remote_env "$ROOT/bin/fm-teardown.sh" ios --retire-secondmate ios > "$TMP_ROOT/teardown-serialized.out" 2>&1 &
 teardown_pid=$!
 sleep 0.2
 kill -0 "$teardown_pid" 2>/dev/null || fail "remote retirement bypassed an active remote respawn"
