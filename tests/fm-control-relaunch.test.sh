@@ -2343,6 +2343,464 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner() {
   pass "reclaim: a herdr secondmate whose endpoint is gone is sent to its own respawn owner"
 }
 
+# --- herdr: a re-created endpoint gets its own presentation workspace --------
+#
+# A relaunch that re-creates a proven-gone endpoint places it exactly where a
+# clean fresh spawn would: in its own disposable workspace, inserted after its
+# owning parent's contiguous child block, and in the flat layout only where a
+# fresh spawn is flat too (docs/herdr-backend.md "Presentation spaces"). This
+# is what keeps a worker grouped under the agent that owns it after a restart.
+#
+# Stateful fake only - never a real herdr session. It models the workspace,
+# tab, and pane layout the projection reads and mutates, and a fake mover
+# stands in for bin/backends/herdr-workspace-move.py.
+make_herdr_layout_stub() {  # <case-dir>
+  local fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+D = os.environ["FM_FAKE_DIR"]
+STATE = os.path.join(D, "herdr-state.json")
+args = sys.argv[1:]
+with open(os.path.join(D, "herdr-log"), "a") as log:
+    log.write(" ".join(args) + "\n")
+session = None
+if len(args) >= 2 and args[-2] == "--session":
+    session = args[-1]
+    args = args[:-2]
+
+
+def emit(obj):
+    print(json.dumps(obj))
+    sys.exit(0)
+
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+
+def load():
+    with open(STATE) as f:
+        return json.load(f)
+
+
+def save(state):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE)
+
+
+def workspace(state, wsid):
+    return next((w for w in state["workspaces"] if w["workspace_id"] == wsid), None)
+
+
+def locate(state, pane):
+    for w in state["workspaces"]:
+        for t in w["tabs"]:
+            if pane in t["panes"]:
+                return w, t
+    return None, None
+
+
+def new_tab(state, w, label):
+    state["n"] += 1
+    tab = {"tab_id": "%s:t%d" % (w["workspace_id"], state["n"]), "label": label,
+           "panes": ["%s:p%d" % (w["workspace_id"], state["n"])]}
+    w["tabs"].append(tab)
+    return tab
+
+
+stopped = os.path.exists(os.path.join(D, "herdr-stopped"))
+release = ["0.9.0", "22"]
+if os.path.exists(os.path.join(D, "herdr-release")):
+    with open(os.path.join(D, "herdr-release")) as f:
+        release = f.read().split()
+if args[:2] == ["status", "--json"]:
+    version = {"version": release[0], "protocol": int(release[1])}
+    server = dict(version, running=not stopped)
+    emit({"client": version, "server": server})
+if args[:1] == ["server"]:
+    if stopped:
+        os.remove(os.path.join(D, "herdr-stopped"))
+    sys.exit(0)
+if stopped:
+    print("error: could not connect to the herdr server", file=sys.stderr)
+    sys.exit(1)
+
+state = load()
+cmd = " ".join(args[:2])
+if cmd == "session list":
+    emit({"sessions": [{"name": session, "running": True,
+                        "socket_path": os.path.join(D, "herdr.sock")}]})
+if cmd == "api schema":
+    emit({"schemas": {"request": {
+        "oneOf": [{"properties": {"method": {"const": "workspace.move"}}}],
+        "$defs": {"WorkspaceMoveParams": {
+            "required": ["workspace_id", "insert_index"],
+            "properties": {"insert_index": {"type": "integer"}}}}}}})
+if cmd == "terminal title":
+    emit({"result": {"reason": "no_foreground_client"}})
+if cmd == "workspace list":
+    emit({"result": {"workspaces": [
+        {"workspace_id": w["workspace_id"], "label": w["label"],
+         "focused": w["workspace_id"] == state["focused"],
+         "active_tab_id": w["active_tab_id"]} for w in state["workspaces"]]}})
+if cmd == "workspace create":
+    state["n"] += 1
+    w = {"workspace_id": "w%d" % state["n"], "label": opt("--label"), "tabs": []}
+    seeded = new_tab(state, w, "1")
+    w["active_tab_id"] = seeded["tab_id"]
+    state["workspaces"].append(w)
+    save(state)
+    emit({"result": {"workspace": {"workspace_id": w["workspace_id"]},
+                     "tab": {"tab_id": seeded["tab_id"]},
+                     "root_pane": {"pane_id": seeded["panes"][0]}}})
+if cmd == "tab create":
+    w = workspace(state, opt("--workspace"))
+    tab = new_tab(state, w, opt("--label"))
+    save(state)
+    with open(os.path.join(D, "herdr-created-tabs"), "a") as f:
+        f.write(" ".join(args) + "\n")
+    emit({"result": {"tab": {"tab_id": tab["tab_id"]},
+                     "root_pane": {"pane_id": tab["panes"][0]}}})
+if cmd == "tab list":
+    w = workspace(state, opt("--workspace"))
+    emit({"result": {"tabs": [
+        {"tab_id": t["tab_id"], "label": t["label"], "workspace_id": w["workspace_id"],
+         "focused": t["tab_id"] == w["active_tab_id"]} for t in w["tabs"]]}})
+if cmd == "pane list":
+    w = workspace(state, opt("--workspace"))
+    emit({"result": {"panes": [
+        {"pane_id": p, "tab_id": t["tab_id"], "workspace_id": w["workspace_id"]}
+        for t in w["tabs"] for p in t["panes"]]}})
+if cmd == "tab get":
+    for w in state["workspaces"]:
+        for t in w["tabs"]:
+            if t["tab_id"] == args[2]:
+                emit({"result": {"tab": {"tab_id": t["tab_id"], "label": t["label"],
+                                         "workspace_id": w["workspace_id"]}}})
+    emit({"error": {"code": "tab_not_found"}})
+if cmd == "tab focus":
+    for w in state["workspaces"]:
+        for t in w["tabs"]:
+            if t["tab_id"] == args[2]:
+                state["focused"] = w["workspace_id"]
+                w["active_tab_id"] = t["tab_id"]
+                save(state)
+    emit({"result": {}})
+if cmd == "pane get":
+    w, t = locate(state, args[2])
+    if w is None:
+        emit({"error": {"code": "pane_not_found"}})
+    with open(os.path.join(D, "cwd")) as f:
+        cwd = f.read()
+    emit({"result": {"pane": {"pane_id": args[2], "tab_id": t["tab_id"],
+                              "workspace_id": w["workspace_id"], "foreground_cwd": cwd}}})
+if cmd == "pane close":
+    w, t = locate(state, args[2])
+    if w is None:
+        emit({"error": {"code": "pane_not_found"}})
+    t["panes"].remove(args[2])
+    if not t["panes"]:
+        w["tabs"].remove(t)
+        if w["tabs"] and w["active_tab_id"] == t["tab_id"]:
+            w["active_tab_id"] = w["tabs"][0]["tab_id"]
+    if not w["tabs"]:
+        state["workspaces"].remove(w)
+    save(state)
+    emit({"result": {}})
+if cmd == "agent get":
+    w, _ = locate(state, args[2])
+    if w is None:
+        emit({"error": {"code": "pane_not_found"}})
+    if args[2] in state["live"]:
+        emit({"result": {"agent": {"agent_status": "idle"}}})
+    emit({"error": {"code": "agent_not_found"}})
+if cmd == "pane process-info":
+    foreground = []
+    if args[2] in state["live"]:
+        foreground = [{"pid": 4243, "name": "claude", "argv": ["claude"], "cmdline": "claude"}]
+    emit({"result": {"type": "pane_process_info", "process_info": {
+        "pane_id": args[2], "shell_pid": 4242, "foreground_processes": foreground}}})
+if cmd == "pane send-text":
+    # Delivering the launch brief is what makes an agent exist on the pane,
+    # exactly as the other herdr fake above models it.
+    payload = args[3] if len(args) > 3 else ""
+    if payload.startswith(". '") and payload.endswith("'") and os.path.isfile(payload[3:-1]):
+        with open(payload[3:-1]) as f:
+            payload = f.read()
+    if "encode launch-brief" in payload or "Firstmate operational input waiting: read" in payload:
+        state["live"].append(args[2])
+        save(state)
+    sys.exit(0)
+if cmd == "pane send-keys":
+    sys.exit(0)
+with open(os.path.join(D, "herdr-unmodelled"), "a") as f:
+    f.write(" ".join(args) + "\n")
+sys.exit(0)
+PY
+  chmod +x "$fb/herdr"
+  cat > "$fb/workspace-move" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+D = os.environ["FM_FAKE_DIR"]
+STATE = os.path.join(D, "herdr-state.json")
+_socket, wsid, index = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(os.path.join(D, "mover-log"), "a") as log:
+    log.write("%s %d\n" % (wsid, index))
+if os.path.exists(os.path.join(D, "mover-fails")):
+    sys.exit(1)
+with open(STATE) as f:
+    state = json.load(f)
+moving = next(w for w in state["workspaces"] if w["workspace_id"] == wsid)
+state["workspaces"].remove(moving)
+state["workspaces"].insert(index, moving)
+with open(STATE, "w") as f:
+    json.dump(state, f)
+print(json.dumps({"id": "fm-workspace-move", "result": {"type": "workspace_list", "workspaces": [
+    {"workspace_id": w["workspace_id"], "label": w["label"], "focused": w["workspace_id"] == state["focused"]}
+    for w in state["workspaces"]]}}))
+PY
+  chmod +x "$fb/workspace-move"
+}
+
+# herdr_layout_case <name> <id> <layout-json>: a herdr ship task whose recorded
+# pane did not survive its stopped server, so a relaunch proves it gone and
+# re-creates it. <layout-json> is the session's workspace list, in order, as
+# [[workspace-id, label], ...]; the first workspace holds the captain's focus.
+# Sets HERDR_CASE_DIR, like herdr_case_or_skip.
+herdr_layout_case() {  # <name> <id> <layout-json>
+  HERDR_CASE_DIR=
+  command -v jq >/dev/null 2>&1 || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  HERDR_CASE_DIR=$(new_case "$1" "$2")
+  add_herdr_ship_task "$HERDR_CASE_DIR" "$2" fmlab '%none'
+  make_herdr_layout_stub "$HERDR_CASE_DIR"
+  printf '%s' "$3" | jq '{
+    n: 100, live: [], focused: .[0][0],
+    workspaces: [.[] | {workspace_id: .[0], label: .[1], active_tab_id: (.[0] + ":t1"),
+      tabs: [{tab_id: (.[0] + ":t1"), label: "agent", panes: [(.[0] + ":p1")]}]}]
+  }' > "$HERDR_CASE_DIR/fake/herdr-state.json"
+  return 0
+}
+
+run_layout_relaunch() {  # <case-dir> <id>
+  FM_BACKEND_HERDR_WORKSPACE_MOVER="$1/fakebin/workspace-move" \
+    run_spawn "$1" "$2" --relaunch --harness claude
+}
+
+layout_labels() {  # <case-dir>
+  jq -r '[.workspaces[].label] | join(" | ")' "$1/fake/herdr-state.json"
+}
+
+# assert_relaunch_projected <case-dir> <id> <label-before> <label-after>
+# [unbound]: the re-created endpoint sits in its own single-pane workspace,
+# directly between the two named workspaces (an empty <label-after> means
+# last), and the record binds it. The journal binds it too unless `unbound`
+# says the workspace was left outside its owner's block, where a fresh spawn
+# also keeps only its attempt journal.
+assert_relaunch_projected() {  # <case-dir> <id> <label-before> <label-after> [unbound]
+  local dir=$1 id=$2 before=$3 after=$4 binding=${5:-bound} ws pane tab labels journal
+  ws=$(meta_field "$dir" "$id" herdr_workspace_id)
+  pane=$(meta_field "$dir" "$id" herdr_pane_id)
+  tab=$(meta_field "$dir" "$id" herdr_tab_id)
+  labels=$(layout_labels "$dir")
+  jq -e --arg ws "$ws" --arg tab "$tab" --arg pane "$pane" --arg id "$id" '
+    [.workspaces[] | select(.workspace_id == $ws)] | length == 1
+      and .[0].label == "└ \($id) · p:\(.[0].label | .[-22:])"
+      and (.[0].tabs | length) == 1
+      and .[0].tabs[0].tab_id == $tab and .[0].tabs[0].label == "fm-\($id)"
+      and .[0].tabs[0].panes == [$pane]
+  ' "$dir/fake/herdr-state.json" >/dev/null \
+    || fail "the re-created endpoint is not alone in its own presentation workspace: $(cat "$dir/fake/herdr-state.json")"
+  jq -e --arg ws "$ws" --arg before "$before" --arg after "$after" '
+    [.workspaces[] | .workspace_id] as $ids
+    | [.workspaces[] | .label] as $labels
+    | ($ids | index($ws)) as $at
+    | $at > 0 and $labels[$at - 1] == $before
+      and (($after == "") and ($at == ($ids | length) - 1) or $labels[$at + 1] == $after)
+  ' "$dir/fake/herdr-state.json" >/dev/null \
+    || fail "the re-created workspace is not between '$before' and '$after': $labels"
+  [ "$(meta_field "$dir" "$id" window)" = "fmlab:$pane" ] \
+    || fail "the rebound record does not name the projected pane, got $(meta_field "$dir" "$id" window)"
+  journal="$dir/home/state/$id.herdr-presentation"
+  assert_present "$journal" "a projected relaunch must journal its projection the way a fresh create does"
+  if [ "$binding" = unbound ]; then
+    grep -qx 'version=1' "$journal" || fail "an unplaced projection must keep only its attempt journal: $(cat "$journal")"
+    return 0
+  fi
+  grep -qx 'version=2' "$journal" || fail "the relaunch did not bind its projection journal: $(cat "$journal")"
+  grep -qx "pane_id=$pane" "$journal" || fail "the projection journal binds another pane: $(cat "$journal")"
+  grep -qx "workspace_id=$ws" "$journal" || fail "the projection journal binds another workspace: $(cat "$journal")"
+}
+
+test_herdr_rebind_gets_its_own_workspace_after_the_owners_block() {
+  local dir out rc=0 log
+  herdr_layout_case rebind-projected rl80 '[["w1","firstmate"],["w2","└ older · p:AbCdEfGhIjKlMnOpQrStUv"],["w3","2ndmate-alpha"],["w4","└ alpha-child · p:ZyXwVuTsRqPoNmLkJiHgFe"]]' || {
+    echo "skip - herdr rebind projection needs jq and python3"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+
+  out=$(run_layout_relaunch "$dir" rl80) || rc=$?
+  log=$(cat "$dir/fake/herdr-log")
+  expect_code 0 "$rc" "a proven-gone endpoint should be re-created"$'\n'"$out"$'\n'"$log"
+  assert_contains "$log" "workspace create" "the re-created endpoint must get its own workspace"
+  assert_relaunch_projected "$dir" rl80 "└ older · p:AbCdEfGhIjKlMnOpQrStUv" "2ndmate-alpha"
+  assert_not_contains "$(layout_labels "$dir")" "fm-rl80" \
+    "the owner's workspace must not gain a flat task tab"
+  [ "$(jq -r '.workspaces[0].tabs | length' "$dir/fake/herdr-state.json")" = 1 ] \
+    || fail "the relaunch added a flat tab to the owner's workspace"
+  [ "$(jq -r .focused "$dir/fake/herdr-state.json")" = w1 ] \
+    || fail "placing the re-created workspace moved the captain's focus"
+  [ -z "$(grep -v -- '--session fmlab$' <<<"$log" | grep -v '^status --json$' || true)" ] \
+    || fail "the projected rebind used a herdr session the record does not name: $log"
+  assert_not_contains "$out" "herdr presentation" "a clean projected relaunch should not warn about its placement"$'\n'"$out"
+  pass "reclaim: a re-created herdr endpoint gets its own workspace after its owner's child block"
+}
+
+test_herdr_rebind_under_a_secondmate_lands_with_its_workers() {
+  local dir out rc=0
+  herdr_layout_case rebind-secondmate rl81 '[["w1","firstmate"],["w2","└ primary · p:AbCdEfGhIjKlMnOpQrStUv"],["w3","2ndmate-momo"],["w4","└ package · p:ZyXwVuTsRqPoNmLkJiHgFe"],["w5","2ndmate-bravo"],["w6","└ bravo-child · p:QwErTyUiOpAsDfGhJkLzXc"]]' || {
+    echo "skip - herdr rebind projection needs jq and python3"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  # The home relaunching its own worker is the momo second mate, so the owning
+  # parent is that second mate's workspace, not firstmate's.
+  printf 'momo\n' > "$dir/home/.fm-secondmate-home"
+
+  out=$(run_layout_relaunch "$dir" rl81) || rc=$?
+  expect_code 0 "$rc" "a second mate's proven-gone worker should be re-created"$'\n'"$out"
+  assert_relaunch_projected "$dir" rl81 "└ package · p:ZyXwVuTsRqPoNmLkJiHgFe" "2ndmate-bravo"
+  grep -qx 'parent_label=2ndmate-momo' "$dir/home/state/rl81.herdr-presentation" \
+    || fail "the projection is not bound under its owning second mate: $(cat "$dir/home/state/rl81.herdr-presentation")"
+  pass "reclaim: a second mate's re-created worker lands in that second mate's child block"
+}
+
+test_herdr_rebind_retires_an_earlier_projection_that_is_gone() {
+  local dir out rc=0 journal
+  herdr_layout_case rebind-stale-journal rl82 '[["w1","firstmate"],["w3","2ndmate-alpha"]]' || {
+    echo "skip - herdr rebind projection needs jq and python3"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  # The task was first spawned projected; the restart took its whole
+  # workspace, so no workspace carries the earlier token any more.
+  journal="$dir/home/state/rl82.herdr-presentation"
+  printf '%s\n' version=1 task_id=rl82 projection_id=OldTokenOldTokenOldTok > "$journal"
+
+  out=$(run_layout_relaunch "$dir" rl82) || rc=$?
+  expect_code 0 "$rc" "a relaunch should retire a journal whose projection is gone"$'\n'"$out"
+  assert_relaunch_projected "$dir" rl82 "firstmate" "2ndmate-alpha"
+  assert_not_contains "$(cat "$journal")" "OldTokenOldTokenOldTok" \
+    "the retired journal's token must not survive into the new projection"
+  pass "reclaim: an earlier projection that is gone is retired and the endpoint is projected again"
+}
+
+# assert_relaunch_flat <case-dir> <id>: the re-created endpoint is an ordinary
+# task tab in its owner's labeled workspace, and no workspace was created.
+assert_relaunch_flat() {  # <case-dir> <id>
+  local dir=$1 id=$2 log
+  log=$(cat "$dir/fake/herdr-log")
+  assert_not_contains "$log" "workspace create" "a flat relaunch must not create a workspace"
+  [ "$(meta_field "$dir" "$id" herdr_workspace_id)" = w1 ] \
+    || fail "a flat relaunch should land in the owner's workspace, got $(meta_field "$dir" "$id" herdr_workspace_id)"
+  jq -e --arg id "$id" '.workspaces[0].tabs | any(.label == "fm-\($id)")' "$dir/fake/herdr-state.json" >/dev/null \
+    || fail "a flat relaunch should add its task tab to the owner's workspace: $(cat "$dir/fake/herdr-state.json")"
+}
+
+test_herdr_rebind_stays_flat_where_a_fresh_spawn_would() {
+  local dir out rc lock_holder lock_path
+  local layout='[["w1","firstmate"],["w2","2ndmate-alpha"]]'
+
+  herdr_layout_case rebind-off rl83 "$layout" || {
+    echo "skip - herdr rebind projection needs jq and python3"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  mkdir -p "$dir/home/config"
+  printf 'off\n' > "$dir/home/config/herdr-presentation-spaces"
+  rc=0; out=$(run_layout_relaunch "$dir" rl83) || rc=$?
+  expect_code 0 "$rc" "an opted-out home still relaunches"$'\n'"$out"
+  assert_relaunch_flat "$dir" rl83
+  assert_absent "$dir/home/state/rl83.herdr-presentation" "an opted-out relaunch must not journal a projection"
+
+  herdr_layout_case rebind-floor rl84 "$layout"
+  dir=$HERDR_CASE_DIR
+  printf '0.7.5 16\n' > "$dir/fake/herdr-release"
+  rc=0; out=$(run_layout_relaunch "$dir" rl84) || rc=$?
+  expect_code 0 "$rc" "a relaunch below the floor still relaunches"$'\n'"$out"
+  assert_relaunch_flat "$dir" rl84
+  assert_contains "$out" "0.8.0 floor" "the below-floor fallback should say why it stayed flat"
+
+  herdr_layout_case rebind-lock rl85 "$layout"
+  dir=$HERDR_CASE_DIR
+  rm -f "$dir/fake/herdr-stopped"
+  lock_path=$(PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" bash -c '
+    . "$1/bin/backends/herdr.sh"
+    fm_backend_herdr_presentation_session_lock_path fmlab' _ "$ROOT") \
+    || fail "could not resolve the fake session's presentation lock"
+  : > "$dir/fake/herdr-stopped"
+  # The lock library reaps a lock whose holder has exited, so a live process
+  # must hold it for the whole relaunch.
+  bash -c '
+    . "$1/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3/lock-held"
+    while [ ! -e "$3/lock-release" ]; do sleep 0.05; done
+    fm_lock_release "$2"' _ "$ROOT" "$lock_path" "$dir/fake" &
+  lock_holder=$!
+  while [ ! -e "$dir/fake/lock-held" ] && kill -0 "$lock_holder" 2>/dev/null; do sleep 0.05; done
+  assert_present "$dir/fake/lock-held" "could not hold the presentation lock for the contention case"
+  rc=0; out=$(run_layout_relaunch "$dir" rl85) || rc=$?
+  : > "$dir/fake/lock-release"
+  wait "$lock_holder"
+  expect_code 0 "$rc" "a relaunch under lock contention still relaunches"$'\n'"$out"
+  assert_relaunch_flat "$dir" rl85
+  assert_contains "$out" "focus lock unavailable" "the contention fallback should say why it stayed flat"
+
+  herdr_layout_case rebind-earlier rl86 '[["w1","firstmate"],["w2","└ rl86 · p:StillHereStillHereStil"]]'
+  dir=$HERDR_CASE_DIR
+  printf '%s\n' version=1 task_id=rl86 projection_id=StillHereStillHereStil > "$dir/home/state/rl86.herdr-presentation"
+  rc=0; out=$(run_layout_relaunch "$dir" rl86) || rc=$?
+  expect_code 0 "$rc" "a relaunch beside an earlier projection still relaunches"$'\n'"$out"
+  assert_relaunch_flat "$dir" rl86
+  assert_contains "$out" "still present or unreadable" "the fallback should name the earlier projection"
+  [ "$(layout_labels "$dir")" = "firstmate | └ rl86 · p:StillHereStillHereStil" ] \
+    || fail "the earlier projection must be left untouched: $(layout_labels "$dir")"
+  grep -qx 'projection_id=StillHereStillHereStil' "$dir/home/state/rl86.herdr-presentation" \
+    || fail "the earlier projection's journal must be left untouched"
+  pass "reclaim: a re-created herdr endpoint stays flat when presentation is off, below the floor, contended, or still has an earlier projection"
+}
+
+test_herdr_rebind_keeps_its_workspace_when_the_move_fails() {
+  local dir out rc=0
+  herdr_layout_case rebind-move-fails rl87 '[["w1","firstmate"],["w2","2ndmate-alpha"]]' || {
+    echo "skip - herdr rebind projection needs jq and python3"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  : > "$dir/fake/mover-fails"
+  out=$(run_layout_relaunch "$dir" rl87) || rc=$?
+  expect_code 0 "$rc" "a failed move never fails the relaunch"$'\n'"$out"
+  assert_contains "$out" "workspace move failed" "the failed move should warn"
+  # A fresh spawn whose move fails keeps its own workspace in Herdr's current
+  # order, and so does the relaunch.
+  assert_relaunch_projected "$dir" rl87 "2ndmate-alpha" "" unbound
+  assert_contains "$out" "could not publish an exact restart binding" \
+    "the unplaced projection should say it has no restart binding"
+  pass "reclaim: a failed ordering move leaves the re-created workspace in Herdr's current order, like a fresh spawn"
+}
+
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -2456,5 +2914,10 @@ test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
+test_herdr_rebind_gets_its_own_workspace_after_the_owners_block
+test_herdr_rebind_under_a_secondmate_lands_with_its_workers
+test_herdr_rebind_retires_an_earlier_projection_that_is_gone
+test_herdr_rebind_stays_flat_where_a_fresh_spawn_would
+test_herdr_rebind_keeps_its_workspace_when_the_move_fails
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight

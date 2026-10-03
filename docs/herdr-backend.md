@@ -157,7 +157,7 @@ Rename it manually before expecting new tasks or recovery to use it.
 
 Recovery and list-live still scan the first workspace matching the home label, because they address panes they already recorded rather than choosing where new work goes.
 The one recovery that does place new work is the control plane's reclaim of a destroyed endpoint.
-It mints a replacement tab through this section's ordinary placement rules while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+It places the replacement exactly as a fresh spawn from the reclaiming seat would, in its own [presentation space](#presentation-spaces) or through this section's ordinary placement rules, while pinning the herdr session the task's record names ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
@@ -166,6 +166,7 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 ## Presentation spaces
 
 Each new crewmate or scout is placed in a disposable one-task workspace by default, on Herdr 0.8.0 and newer.
+So is a crewmate or scout whose relaunch re-creates an endpoint proven gone, so a restart leaves the worker grouped under the agent that owns it.
 This section calls that one-task workspace the projection.
 Without the projection, tasks use the ordinary flat layout described under [Watching and task containers](#watching-and-task-containers).
 
@@ -247,7 +248,14 @@ An unconverged opt-out keeps the default projection in that home until convergen
 Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
 A presentation journal is the per-task record in this home's `state/` that binds a task to its projected workspace.
 
-Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
+Two launches are eligible for projected creation:
+
+- A fresh task with neither metadata nor an existing presentation journal.
+- A relaunch that re-creates an endpoint proven gone ([`agent-control.md`](agent-control.md) "Reclaiming a task whose endpoint is gone").
+  It first retires the task's earlier journal, but only once no workspace in the session still carries that journal's token.
+  An earlier projection that is still present or unreadable stays untouched, with its journal, and the relaunch uses the flat layout.
+
+Both use the same fallbacks to the flat layout and the same creation sequence.
 Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
@@ -361,7 +369,7 @@ Once the exact pane is confirmed gone, teardown retires the task's own journal w
 ### Restart recovery
 
 Recovery is deliberately conservative and presentation-only.
-An existing journal suppresses another projected create.
+An existing journal suppresses another projected create, except for the relaunch retirement described under [Presentation journal](#presentation-journal).
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
 
 A same-identity version 2 binding may replace one exact agent-free restart husk in place.
@@ -473,6 +481,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 | Test | What it covers |
 | --- | --- |
 | `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-control-relaunch.test.sh` | A relaunch that re-creates an endpoint proven gone: its own workspace after the owning primary or secondmate child block, retirement of an earlier journal whose projection is gone, and the flat fallbacks, against a stateful fake. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
