@@ -64,11 +64,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  cat > "$fb/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fb/sleep"
+  fm_fake_exit0 "$fb" sleep
   printf '%s\n' "$fb"
 }
 
