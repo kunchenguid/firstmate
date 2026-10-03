@@ -186,7 +186,7 @@ These are the bounds set by the captain-approved architecture.
 Every existing captain gate remains unchanged in either posture.
 Homes on other primary harnesses do not load the Pi branch extension; shared per-task lease behavior is owned by `bin/fm-lease-lib.sh`.
 
-`AGENTS.md`'s `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
+The [`operational-home-layout`](../.agents/skills/operational-home-layout/SKILL.md) skill's `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
 
 ### Outcome delivery and acknowledgement
 
@@ -450,7 +450,7 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 
 ### Liveness classification
 
-The session-start secondmate liveness sweep and the watcher's secondmate liveness tick use the recovery-grade `fm_backend_agent_state` classifier where verified.
+The session-start secondmate liveness sweep, the watcher's secondmate liveness tick, and the response-lane rail, ladder, and seat-state advice use the recovery-grade `fm_backend_agent_state` classifier where verified.
 The comment above that function in `bin/fm-backend.sh` is the single owner of its detailed state contract and recovery authorization.
 
 The compatibility helper `fm_backend_agent_alive` continues to collapse those detailed results to `alive`, `dead`, or `unknown` for older callers.
@@ -1399,6 +1399,161 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Response lanes (config/response-lanes.conf)
+
+`config/response-lanes.conf` is an optional local, gitignored list of this fleet's response lanes and the thresholds their liveness is judged against.
+When it is present, [`bin/fm-lane-liveness.sh`](../bin/fm-lane-liveness.sh) reads every named lane and publishes a deterministic verdict of `dead`, `degraded`, `alive`, or `unknown` for each.
+When it is absent the rail is inert, and no mode of it reads a lane or publishes a verdict.
+
+The rail exists because a response lane can stop answering without producing any alarm of its own.
+Every signal a supervisor already has measures whether a problem was detected, not whether anything answered it, so a lane whose worker is gone keeps reading as healthy routing.
+The rail measures the responder instead, and it is read-only: it never writes, moves, or deletes a lane's inbox, its messages, its status log, its metadata, or any other lane state.
+
+Routing verification is the rail's second reading, run with `bin/fm-lane-liveness.sh routes` and just as read-only against every lane: each lane's routing claims are classified under the delivery-and-processing rule, a claim missing either half is recorded as `routed_unverified` instead of `routed`, and the mode reports the fleet's unverified rate, which is how much routing is claimed rather than proven handled.
+The script header owns the exact evidence rule and the mode's output lines; this section owns only what the measurement is for.
+
+Two properties are load-bearing and neither is optional.
+
+The rail runs centrally, in the home that supervises the lanes, and never inside a monitored home.
+A rail deployed inside a lane stops when that lane stops, which is precisely when its reading was needed.
+
+The rail also watches itself.
+`bin/fm-lane-liveness.sh check` writes its heartbeat only after a whole sweep finishes, and `bin/fm-lane-liveness.sh selfcheck` reports a heartbeat that has gone stale.
+A sweep the watcher ends on its per-check timeout therefore leaves no heartbeat, and the silence is reported rather than mistaken for quiet.
+Without that second check, a rail that stopped reporting would look exactly like a fleet with nothing to report, which is the same failure one level up.
+
+`bin/fm-lane-liveness.sh arm` writes and registers both checks, and `disarm` retires them and removes the rail's own records.
+The script's own header and `--help` own its modes and mechanics.
+
+This section is the single owner of the config schema.
+
+```
+# Thresholds in seconds; an omitted line keeps the script's default.
+W=900
+D=1800
+E=600
+M=50
+SELF=900
+SSH_TIMEOUT=10
+CAPTURE_TIMEOUT=8
+
+# One per lane.
+lane <name> [inbox-path]
+```
+
+**Thresholds, and why each default is what it is**
+
+- `W=900` is the supervision beat age at which a lane's own supervision counts as stopped. A healthy home beats every 20 to 180 seconds, so 900 is several missed beats rather than one slow poll.
+  A beat older than half of `W` but under it reads `degraded` instead of `dead`.
+  A supervision beat that cannot be established at all, reported as `watcher_beat_age_s=-`, counts as stopped rather than fresh, because unknown is never zero and the rail applies that same rule to supervision that it applies to inboxes.
+- `D=1800` is how long the oldest pending message may sit in a lane whose handled count has not moved since the previous sweep before that lane counts as dead. Half an hour outlasts any normal turn, so a busy worker is not called dead, while a lane that has taken nothing in days is unambiguous.
+  The rule reads the previous handled count the rail already keeps in its own journal, so a lane that handled work in the past but has stopped moving new messages to `handled/` reads dead too, instead of being shielded by its history.
+  The same drain also counts as dead when the lane's agent is proven absent (`agent_status=dead` or `missing`), whatever its handled history, because a proven-absent agent will never move those messages to `handled/`.
+- `E=600` is how long a transport or budget error class must hold before it counts as dead rather than a passing blip. Ten minutes outlasts a provider retry window and a rate-limit cooldown.
+- `M=50` is the percentage of a lane's tracked requests that may stand unanswered before the lane reads `degraded` while its agent is still alive. Above half means the lane receives more than it answers.
+- `SELF=900` is how long the rail may go without completing a sweep before rail silence is reported. It matches `W` because a rail that stopped reporting is as serious as a lane whose supervision stopped.
+- `SSH_TIMEOUT=10` bounds one remote lane read, in the rail and in the ladder's redispatch read of a remote inbox alike, and `CAPTURE_TIMEOUT=8` bounds one pane read. The watcher allows 30 seconds per check, so both stay small enough that one unreachable host cannot consume a whole sweep.
+
+`SSH_TIMEOUT`, `CAPTURE_TIMEOUT`, `COOLDOWN`, and `RELAUNCH_TIMEOUT` must each be a whole number greater than zero, and a zero is refused as a configuration error, because zero would disable the bound instead of applying it.
+`ATTEMPT_CEILING` and `PERSIST_TIMEOUT` still accept zero, which deliberately disables the restart rung or skips the bounded persist wait.
+
+These are response-lane health thresholds only.
+They are entirely separate from the monitoring product's own severity and paging configuration, which this rail never reads or changes.
+
+**Drained while an error class is active**
+
+A lane whose handled count moves while its error class is not `none` reads `degraded`, never `alive`: drain movement under an error proves the filesystem moved, not that a worker could do work.
+The exemption is `none` alone.
+A pane that cannot be read is `unknown`, deliberately not `none`, so a drain during an unread pane window still reads `degraded`, and the established class and its sustain clock stay in place across that window for the same reason.
+The reading carries the rule as two fields: `drained_while_error_active` is `yes` when the drain moved under a class other than `none` and `no` otherwise, and `mover` names the owner of the newest `handled/` record when the filesystem can determine it, reporting `-` for a remote lane whose records live on its own host.
+`routes` prints the same two fields on the lane line of the sweep that observes such a drain, because a pane-skipping sweep still sees the inbox move.
+The ladder records them in its ladder log when acting and prints them on its own lane line when planning, so an observation made by a sweep that prints no full reading is still reported by whoever made it while `plan` changes nothing.
+
+**Lane records**
+
+`<name>` is the lane's own record name in this home's state, so the rail reads that lane's home, host, and endpoint from `state/<name>.meta` rather than repeating them in config.
+The inbox path is optional, and needed only when a lane's inbox is not where its record implies.
+A local lane defaults to `state/<name>.inbox`.
+A lane whose record carries `remote_host=` is read over that host at `<its home>/state/parent-route/<name>.inbox`, because no local inbox directory exists for it.
+The rail resolves each lane's inbox, config override included, prints that exact path on its reading line, and the ladder's redispatch re-sends from that same printed path, so the inbox counted and the inbox re-sent cannot drift apart.
+A remote lane's `agent_status` comes from the same remote control state verb the supervision library polls, bounded like the inbox read, so a remote lane reports its agent's real state instead of a permanent `unverified`.
+
+A lane with no local inbox directory is not a lane with an empty inbox.
+An inbox the rail cannot read is reported `unknown` with every count as `-`, never as zero, because a zero-depth reading for an inbox that lives somewhere else is the exact false-health signal the rail exists to catch.
+
+**Generated state**
+
+The rail writes only three records, all under this home's own `state/`: `.lane-liveness-beat` is the heartbeat, `.lane-liveness-lanes` carries how long each lane's error class has held and what its handled count was last sweep, which is the movement baseline the dead rule reads, and `.lane-liveness-reported` holds the last verdict reported for each lane so an unchanged verdict does not wake the supervisor again.
+The error class and its clock in `.lane-liveness-lanes` are written only by a sweep that read a pane.
+`routes`, which never reads one, and a sweep whose pane could not be read both leave the established class and its clock in place, because an unreadable pane is not evidence that the error ended.
+The handled count in that same record comes from the inbox rather than the pane, so it advances on every reading, and a baseline frozen behind an unread pane would let a stalled lane read as healthy.
+All three are safe to delete; the next sweep rebuilds them, and the first sweep after deleting `.lane-liveness-reported` reports every currently unhealthy lane once more.
+
+**Recovery ladder (same file)**
+
+[`bin/fm-lane-recover.sh`](../bin/fm-lane-recover.sh) reads this same file, so one subsystem keeps one config surface.
+It asks the rail for each lane's verdict and for the error-signature class vocabulary, and owns only the response to them.
+Each reader validates the keys it consumes and skips the keys it does not, so a typo in a key either half reads still refuses rather than being silently ignored.
+
+The ladder is strictly ordered and stops at the first rung that applies: restart a proven dead endpoint, switch the profile of a lane whose error class the rail matched as a provider error, redispatch the work orders a recovered lane never claimed, then escalate and park.
+Only a conclusive endpoint probe admits the switch rung, and a provider fault whose probe is inconclusive escalates with the probe state as its evidence instead.
+Redispatch runs only when the endpoint probes alive again and the lane still holds records it never claimed, and it re-sends each of them once through [`bin/fm-send.sh`](../bin/fm-send.sh) with a fresh correlation id, so a re-send is detectable as a duplicate of the record it repeats.
+Its attempt row in the ladder log is what makes that once-only re-send auditable before the escalation that follows it.
+It reimplements nothing: endpoint probing and the guarded relaunch are [`bin/fm-secondmate-liveness-lib.sh`](../bin/fm-secondmate-liveness-lib.sh), and replacing a live agent onto a new profile is [`bin/fm-control.sh`](../bin/fm-control.sh)'s `relaunch` verb, whose contract already owns that case in the same local copy.
+
+Two orderings in it are deliberate and easy to get wrong.
+Endpoint liveness is an input to the decision and never a terminal answer, because a lane that is process-alive but provider-dead would otherwise stop at "the endpoint is alive" before its error class was ever consulted, which is a silent no-op on the exact case the ladder exists for.
+An unhealthy verdict the ladder cannot remedy ends at the escalation rung carrying its evidence, never at "nothing to do", because reporting nothing to do about a dead lane reports success while doing nothing.
+
+- `RECOVERY` is the off-switch and defaults to `off`. `off` and `dry-run` both print the plan and change nothing; only `acting` permits a rung to run. A run invoked below `acting` refuses and prints the plan instead.
+- `ATTEMPT_CEILING=2` is the per-lane attempt ceiling for the restart rung, and `COOLDOWN=3600` is the window those attempts are counted in. Together they are why a permanently broken lane escalates once with its evidence instead of flapping.
+  The switch rung admits one model switch per lane and the redispatch rung one re-send per lane, held in code rather than config, so the worst case stays two restarts, one model switch, one redispatch, then a page.
+- `PERSIST_TIMEOUT=30` bounds the request that a live lane record the open work it holds only in conversation, before its agent is replaced. A lane looping a provider error cannot answer that request by definition, so an unbounded wait would hang on exactly the lanes the switch rung targets. On timeout the ladder records `persist_impossible` with its justification and proceeds: an agent that cannot reach its provider cannot have landed work, and the relaunch verb preserves the local copy and its uncommitted work by construction.
+- `RELAUNCH_TIMEOUT=300` bounds one guarded relaunch.
+- `SWITCH_MODEL` and `SWITCH_HARNESS` name what the switch rung moves a provider-faulted lane onto. With neither set, a lane that needs a switch escalates instead, so the ladder never invents a target.
+
+A lane parked at the escalation rung stays out of automatic recovery until `bin/fm-lane-recover.sh clear <lane>` releases it, because recovery must not fight a decision a person already made.
+Its ladder log is `state/.lane-recovery-<lane>`, one row per rung tried with its outcome plus, when acting, a row for any drained-while-error observation the rail reported to it, readable with `bin/fm-lane-recover.sh log <lane>`.
+A plan never writes that log; it prints the observation on the lane line instead, so the plan keeps its change-nothing contract.
+
+See [`docs/examples/response-lanes.conf`](examples/response-lanes.conf) for a starting point to copy into local `config/response-lanes.conf`.
+
+## Alert ownership routing and seat state advice (.env TYPESAFE_API_KEY)
+
+Two tools consult typesafe.ai's System One model (Jev) as a second opinion on top of a deterministic answer, and both are opt-in on the same `TYPESAFE_API_KEY` that [Typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) uses.
+[`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh) is the single owner of the shape they share and names every member of the family, so the set is inspectable rather than found by grep.
+`bin/fm-dispatch-resolve.sh` is the family's precedent and predates that library; it carries its own client and is deliberately left as it is rather than refactored underneath a working tool.
+
+Four properties hold for every member built on this library, and they are the reason this is a family rather than three scripts.
+
+- **Deterministic first, always.** The model is asked only about what the deterministic layer could not answer, and it never re-decides something already settled. A question answered deterministically makes no network call at all.
+- **Fail-open, in each tool's own safe direction.** Every failure, including an absent key, is an answer rather than an error: no key, no network, a timeout, a non-200, or a malformed reply all produce a usable verdict and exit 0. Exit 2 is reserved for a usage error, which is actionable rather than worked around.
+- **The key never reaches a process argument.** It lives in one shell variable and is handed to `curl` through a file descriptor, and nothing logs or writes it.
+- **Coarse telemetry and bounded calibration.** Each of them appends one summary line per decision to `state/.<tool>-telemetry`, and one JSON line for each decision it asked the model to `state/.<tool>-calibration.jsonl` until that file reaches its cap.
+  Neither carries a task id, a lane name, PHI, message content, or an alert name: they exist to show whether the tool is working, not what it was asked about.
+  The calibration line records the candidate and chosen option keys by design (seat ids for alert routing), because calibration exists to compare the model's confidence against the option it picked, and a seat id is neither a task id nor PHI.
+  Both are safe to delete.
+
+**Alert ownership routing** ([`bin/fm-alert-route.sh`](../bin/fm-alert-route.sh)) names the seat that owns an alert, so a monitoring rail whose name maps to no charter reaches someone instead of going unattended.
+An alert nobody owns is otherwise indistinguishable from an alert nobody needed, because every existing signal measures whether the alert fired rather than whether it reached a seat.
+
+The deterministic layer matches the alert name against the seat registry in `data/secondmates.md`, strongest signal first: a seat whose id equals the alert name, then an alert namespaced under a seat id as `gpu-ops.thermal` under seat `gpu-ops`, then a scope that claims a namespace by writing it with a trailing dot or star, as `gpu.*` or `monitor.` do, where the longest claimed prefix wins.
+Prose that merely mentions the word does not claim it, and two seats matching equally strongly at the same strength is a genuine ambiguity rather than a match, so it falls through to the model instead of silently routing to whichever appears first.
+
+Here fail-open means toward paging, never toward silence: every failure ends at `status: escalate` or `status: unavailable` naming the fallback owner, `captain`.
+A confident model answer routes; one below the shared confidence floor ends at `status: ambiguous`, carrying its ranking as evidence rather than routing on a guess.
+No path through the tool drops an alert.
+
+**Seat state advice** ([`bin/fm-seat-state-advise.sh`](../bin/fm-seat-state-advise.sh)) answers whether a seat whose endpoint could not be classified is waiting on something or genuinely stuck, distinguishing `pipeline_wait`, `true_wedge`, and `healthy_idle`.
+The deterministic signals for this are each individually correct and jointly inconclusive, which is exactly what a second opinion is for.
+
+It is advisory only and holds no lever that touches a seat.
+Only a proven dead or missing endpoint authorizes a relaunch, and this tool never produces one: a `true_wedge` answer is evidence for a person or for an escalation, never permission to replace an agent, because acting on a semantic guess about an endpoint that could not be classified is how uncommitted work gets destroyed.
+Its fail-open direction is therefore toward leaving the seat alone, including for an answer below the confidence floor, since a false stuck verdict invites disturbing a seat that is working while a delayed one costs only time.
+
+It sends structured signals only: the probe's own state and fixed reason phrase, the busy-state word, the leading verb of the last status line, and the ages of the turn-end, activity, and status records.
+No terminal text, no status line beyond that one verb, no instructions, and no message content leave the host, so an inconclusive seat cannot leak what it was working on.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
@@ -2329,7 +2484,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # the Jev model key for typed dispatch resolution and the second-opinion tools, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off and the alert-routing and seat-state model halves stay off (docs/configuration.md "Typed dispatch resolution", "Alert ownership routing and seat state advice")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

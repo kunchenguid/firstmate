@@ -133,6 +133,11 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-check-register.sh`   | Bind an intentional custom watcher check to its current bytes                       |
 | `fm-check-unregister.sh` | Retire a custom watcher check and its trust binding by validated task id            |
 | `fm-check-lib.sh`        | Validate custom-check registrations and prepare private execution snapshots          |
+| `fm-lane-liveness.sh`   | Read response-lane liveness and routing evidence read-only, and `arm`/`disarm` its rail and rail-silence watcher checks ([configuration.md](configuration.md)) |
+| `fm-lane-recover.sh`    | Bounded ordered recovery ladder for an unhealthy response lane: plan by default, acting only at `RECOVERY=acting` ([configuration.md](configuration.md)) |
+| `fm-alert-route.sh`     | Name the seat charter that owns an alert, escalating to the fallback owner when no charter matches ([configuration.md](configuration.md)) |
+| `fm-seat-state-advise.sh` | Advise whether an inconclusive seat is `pipeline_wait`, `true_wedge`, or `healthy_idle`; advisory only, never authorizing a relaunch ([configuration.md](configuration.md)) |
+| `fm-jev-lib.sh`         | Sourced Jev second-opinion client: shared fail-open shape, confidence floor, telemetry and calibration, and the family roster ([configuration.md](configuration.md)) |
 | `fm-tool-update-check.sh` | Report watched tooling with an update available, and updates installed but left inert by PATH order |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated pull-request, merge-request, and Gerrit-change poll sidecars |

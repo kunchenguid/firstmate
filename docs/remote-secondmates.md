@@ -441,6 +441,8 @@ The watcher's liveness tick applies the identical rule during ordinary supervisi
 - Only a positive `dead` or `missing` reply relaunches through that command.
 - An unreachable transport or inconclusive state is left untouched rather than replaced locally.
 
+The response-lane ladder is a third driver of this same rule: at `RECOVERY=acting` it relaunches a proven dead or missing configured remote lane through this same command behind that same readiness gate, and [`configuration.md`](configuration.md) "Response lanes" owns its bounds.
+
 ### Inventory reconcile for markerless routes
 
 A persistent remote route's parent metadata intentionally has no local spawn-generation marker.
