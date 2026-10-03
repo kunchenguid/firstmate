@@ -147,18 +147,21 @@
 #   even when they select different backends. A fresh spawn first takes the
 #   per-home task-set lock and refuses rather than waits when forced teardown owns
 #   it; relaunch is exempt because the existing task's control lock covers it.
-#   A fresh Treehouse-backed spawn also takes the project-identity lock in the local
-#   root Firstmate home's state directory before slot allocation and holds it through
-#   task metadata publication. Teardown holds that same lock while proving and
-#   returning a slot, so allocation cannot reuse a slot before its owner record
-#   is published. Under that same lock it writes the slot's owner claim, which is
+#   A ship or scout spawn, fresh or relaunched, takes the project-identity
+#   lock in the local root Firstmate home's state directory before inspecting
+#   its worktree and holds it through task metadata publication. Fresh
+#   spawns refuse any path already recorded by another task in this home or a
+#   locally registered home; relaunches apply the same check to their recorded
+#   path. Teardown holds that lock while proving and returning a slot, so
+#   allocation cannot reuse a slot before its owner record is published. Under
+#   that same lock a fresh spawn writes the slot's owner claim, which is
 #   what lets teardown leave a slot reassigned since untouched; bin/fm-wake-lib.sh
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
 #   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   metadata publication has released that lock leaves the claim in place until
+#   the task is torn down.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
@@ -617,6 +620,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-registry-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -3017,7 +3022,7 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+if [ "$KIND" != secondmate ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -3200,6 +3205,76 @@ real_path_or_raw() { # <path>
   else
     printf '%s\n' "$path"
   fi
+}
+
+# The project lock held by each Treehouse spawn also covers this scan through
+# metadata publication. A free process lease is not proof that an older task
+# record stopped naming the slot; accepting it would make both teardowns unsafe.
+spawn_require_unclaimed_worktree_record() { # <worktree>
+  local worktree=$1 slot root home registry line child state_dir other other_id other_path
+  local known i=0 existing
+  local -a homes states
+  slot=$(cd "$worktree" 2>/dev/null && pwd -P) || {
+    echo "error: cannot inspect allocated worktree $worktree for duplicate task records" >&2
+    return 1
+  }
+  root=$(fm_firstmate_root_home "$FM_HOME") || {
+    echo "error: cannot resolve the local root Firstmate home for duplicate-claim inspection" >&2
+    return 1
+  }
+  homes=("$root")
+  states=("$STATE")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    known=0
+    for existing in "${states[@]}"; do
+      [ "$existing" != "$home/state" ] || known=1
+    done
+    [ "$known" = 1 ] || states+=("$home/state")
+    registry="$home/data/secondmates.md"
+    [ ! -e "$registry" ] && [ ! -L "$registry" ] && continue
+    [ -f "$registry" ] && [ ! -L "$registry" ] || {
+      echo "error: local Firstmate registry is unsafe at $registry; refusing duplicate-claim inspection" >&2
+      return 1
+    }
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*)
+          secondmate_registry_parse_line "$line" || {
+            echo "error: malformed local Firstmate registry entry in $registry; refusing duplicate-claim inspection" >&2
+            return 1
+          }
+          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+          child=$(cd "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || {
+            echo "error: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME" >&2
+            return 1
+          }
+          known=0
+          for existing in "${homes[@]}"; do
+            [ "$existing" != "$child" ] || known=1
+          done
+          [ "$known" = 1 ] || homes+=("$child")
+          ;;
+      esac
+    done < "$registry"
+  done
+  for state_dir in "${states[@]}"; do
+    for other in "$state_dir"/*.meta; do
+      [ -f "$other" ] && [ ! -L "$other" ] || continue
+      [ "${other##*/}" = "$ID.meta" ] && [ "$other" -ef "$STATE/$ID.meta" ] && continue
+      other_id=${other##*/}
+      other_id=${other_id%.meta}
+      for field in worktree home; do
+        other_path=$(fm_meta_get "$other" "$field")
+        [ -n "$other_path" ] || continue
+        other_path=$(cd "$other_path" 2>/dev/null && pwd -P) || continue
+        [ "$other_path" = "$slot" ] || continue
+        echo "error: worktree $slot is already recorded by task $other_id ($other); refusing a duplicate claim" >&2
+        return 1
+      done
+    done
+  done
 }
 
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
@@ -3642,7 +3717,7 @@ else
     HERDR_LAUNCHER_RELATIONSHIP=launcher-home
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
-      HERDR_LAUNCHER_RELATIONSHIP=other-home
+      HERDR_LAUNCHER_RELATIONSHIP='other-home'
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
@@ -3833,6 +3908,12 @@ EOF
       exit 1
     fi
     validate_spawn_worktree "orca worktree create" "$W"
+    if ! spawn_require_unclaimed_worktree_record "$WT"; then
+      # A returned path already claimed by another task must never be passed
+      # to abort cleanup, which would remove that task's Orca worktree.
+      ORCA_ABORT_CLEANUP=0
+      exit 1
+    fi
     if [ -z "$ORCA_TERMINAL" ]; then
       ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
@@ -4213,6 +4294,9 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" != secondmate ]; then
+  spawn_require_unclaimed_worktree_record "$WT" || exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -4309,6 +4393,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  if ! spawn_require_unclaimed_worktree_record "$WT"; then
+    rovo_endpoint_cleanup
+    exit 1
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

@@ -1707,6 +1707,23 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_a_duplicate_worktree_record() {
+  local dir out rc before
+  dir=$(new_case duplicate-claim rl-duplicate)
+  add_ship_task "$dir" rl-duplicate claude
+  printf 'zsh' > "$dir/fake/command"
+  cp "$dir/home/state/rl-duplicate.meta" "$dir/home/state/other-task.meta"
+  before=$(cat "$dir/home/state/rl-duplicate.meta")
+  out=$(run_spawn "$dir" rl-duplicate --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunching a duplicate worktree claim should refuse"
+  assert_contains "$out" "already recorded by task other-task" \
+    "relaunch duplicate refusal did not name the competing record"
+  [ "$(cat "$dir/home/state/rl-duplicate.meta")" = "$before" ] \
+    || fail "duplicate relaunch changed the task record"
+  [ ! -s "$dir/fake/literal" ] || fail "duplicate relaunch launched an agent"
+  pass "fm-spawn --relaunch: refuses a worktree named by another task record"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -2386,6 +2403,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+test_spawn_relaunch_refuses_a_duplicate_worktree_record
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
