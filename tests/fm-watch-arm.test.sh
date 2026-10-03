@@ -1264,6 +1264,75 @@ test_take_over_preserves_downtime_from_watcher_self_exit() {
   pass "watch-arm: takeover preserves self-exit downtime and surfaces a recovery wake"
 }
 
+# A lost startup race (another watcher holds the singleton, so the arm's own
+# forked child must stand down) must never block the arm forever on that child.
+# Predicate: while the "other" watcher is healthy, the arm's own child is alive
+# but genuinely stalled (hung before it can stand down). The arm retires the
+# stalled child within a bounded wait and fails loudly instead of blocking on
+# `wait $child` indefinitely - the exact regression this bounds the forever-wait
+# against.
+test_lost_race_child_stand_down_is_bounded() {
+  local dir home state fakebin armout holder_pid identity rc tmpbin entry
+  dir=$(make_case lost-race-stalled-child)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home"
+
+  # A live process P holds a well-formed singleton lock, so the arm's healthy
+  # predicate can name a healthy "other" watcher that is NOT the arm's child.
+  # The lock names this case's own watcher path: the arm resolves its child
+  # from its own directory, so this case arms through a copied bin dir whose
+  # fm-watch.sh is a real executable that never exits, keeping the arm's forked
+  # child alive and never standing down - the stalled-child shape the arm must
+  # retire instead of waiting on forever.
+  tmpbin="$dir/bin"
+  mkdir -p "$tmpbin"
+  for entry in "$ROOT"/bin/*; do
+    [ "$(basename "$entry")" = fm-watch.sh ] && continue
+    ln -s "$entry" "$tmpbin/$(basename "$entry")"
+  done
+  printf '#!/usr/bin/env bash\nexec sleep 300\n' > "$tmpbin/fm-watch.sh"
+  chmod +x "$tmpbin/fm-watch.sh"
+  sleep 1000 & holder_pid=$!
+  identity=$(LC_ALL=C ps -p "$holder_pid" -o lstart= -o command= | sed 's/^ *//')
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$holder_pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$tmpbin/fm-watch.sh" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+  # No fresh beacon yet: the delegated holder is NOT healthy at arm start, so the
+  # arm forks a child rather than attaching. The beacon is published mid-window
+  # to flip the holder healthy while that child is still stalled.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_ATTACH_POLL=0.05 FM_ARM_CONFIRM_TIMEOUT=3 FM_POLL=999999 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$tmpbin/fm-watch-arm.sh" > "$armout" 2>&1 &
+  ARM_PID=$!
+  sleep 0.6
+  touch "$state/.last-watcher-beat"
+
+  wait_for_exit "$ARM_PID" 150
+  rc=$?
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  # The arm must have exited on its own (bounded), not have been killed by the
+  # wait_for_exit deadline (124: a pre-fix arm blocks forever on the stalled
+  # child and only dies when the tester kills it).
+  [ "$rc" -ne 124 ] \
+    || fail "the arm blocked forever on the stalled lost-race child instead of retiring it"
+  grep -qF 'stalled before standing down' "$armout" \
+    || fail "the arm did not report the stalled stand-down child: $(cat "$armout")"
+  grep -q '^watcher: FAILED' "$armout" \
+    || fail "a retired stalled child must fail the cycle loudly: $(cat "$armout")"
+  grep -q 'reason=child-stand-down-stalled' "$state/.watch-cycle-exits.log" \
+    || fail "the stalled stand-down was not classified in the lifecycle ledger"
+  is_live_non_zombie "$ARM_PID" && fail "the arm is still alive after reporting"
+  pass "watch-arm: a lost-race child that stalls before standing down is retired instead of blocking the arm forever"
+}
+
 test_downtime_marker_does_not_follow_symlink() {
   local dir home state fakebin armout watcher_pid sentinel
   dir=$(make_case downtime-marker-symlink)
@@ -1607,6 +1676,7 @@ test_idle_lavish_source_stays_quiet_until_result
 test_append_wakes_live_announced_watcher
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
+test_lost_race_child_stand_down_is_bounded
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
 test_handling_delivered_accepts_already_acked_generation

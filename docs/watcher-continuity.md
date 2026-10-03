@@ -378,6 +378,11 @@ Before releasing its singleton lock after printing an actionable reason, the wat
 A matching PID and identity lets an attached arm report the delivered reason and exit zero, even after its durable wake was handled and acknowledged.
 An unrelated queue producer or a recycled PID cannot satisfy the match.
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
+After initial readiness, an arm that forked the watcher keeps applying the same identity-bound beacon predicate instead of treating a live PID as permanent health.
+When that owned watcher reaches the shared stale-beacon grace, the arm sends TERM to the watcher's isolated process group and then, for a child still alive after `FM_WATCH_STALL_RETIRE_TIMEOUT`, KILL to that same group: the arm's one retirement contract, shared with its signal and stand-down cleanup paths.
+It then publishes the existing watcher-down recovery episode and exits with a typed failure.
+The stale lock is removed only once the child is dead and still matches the expected PID, so a child that survives the bound keeps its lock and the ledger records the refused release.
+Persistent adapters therefore lose their owned-child no-op when the child is no longer healthy and can run their existing bounded retry without restarting the primary session.
 
 ### Cycle exit log
 
@@ -475,10 +480,12 @@ It checks that a newly appended keyed decision is classified without rereading e
 - Recovery publication before stale-lock removal.
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
-- A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- A real-process SIGSTOP counterfactual that distinguishes a live PID from a stale beacon and proves the bounded retirement contract on both platforms.
+- On Linux the retirement's KILL kills the stopped watcher immediately and the reaped child yields the released-lock shape.
+- On other hosts the same relinquished lock is followed by same-session re-arm surfacing the accepted downtime episode and a healthy successor whose beacon keeps advancing.
+- The refusal shape that keeps a live holder's lock is not exercised by this counterfactual and is described at the arm-layer contract above.
 
 ### Claude auto-arm and turn-end guard
-
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 
 `tests/fm-claude-stop-autoarm.test.sh` covers:
