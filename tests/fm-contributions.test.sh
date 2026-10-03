@@ -1147,6 +1147,7 @@ test_unsupported_forge_url_is_never_recorded_as_a_failure() {
   home=$(new_home unsupported-poll)
   forge_home "$home"
   wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'poll failed on a backlog carrying an unsupported forge URL'

@@ -237,9 +237,12 @@ forge() {
   [ "$remaining" -le 5 ] || remaining=5
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read stopped at its own bound, at the deadline, or by TERM, INT or HUP
-  # aimed at it is unmeasured; every other nonzero status is unavailable
-  # evidence.
+  # Five statuses mean the read answered nothing and so is unmeasured: 124, the
+  # bound the runner reports for its own per-read cap or the deadline; 137, a
+  # client SIGKILLed by something other than the runner, whose own escalation
+  # fm_run_external_timeout collapses into 124 and whose perl watchdog exits 124
+  # from its handler; and TERM's 143, INT's 130 and HUP's 129 aimed at the read
+  # alone. Every other nonzero status is unavailable evidence.
   if read_cut_short "$rc"; then
     unmeasured
   elif [ "$rc" -ne 0 ]; then
