@@ -492,6 +492,139 @@ test_build_refuses_a_template_without_exactly_one_slot() {
   pass "build refuses a template without exactly one data slot"
 }
 
+test_home_template_selection() {
+  local home data mode selected out
+  for mode in absolute relative config-override environment; do
+    home=$(make_home "template-$mode")
+    data="$home/payload.json"
+    write_valid_payload "$data"
+    mkdir -p "$home/config" "$home/custom templates" "$home/alt-config"
+    selected="$home/custom templates/board.html"
+    cp "$ROOT/.agents/skills/bearings/assets/board-template.html" "$selected"
+    printf '\n<!-- home-template-marker -->\n' >> "$selected"
+    case "$mode" in
+      absolute) printf '%s\n' "$selected" > "$home/config/bearings-board-template" ;;
+      relative) printf '%s' 'custom templates/board.html' > "$home/config/bearings-board-template" ;;
+      config-override)
+        # The home config must be ignored when the override directory wins,
+        # and the override's relative path still resolves against FM_HOME.
+        printf '%s\n' "$home/missing.html" > "$home/config/bearings-board-template"
+        printf '%s\n' 'custom templates/board.html' > "$home/alt-config/bearings-board-template"
+        ;;
+      environment)
+        # Even an invalid config must be ignored when the test override wins.
+        printf '%s\n' "$home/missing.html" > "$home/config/bearings-board-template"
+        ;;
+    esac
+    case "$mode" in
+      environment)
+        out=$(FM_BEARINGS_BOARD_TEMPLATE="$selected" run_board "$home" build "$data") \
+          || fail "environment override did not win: $out"
+        ;;
+      config-override)
+        out=$(unset FM_BEARINGS_BOARD_TEMPLATE; FM_CONFIG_OVERRIDE="$home/alt-config" run_board "$home" build "$data") \
+          || fail "config directory override build failed: $out"
+        ;;
+      *)
+        out=$(unset FM_BEARINGS_BOARD_TEMPLATE; run_board "$home" build "$data") \
+          || fail "$mode home template build failed: $out"
+        ;;
+    esac
+    assert_contains "$(cat "$home/.lavish/bearings-board.html")" 'home-template-marker' \
+      "$mode build did not use the selected template"
+    extract_payload "$home/.lavish/bearings-board.html" | jq -e '.schema == "fm-bearings-board.v1"' >/dev/null \
+      || fail "$mode home template lost the payload"
+  done
+  pass "home templates support absolute and home-relative paths; config directory and environment overrides win"
+}
+
+test_home_template_refusals() {
+  local home data kind selected out config
+  for kind in missing slotless duplicate symlink directory unreadable empty multiline; do
+    home=$(make_home "template-refusal-$kind")
+    data="$home/payload.json"
+    config="$home/config/bearings-board-template"
+    selected="$home/custom.html"
+    write_valid_payload "$data"
+    mkdir -p "$home/config" "$home/.lavish"
+    printf 'existing board\n' > "$home/.lavish/bearings-board.html"
+    printf '%s\n' "$selected" > "$config"
+    case "$kind" in
+      missing) ;;
+      slotless) printf '<html>no slot</html>\n' > "$selected" ;;
+      duplicate) printf '__FM_BEARINGS_BOARD_DATA__\n__FM_BEARINGS_BOARD_DATA__\n' > "$selected" ;;
+      symlink) ln -s "$ROOT/.agents/skills/bearings/assets/board-template.html" "$selected" ;;
+      directory) mkdir "$selected" ;;
+      unreadable)
+        cp "$ROOT/.agents/skills/bearings/assets/board-template.html" "$selected"
+        chmod 000 "$selected"
+        if [ -r "$selected" ]; then
+          printf 'skip: current user can read mode-000 template\n'
+          continue
+        fi
+        ;;
+      empty) : > "$config" ;;
+      multiline) printf '%s\n%s\n' "$selected" "$selected" > "$config" ;;
+    esac
+    if out=$(unset FM_BEARINGS_BOARD_TEMPLATE; run_board "$home" build "$data" 2>&1); then
+      fail "$kind configured template was accepted"
+    fi
+    assert_contains "$out" "$config" "$kind refusal omitted the config file"
+    case "$kind" in
+      empty|multiline) ;;
+      *) assert_contains "$out" "$selected" "$kind refusal omitted the resolved path" ;;
+    esac
+    [ "$(cat "$home/.lavish/bearings-board.html")" = 'existing board' ] \
+      || fail "$kind refusal changed the existing board"
+  done
+  pass "invalid home template configuration refuses without replacing the board"
+}
+
+test_config_override_must_be_a_readable_directory() {
+  local home data kind override out
+  for kind in file dangling-symlink missing unreadable; do
+    home=$(make_home "config-override-$kind")
+    data="$home/payload.json"
+    override="$home/alt-config"
+    write_valid_payload "$data"
+    mkdir -p "$home/config" "$home/.lavish"
+    printf 'existing board\n' > "$home/.lavish/bearings-board.html"
+    case "$kind" in
+      file) printf 'not a directory\n' > "$override" ;;
+      dangling-symlink) ln -s "$home/absent-config" "$override" ;;
+      missing) ;;
+      unreadable)
+        mkdir "$override"
+        chmod 000 "$override"
+        if [ -r "$override" ] && [ -x "$override" ]; then
+          printf 'skip: current user can read mode-000 directory\n'
+          continue
+        fi
+        ;;
+    esac
+    if out=$(unset FM_BEARINGS_BOARD_TEMPLATE; FM_CONFIG_OVERRIDE="$override" run_board "$home" build "$data" 2>&1); then
+      fail "$kind FM_CONFIG_OVERRIDE was accepted and published a board: $out"
+    fi
+    assert_contains "$out" 'FM_CONFIG_OVERRIDE' "$kind refusal did not name FM_CONFIG_OVERRIDE: $out"
+    assert_contains "$out" "$override" "$kind refusal omitted the resolved directory: $out"
+    [ "$(cat "$home/.lavish/bearings-board.html")" = 'existing board' ] \
+      || fail "$kind FM_CONFIG_OVERRIDE refusal changed the existing board"
+  done
+
+  # Without the override, a home that has no config directory at all still
+  # builds from the shipped template: absence is the normal fallback, not an
+  # unusable selection.
+  home=$(make_home config-override-unset)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  [ ! -e "$home/config" ] || fail "fixture home unexpectedly has a config directory"
+  out=$(unset FM_BEARINGS_BOARD_TEMPLATE FM_CONFIG_OVERRIDE; run_board "$home" build "$data" 2>&1) \
+    || fail "a home without a config directory did not fall back to the shipped template: $out"
+  extract_payload "$home/.lavish/bearings-board.html" | jq -e '.schema == "fm-bearings-board.v1"' >/dev/null \
+    || fail "shipped-template fallback lost the payload"
+  pass "an unusable FM_CONFIG_OVERRIDE refuses; an absent home config still falls back to the shipped template"
+}
+
 test_charted_kind_is_optional_and_accepts_both_values() {
   local home data
   home=$(make_home chartedkind)
@@ -769,6 +902,9 @@ test_build_refuses_a_nondecision_reconcile_value() {
   pass "build reserves reconcile across non-decision cards"
 }
 
+test_home_template_selection
+test_home_template_refusals
+test_config_override_must_be_a_readable_directory
 test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
