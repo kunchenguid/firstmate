@@ -192,8 +192,9 @@ So a finished, hung, or identity-mismatched claim cannot suppress that recovery 
 
 The recovery-episode contract below owns once-per-generation announcement.
 A handling successor does not re-announce rows inherited from its predecessor.
-It snapshots their highest queue sequence under the queue lock before becoming ready.
-An external append above that sequence can surface a new recovery notification, whether the prior handling turn is still running or has acknowledged its rows.
+It snapshots those rows under the queue lock before becoming ready.
+An external append of any other row can surface a new recovery notification, whether the prior handling turn is still running or has acknowledged its rows.
+The snapshot holds rows rather than a sequence bound, so a lost or malformed sequence counter cannot make a later row read as inherited; the append also numbers past every queued row, so an outstanding acknowledgement cannot consume it.
 Notification never consumes rows; sequence-bound, per-actor acknowledgement remains the owner of consumption.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
 
@@ -453,7 +454,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A persistent live successor after recovery.
 - An idle live Lavish source that stays quiet until its real result wakes promptly.
 - An append that reopens an announced empty recovery.
-- An external append above a handling successor's inherited sequence that surfaces both before and after the prior handling turn acknowledges its rows.
+- An external append beside a handling successor's inherited rows that surfaces both before and after the prior handling turn acknowledges its rows, including after a lost or malformed sequence counter.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
