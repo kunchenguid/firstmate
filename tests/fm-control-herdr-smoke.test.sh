@@ -35,6 +35,9 @@ herdr_forget_inherited_pane
 
 SESSION="fm-lab-control-smoke-$$"
 export HERDR_SESSION="$SESSION"
+# Same seam tests/lib.sh exports: this sandbox pins FM_HOME to scratch homes
+# from inside the repo checkout, which is deliberate addressing, not drift.
+export FM_TEST_SEAM=1
 SCRATCH=
 cleanup_all() {
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"

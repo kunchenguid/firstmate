@@ -121,6 +121,9 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
 fi
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# warn after fm-wake-lib resolves FM_HOME
+# shellcheck source=bin/fm-home-drift-lib.sh
+if [ -f "$SCRIPT_DIR/fm-home-drift-lib.sh" ]; then . "$SCRIPT_DIR/fm-home-drift-lib.sh" && fm_home_drift_warn; fi
 
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
