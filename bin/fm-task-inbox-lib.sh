@@ -268,7 +268,10 @@ fm_task_inbox_body() {  # <record-path>
 }
 
 # The constant self-describing doorbell line for the inbox containing a record.
-# It names the inbox by the literal "$FM_TASK_INBOX", which bin/fm-spawn.sh
+# It names the inbox and defers how to read and acknowledge it to the brief's
+# inbox section (bin/fm-brief.sh), which gives a ship or scout worker the
+# batched bin/fm-task-inbox.sh take and ack and a secondmate charter the manual
+# steps, so one line serves both. It names the inbox by the literal "$FM_TASK_INBOX", which bin/fm-spawn.sh
 # exports into every launch as the inbox's absolute path, so the worker can
 # resolve it from its own environment even after losing its brief context.
 # The short `<task>.inbox` name follows as the fallback for a worker launched
@@ -290,7 +293,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     ''|*[![:print:]]*) return 1 ;;
   esac
   quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
-  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
+  printf ": Firstmate instruction waiting in \"\$FM_TASK_INBOX\", your '%s' steering inbox: handle it as the inbox section of your brief says." \
     "$quoted"
 }
 

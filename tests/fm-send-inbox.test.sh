@@ -131,7 +131,7 @@ test_text_steer_rides_inbox() {
   body=$(record_body _ "$rec")
   [ "$body" = "please rebase onto main" ] || fail "the recorded body differs: $body"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" \
+  assert_contains "$typed" "Firstmate instruction waiting in \"\$FM_TASK_INBOX\", your 't1.inbox' steering inbox" \
     "the doorbell should direct the worker to drain the inbox"
   case "$typed" in
   *"please rebase onto main"*) fail "the payload must never be typed:"$'\n'"$typed" ;;
@@ -207,8 +207,8 @@ test_resend_enqueues_new_sequence() {
   doorbells=$(grep -cF 'Firstmate instruction waiting' "$dir/send.log" || true)
   [ "$doorbells" = 1 ] || fail "each send rings once (the log is truncated per send), got $doorbells"
   typed=$(cat "$dir/send.log")
-  assert_contains "$typed" "numeric order" \
-    "a newer record's doorbell should preserve inbox sequence ordering"
+  assert_contains "$typed" "handle it as the inbox section of your brief says." \
+    "a newer record's doorbell should defer the ordered read to the brief's inbox section"
   case "$typed" in
   *"check the CI result"*) fail "a re-send typed the payload" ;;
   esac

@@ -280,31 +280,30 @@ EOF
 # Written once; only the two sentences about a green PR depend on the forge,
 # because on gerrit the ci step is skipped and there is no PR to report.
 fm_nm_driving_block() {  # <forge>
-  local pr_return_line='' pr_reattach_clause=';' drive_block wait_cfg
+  local pr_return_line='' pr_reattach_clause=';' drive_block
   if [ "$1" != gerrit ]; then
     pr_return_line="Only a drive call's return reports the green PR: \`no-mistakes axi status\` shows progress but never reports \`checks-passed\` while the ci step is still monitoring the PR for merge, so never wait on a status poll for the next gate or outcome.
 "
     pr_reattach_clause="; once checks are green it returns \`checks-passed\` immediately, and"
   fi
-  # config/wait-no-turns selects the foreground drive. Absent, the text matches
-  # the backgrounded drive a home had before that flag.
-  wait_cfg=${CONFIG:-${FM_CONFIG_OVERRIDE:-${FM_HOME:-}/config}}
-  if [ -e "$wait_cfg/wait-no-turns" ]; then
-    drive_block="Drive the run with ONE foreground \`no-mistakes axi run\` and let it block.
-It bounds its own hold for you: \`--wait\` (default 8m) exists precisely so a harness with a ten-minute command cap gets a structured return instead of being killed mid-hold.
-Declare that wait using the brief's status-reporting rule before the foreground drive call.
-Never background a wait, and never arm a timer to stand in for one: a backgrounded call returns in milliseconds, so it does not wait at all, and every timer left behind fires later as a paid wake for nothing.
-${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - that is not a failure: reattach at once by re-running \`no-mistakes axi run\` without flags, and issue the same foreground call again, one at a time, until a gate or outcome comes back${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
-  else
-    drive_block="One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
-So background the drive call instead of sitting in one blocking hold your harness will kill, and read its return when it finishes.
-Declare that wait using the brief's status-reporting rule before waiting on the backgrounded drive call.
-Where a harness's own command limit is not established, assume it bounds commands and use that same backgrounded shape.
-${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - reattach at once by re-running \`no-mistakes axi run\` without flags, backgrounded the same way${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`."
-  fi
+  drive_block="One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.
+So wait on the run with ONE backgrounded drive call that notifies you when it returns, never with status loops.
+Background it only with your harness's own completion-notifying facility, such as the Claude Code Bash tool's \`run_in_background\`, which resumes you when the call exits; never with shell \`&\`, and never poll any status, log, or timer while it runs.
+Where your harness has no such facility, run the drive call in the foreground and let its own \`--wait\` bound (default 8m) return it.
+Declare that wait using the brief's status-reporting rule before the first drive call.
+When it returns, read it: answer a gate with \`respond\`, or reattach the same way.
+${pr_return_line}Whenever a drive call returns without a gate or an outcome - its own wait elapsed, or it was killed or timed out - that is not a failure: reattach at once by re-running \`no-mistakes axi run\` without flags, backgrounded the same way${pr_reattach_clause} if it refuses because no run is active, read the finished outcome from \`no-mistakes axi status\`.
+After a \`respond\`, reattach the same way and never send that \`respond\` again: it sent its answer before it began waiting, so a resend would answer whichever gate parks next without you reading it."
   cat <<EOF
 You drive no-mistakes by responding to its gates, not by implementing fixes.
-Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
+Use exactly these commands; you need no \`--help\`, \`no-mistakes doctor\`, or status poll to find them:
+- start the run: \`no-mistakes axi run --intent "<intent>"\`
+- reattach after a return with no gate or outcome: \`no-mistakes axi run\` with no other flags
+- answer a gate: \`no-mistakes axi respond --action approve\`, or \`no-mistakes axi respond --action fix --findings <id>,<id>\` with optional \`--instructions "<text>"\`, or \`no-mistakes axi respond --action skip\`
+- one step's detail: \`no-mistakes axi logs --step <step>\` (add \`--full\` for the whole log)
+- the finished outcome when no run is active: \`no-mistakes axi status\`
+Open \`--help\` only when one of these is refused as unknown.
 When starting no-mistakes, pass \`--intent\` as only this brief's \`## Captain's intent\` subsection body, not its heading, plus any later words the captain actually said.
 Preserve the actual words without adding speaker labels or direct address; the subsection heading supplies provenance outside the pipeline input.
 For a legacy brief with no such subsection, include only words on lines marked \`[captain] \`, excluding that metadata prefix; never copy its mixed \`# Task\` wholesale.

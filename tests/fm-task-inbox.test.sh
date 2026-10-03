@@ -8,8 +8,8 @@
 # unacknowledged message before escalating once as an ordinary stale wake.
 # These tests pin the semantics with real processes:
 #   1. A message is written durably and appears in the inbox, byte-exact
-#      including newlines, with a doorbell naming the inbox glob, numeric order,
-#      and handled/.
+#      including newlines, with a doorbell naming the inbox and deferring to
+#      the brief's inbox section.
 #   2. Sequencing dedups per worker lifetime: the handled mv retires a record,
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #      The idempotent enqueue (the remote steer leg's primitive) additionally
@@ -174,10 +174,11 @@ test_write_is_durable_and_exact() {
   doorbell2=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec2")
   [ "$doorbell" = "$doorbell2" ] \
     || fail "every record in one inbox should ring the same drain-all doorbell"
-  assert_contains "$doorbell" "list \"\$FM_TASK_INBOX\"/*.msg" "doorbell should list all unhandled records through FM_TASK_INBOX"
+  assert_contains "$doorbell" "waiting in \"\$FM_TASK_INBOX\"," "doorbell should name the inbox through FM_TASK_INBOX"
   assert_contains "$doorbell" "'t1.inbox' steering inbox" "doorbell should quote and name the inbox"
-  assert_contains "$doorbell" "numeric order" "doorbell should require ordered processing"
-  assert_contains "$doorbell" "handled/" "doorbell should name the handled dir"
+  assert_contains "$doorbell" "handle it as the inbox section of your brief says." \
+    "doorbell should defer reading and acknowledging to the brief's inbox section"
+  assert_not_contains "$doorbell" "*.msg" "doorbell must not prescribe the manual list sequence"
   assert_contains "$doorbell" "Firstmate instruction waiting" "doorbell should be self-describing"
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
@@ -751,7 +752,7 @@ test_watcher_rerings_idle_pane_quietly() {
     sleep 0.1
     i=$((i + 1))
   done
-  grep -qF "Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your 't1.inbox' steering inbox" "$log" \
+  grep -qF "Firstmate instruction waiting in \"\$FM_TASK_INBOX\", your 't1.inbox' steering inbox" "$log" \
     || { kill "$pid" 2>/dev/null; fail "the watcher never re-rang the doorbell:"$'\n'"$(cat "$log")"; }
   kill -0 "$pid" 2>/dev/null \
     || fail "a healthy re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
