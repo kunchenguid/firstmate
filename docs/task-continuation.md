@@ -36,7 +36,11 @@ The Pi primary discovers eligible tasks through `progress-list`. A token-bound c
 
 The durable wake queue and branch outcome sequence remain delivery owners. Acknowledging a presented notification is sequence-bound and does not enroll or reconcile another goal record. Re-presenting unchanged work does not create a second goal wake. Topic switches and reloads recover from the backlog row rather than transcript history.
 
-`fm_task_continuation` exposes only `read` and `update`. The authenticated `fm_task_intent_update` path still appends a selected captain correction to the original intent through [`fm-task-intent.py`](../bin/fm-task-intent.py). That owner authenticates the native session input and atomically changes only `brief.md`; it creates no progress or lifecycle record. Cross-task work returns to MAIN, which uses the existing durable handoff owner rather than a branch-side lifecycle patch.
+`fm_task_continuation` exposes only `read` and `update`.
+The MAIN-only `fm_task_intent_update` path replaces the existing `## Captain's intent` body with explicitly supplied processed requirement text through [`fm-task-intent.py`](../bin/fm-task-intent.py).
+Its `input` parameter is the complete final requirement itself, not a message selector or a claim that the prose is a verbatim quote.
+The owner verifies the current MAIN and task boundary and atomically changes only `brief.md`; it creates no source mapping, receipt, intent history, progress, or lifecycle record.
+Cross-task work returns to MAIN, which uses the existing durable handoff owner rather than a branch-side lifecycle patch.
 
 ## Existing owners remain authoritative
 

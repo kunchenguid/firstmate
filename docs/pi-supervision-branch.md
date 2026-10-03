@@ -81,7 +81,8 @@ A queued handoff, successful send, provider terminal state, report or pull reque
 An unreadable task record produces a scoped reconciliation request without inventing an executor or progress state.
 
 Ordinary chat creates no progress record.
-For an authenticated follow-up, MAIN uses the separate `fm_task_intent_update` tool, which appends the selected original input through the existing interruption-safe intent owner.
+For an authenticated follow-up, MAIN uses the separate `fm_task_intent_update` tool, whose `input` parameter replaces the task's final Intent with the complete processed requirement through the existing atomic intent owner.
+The canonical brief remains the only Intent record; no source-message mapping, update receipt, or parallel history is created.
 Discovery stays in the heartbeat owner's `progress-list` call; it does not add another history or progress source to MAIN's daily read/update schema.
 The Branch registration exposes only `read` for the exact compact-progress task admitted from the original backlog.
 Historical rich-lifecycle records are neither admissions nor readable through this tool.

@@ -8,7 +8,7 @@
 #   fm-task-state.sh progress <task-id>
 #   fm-task-state.sh update-progress <task-id> --expected-token TOKEN --progress '<json>'
 #   fm-task-state.sh progress-list
-#   fm-task-state.sh intent-plan|update-brief <task-id> --session-file FILE --entry-id ID --input ID
+#   fm-task-state.sh update-brief <task-id> --requirement=TEXT
 #
 # Legacy metadata and explicit executor=local-agent records delegate unchanged
 # to fm-crew-state.sh.
@@ -67,10 +67,17 @@ case "${1:-}" in
     fm_task_progress_update "$progress_id" "$task_progress_expected" "$task_progress_json"
     exit $?
     ;;
-  intent-plan|update-brief)
+  update-brief)
     intent_operation=$1
     intent_id=${2:-}
-    [ -n "$intent_id" ] && [ "$#" -ge 3 ] || exit 2
+    [ -n "$intent_id" ] || {
+      echo 'REFUSED: update-brief requires an existing canonical task id and --requirement TEXT' >&2
+      exit 6
+    }
+    [ "$#" -ge 3 ] || {
+      echo 'REFUSED: update-brief requires --requirement TEXT' >&2
+      exit 6
+    }
     shift 2
     [ "${FM_SUPERVISION_ACTOR:-main}" = main ] || {
       echo 'REFUSED: intent updates belong to MAIN' >&2

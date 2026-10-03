@@ -92,6 +92,7 @@ const mainSchema = tools.get('fm_task_continuation').parameters;
 assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'record_token', 'task']);
 assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
 assert.deepEqual(Object.keys(tools.get('fm_task_intent_update').parameters.properties).sort(), ['input', 'task']);
+assert.match(tools.get('fm_task_intent_update').parameters.properties.input.description, /Complete processed requirement text/);
 assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, ['task']);
 const empty = await tool({ action: 'read', task: 'task' });
 assert.equal(empty.goal, 'Deliver compact continuation');
@@ -180,32 +181,123 @@ assert.equal(completed.next_step, '');
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
   'accepted compact result remained an active reminder');
 
-session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Clarify the acceptance wording.' }], timestamp: Date.now() });
-const correction = session.getLeafId();
-const appendIntentEntry = session.appendCustomEntry.bind(session);
-let interruptConfirmation = true;
-session.appendCustomEntry = (name, value) => {
-  if (name === 'fm-continuation-input' && value.pending === false && interruptConfirmation) {
-    interruptConfirmation = false;
-    throw new Error('fixture: interrupted after compact brief commit');
-  }
-  return appendIntentEntry(name, value);
-};
-const interruptedIntent = await rawIntent({ task: 'task', input: correction });
-assert.equal(interruptedIntent.isError, true, 'compact intent interruption was not exposed');
-assert.match(interruptedIntent.content[0].text, /interrupted after compact brief commit/);
-assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'compact intent correction enrolled a rich lifecycle');
-session.appendCustomEntry = appendIntentEntry;
+for (const [params, pattern] of [
+  [{ task: 'task' }, /requires processed requirement text/],
+  [{ task: 'task', input: '' }, /non-whitespace processed requirement text/],
+  [{ task: 'task', input: ' \n\t ' }, /non-whitespace processed requirement text/],
+  [{ task: 'task', input: 'invalid\0text' }, /must not contain NUL/],
+  [{ task: 'task', input: 'x'.repeat(8193) }, /8192-character limit/],
+  [{ task: 'task', input: 'Requirement summary\n## Acceptance\nMust pass.' }, /heading level 3 or deeper/],
+]) {
+  const invalid = await rawIntent(params);
+  assert.equal(invalid.isError, true, `invalid intent input was accepted: ${JSON.stringify(params)}`);
+  assert.match(invalid.content[0].text, pattern);
+}
+
+const processedRequirement = '确认不要通过枚举逐项覆盖这些场景。\n\n验收：使用行为测试证明开放式分类仍然成立。';
+const intentEntriesBefore = session.getBranch().filter(entry =>
+  entry.type === 'custom' && entry.customType === 'fm-continuation-input').length;
+const processedResult = await rawIntent({ task: 'task', input: processedRequirement });
+assert.equal(Boolean(processedResult.isError), false, JSON.stringify(processedResult));
+const processedBrief = readFileSync(home + '/data/task/brief.md', 'utf8');
+assert.equal(processedBrief.split(processedRequirement).length, 2,
+  'literal Chinese multiline processed requirement was not stored exactly once');
+assert.doesNotMatch(processedBrief, /Deliver the requested behavior/,
+  'processed requirement was appended instead of replacing the final Intent');
+assert.match(processedBrief, /## Firstmate spec\nVerify the public fixture/,
+  'intent replacement changed another brief subsection');
+assert.equal(session.getBranch().filter(entry =>
+  entry.type === 'custom' && entry.customType === 'fm-continuation-input').length, intentEntriesBefore,
+  'intent replacement created a source or transaction receipt');
+assert.equal(existsSync(home + '/state/task-session-index'), false,
+  'intent replacement created a session provenance index');
+const retriedIntent = await rawIntent({ task: 'task', input: processedRequirement });
+assert.equal(Boolean(retriedIntent.isError), false, JSON.stringify(retriedIntent));
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8'), processedBrief,
+  'retry changed or duplicated the final Intent');
+const optionRequirement = '--no-enum remains literal requirement text.\n\n### Acceptance\nUse an open-ended behavior test.';
+const optionResult = await rawIntent({ task: 'task', input: optionRequirement });
+assert.equal(Boolean(optionResult.isError), false, JSON.stringify(optionResult));
+assert.match(readFileSync(home + '/data/task/brief.md', 'utf8'), /--no-enum remains literal requirement text/,
+  'option-looking processed requirement was reclassified as a CLI option');
+const restoreProcessed = await rawIntent({ task: 'task', input: processedRequirement });
+assert.equal(Boolean(restoreProcessed.isError), false, JSON.stringify(restoreProcessed));
+const extractedIntent = spawnSync('bash', ['-c', '. "$1/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$2" "## Captain\'s intent"',
+  '_', process.env.REAL_ROOT, home + '/data/task/brief.md'], { encoding: 'utf8' });
+assert.equal(extractedIntent.status, 0, extractedIntent.stderr);
+assert.match(extractedIntent.stdout, /确认不要通过枚举逐项覆盖这些场景/,
+  'downstream review intent extraction did not see the processed requirement');
+
+command('fm-tasks-axi.sh', ['add', 'task-other', 'Keep task routing explicit', '--kind', 'ship',
+  '--body', 'Another task must keep its own final Intent.', '--start']);
+mkdirSync(home + '/data/task-other', { recursive: true });
+writeFileSync(home + '/data/task-other/brief.md', "# Task\n## Captain's intent\nOther task intent\n\n## Firstmate spec\nStay isolated\n");
+writeFileSync(home + '/state/task-other.meta', `spawn_gen=g1\nkind=ship\nexecutor=local-agent\nproject=${home}/project\nbackend=herdr\nwindow=other-endpoint\nharness=pi\nendpoint_task_id=task-other\n`);
+const routedRequirement = 'Only task-other receives this complete processed requirement.';
+const routedIntent = await rawIntent({ task: 'task-other', input: routedRequirement });
+assert.equal(Boolean(routedIntent.isError), false, JSON.stringify(routedIntent));
+assert.match(readFileSync(home + '/data/task-other/brief.md', 'utf8'), new RegExp(routedRequirement));
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8'), processedBrief,
+  'explicit task routing changed a different task brief');
+const missingTask = await rawIntent({ task: 'missing-task', input: 'Must not create a task.' });
+assert.equal(missingTask.isError, true, 'intent update created or accepted an unknown task');
+assert.match(missingTask.content[0].text, /missing or unsafe task data directory/);
+
+const ownerEmpty = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'task',
+  '--requirement', '   '], {
+  encoding: 'utf8', env: { ...process.env, FM_HOME: home, FM_DATA_OVERRIDE: home + '/data',
+    FM_STATE_OVERRIDE: home + '/state', FM_SUPERVISION_ACTOR: 'main' },
+});
+assert.equal(ownerEmpty.status, 6, 'intent owner accepted empty processed requirement text');
+assert.match(ownerEmpty.stderr, /non-whitespace processed requirement text/);
+const ownerAbsent = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'task'], {
+  encoding: 'utf8', env: { ...process.env, FM_HOME: home, FM_DATA_OVERRIDE: home + '/data',
+    FM_STATE_OVERRIDE: home + '/state', FM_SUPERVISION_ACTOR: 'main' },
+});
+assert.equal(ownerAbsent.status, 6, 'intent owner accepted absent processed requirement text');
+assert.match(ownerAbsent.stderr, /requires --requirement TEXT/);
+const ownerHeading = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'task',
+  '--requirement=Summary\n## Escaped section\nMust not escape.'], {
+  encoding: 'utf8', env: { ...process.env, FM_HOME: home, FM_DATA_OVERRIDE: home + '/data',
+    FM_STATE_OVERRIDE: home + '/state', FM_SUPERVISION_ACTOR: 'main' },
+});
+assert.equal(ownerHeading.status, 6, 'intent owner accepted a heading that escapes the Intent subsection');
+assert.match(ownerHeading.stderr, /heading level 3 or deeper/);
+const unauthorized = spawnSync(process.env.REAL_ROOT + '/bin/fm-task-state.sh', ['update-brief', 'task',
+  '--requirement', 'Unauthorized replacement'], {
+  encoding: 'utf8', env: { ...process.env, FM_HOME: home, FM_DATA_OVERRIDE: home + '/data',
+    FM_STATE_OVERRIDE: home + '/state', FM_SUPERVISION_ACTOR: 'branch' },
+});
+assert.equal(unauthorized.status, 6, 'non-MAIN actor reached the intent transaction owner');
+assert.match(unauthorized.stderr, /intent updates belong to MAIN/);
+
+const concurrentRequirements = [
+  'Concurrent complete requirement A.\n\nKeep subsection A intact.',
+  'Concurrent complete requirement B.\n\nKeep subsection B intact.',
+];
+const concurrentResults = await Promise.all(concurrentRequirements.map(input => rawIntent({ task: 'task', input })));
+assert.equal(concurrentResults.every(result => !result.isError), true,
+  `concurrent intent replacements did not serialize: ${JSON.stringify(concurrentResults)}`);
+const concurrentIntent = spawnSync('bash', ['-c', '. "$1/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$2" "## Captain\'s intent"',
+  '_', process.env.REAL_ROOT, home + '/data/task/brief.md'], { encoding: 'utf8' });
+assert.equal(concurrentIntent.status, 0, concurrentIntent.stderr);
+assert.ok(concurrentRequirements.includes(concurrentIntent.stdout.trim()),
+  'concurrent intent replacement produced a partial or mixed body');
+assert.match(readFileSync(home + '/data/task/brief.md', 'utf8'), /## Firstmate spec\nVerify the public fixture/,
+  'concurrent intent replacement changed another brief subsection');
+
+const correction = 'Clarify the processed acceptance wording without quoting the original message.';
 await fire('session_shutdown', { reason: 'intent-recovery' });
 session = SessionManager.open(session.getSessionFile());
 continuation = await install();
 const intentResult = await rawIntent({ task: 'task', input: correction });
 assert.equal(Boolean(intentResult.isError), false, JSON.stringify(intentResult));
-assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split('Clarify the acceptance wording.').length, 2,
-  'compact intent retry duplicated or lost the authenticated correction');
+assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split(correction).length, 2,
+  'intent replacement after reload was not authoritative');
+assert.doesNotMatch(readFileSync(home + '/data/task/brief.md', 'utf8'), /确认不要通过枚举/,
+  'new processed requirement retained stale prior Intent text');
 assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'compact intent recovery created a rich lifecycle record');
+  'intent replacement created a rich lifecycle record');
 const correctedRead = await tool({ action: 'read', task: 'task' });
 assert.notEqual(correctedRead.record_token, completed.record_token,
   'authenticated intent change did not invalidate the old progress scope');
