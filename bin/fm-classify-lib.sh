@@ -465,6 +465,26 @@ status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
   printf '%s' "$epoch"
 }
 
+# fm-spawn.sh records spawn_status_lines at the incarnation's publication
+# boundary on every backend/harness. A done/failed declaration must occur after
+# that retained ledger prefix; wall-clock time cannot order incarnations.
+# Missing/malformed boundaries preserve legacy reads. Callers pass their
+# selected metadata (including fleet snapshots) and the live status ledger.
+status_terminal_is_current() {  # <status-line> <meta-file> <status-file>
+  local line=$1 meta=$2 status=$3 field boundary='' candidate
+  case "$(status_line_verb "$line")" in done|failed) ;; *) return 0 ;; esac
+  [ -f "$meta" ] && [ -r "$meta" ] && [ ! -L "$meta" ] || return 0
+  while IFS= read -r field || [ -n "$field" ]; do
+    case "$field" in spawn_status_lines=*) boundary=${field#spawn_status_lines=} ;; esac
+  done < "$meta"
+  [[ "$boundary" =~ ^(0|[1-9][0-9]{0,11})$ ]] || return 0
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 1
+  while IFS= read -r candidate || [ -n "$candidate" ]; do
+    [ "$candidate" != "$line" ] || return 0
+  done < <(tail -n "+$((boundary + 1))" "$status")
+  return 1
+}
+
 # Stamp only a newly emitted event. Preserve an existing tag, even malformed,
 # and preserve the event itself if the clock cannot be read. Never use this to
 # timestamp a copied historical line.
