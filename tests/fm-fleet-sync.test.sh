@@ -782,6 +782,44 @@ test_stale_fork_ref_cannot_authorize_pruning() {
   pass "fleet pruning ignores stale refs from remotes it did not fetch"
 }
 
+test_narrow_fetch_cannot_leave_stale_origin_pruning_proof() {
+  local home clone origin out
+  home=$(new_home)
+  clone=$(build_pair "$home" narrowfetch)
+  origin="$home/remotes/narrowfetch.git"
+
+  git -C "$clone" checkout -qb unpublished
+  commit_file "$clone" unpublished.txt unique unique
+  git -C "$clone" push -q origin unpublished:carrier
+  git -C "$clone" fetch -q origin
+  git --git-dir="$origin" update-ref -d refs/heads/carrier
+  git -C "$clone" checkout -q main
+  git -C "$clone" config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+  git -C "$clone" config --add remote.origin.fetch '+refs/heads/unpublished:refs/remotes/origin/unpublished'
+  git -C "$clone" config --add remote.origin.fetch '+refs/heads/landed:refs/remotes/origin/landed'
+  git -C "$clone" config branch.unpublished.remote origin
+  git -C "$clone" config branch.unpublished.merge refs/heads/unpublished
+
+  git -C "$clone" branch landed origin/main
+  git -C "$clone" config branch.landed.remote origin
+  git -C "$clone" config branch.landed.merge refs/heads/landed
+  [ "$(git -C "$clone" for-each-ref --format='%(upstream:track)' refs/heads/unpublished)" = '[gone]' ] \
+    || fail "narrow-fetch fixture lacks a gone upstream"
+  git -C "$clone" show-ref --verify --quiet refs/remotes/origin/carrier \
+    || fail "narrow-fetch fixture lacks the cached origin ref"
+
+  out=$(run_sync "$home" narrowfetch)
+
+  assert_contains "$out" 'pruned landed' "a branch contained by refreshed origin was not pruned"
+  ! git -C "$clone" show-ref --verify --quiet refs/remotes/origin/carrier \
+    || fail "fleet sync left the deleted origin branch cached"
+  git -C "$clone" show-ref --verify --quiet refs/heads/unpublished \
+    || fail "a stale origin ref authorized deletion of unpublished work"
+  [ "$(git -C "$clone" show unpublished:unpublished.txt)" = unique ] \
+    || fail "fleet sync lost the unpublished commit"
+  pass "fleet pruning refreshes origin refs despite a narrow fetch configuration"
+}
+
 test_detached_clean_ancestor_recovers
 test_detached_unique_commit_is_stuck_untouched
 test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
@@ -806,6 +844,7 @@ test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
 test_non_signature_fetch_failure_is_not_retried
 test_stale_fork_ref_cannot_authorize_pruning
+test_narrow_fetch_cannot_leave_stale_origin_pruning_proof
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
