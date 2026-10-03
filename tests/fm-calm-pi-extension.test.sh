@@ -1659,11 +1659,15 @@ for (const { name, actual } of rows) {
     throw new Error(`${name} was not hidden before export rendering`);
   }
 }
+// Pi 1.0.1 reads getToolRenderers; older versions read getToolDefinition.
+// Both hooks resolve the same registered renderers in this fixture.
+const getToolRenderers = (name) => tools.find((tool) => tool.name === name);
 async function assertStockHtmlRendering(command, submitData) {
   editorText = command;
   terminalInputHandler(submitData);
   const htmlRenderer = createToolHtmlRenderer({
-    getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+    getToolDefinition: getToolRenderers,
+    getToolRenderers,
     theme,
     cwd: process.cwd(),
   });
@@ -1694,7 +1698,8 @@ getKeybindings().setUserBindings({ "tui.input.submit": "alt+s" });
 editorText = "/export remapped.html";
 terminalInputHandler("\r");
 const unmatchedRenderer = createToolHtmlRenderer({
-  getToolDefinition: (name) => tools.find((tool) => tool.name === name),
+  getToolDefinition: getToolRenderers,
+  getToolRenderers,
   theme,
   cwd: process.cwd(),
 });
