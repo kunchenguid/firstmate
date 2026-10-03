@@ -1524,13 +1524,16 @@ _fm_pending_reply_select_needing_work() {  # <record-path>...
 # selected in one pass first (_fm_pending_reply_select_needing_work), so a
 # settled record costs no lock and no fork, and the per-record path below runs,
 # unchanged, only for the records that selection returns.
-fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
+# An optional <progress-fn> is called before each record, so a caller that
+# publishes liveness (the watcher) can do so from this sweep.
+fm_pending_reply_tick() {  # <state-dir> [progress-fn]
+  local state=$1 progress=${2:-} dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
   local observation observation_task found i
   local -a observation_tasks=() observation_values=() records=() selected=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
+    [ -z "$progress" ] || "$progress"
     [ -f "$rec" ] || continue
     case "${rec##*/}" in
       .*) continue ;;

@@ -37,7 +37,7 @@ The guard acts at that boundary when both of these hold:
 - Work, a process-event source, a registered custom check, or Relay polling needs supervision.
 - No identity-matched watcher has a fresh beacon.
 
-The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` touches every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
+The beacon is `state/.last-watcher-beat`, which `bin/fm-watch.sh` republishes throughout every cycle, as [Guard grace and the poll cadence](#guard-grace-and-the-poll-cadence) describes.
 When the guard acts, the harness integration must do one of two things:
 
 - Block the turn end.
@@ -206,8 +206,9 @@ With `state/.afk` absent the daemon lock proves nothing and the strict watcher p
 
 ### Guard grace and the poll cadence
 
-`bin/fm-watch.sh` touches `state/.last-watcher-beat` once per cycle, immediately before its terminal wait (`event_wait_or_sleep`) as well as at the top of the next cycle.
-A healthy watcher's beacon can therefore legitimately age up to `FM_POLL` seconds between touches.
+`bin/fm-watch.sh` republishes `state/.last-watcher-beat` at the top of each cycle, between the main loop's phases, before each item of the per-task sweeps its `watcher_beat` calls mark, and just before its terminal wait (`event_wait_or_sleep`).
+`watcher_beat` in `bin/fm-watch.sh` owns that contract, and its call sites are that contract rather than a rule about which sweeps qualify.
+A marked sweep therefore keeps the beacon fresh however long it runs, while a step that blocks stops publishing and goes stale; a healthy watcher's beacon can still legitimately age up to `FM_POLL` seconds across the terminal wait.
 
 A fixed 300-second grace default stops correctly bounding staleness once a home's `FM_POLL` reaches or exceeds it.
 A perfectly healthy watcher mid-wait would then read stale at the edge of every full poll cycle by definition.

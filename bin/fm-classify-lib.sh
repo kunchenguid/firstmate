@@ -2698,9 +2698,17 @@ $chunk
 EOF
   return 0
 }
-signal_crew_provably_working() {  # <file> ...
-  local f base dir task seen=""
+# <progress-fn> is a REQUIRED leading positional argument, not an optional one:
+# the file list is variadic, so omitting it consumes the first file instead of
+# defaulting. Pass an empty string when no callback is wanted. It is called before
+# each file, so a caller that publishes liveness (the watcher) can do so from this
+# sweep: it runs one bounded crew_absorb_class read per distinct task with nothing
+# else between.
+signal_crew_provably_working() {  # <progress-fn> <file> ...
+  local progress=${1:-} f base dir task seen=""
+  [ "$#" -eq 0 ] || shift
   for f in "$@"; do
+    [ -z "$progress" ] || "$progress"
     base=${f##*/}
     dir=${f%/*}
     [ "$dir" != "$f" ] || dir=.

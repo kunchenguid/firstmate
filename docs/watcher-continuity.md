@@ -476,6 +476,9 @@ It checks that a newly appended keyed decision is classified without rereading e
 - The typed self-eviction failure.
 - Bounded and successor-linked lifecycle rows.
 - A SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
+- A per-task sweep that outlasts the guard grace, whose beacon must stay fresh for the whole cycle.
+- A watcher blocked inside one step, whose beacon must stop advancing, read unhealthy, and still be refused by a re-arm.
+- A beacon the watcher cannot publish at all, which must leave a bounded record while the watcher keeps polling.
 
 ### Claude auto-arm and turn-end guard
 

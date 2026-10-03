@@ -266,10 +266,11 @@ fi
 # turn-ended signature, annotation staleness checks, and guarded bookkeeping writes.
 
 POLL=${FM_POLL:-15}                   # seconds between cycles
-# The liveness beacon is touched once per cycle, immediately before the
-# terminal wait below (event_wait_or_sleep) as well as at the top of the next
-# one, so a healthy cycle's beacon can legitimately age up to POLL seconds
-# between touches. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
+# The liveness beacon is republished wherever watcher_beat below is called -
+# including immediately before the terminal wait (event_wait_or_sleep) and at the
+# top of the next cycle - so a healthy cycle's beacon can legitimately age up to
+# POLL seconds across that wait, no matter how long a marked sweep runs;
+# watcher_beat below owns that contract. fm_poll_derived_grace (bin/fm-wake-lib.sh, already sourced
 # transitively above) is the single owner of the max(300, poll+60)
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
@@ -696,6 +697,7 @@ signal_turnend_panes_churned() {  # <file> ...
     fi
   done
   for meta in "$STATE"/*.meta; do
+    watcher_beat
     [ -e "$meta" ] || continue
     rec_task=${meta##*/}
     rec_task=${rec_task%.meta}
@@ -741,6 +743,7 @@ signal_turnend_panes_churned() {  # <file> ...
     [ "${snapshot_kinds[$task_index]}" != secondmate ] || return 1
   done
   for ((i = 0; i < ${#signal_tasks[@]}; i++)); do
+    watcher_beat
     task=${signal_tasks[$i]}
     crew_is_provably_working "$task" && continue
     task_index=${signal_indexes[$i]}
@@ -755,6 +758,7 @@ signal_turnend_panes_churned() {  # <file> ...
   fi
   absorb_secs=$((10#$TURNEND_CHURN_ABSORB_SECS))
   for task_index in "${churn_indexes[@]}"; do
+    watcher_beat
     w=${snapshot_windows[$task_index]}
     key=${snapshot_keys[$task_index]}
     backend=${snapshot_backends[$task_index]}
@@ -817,6 +821,7 @@ signal_turnend_panes_churned() {  # <file> ...
 recorded_windows() {
   local meta w seen=
   for meta in "$STATE"/*.meta; do
+    watcher_beat
     [ -e "$meta" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     [ -n "$w" ] || continue
@@ -954,6 +959,7 @@ secondmate_wake_stall_tick() {
   local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
+    watcher_beat
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] || continue
@@ -1067,6 +1073,7 @@ secondmate_liveness_tick() {
   local now=$(( $(date +%s) )) meta id kind
   local bound_marker attempts notify_key reason queued err first_reason='' failed=0
   for meta in "$STATE"/*.meta; do
+    watcher_beat
     [ -e "$meta" ] || continue
     kind=$(fm_meta_get "$meta" kind 2>/dev/null || true)
     [ "$kind" = secondmate ] || continue
@@ -1975,6 +1982,28 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
   echo $(( now - m ))
 }
 
+# Liveness beacon (state/.last-watcher-beat) read by the guards and the arm
+# layer. Only the lock-holding watcher publishes it, and only where its own cycle
+# has just made progress: the top of each cycle, each phase boundary, the items of
+# the per-task sweeps whose loops call this below, and just before the terminal
+# wait. Those call sites are the whole contract, not a rule about which sweeps
+# qualify, so a stretch of work with no call between beats does not publish.
+# A marked sweep that is slow because the fleet is large keeps the beacon fresh,
+# while a watcher blocked inside any single step stops publishing and goes stale
+# exactly as before; nothing here runs on a timer or from a helper process. The
+# file holds the cycle number so a reader can tell a new cycle from a mid-cycle
+# beat; every guard reads only its mtime. A sourced copy (no WATCHER_PID) never
+# beats. Returns the write's status, so a caller can report a beacon this watcher
+# cannot publish - the one failure every guard reads as broken supervision.
+WATCHER_CYCLE=0
+watcher_beat() {
+  local holder=
+  [ -n "${WATCHER_PID:-}" ] || return 0
+  read -r holder 2>/dev/null < "$WATCH_LOCK/pid" || true
+  [ "$holder" = "$WATCHER_PID" ] || return 0
+  printf '%s\n' "$WATCHER_CYCLE" 2>/dev/null > "$STATE/.last-watcher-beat"
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers.
 # Each file is compared against its persisted reported signature in .seen-* rather
 # than mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -1996,6 +2025,7 @@ scan_signals() {
   # status_scan_parent_channel_exclude (fm-classify-lib.sh).
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    watcher_beat
     [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
@@ -2201,6 +2231,7 @@ signal_files_actionable() {  # <status-file> ...
   FM_SIGNAL_SURFACE_ENDPOINTS=''
   FM_SIGNAL_NEEDS_DECISION_FILES=''
   for f in "$@"; do
+    watcher_beat
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || [ -L "$f" ] || continue
     task=$(basename "$f"); task="${task%.status}"
@@ -2266,6 +2297,7 @@ heartbeat_scan_finds_actionable() {
   exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
+    watcher_beat
     [ -e "$f" ] || [ -L "$f" ] || continue
     [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
@@ -2302,6 +2334,7 @@ event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
   local windows=()
   while IFS= read -r w; do
+    watcher_beat
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
     # Secondmate endpoints are supervised via status writes, not pane/agent
@@ -2661,9 +2694,10 @@ while :; do
     exit 0
   fi
 
-  # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  # Liveness beacon (watcher_beat owns the contract): a new cycle starts here,
+  # and the per-phase and per-item beats below keep a long cycle visibly alive.
+  WATCHER_CYCLE=$((WATCHER_CYCLE + 1))
+  watcher_beat || triage_log "liveness beacon could not be published to $STATE/.last-watcher-beat"
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -2684,13 +2718,14 @@ while :; do
   # parent reports, observe backend busy/idle turn completion, send one recovery
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
-  fm_pending_reply_tick "$STATE" || true
+  fm_pending_reply_tick "$STATE" watcher_beat || true
 
   # Endpoint liveness runs before queue observation: a positively dead or
   # missing secondmate endpoint is relaunched here on a bounded cadence, which
   # is also what unsticks that mate's foreign wake queue. The tick's single
   # wake exits the cycle like every other wake, so its marker is stamped before
   # any relaunch and the restarted watcher will not re-probe early.
+  watcher_beat
   secondmate_liveness_tick || {
     echo "watcher: secondmate liveness check failed" >&2
     exit 1
@@ -2699,6 +2734,7 @@ while :; do
   # A live secondmate endpoint does not prove that its own wake loop is alive.
   # Observe the foreign queue before the rest of this cycle so an aged row wakes
   # the parent without consuming or rewriting the receiving home's record.
+  watcher_beat
   secondmate_wake_stall_tick || {
     echo "watcher: secondmate wake-loop observation failed" >&2
     exit 1
@@ -2708,6 +2744,7 @@ while :; do
   # each registered source has its own child blocking on that source, and this
   # only republishes results already captured durably and restarts a source
   # whose owner is gone. It is a no-op with nothing registered.
+  watcher_beat
   if [ -d "$STATE/procevent" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null 2>&1 || true
   fi
@@ -2722,6 +2759,7 @@ while :; do
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
   # was created, so quiet cycles never wake firstmate or consume model tokens.
+  watcher_beat
   inactive_out=
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
@@ -2744,6 +2782,7 @@ while :; do
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
+      watcher_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -2874,6 +2913,7 @@ EOF
   # signature for an already-pending file (last write wins below).
   pending=$(scan_signals)
   if [ -n "$pending" ]; then
+    watcher_beat
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
     # The final coalesced signal set is the watcher-carried status-change
@@ -2930,7 +2970,7 @@ EOF
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { ! signal_crew_provably_working watcher_beat $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -2998,6 +3038,7 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    watcher_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -3255,5 +3296,6 @@ EOF
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
   # else the blind poll sleep. See event_wait_or_sleep.
+  watcher_beat
   event_wait_or_sleep
 done

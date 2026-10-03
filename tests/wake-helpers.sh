@@ -88,6 +88,13 @@ if [ "${1:-}" = "capture-pane" ]; then
       _prev=$_arg
     done
   fi
+  if [ -n "${FM_FAKE_TMUX_CAPTURE_DELAY:-}" ]; then
+    # A slow (or, with a long delay, hung) pane read. Each read records its
+    # sleeper's pid so a test can end exactly the reads it started.
+    sleep "$FM_FAKE_TMUX_CAPTURE_DELAY" &
+    [ -z "${FM_FAKE_TMUX_CAPTURE_PIDS:-}" ] || printf '%s\n' "$!" >> "$FM_FAKE_TMUX_CAPTURE_PIDS"
+    wait "$!"
+  fi
   if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ]; then
     cat "$FM_FAKE_TMUX_CAPTURE"
   fi
