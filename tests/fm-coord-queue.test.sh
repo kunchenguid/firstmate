@@ -275,7 +275,8 @@ reject queue-operator-abort "$abort_payload" 'operator abort must require the en
 aborted=$(FM_COORD_AUTHORITY_TOKEN="$authority_token" coord queue-operator-abort "$abort_payload")
 [ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
 reject queue-operator-abort "$abort_payload" 'an unauthenticated replay must not return the authority receipt'
-field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="@authority" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record its authenticated actor and reason'
+operator_identity=$(python3 -c 'import os,pwd; uid=os.geteuid(); print(f"@authority:{pwd.getpwuid(uid).pw_name}:{uid}")')
+field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]==sys.argv[1] and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' "$operator_identity" || fail 'operator abort must record its authenticated local account and reason'
 kill "$live_wrapper"
 wait "$live_wrapper" 2> /dev/null || true
 pass 'a stuck wrapper never auto-releases; only the enrolled authority can abort'

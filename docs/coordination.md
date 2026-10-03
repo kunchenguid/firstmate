@@ -100,8 +100,8 @@ The PR is read again after the compare, and a changed state, merge flag, head, o
 Before any forge read toward a not-merged release, the recorded wrapper process must be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
 An attempt whose recorded wrapper identity cannot be checked never leaves `outcome-unknown` as not merged.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
-`queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled `@authority` actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
-The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records `@authority` as the operator.
+`queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled authority actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
+The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records the process's authenticated local account and effective UID as `@authority:<account>:<uid>`.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
 The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
@@ -133,7 +133,7 @@ Run `bin/fm-coord.sh --help` for the current command list.
 `--db PATH` selects an explicit local database for tests or one authority; otherwise set `FM_HOME` for `state/fm-coord.sqlite3`.
 Initialize with `FM_COORD_AUTHORITY_TOKEN=<private-random-token> bin/fm-coord.sh init` to enroll an authority credential of at least 32 characters.
 The database stores only its SHA-256 digest; keep the token private to the authority host and supply the same environment variable for `queue-operator-abort`.
-An initialization without the token leaves operator abort disabled until a later `init` with the token enrolls it once and records an `authority-enrolled` event; repeating `init` with the same token changes nothing, and a different token is refused rather than replacing the enrolled one.
+An initialization without the token leaves operator abort disabled until a later `init` with the token enrolls it once and records an `authority-enrolled` event with the local account identity; repeating `init` with the same token changes nothing, and a different token is refused rather than replacing the enrolled one.
 Then use `enroll {"request_id":"enroll-a","home_id":"home-a","repos":["owner/repo"]}` and `session {"request_id":"session-a","home_id":"home-a"}`.
 An administrative area definition uses `area-set {"request_id":"area-a","repo":"owner/repo","name":"api","paths":["src/api"],"aliases":["server-api"]}`.
 An intent uses `submit {"request_id":"submit-a","intent_id":"task-a","home_id":"home-a","generation":1,"repo":"owner/repo","base":"main","base_oid":"0000000000000000000000000000000000000000","branch":"task/a","task_id":"a","goal":"Update API","resources":[{"type":"area","name":"api"}]}`.

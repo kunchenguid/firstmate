@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import sqlite3
 import subprocess
@@ -77,13 +78,22 @@ def authority_hash():
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def authority_identity():
+    uid = os.geteuid()
+    try:
+        account = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        account = "uid"
+    return f"@authority:{account}:{uid}"
+
+
 def authority_actor(db, payload):
     require("home_id" not in payload, "operator abort requires the @authority actor")
     require("operator" not in payload, "operator identity comes from the authenticated actor")
     credential = authority_hash()
     enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
     require(credential is not None and enrolled is not None and hmac.compare_digest(credential, enrolled[0]), "enrolled authority credential required")
-    return "@authority"
+    return authority_identity()
 
 
 def path(value):
@@ -727,7 +737,7 @@ def main():
                     require(enrolled is None or hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
                     if enrolled is None:
                         db.execute("INSERT INTO meta(key,value) VALUES('authority_token_sha256',?)", (credential,))
-                        emit(db, "authority-enrolled", None, {"actor": "@authority"})
+                        emit(db, "authority-enrolled", None, {"actor": authority_identity()})
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
