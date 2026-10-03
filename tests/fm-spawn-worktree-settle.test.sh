@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# loop (bin/fm-spawn.sh, the wait loop after `treehouse get`).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
@@ -19,6 +19,15 @@
 # comparing only against the project adopted it and the isolation guard then
 # refused the launch. The cases below cover both the transient and the pane
 # that never leaves the primary at all.
+#
+# The third transient is a checkout still being written. While `git worktree
+# add` populates a new slot, its `.git` link already exists and its `git reset
+# --hard` child runs inside the slot, so a pane reporting its foreground cwd
+# reads the slot as an isolated worktree from the first poll, and `git status`
+# lists every file not yet written. Adopting it then refused the launch as "not
+# clean", and on a checkout slower than the wait the abort interrupted git and
+# left a partial slot folder behind. The last cases cover a checkout that
+# finishes, one that outlasts the ordinary wait, and one that never finishes.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -44,6 +53,9 @@ case "$*" in
     [ -f "$countfile" ] && n=$(cat "$countfile")
     n=$((n + 1))
     printf '%s\n' "$n" > "$countfile"
+    if [ "$n" = "${FM_FAKE_SETTLE_AT:-}" ]; then
+      "${FM_FAKE_SETTLE_CMD:?FM_FAKE_SETTLE_CMD unset}"
+    fi
     if [ "$n" -le "${FM_FAKE_PANE_STALE_READS:-0}" ]; then
       printf '%s\n' "${FM_FAKE_PANE_STALE:-}"
     else
@@ -110,7 +122,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
-    PATH="$FAKEBIN_DIR:$PATH" \
+    PATH="$FAKEBIN_DIR:${SETTLE_TEST_PATH:-$PATH}" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
 
@@ -221,9 +233,144 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# make_checkout_case <name> <id> builds a Treehouse pool slot whose checkout
+# is still being written, plus the script the fake pane runs to finish it.
+# The state does not list a new slot until checkout finishes. The slot is
+# missing a tracked file until the finish script runs.
+make_checkout_case() {
+  local name=$1 id=$2 case_dir home proj wt fakebin countfile finish state
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  countfile="$case_dir/pane-call-count"
+  finish="$case_dir/finish-checkout"
+  fakebin=$(make_settle_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" codex
+  wt="$case_dir/pool/1/project"
+  state="$case_dir/pool/treehouse-state.json"
+  mkdir -p "$case_dir/pool/1"
+  fm_git_worktree "$proj" "$wt" "slot-$name"
+  printf '{"worktrees":[]}\n' > "$state"
+  rm "$wt/README.md"
+  cat > "$finish" <<EOF
+#!/usr/bin/env bash
+git -C '$wt' checkout -- README.md
+printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":%s}]}\n' '$wt' "\$FM_FAKE_OWNER_PID" > '$state'
+EOF
+  chmod +x "$finish"
+  fm_test_spawn_brief "$home" "$id" "Exercise checkout-in-progress detection for $id."
+  printf '%s\n' "$case_dir|$home|$proj|$wt|$finish|$fakebin|$countfile|0"
+}
+
+run_checkout_spawn() {
+  local id=$1 settle_at=$2
+  FM_FAKE_SETTLE_AT="$settle_at" FM_FAKE_SETTLE_CMD="$STALE_DIR" FM_FAKE_OWNER_PID=$$ \
+    run_settle_spawn "$id"
+}
+
+# The incident: the pane reads the new pool slot while its checkout is still
+# being written, for longer than the ordinary wait. The spawn must keep waiting
+# until Treehouse has recorded the slot as handed out, then launch from the
+# finished checkout rather than refusing it as uncommitted work.
+test_pool_slot_checkout_in_progress_is_waited_out() {
+  local rec id out status claim
+  id=settle-checkout-pool-z5
+  rec=$(make_checkout_case settle-checkout-pool "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 75)
+  status=$?
+  expect_code 0 "$status" "spawn should launch once the slot checkout finishes"$'\n'"$out"
+  assert_not_contains "$out" "is not clean" \
+    "spawn misread a checkout still being written as uncommitted work"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the finished slot"
+  claim="$(dirname "$WT_DIR")/.fm-slot-owner"
+  grep -Fxq -- "task=$id" "$claim" 2>/dev/null \
+    || fail "the finished slot was not claimed for the task"
+  [ "$(cat "$COUNTFILE")" -gt 75 ] \
+    || fail "spawn adopted the slot before its checkout finished"
+  pass "a pool slot whose checkout is still being written is waited out, past the ordinary wait"
+}
+
+# A checkout that never finishes still ends in a refusal that names the cause,
+# and the refusal neither claims the slot nor touches its files.
+test_checkout_that_never_finishes_refuses_without_claiming() {
+  local rec id out status
+  id=settle-checkout-stuck-z7
+  rec=$(make_checkout_case settle-checkout-stuck "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 0)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched from a slot whose checkout never finished"$'\n'"$out"
+  assert_contains "$out" "did not enter an isolated worktree" \
+    "spawn did not report the unfinished acquisition"
+  assert_contains "$out" "still being written" \
+    "the refusal did not say the slot checkout was still in progress"
+  assert_not_contains "$out" "is not clean" \
+    "spawn misread an unfinished checkout as uncommitted work"
+  [ ! -e "$(dirname "$WT_DIR")/.fm-slot-owner" ] || fail "refused spawn claimed the unfinished slot"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ ! -e "$WT_DIR/README.md" ] || fail "refused spawn changed the unfinished checkout"
+  pass "a checkout that never finishes is refused by name, unclaimed and untouched"
+}
+
+test_leased_pool_slot_waits_for_handoff() {
+  local rec id out status state
+  id=settle-leased-pool-z9
+  rec=$(make_checkout_case settle-leased-pool "$id")
+  read_settle_record "$rec"
+  state="$(dirname "$(dirname "$WT_DIR")")/treehouse-state.json"
+  printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":%s,"leased":true,"lease_holder":"acquisition incomplete"}]}\n' "$WT_DIR" "$$" > "$state"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+
+  out=$(run_checkout_spawn "$id" 5)
+  status=$?
+  expect_code 0 "$status" "spawn should wait for the leased slot to be handed out"$'\n'"$out"
+  [ "$(cat "$COUNTFILE")" -ge 5 ] || fail "spawn adopted the leased slot before handoff"
+  assert_not_contains "$out" "is not clean" "spawn adopted a leased slot mid-checkout"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" "spawn did not adopt the released slot"
+  pass "leased pool slot with live owner waits until handoff"
+}
+
+test_pool_slot_without_jq_refuses_immediately() {
+  local rec id out status no_jq dir tool
+  id=settle-no-jq-pool-z8
+  rec=$(make_checkout_case settle-no-jq-pool "$id")
+  read_settle_record "$rec"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  no_jq="$TMP_ROOT/no-jq-bin"
+  mkdir -p "$no_jq"
+  local -a dirs
+  IFS=: read -r -a dirs <<< "$PATH"
+  for dir in "${dirs[@]}"; do
+    [ -d "$dir" ] || continue
+    for tool in "$dir"/*; do
+      [ -x "$tool" ] && [ ! -d "$tool" ] || continue
+      [ "${tool##*/}" = jq ] && continue
+      [ -e "$no_jq/${tool##*/}" ] || ln -s "$tool" "$no_jq/${tool##*/}"
+    done
+  done
+  out=$(SETTLE_TEST_PATH="$no_jq" run_checkout_spawn "$id" 0)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched without jq on a pool slot"
+  assert_contains "$out" 'jq is required' "missing jq refusal did not name the requirement"
+  [ "$(cat "$COUNTFILE")" -lt 3 ] || fail "spawn waited instead of refusing promptly without jq"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ ! -e "$(dirname "$WT_DIR")/.fm-slot-owner" ] || fail "refused spawn claimed the slot"
+  pass "missing jq refuses a Treehouse pool slot promptly without publishing or claiming"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_pool_slot_checkout_in_progress_is_waited_out
+test_leased_pool_slot_waits_for_handoff
+test_checkout_that_never_finishes_refuses_without_claiming
+test_pool_slot_without_jq_refuses_immediately
 
 echo "# all fm-spawn-worktree-settle tests passed"
