@@ -250,14 +250,54 @@ case "$*" in
     exit 0
     ;;
   *"ppid="*)
-    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || exit 1
-    /bin/ps -o ppid= -p "$pid"
+    [ -n "${FM_FAKE_HARNESS_PID:-}" ] || { printf '0\n'; exit 0; }
+    exec /bin/ps -o ppid= -p "$pid"
     ;;
 esac
 exit 1
 SH
   chmod +x "$fakebin/ps"
   printf '%s\n' "$harness" > "$fakebin/.harness-name"
+}
+
+# make_fake_ps_denied <fakebin>: every `ps` invocation fails, mimicking a Codex
+# sandbox that blocks process inspection. fm-lock.sh then cannot identify this
+# session's harness and classifies the failure ps-unavailable (issue #306) -
+# distinct from another live session holding the lock.
+make_fake_ps_denied() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+}
+
+# make_fake_ps_no_harness <fakebin>: `ps` works but no reported process is a
+# harness, and the ancestry climbs to a non-harness pid 1 whose parent is 0 -
+# the shape a sandboxed PID namespace or a plain shell produces. fm-lock.sh
+# classifies the completed walk harness-detect-failed, still distinct from
+# another live session holding the lock (issue #306).
+make_fake_ps_no_harness() {
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=|args=) printf '/bin/bash\n' ;;
+  ppid=) [ "$pid" = 1 ] && printf '0\n' || printf '1\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
 }
 
 make_fake_ps_pi_holder() {
@@ -847,6 +887,10 @@ EOF
   expect_code 0 "$status" "fm-session-start.sh must exit 0 even on a lock refusal"
   assert_contains "$out" "READ-ONLY SESSION" "read-only banner missing on lock refusal"
   assert_contains "$out" "another live firstmate session holds the lock" "read-only banner did not surface fm-lock.sh's own error text"
+  assert_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "a genuinely held lock did not get the held-banner title"
+  assert_not_contains "$out" "UNABLE TO VERIFY THIS SESSION'S IDENTITY" "a genuinely held lock was mislabeled as an identity failure"
+  assert_contains "$out" "The session holding the lock owns mutable follow-up" "the held-lock next step did not name the holder's follow-up ownership"
+  assert_not_contains "$out" "FM_LOCK_REASON=" "the machine-readable reason line leaked into the digest"
   assert_contains "$out" "Skipping every mutating step" "read-only banner did not explain what was skipped"
   assert_contains "$out" "skipped (read-only session)" "wake-queue section did not report itself skipped"
   assert_contains "$out" "WATCHER DOWN - SUPERVISION IS OFF" "read-only guard did not surface watcher-liveness alarm"
@@ -877,6 +921,83 @@ EOF
   pass "a lock refusal prints a loud read-only banner, skips every mutating step, and still completes the digest"
 }
 
+# --- identity-unverifiable path: process inspection denied (issue #306) -------
+
+test_ps_unavailable_read_only_path() {
+  local rec root home fakebin out status
+  rec=$(new_world ps-unavailable)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # ps denied -> fm-lock.sh cannot identify this session's harness ->
+  # ps-unavailable, NOT a held lock. No .lock file exists, so a false "another
+  # session" banner would be doubly wrong. A queued wake proves the read-only
+  # path still skips the drain.
+  make_fake_ps_denied "$fakebin"
+  append_wake "$home/state" signal task-z "needs-decision: pick a library" || fail "seed wake failed"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 even when it cannot verify identity"
+  # The honest banner: identity unverifiable, and explicitly NOT a lock claim.
+  assert_contains "$out" "READ-ONLY SESSION - UNABLE TO VERIFY THIS SESSION'S IDENTITY" "identity-unverifiable banner missing on denied process inspection"
+  assert_contains "$out" "NOT a claim that" "banner did not disclaim the false lock-held reading"
+  assert_contains "$out" "ps failed or was denied" "banner did not surface fm-lock.sh's ps-unavailable message"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "denied ps was falsely banner-labeled as another session holding the lock"
+  assert_not_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "denied ps fell to the generic banner instead of the identity banner"
+  # The raw machine-readable token must not leak into the human-facing digest.
+  assert_not_contains "$out" "FM_LOCK_REASON=" "machine-readable reason token leaked into the digest"
+  # The recommended diagnostics.
+  assert_contains "$out" "bin/fm-lock.sh status" "banner did not recommend fm-lock.sh status"
+  assert_contains "$out" "tmux list-sessions" "banner did not recommend tmux session discovery"
+  assert_contains "$out" "tmux list-panes -a" "banner did not recommend tmux pane discovery"
+  assert_contains "$out" "ps -axo pid,ppid,stat,lstart,command" "banner did not recommend process discovery"
+  assert_contains "$out" "A Codex sandbox may require approval for process inspection" "banner did not note the Codex sandbox caveat"
+  # Still read-only: every mutating step skipped, exactly like a held lock.
+  assert_contains "$out" "skipped (read-only session)" "identity-unverifiable path did not skip the wake-queue drain"
+  [ -s "$home/state/.wake-queue" ] || fail "identity-unverifiable path drained the wake queue instead of leaving it"
+  # Honest next-step guidance, not the held-lock wording.
+  assert_contains "$out" "could not verify its own identity" "next step did not explain the identity-unverifiable cause"
+  assert_contains "$out" "Stay read-only: do not arm" "next step did not block direct watcher repair"
+  assert_not_contains "$out" "The session holding the lock owns mutable follow-up" "next step claimed a lock holder that was never proven"
+
+  pass "a denied ps yields an honest identity-unverifiable banner that stays read-only without claiming another session"
+}
+
+# --- identity-unverifiable path: walk found no harness (issue #306) -----------
+
+test_harness_detect_failed_read_only_path() {
+  local rec root home fakebin out status
+  rec=$(new_world harness-detect-failed)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  # ps works but the ancestry ends at a non-harness pid 1 - the sandboxed
+  # PID-namespace or plain-shell shape - so the completed walk is classified
+  # harness-detect-failed, still not a held lock.
+  make_fake_ps_no_harness "$fakebin"
+  append_wake "$home/state" signal task-y "done: must remain queued" || fail "seed wake failed"
+
+  status=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+
+  expect_code 0 "$status" "fm-session-start.sh must exit 0 when the walk finds no harness"
+  assert_contains "$out" "READ-ONLY SESSION - UNABLE TO VERIFY THIS SESSION'S IDENTITY" "identity-unverifiable banner missing on a harness-less walk"
+  assert_contains "$out" "cannot locate harness process in ancestry" "banner did not surface fm-lock.sh's harness-detect-failed message"
+  assert_not_contains "$out" "cannot inspect processes to identify this session's harness" "the walk's own message was displaced by the ps-unavailable message"
+  assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "a harness-less walk was falsely banner-labeled as another session holding the lock"
+  assert_not_contains "$out" "FM_LOCK_REASON=" "machine-readable reason token leaked into the digest"
+  assert_contains "$out" "bin/fm-lock.sh status" "banner did not recommend fm-lock.sh status"
+  assert_contains "$out" "skipped (read-only session)" "harness-detect-failed path did not skip the wake-queue drain"
+  [ -s "$home/state/.wake-queue" ] || fail "harness-detect-failed path drained the wake queue instead of leaving it"
+  assert_contains "$out" "could not verify its own identity" "next step did not explain the identity-unverifiable cause"
+
+  pass "a completed walk with no harness yields the identity-unverifiable banner with its own message and stays read-only"
+}
+
 test_lock_write_failure_read_only_path() {
   local rec root home fakebin out status
   rec=$(new_world lock-write-failure)
@@ -898,6 +1019,8 @@ EOF
   assert_contains "$out" "FLEET LOCK OWNERSHIP WAS NOT VERIFIED" "lock publication failure was misreported as a live holder"
   assert_contains "$out" "lacks verified fleet-lock ownership" "lock publication failure did not explain why queued wakes remain untouched"
   assert_not_contains "$out" "ANOTHER LIVE FIRSTMATE SESSION HOLDS THE FLEET LOCK" "lock publication failure falsely claimed a live lock holder"
+  assert_not_contains "$out" "UNABLE TO VERIFY THIS SESSION'S IDENTITY" "a write failure is neither a held lock nor an identity failure, so it must keep the generic banner"
+  assert_not_contains "$out" "FM_LOCK_REASON=" "a write failure printed a machine-readable reason line it does not carry"
   [ -s "$home/state/.wake-queue" ] || fail "lock publication failure allowed the wake queue to mutate"
 
   pass "session start stays read-only when lock ownership cannot be published"
@@ -3016,6 +3139,8 @@ EOF
 
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
+test_ps_unavailable_read_only_path
+test_harness_detect_failed_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner

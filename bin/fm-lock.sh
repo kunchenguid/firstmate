@@ -20,7 +20,24 @@
 # bin/fm-startup-network.sh compares that pid across its deferred sweeps; a dead
 # recorded pid is reclaimed and rewritten to this session's anchor.
 #
-# Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
+# Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified.
+#                             Identity-relevant acquire failures also print a
+#                             stable machine-readable FM_LOCK_REASON=<reason>
+#                             line to stderr beside the human-readable error:
+#                               lock-held             another live firstmate
+#                                                     session holds the lock
+#                               ps-unavailable        process inspection failed
+#                                                     or was denied, so this
+#                                                     session cannot identify
+#                                                     its own harness (the
+#                                                     Codex-sandbox shape)
+#                               harness-detect-failed the ancestry walk ran but
+#                                                     found no verified harness
+#                             Every other acquire failure - state-directory,
+#                             write, and verification failures - prints no
+#                             reason line. A caller must never treat
+#                             ps-unavailable or harness-detect-failed as
+#                             another session holding the lock.
 #        fm-lock.sh status    print holder and liveness; always exits 0.
 #                             A held lock is not proof the holder is consuming
 #                             wakes. Machine-readable lock fields live on
@@ -50,12 +67,25 @@ if [ "${1:-}" = "status" ]; then
     free) echo "lock: free" ;;
     unreadable) echo "lock: unreadable" ;;
     held) echo "lock: held by live harness pid $FM_LOCK_INSPECT_PID" ;;
+    unknown) echo "lock: unknown (pid ${FM_LOCK_INSPECT_PID:-unresolved} is neither a live verified harness nor provably dead; it cannot be classified without guessing)" ;;
     *) echo "lock: stale (pid $FM_LOCK_INSPECT_PID dead or not a harness)" ;;
   esac
   exit 0
 fi
 
-me=$(fm_session_lock_anchor_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_session_lock_anchor_pid) || {
+  case "$?" in
+    2)
+      echo "FM_LOCK_REASON=ps-unavailable" >&2
+      echo "error: cannot inspect processes to identify this session's harness (ps failed or was denied); operate read-only until resolved" >&2
+      ;;
+    *)
+      echo "FM_LOCK_REASON=harness-detect-failed" >&2
+      echo "error: cannot locate harness process in ancestry; operate read-only until resolved" >&2
+      ;;
+  esac
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
@@ -181,6 +211,7 @@ confirm_own_lock() {  # <recorded-pid>
 
 refuse_live_owner() {  # <recorded-pid>
   local recorded
+  echo "FM_LOCK_REASON=lock-held" >&2
   if recorded=$(fm_session_lock_recorded_session_id "$STATE"); then
     echo "error: another live firstmate session holds the lock (pid $1, session $recorded); operate read-only until resolved" >&2
   else
