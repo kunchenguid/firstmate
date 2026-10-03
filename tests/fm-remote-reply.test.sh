@@ -102,15 +102,24 @@ stop_reply_listener() {
 
 # Block until this generation's capture has been applied. A live listener keeps
 # its claim across polls, so start is only launched when nothing owns the source.
+# Ownership is re-read on a bounded cadence instead of sampled once: a manual
+# `handle` re-arms the source, and a listener caught between adopting the
+# previous registration and launching its next poll still reads as live and then
+# exits as superseded. Nothing here reconciles, so one sample taken in that gap
+# would leave the source with no listener for the whole wait.
 await_reply_result() { # <result-path>
-  local result=$1 handled=${1%.result}.handled _
-  if [ "$(reply_owner)" != live ]; then
-    remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
-  fi
-  for _ in $(seq 1 800); do
+  local result=$1 handled=${1%.result}.handled poll starter=''
+  for poll in $(seq 0 799); do
     [ -s "$result" ] && [ -f "$handled" ] && return 0
+    if [ $((poll % 20)) -eq 0 ] && ! kill -0 "$starter" 2>/dev/null \
+      && [ "$(reply_owner)" != live ]; then
+      remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 &
+      starter=$!
+    fi
     sleep 0.05
   done
+  printf 'await_reply_result: %s was not applied within the wait (owner=%s, listener launched by this wait=%s)\n' \
+    "${result##*/}" "$(reply_owner)" "${starter:-none}" >&2
   return 1
 }
 
