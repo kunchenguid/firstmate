@@ -453,6 +453,7 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 - A persistent live successor after recovery.
 - An idle live Lavish source that stays quiet until its real result wakes promptly.
 - An append that reopens an announced empty recovery.
+- An external append above a handling successor's inherited sequence that surfaces both before and after the prior handling turn acknowledges its rows.
 - A watcher close inside the handling window that must leave the printed acknowledgement valid.
 - A re-arm whose recovery cycle is slowed after confirmation and must still surface rather than read as a watcher that stayed live.
 - The self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
