@@ -337,8 +337,8 @@ fm_backend_tmux_kiro_wrapper_state() {  # <wrapper pid> -> dead|alive|ambiguous
   ') || { printf ambiguous; return; }
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
+    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || { other=1; continue; }
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || { other=1; continue; }
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify_name "$comm" "$argv0")" = agent ] \
       || [ "$(fm_agent_process_classify_name "$argv0" "$argv0")" = agent ] \
