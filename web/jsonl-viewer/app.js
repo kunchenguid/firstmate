@@ -4,7 +4,11 @@ const state = {
   tasks: [],
   selected: null,
   selectedTaskId: null,
+  selectedTaskDocumentType: null,
   entries: [],
+  eventSegments: [],
+  entryNodes: new Map(),
+  entrySequence: 0,
   cursor: "tail",
   identity: "",
   eof: false,
@@ -61,6 +65,8 @@ const elements = {
   taskDetailWait: document.getElementById("task-detail-wait"),
   taskDetailWarning: document.getElementById("task-detail-warning"),
   taskDocumentType: document.getElementById("task-document-type"),
+  taskDocumentBrief: document.getElementById("task-document-brief"),
+  taskDocumentReport: document.getElementById("task-document-report"),
   taskDocumentEmpty: document.getElementById("task-document-empty"),
   taskDocumentRendered: document.getElementById("task-document-rendered"),
   taskDocumentSource: document.getElementById("task-document-source"),
@@ -69,6 +75,7 @@ const elements = {
 };
 
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const SUPERVISOR_HIDDEN_EVENT_TYPE = "openai-codex-compat-native-response";
 const displayTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   timeZone: DISPLAY_TIME_ZONE,
   year: "numeric",
@@ -121,6 +128,7 @@ function invalidateCredential(message = "Enter an access token to begin.") {
   state.tasks = [];
   state.selected = null;
   state.selectedTaskId = null;
+  state.selectedTaskDocumentType = null;
   state.selectionGeneration += 1;
   state.taskSelectionGeneration += 1;
   state.taskRequestGeneration += 1;
@@ -383,28 +391,78 @@ function refreshFilterOptions() {
   }
 }
 
-function applyFilters() {
+function cardMatchesFilters(card) {
   const query = elements.eventSearch.value.toLowerCase();
+  return (!query || card.dataset.search.includes(query))
+    && (elements.roleFilter.value === "all" || card.dataset.role === elements.roleFilter.value)
+    && (elements.typeFilter.value === "all" || card.dataset.type === elements.typeFilter.value);
+}
+
+function applyFilters() {
   for (const card of elements.events.querySelectorAll(".event-card")) {
-    card.hidden = (query && !card.dataset.search.includes(query))
-      || (elements.roleFilter.value !== "all" && card.dataset.role !== elements.roleFilter.value)
-      || (elements.typeFilter.value !== "all" && card.dataset.type !== elements.typeFilter.value);
+    card.hidden = !cardMatchesFilters(card);
   }
 }
 
-function addBoundary(message) {
+function boundaryNode(message) {
   const boundary = document.createElement("div");
   boundary.className = "boundary";
   boundary.textContent = message;
-  elements.events.append(boundary);
+  return boundary;
 }
 
-function appendEntries(entries) {
-  state.entries.push(...entries);
+function entryTimestamp(entry) {
+  const value = timestampOf(entry.value);
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function renderEntriesNewestFirst(anchor = null, anchorTop = undefined) {
+  if (!anchor) {
+    anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
+    anchorTop = anchor?.getBoundingClientRect().top;
+  }
   const fragment = document.createDocumentFragment();
-  for (const entry of entries) fragment.append(renderEntry(entry));
-  elements.events.append(fragment);
+  for (const segment of [...state.eventSegments].reverse()) {
+    const ordered = segment.entries.map((entry, index) => ({ entry, index, timestamp: entryTimestamp(entry) }))
+      .sort((left, right) => {
+        if (left.timestamp !== null && right.timestamp !== null) return right.timestamp - left.timestamp || left.index - right.index;
+        if (left.timestamp !== null) return -1;
+        if (right.timestamp !== null) return 1;
+        return (right.entry.offset ?? 0) - (left.entry.offset ?? 0) || left.index - right.index;
+      });
+    for (const { entry } of ordered) {
+      let card = state.entryNodes.get(entry.displayKey);
+      if (!card) {
+        card = renderEntry(entry);
+        state.entryNodes.set(entry.displayKey, card);
+      }
+      card.hidden = !cardMatchesFilters(card);
+      fragment.append(card);
+    }
+    if (segment.boundary) fragment.append(segment.boundary);
+  }
+  elements.events.replaceChildren(fragment);
+  if (anchor?.isConnected && anchorTop !== undefined) {
+    const delta = anchor.getBoundingClientRect().top - anchorTop;
+    if (Math.abs(delta) > 0.5) window.scrollBy(0, delta);
+  }
+}
+
+function appendEntries(entries, boundaryMessage = "") {
+  const anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
+  const anchorTop = anchor?.getBoundingClientRect().top;
+  const prepared = entries
+    .filter(entry => !(state.selected?.source === "supervisor" && entry.value?.customType === SUPERVISOR_HIDDEN_EVENT_TYPE))
+    .map(entry => ({ ...entry, displayKey: String(++state.entrySequence) }));
+  state.entries.push(...prepared);
+  if (!state.eventSegments.length || boundaryMessage) {
+    state.eventSegments.push({ entries: [], boundary: boundaryMessage ? boundaryNode(boundaryMessage) : null });
+  }
+  state.eventSegments.at(-1).entries.push(...prepared);
   refreshFilterOptions();
+  renderEntriesNewestFirst(anchor, anchorTop);
   applyFilters();
 }
 
@@ -430,6 +488,8 @@ async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
   try {
     if (resetDisplay) {
       state.entries = [];
+      state.eventSegments = [];
+      state.entryNodes.clear();
       state.cursor = fromStart ? 0 : "tail";
       state.identity = "";
       state.partialBytes = 0;
@@ -440,11 +500,11 @@ async function loadEvents({ resetDisplay = false, fromStart = false } = {}) {
     if (state.identity) query.set("identity", state.identity);
     const body = await api(`/api/events?${query}`);
     if (!requestIsCurrent(selectionGeneration, requestGeneration, source, id)) return;
-    if (body.reset) addBoundary(`The journal was ${body.reset}. Previously displayed events are retained; the replacement continues below.`);
+    const boundaryMessage = body.reset ? `The journal was ${body.reset}. Replacement records are shown above; previously displayed records remain below.` : "";
     if (body.omittedPrefixBytes) showNotice(`Showing the live tail. ${body.omittedPrefixBytes.toLocaleString()} earlier bytes are not loaded; use “Load from start” for the complete file.`);
     if (body.partialBytes) showNotice(`Waiting for a newline: the final ${body.partialBytes.toLocaleString()} bytes are incomplete and have not been presented as an event.`);
     else if (!body.omittedPrefixBytes) showNotice();
-    appendEntries(body.events);
+    appendEntries(body.events, boundaryMessage);
     state.cursor = body.nextCursor;
     state.identity = body.identity;
     state.eof = body.eof;
@@ -495,7 +555,6 @@ function selectDisplay(reportSelected) {
 const taskGroups = [
   ["processing", "Processing"],
   ["held", "Waiting or blocked"],
-  ["completed", "Completed"],
   ["history", "Archived or cancelled"],
 ];
 
@@ -526,7 +585,11 @@ function taskCard(task) {
   const id = document.createElement("small");
   id.textContent = task.id;
   const metadata = document.createElement("small");
-  const documentLabel = task.documentType === "report" ? "Task report" : task.documentType === "brief" ? "Task brief" : "No document";
+  const documentTypes = task.documentTypes || (task.documentType ? [task.documentType] : []);
+  const documentLabel = documentTypes.includes("brief") && documentTypes.includes("report") ? "Brief + report"
+    : documentTypes.includes("report") ? "Task report"
+    : documentTypes.includes("brief") ? "Task brief"
+    : "No document";
   metadata.textContent = [task.project, task.kind, documentLabel].filter(Boolean).join(" · ");
   button.append(badge, title, id, metadata);
   if (task.warning) {
@@ -587,7 +650,17 @@ function renderTaskDetail() {
   elements.taskDetailWait.textContent = task.wait || "";
   elements.taskDetailWarning.hidden = !task.warning;
   elements.taskDetailWarning.textContent = task.warning || "";
-  elements.openTaskReport.hidden = task.documentType !== "report";
+  const documentTypes = task.documentTypes || (task.documentType ? [task.documentType] : []);
+  for (const [source, button, label] of [
+    ["brief", elements.taskDocumentBrief, "Brief"],
+    ["report", elements.taskDocumentReport, "Report"],
+  ]) {
+    const available = documentTypes.includes(source);
+    button.disabled = !available;
+    button.textContent = available ? label : `${label} unavailable`;
+    button.setAttribute("aria-selected", String(state.selectedTaskDocumentType === source));
+  }
+  elements.openTaskReport.hidden = !documentTypes.includes("report");
 }
 
 function clearTaskDocument(message) {
@@ -601,6 +674,16 @@ function clearTaskDocument(message) {
   elements.taskDocumentEmpty.textContent = message;
 }
 
+function taskDocumentRequestIsCurrent(taskId, documentType, selectionGeneration) {
+  const currentTask = state.tasks.find(item => item.id === taskId);
+  const currentTypes = currentTask?.documentTypes || (currentTask?.documentType ? [currentTask.documentType] : []);
+  return selectionGeneration === state.taskSelectionGeneration
+    && state.selectedTaskId === taskId
+    && state.selectedTaskDocumentType === documentType
+    && currentTypes.includes(documentType)
+    && elements.source.value === "tasks";
+}
+
 async function loadTaskDocument({ resetDisplay = false } = {}) {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   if (!task) return;
@@ -608,15 +691,19 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
     clearTaskDocument("No canonical task document is available for this task.");
     return;
   }
+  const documentTypes = task.documentTypes || (task.documentType ? [task.documentType] : []);
+  const documentType = documentTypes.includes(state.selectedTaskDocumentType) ? state.selectedTaskDocumentType : documentTypes.includes("report") ? "report" : documentTypes[0];
+  state.selectedTaskDocumentType = documentType;
+  renderTaskDetail();
   const taskId = task.id;
   const selectionGeneration = state.taskSelectionGeneration;
-  if (state.taskDocumentLoading?.taskId === taskId && state.taskDocumentLoading?.selectionGeneration === selectionGeneration) return;
-  const request = { taskId, selectionGeneration };
+  if (state.taskDocumentLoading?.taskId === taskId && state.taskDocumentLoading?.documentType === documentType && state.taskDocumentLoading?.selectionGeneration === selectionGeneration) return;
+  const request = { taskId, documentType, selectionGeneration };
   state.taskDocumentLoading = request;
   if (resetDisplay) clearTaskDocument("Loading task document…");
   try {
-    const body = await api(`/api/task-document?${new URLSearchParams({ id: taskId })}`);
-    if (selectionGeneration !== state.taskSelectionGeneration || state.selectedTaskId !== taskId || elements.source.value !== "tasks") return;
+    const body = await api(`/api/task-document?${new URLSearchParams({ id: taskId, type: documentType })}`);
+    if (!taskDocumentRequestIsCurrent(taskId, documentType, selectionGeneration)) return;
     if (resetDisplay || body.content !== state.taskDocumentContent) {
       renderMarkdown(elements.taskDocumentRendered, body.content);
       elements.taskDocumentSource.querySelector("pre").textContent = body.content;
@@ -627,7 +714,7 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
     elements.taskDocumentEmpty.hidden = true;
     elements.taskDocumentSource.hidden = false;
   } catch (error) {
-    if (selectionGeneration !== state.taskSelectionGeneration || state.selectedTaskId !== taskId) return;
+    if (!taskDocumentRequestIsCurrent(taskId, documentType, selectionGeneration)) return;
     if (error.status === 401) invalidateCredential("Saved access token was rejected. Enter a valid token to continue.");
     else clearTaskDocument(error.message);
   } finally {
@@ -638,7 +725,20 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
 async function selectTask(id) {
   state.taskSelectionGeneration += 1;
   state.selectedTaskId = id;
+  const task = state.tasks.find(item => item.id === id);
+  const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
+  state.selectedTaskDocumentType = documentTypes.includes("report") ? "report" : documentTypes[0] || null;
   renderSessions();
+  await loadTaskDocument({ resetDisplay: true });
+}
+
+async function selectTaskDocument(type) {
+  const task = state.tasks.find(item => item.id === state.selectedTaskId);
+  const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
+  if (!documentTypes.includes(type) || state.selectedTaskDocumentType === type) return;
+  state.taskSelectionGeneration += 1;
+  state.selectedTaskDocumentType = type;
+  renderTaskDetail();
   await loadTaskDocument({ resetDisplay: true });
 }
 
@@ -778,9 +878,12 @@ elements.rememberToken.addEventListener("change", () => {
 });
 elements.closeTask.addEventListener("click", () => {
   state.selectedTaskId = null;
+  state.selectedTaskDocumentType = null;
   state.taskSelectionGeneration += 1;
   renderTaskDashboard();
 });
+elements.taskDocumentBrief.addEventListener("click", () => selectTaskDocument("brief"));
+elements.taskDocumentReport.addEventListener("click", () => selectTaskDocument("report"));
 elements.openTaskReport.addEventListener("click", () => {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   if (task?.documentType !== "report") return;

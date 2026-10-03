@@ -27,11 +27,15 @@ The server provides plain HTTP without TLS termination.
 Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
 
 Open `http://SERVER:17847/`, enter the token in the page, and choose the task dashboard, a journal, or a task report.
-The dashboard separates processing, waiting or blocked, completed, and archived or cancelled tasks.
+The dashboard summarizes processing, waiting or blocked, and archived or cancelled tasks without a separate Completed card or section.
+Completed records remain available through the task list and report view without being relabelled as archived.
 An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
 `Processing` counts tasks marked active, in flight, or working only when no hold condition applies.
-`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or need lifecycle reconciliation, so they are excluded from `Processing` even if another current record still says working.
-Each task opens its canonical Markdown report when present, otherwise its canonical brief, and labels which document type is shown.
+`Waiting or blocked` counts tasks that are queued, parked, explicitly blocked, waiting on a dependency or open decision, or have conflicting current records, so they are excluded from `Processing` even if another current record still says working.
+
+The viewer does not use retained rich lifecycle records as an ordinary task source. It may read a valid historical `archived` fact only to keep an already explicit stop labelled `Cancelled`; malformed or non-archived legacy records are ignored and never require reconciliation.
+Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.
+The initial selection remains the canonical report when present and otherwise the canonical brief.
 Tasks with a canonical report also provide an explicit Open task report action that switches to the report view without changing the canonical task identity.
 The page sends the token only in the `Authorization` header for protected APIs.
 By default the token stays in page memory.
@@ -40,6 +44,7 @@ Anyone using that browser profile can then use the saved token, so leave the opt
 If browser storage is unavailable, login still works for the current page and the page reports that it could not persist the token.
 Rejected or expired saved credentials are removed instead of being retried.
 The page starts from a clearly labelled recent tail for a large journal, can reload from byte zero, supports text and role/type filters, and polls for complete appended lines without a page reload.
+The selected agent session displays its records newest first on initial load, reload, pagination, and live append while preserving the content order inside each record and the source JSONL bytes.
 Task status and selected task documents refresh automatically while dashboard refresh is enabled.
 Before the first task snapshot succeeds, counts show dashes instead of authoritative zeros, and the task lists distinguish loading and failure from a genuinely empty category.
 Background task refresh keeps the last loaded counts and selection visible, while session selection and journal event reads remain available during task loading.
