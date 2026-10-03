@@ -1493,6 +1493,10 @@ families_for_changed_path() {
       printf '%s\n' live-harness-optin
       printf '%s\n' afk
       ;;
+    bin/fm-project-registry-lib.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      ;;
     bin/fm-startup-memory-budget.sh|bin/fm-startup-memory-budget-lib.sh)
       printf '%s\n' secondmate
       printf '%s\n' session-bootstrap

@@ -501,6 +501,7 @@ test_project_mode_matches_whole_multiword_names() {
 - 048. Blast- Lease summary drafter [local-only] - fixture (added 2026-01-01)
 - foo bar [local-only +yolo branch=x/] - fixture (added 2026-01-01)
 - foo [direct-PR] - fixture (added 2026-01-01)
+- Acme - Site [local-only +yolo] - fixture (added 2026-01-01)
 - controlproj [direct-PR] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" "048. Blast- Lease summary drafter" 2>/dev/null)
@@ -515,6 +516,9 @@ EOF
   [ "$out" = "local-only on" ] || fail "a longer multi-word name did not resolve to its own row (got '$out')"
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix "foo bar" 2>/dev/null)
   [ "$out" = "x/" ] || fail "a multi-word name's registered branch prefix did not resolve (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" "Acme - Site" 2>/dev/null)
+  [ "$out" = "local-only on" ] || fail "a name containing ' - ' did not resolve to its own row (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" controlproj 2>/dev/null)
   [ "$out" = "direct-PR off" ] || fail "a single-word control name regressed (got '$out')"

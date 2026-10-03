@@ -640,6 +640,30 @@ fi
 assert_grep 'has no registry record' "$TMP_ROOT/seed-unregistered.out" \
   "the unregistered-project refusal did not name the missing record"
 
+# A remote route carries only project names that are safe path components, so a
+# registered name containing a space is refused before anything is provisioned,
+# never published remotely with a default posture in place of its own entry.
+printf '%s\n' '- foo bar [direct-PR +yolo] - spaced project (added 2026-09-28)' >> "$TMP_ROOT/seed-parent/data/projects.md"
+if FM_SECONDMATE_CHARTER='Spaced charter.' FM_SECONDMATE_SCOPE='spaced' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-spaced remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-spaced-home" "foo bar=$BETA_ORIGIN" \
+  > "$TMP_ROOT/seed-spaced.out" 2>&1; then
+  fail "remote seeding accepted a project name containing a space"
+fi
+assert_grep 'invalid project name: foo bar' "$TMP_ROOT/seed-spaced.out" \
+  "the spaced-name refusal did not name the whole project"
+assert_absent "$TMP_ROOT/seed-spaced-home" "the spaced project name still provisioned a remote home"
+printf '%s\n' '- Acme - Site [direct-PR] - dashed project (added 2026-09-30)' >> "$TMP_ROOT/seed-parent/data/projects.md"
+if FM_SECONDMATE_CHARTER='Dashed charter.' FM_SECONDMATE_SCOPE='dashed' \
+  seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-dashed remote-mac "$REMOTE_ROOT" \
+  "$TMP_ROOT/seed-dashed-home" "Acme - Site=$BETA_ORIGIN" \
+  > "$TMP_ROOT/seed-dashed.out" 2>&1; then
+  fail "remote seeding accepted a project name containing ' - '"
+fi
+assert_grep 'invalid project name: Acme - Site' "$TMP_ROOT/seed-dashed.out" \
+  "the dashed-name refusal did not name the whole project"
+assert_absent "$TMP_ROOT/seed-dashed-home" "the dashed project name still provisioned a remote home"
+
 out=$(FM_SECONDMATE_CHARTER='Own beta delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='beta delivery and validation' \
   seed_env "$ROOT/bin/fm-remote-home-seed.sh" seed-noclone remote-mac "$REMOTE_ROOT" \
@@ -680,6 +704,27 @@ assert_grep 'not an accepted clone URL' "$TMP_ROOT/unsafe-origin.out" \
   "remote provisioning did not name the rejected origin"
 assert_absent "$TMP_ROOT/unsafe-origin-home" "the rejected manifest left a remote home behind"
 pass "remote provisioning re-validates a supplied origin at the receiving host"
+
+# The receiving host publishes the decoded registry value verbatim, so it must
+# be exactly the one entry for the project: an extra line smuggled after a valid
+# entry is refused and provisions nothing.
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=1\nproject=%s|%s|%s|%s\n' \
+  "$(printf multiline-registry | base64 | tr -d '\n')" \
+  "$(printf 'Multi-line registry manifest charter.\n' | base64 | tr -d '\n')" \
+  "$(printf beta | base64 | tr -d '\n')" \
+  "$(printf '%s' "$BETA_ORIGIN" | base64 | tr -d '\n')" \
+  "$(printf -- '- beta [direct-PR] - beta project (added 2026-08-06)\n- delta [direct-PR] - smuggled entry' | base64 | tr -d '\n')" \
+  "$(printf direct-PR | base64 | tr -d '\n')" \
+  > "$TMP_ROOT/multiline-registry.manifest"
+if FM_HOME="$TMP_ROOT/multiline-registry-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/multiline-registry.manifest" \
+  > "$TMP_ROOT/multiline-registry.out" 2>&1; then
+  fail "remote provisioning accepted a registry value with more than one line"
+fi
+assert_grep 'project beta registry line is malformed' "$TMP_ROOT/multiline-registry.out" \
+  "remote provisioning did not refuse the multi-line registry value as malformed"
+assert_absent "$TMP_ROOT/multiline-registry-home" "the multi-line registry manifest left a remote home behind"
+pass "remote provisioning refuses a registry value that is not exactly the project's entry"
 
 # Firstmate is a shared template, so seeding must carry a project origin from any
 # forge or host, not a privileged one. These four URL shapes have to survive the
