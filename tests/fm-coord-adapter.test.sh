@@ -612,12 +612,48 @@ start=$(coord inspect '{}' | python3 -c 'import json,sys; print([q for q in json
 slot=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["slot_generation"])' "$gates}")
 coord queue-result "{\"request_id\":\"result-restarted\",\"intent_id\":\"restarted:owner/repo:restarted\",\"generation\":$slot,\"outcome\":\"unknown\"}" > /dev/null
 sqlite3 "$db" "UPDATE meta SET value='previous-boot' WHERE key='boot_id'"
-adapter "$tmp/restarted" heartbeat restarted > /dev/null 2>&1 || fail 'a checkpoint after the restart must complete'
+# Every checkpoint after the restart must start fresh session requests instead of reusing the attempt's old submit.
+for checkpoint in "heartbeat restarted" "pre-push restarted $repo" "pre-ci restarted $repo"; do
+  # shellcheck disable=SC2086
+  adapter "$tmp/restarted" $checkpoint > /dev/null 2> "$tmp/restarted-checkpoint.err" || fail "$checkpoint after the restart must complete: $(cat "$tmp/restarted-checkpoint.err")"
+  case "$(cat "$tmp/restarted-checkpoint.err")" in *'changed payload'*) fail "$checkpoint must not reuse a request from the old session" ;; esac
+done
+python3 - "$tmp/restarted/state/fm-coord-adapter.json" <<'PY' || fail 'the restarted task must hold a fresh claim while its attempt identity is kept'
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['restarted']
+assert task['claim']['ok'] is True and task['intent_id'] != 'restarted:owner/repo:restarted'
+assert task['attempt']['intent_id'] == 'restarted:owner/repo:restarted'
+assert 'pending_ci' not in task and 'pending_head' not in task
+PY
+# A fresh dispatch from a new start commit submits a fresh intent while the attempt is still unreported.
+git -C "$repo" worktree add -q --detach "$tmp/restarted-wt"
+git -C "$tmp/restarted-wt" commit -q --allow-empty -m restarted-start
+adapter "$tmp/restarted" dispatch restarted "$repo" "$tmp/restarted-wt" "$tmp/restarted.brief" branch/restarted codex > /dev/null 2> "$tmp/restarted-dispatch.err" || fail "a changed start commit must dispatch: $(cat "$tmp/restarted-dispatch.err")"
+python3 - "$tmp/restarted/state/fm-coord-adapter.json" "$(git -C "$tmp/restarted-wt" rev-parse HEAD)" <<'PY' || fail 'a changed start commit must get a fresh submit request'
+import json,sys
+state=json.load(open(sys.argv[1]))
+task=state['tasks']['restarted']
+assert task['claim']['ok'] is True and task['base_oid'] == sys.argv[2]
+assert state['requests']['restarted:submit']['payload']['base_oid'] == sys.argv[2]
+assert task['attempt']['intent_id'] == 'restarted:owner/repo:restarted'
+PY
 kill "$wrapper"
 wait "$wrapper" 2> /dev/null || true
 exit_fields="{\"slot_generation\":$slot,\"attempt_event_id\":\"$attempt_id\",\"wrapper_host_id\":\"restarted-test-host\",\"wrapper_pid\":$wrapper,\"wrapper_start\":\"$start\"}"
 exited=$(adapter "$tmp/restarted" wrapper-exited restarted "$exit_fields" 2> "$tmp/restarted-exit.err") || fail "a restarted coordinator must accept the exit of the unsettled attempt: $(cat "$tmp/restarted-exit.err")"
 [ "$(field "$exited" state)" = outcome-unknown ] || fail "the exit must be reported against the recorded attempt: $(cat "$tmp/restarted-exit.err")"
+# Lose that reply across another restart: the retry reuses the attempt-keyed request ID from a new session.
+python3 - "$tmp/restarted/state/fm-coord-adapter.json" "$attempt_id" <<'PY'
+import json,sys
+path=sys.argv[1]
+state=json.load(open(path))
+state['requests']['restarted:exit:'+sys.argv[2]].pop('reply')
+state['tasks']['restarted']['attempt']={'attempt_event_id':sys.argv[2],'intent_id':'restarted:owner/repo:restarted'}
+json.dump(state,open(path,'w'))
+PY
+sqlite3 "$db" "UPDATE meta SET value='previous-boot' WHERE key='boot_id'"
+again=$(adapter "$tmp/restarted" wrapper-exited restarted "$exit_fields" 2> "$tmp/restarted-exit.err") || fail "a lost exit reply must be recovered after a restart: $(cat "$tmp/restarted-exit.err")"
+[ "$(field "$again" event_id)" = "$(field "$exited" event_id)" ] || fail 'the retried exit must return the original receipt'
 mkdir -p "$tmp/forge"
 cat > "$tmp/forge/gh-axi" <<'GH'
 #!/usr/bin/env bash
