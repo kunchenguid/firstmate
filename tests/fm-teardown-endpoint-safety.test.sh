@@ -1180,12 +1180,14 @@ test_records_only_release_uses_landed_work_proofs() {
   git -C "$dir/project" update-ref refs/heads/fm/stale-task "$unique"
   expect_release_refused "$dir" stale-task "not landed" "unique unlanded commit"
 
-  # A merged PR proves only the commits up to its head, so a pruned branch is
-  # judged by the record's last-known head (pr_head=).
-  dir=$(stage_unclaimed_duplicate duplicate-squash-pruned ship "branch=fm/stale-task" \
-    "pr=https://github.com/example/project/pull/7")
-  current=$(git -C "$dir/project" rev-parse HEAD)
-  cat > "$dir/fakebin/gh" <<SH
+  # A pruned branch is judged by the forge's merged PR head: a recorded
+  # last-known head (pr_head=) must be within it; with none recorded, nothing
+  # local is left to lose and the archive says so.
+  for unique in none beyond equal; do
+    dir=$(stage_unclaimed_duplicate "duplicate-squash-pruned-$unique" ship "branch=fm/stale-task" \
+      "pr=https://github.com/example/project/pull/7")
+    current=$(git -C "$dir/project" rev-parse HEAD)
+    cat > "$dir/fakebin/gh" <<SH
 #!/usr/bin/env bash
 if [ "\$1 \$2" = "pr view" ]; then
   printf 'MERGED\t$current\thttps://github.com/example/project/pull/7\n'
@@ -1193,24 +1195,32 @@ if [ "\$1 \$2" = "pr view" ]; then
 fi
 exit 1
 SH
-  chmod +x "$dir/fakebin/gh"
-  expect_release_refused "$dir" stale-task "not recorded or not resolvable" "pruned branch with no recorded head"
-  unique=$(printf 'beyond\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
-    commit-tree 'HEAD^{tree}' -p HEAD)
-  printf 'pr_head=%s\n' "$unique" >> "$dir/home/state/stale-task.meta"
-  expect_release_refused "$dir" stale-task "not contained in a merged PR head" \
-    "pruned branch whose recorded head is one commit beyond the PR head"
-  fm_write_meta "$dir/home/state/stale-task.meta" \
-    "window=firstmate:fm-stale-task" "endpoint_task_id=stale-task" \
-    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "branch=fm/stale-task" \
-    "pr=https://github.com/example/project/pull/7" "pr_head=$current"
-  run_release "$dir" stale-task \
-    || fail "records-only release refused a squash-merged ship whose branch was pruned: $(cat "$dir/stderr")"
-  assert_released_leaving_live_slot "$dir" stale-task "squash-merged pruned ship"
+    chmod +x "$dir/fakebin/gh"
+    case "$unique" in
+      beyond)
+        printf 'pr_head=%s\n' "$(printf 'beyond\n' | git -C "$dir/project" -c user.name=test \
+          -c user.email=test@example.invalid commit-tree 'HEAD^{tree}' -p HEAD)" >> "$dir/home/state/stale-task.meta"
+        expect_release_refused "$dir" stale-task "no merged PR head contains" \
+          "pruned branch whose recorded head is one commit beyond the PR head"
+        continue
+        ;;
+      equal) printf 'pr_head=%s\n' "$current" >> "$dir/home/state/stale-task.meta" ;;
+    esac
+    run_release "$dir" stale-task \
+      || fail "records-only release refused a squash-merged pruned ship (pr_head $unique): $(cat "$dir/stderr")"
+    assert_released_leaving_live_slot "$dir" stale-task "squash-merged pruned ship (pr_head $unique)"
+    if [ "$unique" = none ]; then
+      grep -Fqx 'release_note=branch pruned; no local evidence of unlanded commits' \
+        "$dir"/home/data/stale-task/retired-duplicate-claim.*.meta \
+        || fail "pruned release with no recorded head did not note it in the archive"
+    else
+      ! grep -Fq 'release_note=' "$dir"/home/data/stale-task/retired-duplicate-claim.*.meta \
+        || fail "pruned release with a recorded head noted missing evidence"
+    fi
+  done
 
   dir=$(stage_unclaimed_duplicate duplicate-pruned-unmerged ship "branch=fm/stale-task")
-  printf 'pr_head=%s\n' "$(git -C "$dir/project" rev-parse HEAD)" >> "$dir/home/state/stale-task.meta"
-  expect_release_refused "$dir" stale-task "not contained in a merged PR head" "pruned branch with no merged PR"
+  expect_release_refused "$dir" stale-task "no merged PR head contains" "pruned branch with no merged PR"
 
   dir=$(stage_unclaimed_duplicate duplicate-local-only ship "branch=fm/stale-task" "mode=local-only")
   unique=$(printf 'landed\n' | git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
@@ -1265,20 +1275,57 @@ test_records_only_release_refuses_unverified_backends() {
   pass "fm-teardown: records-only release refuses, naming the backend, when Zellij or cmux cannot prove an endpoint agent-free"
 }
 
-# The archive is published only after the record is removed: a failure partway
-# through leaves the record and no completion-looking archive.
-test_records_only_release_archives_last() {
+# The archive is a two-phase commit: <name>.pending before any cleanup, the
+# record removed, then the rename to <name>. A failure between any two phases
+# leaves the record or an archive of it, and a retry converges.
+assert_archive_state() {  # <case> <pending-count> <final-count> <description>
+  local dir=$1 pending final
+  pending=$(compgen -G "$dir/home/data/stale-task/retired-duplicate-claim.*.meta.pending" | wc -l | tr -d ' ')
+  final=$(compgen -G "$dir/home/data/stale-task/retired-duplicate-claim.*.meta" | wc -l | tr -d ' ')
+  [ "$pending:$final" = "$2:$3" ] || fail "$4: expected $2 pending and $3 final archives, found $pending and $final"
+}
+
+test_records_only_release_archives_in_two_phases() {
   local dir
-  dir=$(stage_unclaimed_duplicate duplicate-archive-last ship "branch=fm/stale-task")
+  dir=$(stage_unclaimed_duplicate duplicate-archive-phases ship "branch=fm/stale-task" "spawn_gen=gen-1")
   git -C "$dir/project" branch fm/stale-task
+  cat > "$dir/fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  *retired-duplicate-claim*.pending) [ -z "${FM_TEST_FAIL_ARCHIVE_PENDING:-}" ] || exit 1 ;;
+  *retired-duplicate-claim*.meta) [ -z "${FM_TEST_FAIL_ARCHIVE_FINAL:-}" ] || exit 1 ;;
+esac
+exec /bin/ln "$@"
+SH
+  chmod +x "$dir/fakebin/ln"
+  # An earlier generation's archive keeps its name; this one takes a suffix.
+  mkdir -p "$dir/home/data/stale-task"
+  printf 'earlier\n' > "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.meta"
+
+  FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_ARCHIVE_PENDING=1 expect_release_refused "$dir" stale-task \
+    "pending retirement archive" "pending archive publish failing"
+  assert_archive_state "$dir" 0 1 "failed pending publish"
+  ! grep -Fq 'kill-window' "$dir/runtime.log" || fail "a failed pending publish still closed the endpoint"
+
   FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_KILL=1 expect_release_refused "$dir" stale-task \
-    "" "endpoint close failing mid-retirement"
-  ! compgen -G "$dir/home/data/stale-task/retired-duplicate-claim*.meta" >/dev/null \
-    || fail "a failed retirement left a completion-looking archive"
-  FM_TEST_STALE_COMMAND=zsh run_release "$dir" stale-task \
-    || fail "records-only release retry failed: $(cat "$dir/stderr")"
-  assert_released_leaving_live_slot "$dir" stale-task "retry after a failed close"
-  pass "fm-teardown: records-only release archives the stale record only after it is retired"
+    "" "endpoint close failing after the pending archive"
+  assert_archive_state "$dir" 1 1 "failed endpoint close"
+
+  ! FM_TEST_STALE_COMMAND=zsh FM_TEST_FAIL_ARCHIVE_FINAL=1 run_release "$dir" stale-task \
+    || fail "records-only release reported success when its final archive rename failed"
+  assert_contains "$(cat "$dir/stderr")" "could not be published" "failed final rename did not explain the cause"
+  assert_absent "$dir/home/state/stale-task.meta" "failed final rename kept the record"
+  assert_archive_state "$dir" 1 1 "failed final rename"
+  grep -Fqx 'spawn_gen=gen-1' "$dir"/home/data/stale-task/retired-duplicate-claim.gen-1.1.meta.pending \
+    || fail "the pending archive does not hold the removed record"
+
+  run_release "$dir" stale-task || fail "records-only release retry did not finalize: $(cat "$dir/stderr")"
+  assert_archive_state "$dir" 0 2 "retry after failed final rename"
+  grep -Fqx 'earlier' "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.meta" \
+    || fail "records-only release overwrote an earlier archive"
+  grep -Fqx 'spawn_gen=gen-1' "$dir/home/data/stale-task/retired-duplicate-claim.gen-1.1.meta" \
+    || fail "the finalized archive does not hold the removed record"
+  pass "fm-teardown: records-only release archives in two phases and a retry converges after a failure between any two"
 }
 
 test_records_only_release_of_stale_scout() {
@@ -1724,7 +1771,7 @@ test_records_only_release_uses_landed_work_proofs
 test_records_only_release_through_symlinked_home
 test_records_only_release_of_stale_scout
 test_records_only_release_refuses_unverified_backends
-test_records_only_release_archives_last
+test_records_only_release_archives_in_two_phases
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

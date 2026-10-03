@@ -184,10 +184,12 @@
 #   which has a live endpoint. The stale endpoint must be dead or missing. A
 #   ship's work is read from its own branch ref, never the shared checkout, and
 #   must pass ordinary teardown's landed-work proofs (a pruned ref only through
-#   a merged PR whose head contains the record's pr_head=); a scout must pass
-#   the report and completion gates. It closes its exact endpoint and backlog
-#   item, removes the record, then archives it under
-#   data/<id>/retired-duplicate-claim.<spawn_gen>.meta, leaving the shared
+#   a merged PR whose forge-reported head contains the record's pr_head= when
+#   one is recorded); a scout must pass the report and completion gates. It
+#   stages the record as a .pending archive, closes its exact endpoint and
+#   backlog item, removes the record, then renames the archive to
+#   data/<id>/retired-duplicate-claim.<spawn_gen>[.<n>].meta (a rerun finishes
+#   an interrupted release from its pending archive), leaving the shared
 #   worktree, slot, and live processes untouched. Zellij and cmux cannot prove
 #   an endpoint agent-free, so release is unavailable on those backends. It
 #   cannot combine with --force; missing or ambiguous proof refuses before
@@ -522,6 +524,26 @@ CONTROL_LOCK_HELD=1
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
+
+# Phase 3 of a records-only release's archive (see the publish step below):
+# rename <name>.pending to <name>, never over an existing archive.
+finalize_duplicate_archive() {  # <pending-path>
+  local final=${1%.pending}
+  { [ "$1" -ef "$final" ] || ln "$1" "$final"; } && rm -f "$1"
+}
+# A release that stopped after removing the record left only that rename.
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ] && [ ! -e "$META" ] && [ ! -L "$META" ] && [ ! -L "$DATA/$ID" ]; then
+  for TEARDOWN_PENDING_ARCHIVE in "$DATA/$ID"/retired-duplicate-claim.*.meta.pending; do
+    [ -f "$TEARDOWN_PENDING_ARCHIVE" ] || continue
+    finalize_duplicate_archive "$TEARDOWN_PENDING_ARCHIVE" || {
+      echo "error: cannot publish task $ID's retirement archive from $TEARDOWN_PENDING_ARCHIVE" >&2
+      exit 1
+    }
+    echo "finalized task $ID's records-only release archive ${TEARDOWN_PENDING_ARCHIVE%.pending}"
+    TEARDOWN_PENDING_FINALIZED=1
+  done
+  [ -z "${TEARDOWN_PENDING_FINALIZED:-}" ] || exit 0
+fi
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -1482,6 +1504,8 @@ LANDED_DIR=$WT
 LANDED_REF=HEAD
 # A pruned branch ref's last-known head (the record's pr_head=); empty otherwise.
 LANDED_RECORDED_HEAD=
+# 1 when a records-only release found the task's branch ref pruned.
+LANDED_REF_PRUNED=0
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
@@ -1583,6 +1607,9 @@ pr_is_merged() {
     # A merged PR proves only the commits up to its head: the pruned branch's
     # recorded head must be one of them.
     git -C "$LANDED_DIR" merge-base --is-ancestor "$LANDED_RECORDED_HEAD" "$head" 2>/dev/null && landed=1
+  elif [ "$LANDED_REF_PRUNED" = 1 ]; then
+    # Pruned with no last-known head: no local commit is left that could be lost.
+    landed=1
   else
     current=$(git -C "$LANDED_DIR" rev-parse --verify "$LANDED_REF" 2>/dev/null) || return 1
     if git -C "$LANDED_DIR" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
@@ -2450,7 +2477,9 @@ require_exclusive_task_worktree_slot() {
 # or status in that slot. The proofs are ordinary teardown's: reachable from a
 # remote (or the live owner's branch), merged into local main for local-only,
 # or landed through a merged PR or default-branch content. A pruned branch ref
-# is landed only through a merged PR whose head contains the record's pr_head=.
+# is landed only through a merged PR; the forge reports its head, which must
+# contain the record's pr_head= when one is recorded.
+DUPLICATE_RELEASE_NOTE=
 duplicate_claim_branch_is_landed() {
   local branch owner_branch owner_ref='' remaining name
   branch=$(fm_meta_get "$META" branch)
@@ -2480,13 +2509,12 @@ duplicate_claim_branch_is_landed() {
     return 1
   else
     LANDED_RECORDED_HEAD=$(fm_meta_get "$META" pr_head)
-    if [ -z "$LANDED_RECORDED_HEAD" ] \
-      || ! git -C "$PROJ" cat-file -e "$LANDED_RECORDED_HEAD^{commit}" 2>/dev/null; then
-        echo "REFUSED: task $ID's branch ref $LANDED_REF is missing and its last-known head (pr_head=${LANDED_RECORDED_HEAD:-<none>}) is not recorded or not resolvable; a merged PR cannot prove its work landed." >&2
-        return 1
+    LANDED_REF_PRUNED=1
+    if pr_is_merged "$branch"; then
+      [ -n "$LANDED_RECORDED_HEAD" ] || DUPLICATE_RELEASE_NOTE='branch pruned; no local evidence of unlanded commits'
+      return 0
     fi
-    pr_is_merged "$branch" && return 0
-    echo "REFUSED: task $ID's branch ref $LANDED_REF is missing and its recorded head $LANDED_RECORDED_HEAD is not contained in a merged PR head; records-only release would lose that work." >&2
+    echo "REFUSED: task $ID's branch ref $LANDED_REF is missing and no merged PR head contains its last-known head (pr_head=${LANDED_RECORDED_HEAD:-<none>}); records-only release would lose that work." >&2
     return 1
   fi
   work_is_landed "$branch" && return 0
@@ -3640,16 +3668,47 @@ if [ "$BACKEND" = herdr ]; then
   TEARDOWN_HERDR_PANE=$FM_BACKEND_HERDR_PANE
 fi
 
+# Records-only release archives in two phases: the record is published as
+# <name>.pending here, before any cleanup; the endpoint is closed and the record
+# removed; then the pending archive is renamed to <name>. <name> is unique per
+# generation (a numeric suffix if taken) and never overwritten, and a retry
+# reuses this generation's pending archive, so no record is removed unarchived.
+publish_duplicate_archive_pending() {
+  local base gen name n=0 tmp
+  gen=$(fm_meta_get "$META" spawn_gen)
+  base="$DUPLICATE_ARCHIVE_DIR/retired-duplicate-claim.${gen:-legacy}"
+  for name in "$base.meta.pending" "$base".[0-9]*.meta.pending; do
+    [ -f "$name" ] || continue
+    DUPLICATE_ARCHIVE_PENDING=$name
+    return 0
+  done
+  tmp="$DUPLICATE_ARCHIVE_DIR/.retired-duplicate-claim.tmp.$$"
+  { cat "$META" && { [ -z "$DUPLICATE_RELEASE_NOTE" ] || printf 'release_note=%s\n' "$DUPLICATE_RELEASE_NOTE"; }; } > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  name="$base.meta"
+  while [ -e "$name" ] || ! ln "$tmp" "$name.pending" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -le 100 ] || { rm -f "$tmp"; return 1; }
+    name="$base.$n.meta"
+  done
+  rm -f "$tmp"
+  DUPLICATE_ARCHIVE_PENDING="$name.pending"
+}
+
 if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
   DUPLICATE_ARCHIVE_DIR="$DATA/$ID"
-  # Published last, after the record is removed, under a generation-unique name.
-  DUPLICATE_ARCHIVE="$DUPLICATE_ARCHIVE_DIR/retired-duplicate-claim.${TEARDOWN_META_SPAWN_GEN:-$(date -u +%Y%m%dT%H%M%SZ)-$$}.meta"
   [ ! -L "$DUPLICATE_ARCHIVE_DIR" ] || {
     echo "REFUSED: duplicate-claim archive directory is a symlink: $DUPLICATE_ARCHIVE_DIR" >&2
     exit 1
   }
   mkdir -p "$DUPLICATE_ARCHIVE_DIR" || {
     echo "REFUSED: cannot create duplicate-claim archive directory $DUPLICATE_ARCHIVE_DIR" >&2
+    exit 1
+  }
+  publish_duplicate_archive_pending || {
+    echo "REFUSED: cannot publish task $ID's pending retirement archive under $DUPLICATE_ARCHIVE_DIR; nothing was changed" >&2
     exit 1
   }
 fi
@@ -3993,14 +4052,6 @@ fi
 # racing the same id stays serialized exactly as it was before. A captain-held
 # row takes the retain transition here instead of the close: same record, same
 # ordering, the row returns to Queued with its deliverable recorded.
-if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
-  DUPLICATE_ARCHIVE_TMP="$DUPLICATE_ARCHIVE_DIR/.retired-duplicate-claim.tmp.$$"
-  cp "$META" "$DUPLICATE_ARCHIVE_TMP" || {
-    rm -f "$DUPLICATE_ARCHIVE_TMP"
-    echo "error: cannot stage task $ID's stale record for archiving; retaining the record for a rerun" >&2
-    exit 1
-  }
-fi
 if [ "$BACKLOG_CLOSED" = 1 ]; then
   BACKLOG_CLOSE_MARKER=$(fm_backlog_close_marker_path "$STATE" "$ID") || exit 1
   if ! fm_backlog_atomic_transition "$BACKLOG_TRANSITION" "$STATE/$ID.meta" "$BACKLOG_CLOSE_MARKER" \
@@ -4027,10 +4078,9 @@ else
     exit 1
   fi
 fi
-# ln refuses an existing name, so a retry never overwrites an earlier archive.
-if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ] \
-  && ! { ln "$DUPLICATE_ARCHIVE_TMP" "$DUPLICATE_ARCHIVE" && rm -f "$DUPLICATE_ARCHIVE_TMP"; }; then
-    echo "warning: task $ID's record is retired, but its archive could not be published at $DUPLICATE_ARCHIVE; the copy remains at $DUPLICATE_ARCHIVE_TMP" >&2
+if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ] && ! finalize_duplicate_archive "$DUPLICATE_ARCHIVE_PENDING"; then
+  echo "error: task $ID's record is retired and archived at $DUPLICATE_ARCHIVE_PENDING, but that archive could not be published; rerun fm-teardown.sh $ID --release-duplicate-claim to finish" >&2
+  exit 1
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
