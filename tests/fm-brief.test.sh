@@ -1179,6 +1179,76 @@ test_home_brief_include_is_appended_last() {
 # (a) An unregistered/default project - no --branch-prefix passed at all - must
 # keep every generated ship mode's branch on the legacy "fm/<task-id>" name, byte
 # for byte, so every existing firstmate installation is unaffected.
+# Real config-push -> secondmate scaffold, without launching any worker.
+test_shared_brief_include_push_and_scaffold() {
+  local home sm out kind brief expected rc
+  home="$TMP_ROOT/shared-primary"
+  sm="$TMP_ROOT/shared-secondmate"
+  mkdir -p "$home/config" "$home/state" "$home/data" "$sm/config" "$sm/bin"
+  printf '%s\n' 'Fixture worker instructions.' > "$sm/AGENTS.md"
+  printf '%s\n' 'config/' 'data/' 'state/' '.fm-secondmate-home' > "$sm/.gitignore"
+  git init -q "$sm"
+  printf '%s\n' shared-mate > "$sm/.fm-secondmate-home"
+  printf 'kind=secondmate\nbackend=tmux\nwindow=shared-include-test:absent\nhome=%s\n' "$sm" \
+    > "$home/state/shared-mate.meta"
+  touch "$home/state/.last-watcher-beat"
+  # shellcheck disable=SC2016 # Prove include text stays literal.
+  printf '%s\n' 'Shared fleet rule: `echo $(id)`.' > "$home/config/brief-include-shared.md"
+  printf '%s\n' 'Primary-only rule.' > "$home/config/brief-include.md"
+  printf '%s\n' 'Secondmate domain rule.' > "$sm/config/brief-include.md"
+  expected="$TMP_ROOT/shared-include-expected"
+  printf '%s\n' '# Home brief additions' \
+    "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
+    > "$expected"
+  cat "$home/config/brief-include-shared.md" "$sm/config/brief-include.md" >> "$expected"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    bash "$ROOT/bin/fm-config-push.sh" 2>&1) || fail "shared include push failed: $out"
+  assert_contains "$out" 'brief-include-shared.md: pushed' "push did not report the shared include"
+  cmp -s "$home/config/brief-include-shared.md" "$sm/config/brief-include-shared.md" \
+    || fail "shared include did not propagate byte-exactly"
+  for kind in ship scout; do
+    if [ "$kind" = ship ]; then
+      FM_HOME="$sm" bash "$ROOT/bin/fm-brief.sh" "shared-$kind" sample --mode no-mistakes >/dev/null \
+        || fail "ship scaffold failed"
+    else
+      FM_HOME="$sm" bash "$ROOT/bin/fm-brief.sh" "shared-$kind" sample --scout >/dev/null \
+        || fail "scout scaffold failed"
+    fi
+    brief="$sm/data/shared-$kind/brief.md"
+    sed -n '/^# Home brief additions/,$p' "$brief" > "$TMP_ROOT/shared-include-actual"
+    cmp -s "$expected" "$TMP_ROOT/shared-include-actual" \
+      || fail "$kind did not append both literal blocks in shared-first order"
+    assert_no_grep 'Primary-only rule.' "$brief" "push overwrote the domain include"
+  done
+  FM_HOME="$sm" FM_SECONDMATE_CHARTER=sample bash "$ROOT/bin/fm-brief.sh" shared-charter \
+    --secondmate --no-projects >/dev/null || fail "charter scaffold failed"
+  assert_no_grep '# Home brief additions' "$sm/data/shared-charter/brief.md" "charter took includes"
+
+  # Absence converges, while the destination's domain rules survive.
+  rm "$home/config/brief-include-shared.md"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    bash "$ROOT/bin/fm-config-push.sh" 2>&1) || fail "shared include removal failed: $out"
+  assert_absent "$sm/config/brief-include-shared.md" "shared absence did not converge"
+  FM_HOME="$sm" bash "$ROOT/bin/fm-brief.sh" shared-removed sample --scout >/dev/null \
+    || fail "scaffold after removal failed"
+  assert_grep 'Secondmate domain rule.' "$sm/data/shared-removed/brief.md" "removal lost domain rule"
+  assert_no_grep 'Shared fleet rule:' "$sm/data/shared-removed/brief.md" "removed shared rule survived"
+
+  # Shared includes obey the same safety boundary as home-local includes.
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$sm/config/brief-include-shared.md"
+  out=$(FM_HOME="$sm" bash "$ROOT/bin/fm-brief.sh" shared-contract sample --scout 2>&1); rc=$?
+  expect_code 1 "$rc" "shared delivery contract must stop scaffolding"
+  assert_contains "$out" 'brief-include-shared.md must not carry' "refusal did not name shared file"
+  assert_absent "$sm/data/shared-contract" "shared contract refusal left partial scaffold"
+  rm "$sm/config/brief-include-shared.md"
+  mkdir "$sm/config/brief-include-shared.md"
+  out=$(FM_HOME="$sm" bash "$ROOT/bin/fm-brief.sh" shared-unusable sample --scout 2>&1); rc=$?
+  expect_code 1 "$rc" "unusable shared include must stop scaffolding"
+  assert_absent "$sm/data/shared-unusable" "unusable shared include left partial scaffold"
+  pass "shared brief include: config-push propagates exact bytes and absence; ship/scout keep domain rules"
+}
+
 test_ship_branch_prefix_defaults_to_legacy_fm() {
   local home id mode brief
   home="$TMP_ROOT/branch-prefix-default-home"
@@ -1424,6 +1494,7 @@ test_scout_lavish_line_follows_presentation_floor
 test_workers_wait_without_spending_turns
 test_wait_no_turns_absent_keeps_the_previous_brief
 test_home_brief_include_is_appended_last
+test_shared_brief_include_push_and_scaffold
 test_ship_branch_prefix_defaults_to_legacy_fm
 test_ship_branch_prefix_override_is_consistent_across_modes
 test_ship_branch_prefix_empty_override_yields_bare_task_id
