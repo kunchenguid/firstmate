@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
-# worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# worktree, leave an adopted worktree to its creator, or retire a secondmate
+# home; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -148,6 +149,30 @@
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
+# An adopted worktree (worktree_source=adopted, written by bin/fm-spawn.sh
+# --adopt-worktree) is not a pool slot either: it is its creator's copy, so
+# teardown never returns it to a pool, resets it, deletes its branch, or removes
+# it, even when a forced secondmate teardown discards child work. Only while the
+# copy still carries this task's own owner claim, it restores any worktree
+# wiring file the copy already carried when it was adopted (saved by spawn in
+# the copy's per-worktree git dir), replacing rather than writing through a path
+# that became a symlink, removes only the wiring the recorded harness armed, and
+# releases that claim; a copy claimed by another home or task, or no longer
+# claimed at all, is left entirely untouched. That store is the only proof of
+# which files firstmate wrote, so a store that is gone removes nothing at all, a
+# store that cannot be fully applied is retained and leaves the copy possibly
+# part restored, and a store that cannot be removed after a full restore makes
+# every later adoption of the copy refuse; teardown warns for each case in its
+# own terms, naming the copy and the store, and reports the handback as
+# incomplete rather than clean.
+# The copy itself is left to its creator, and so is everything live inside it:
+# sessions sharing that checkout legitimately work there, and a run or a
+# process in the copy cannot be attributed to this task by branch and head
+# alone, so teardown reaps no process under an adopted copy and concludes or
+# aborts no no-mistakes run in it - a process still holding the copy is named
+# and left running, and a parked run is left for whoever started it. This
+# task's own tasktmp is still reaped, and the landed-work gates and this
+# task's own record cleanup run exactly as for a pooled copy.
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
@@ -1107,6 +1132,8 @@ fi
 # (and must keep refusing it for control/kill callers), so teardown skips the
 # validator rather than probing or closing an ambient current window.
 WT=$(fm_meta_get "$META" worktree)
+WORKTREE_SOURCE=$(fm_meta_get "$META" worktree_source)
+TEARDOWN_ADOPTED_RESTORE_FAILED=0
 PROJ=$(fm_meta_get "$META" project)
 T_ORCA=
 if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
@@ -2170,6 +2197,17 @@ reap_task_backend_process_group() {  # <label>
   fi
 }
 
+# An adopted copy is its creator's, so a process running in it is not this
+# task's to kill even when teardown cannot attribute it: name what is still
+# running there and leave it alone.
+report_adopted_worktree_processes() {  # <worktree>
+  local wt=$1
+  command -v lsof >/dev/null 2>&1 || return 0
+  task_pids_under_roots "$wt" || return 0
+  [ -n "$TASK_PIDS" ] || return 0
+  echo "teardown: leaving process(es) running under adopted worktree $wt for $ID untouched: $(printf '%s' "$TASK_PIDS" | tr '\n' ' ')" >&2
+}
+
 # Reap every process rooted (by cwd) under this task's own worktree or tasktmp
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
@@ -2460,6 +2498,40 @@ require_owned_task_worktree_slot() {
 
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+}
+
+# Hand an adopted copy back to its creator (see script header), warning in its
+# own terms for every way the handback is incomplete. The claim is checked
+# before anything is restored: a record whose claim was already released -
+# say, by an earlier teardown that could not then remove the record - no longer
+# owns that copy's wiring or preserve store, which may belong to whoever
+# adopted the copy since. Returns 1 when the handback is not complete.
+teardown_hand_back_adopted_worktree() {  # <worktree> <task-id> <state-dir> <recorded-harness>
+  local wt=$1 id=$2 state=$3 harness=$4 store holder rc=0
+  [ -d "$wt" ] || return 0
+  store=$(fm_adopted_worktree_wiring_store "$wt" 2>/dev/null) || store=
+  if ! fm_adopted_worktree_owner_is_mine "$wt" "$id" "$state"; then
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      absent) holder="its owner claim is gone" ;;
+      unsafe) holder="its owner claim cannot be read" ;;
+      *) holder="it is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID${FM_TREEHOUSE_SLOT_OWNER_HOME:+ (home $FM_TREEHOUSE_SLOT_OWNER_HOME)}" ;;
+    esac
+    echo "warning: adopted worktree $wt is no longer task $id's - $holder - so its wiring and the originals preserved at ${store:-an unresolvable store path} cannot be proved to be this task's; nothing in that copy was restored, removed, or released" >&2
+    return 1
+  fi
+  if [ -z "$store" ] || [ ! -d "$store" ]; then
+    echo "warning: could not restore adopted worktree $wt to the wiring its creator handed over: the originals spawn preserved at ${store:-an unresolvable store path} are gone, so nothing in that copy can be proved to be firstmate's; nothing was removed from it and task $id's hook files may still be live there" >&2
+    rc=1
+  else
+    fm_control_restore_adopted_wiring "$wt" "$store" "$harness" || rc=$?
+    case "$rc" in
+      0) ;;
+      3) echo "warning: adopted worktree $wt was restored to the wiring its creator handed over, but the preserve store at $store could not be removed; every later adoption of that copy refuses until it is" >&2 ;;
+      *) echo "warning: adopted worktree $wt was not fully restored to the wiring its creator handed over, so that copy may now hold a mix of task $id's wiring and its creator's own files. The preserved originals are retained at $store; inspect both before that copy is used again" >&2 ;;
+    esac
+  fi
+  fm_adopted_worktree_owner_release "$wt" "$id" "$state"
+  [ "$rc" = 0 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3018,7 +3090,8 @@ validate_firstmate_home_children_removal() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
       fi
-    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+    elif [ -n "$child_wt" ] && [ -e "$child_wt" ] &&
+      [ "$(meta_value "$child_meta" worktree_source)" != adopted ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
@@ -3260,6 +3333,15 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$(meta_value "$child_meta" worktree_source)" = adopted ]; then
+      # An adopted copy is its creator's, never a pool slot: even a forced
+      # discard restores the wiring the copy came with, removes only the files
+      # firstmate wrote, and drops only this child's own claim - never the copy,
+      # its branch, or anything in it while another home or task holds it.
+      if [ -n "$child_wt" ]; then
+        teardown_hand_back_adopted_worktree "$child_wt" "$child_id" "$sub_state" \
+          "$(meta_value "$child_meta" harness)" || true
+      fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3559,8 +3641,13 @@ fi
 # dedicated process-event and firstmate-home removal machinery further below,
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if [ "$WORKTREE_SOURCE" = adopted ]; then
+    report_adopted_worktree_processes "$WT"
+    reap_task_worktree_processes tasktmp "$TASK_TMP"
+  else
+    conclude_task_no_mistakes_run "$WT"
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  fi
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
@@ -3593,6 +3680,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
+elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
+  # Adopted, not leased (see script header): the copy's own wiring is put back,
+  # only the files firstmate wrote are removed, and only this task's own claim
+  # is released - a copy another home or task holds now is left entirely alone.
+  teardown_hand_back_adopted_worktree "$WT" "$ID" "$STATE" "$(fm_meta_get "$META" harness)" ||
+    TEARDOWN_ADOPTED_RESTORE_FAILED=1
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
@@ -3848,6 +3941,12 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$WORKTREE_SOURCE" = adopted ] && [ "$KIND" != secondmate ]; then
+  if [ "$TEARDOWN_ADOPTED_RESTORE_FAILED" = 1 ]; then
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT was NOT cleanly handed back to its creator - see the warning above; the copy and its branch are untouched)"
+  else
+    echo "teardown $ID complete (window ${T:-none}; adopted worktree $WT left in place for its creator, with any process still running in it untouched)"
+  fi
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window ${T:-none}, worktree $WT)"
 else
