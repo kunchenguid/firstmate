@@ -2346,7 +2346,6 @@ test_separate_self_announced_answers_after_fold_are_owned() {
   dir=$(make_case multi-answer-owned)
   state="$dir/state"
   status="$state/t.status"
-  printf 'kind=ship\n' > "$state/t.meta"
 
   run_wake_lib() {
     FM_STATE_OVERRIDE="$state" bash -c '

@@ -55,6 +55,10 @@
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
+# A child with an open needs-decision is waiting, not finished: it is never
+# reported as a terminal outcome. In a secondmate home that wait is published
+# once per opener on the parent channel instead, through the same receipt store:
+#   blocked [key=decision-waiting-<fp12>]: waiting on decision <key> for <age>: child=<child>
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -497,7 +501,7 @@ report_child() { # <id>
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
-  local open key decision_key decision_verb decision_note origin decision_age
+  local open key decision_key decision_verb origin decision_age
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -522,7 +526,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   fi
   open=$(status_open_decisions "$status" "$kind")
   decision_key=
-  while IFS=$'\t' read -r key decision_verb decision_note; do
+  while IFS=$'\t' read -r key decision_verb _; do
     [ "$decision_verb" = needs-decision ] || continue
     decision_key=$key
     break
@@ -531,11 +535,24 @@ $open
 EOF
   if [ -n "$decision_key" ]; then
     decision_age=unknown
+    origin=
     if origin=$(status_open_decision_origin "$status" "$decision_key"); then
       decision_age="$(( $(date +%s) - ${origin%% *} ))s"
       case "$decision_age" in -*) decision_age=0s ;; esac
     fi
-    printf 'waiting on decision %s for %s: child=%s\n' "$decision_key" "$decision_age" "$id" >&2
+    payload="waiting on decision $decision_key for $decision_age: child=$id"
+    printf '%s\n' "$payload" >&2
+    [ -n "$self" ] || return 0
+    incarnation=$(meta_incarnation "$meta")
+    fingerprint=$(sha256_text "$incarnation|$id|waiting|$decision_key|$origin")
+    ensure_record "$fingerprint" "$id" "$incarnation" waiting "decision-waiting-$self-$id" direct upstream "" || return 1
+    [ -n "$RECORD_PENDING" ] || return 0
+    if fm_parent_channel_report "$FM_HOME" "$STATE" "blocked [key=decision-waiting-${fingerprint:0:12}]: $payload"; then
+      mark_reported "$RECORD_PENDING" || return 1
+    else
+      notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+        "decision wait needs parent report: child=$id key=$decision_key"
+    fi
     return 0
   fi
   case "$state_line" in

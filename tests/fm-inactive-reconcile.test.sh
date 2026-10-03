@@ -1094,4 +1094,25 @@ test_open_decision_prevents_inactive_terminal_outcome() {
 }
 test_open_decision_prevents_inactive_terminal_outcome
 
+test_secondmate_decision_wait_reaches_parent_once() {
+  local now
+  make_world open-decision-mate; bind_secondmate local
+  write_child "$MATE" child 'working: drafting docs'
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 120))" >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup 2>/dev/null
+  [ "$(grep -c 'waiting on decision publication for ' "$MAIN/state/mate.status" 2>/dev/null)" = 1 ] \
+    || fail "decision wait did not reach the parent channel: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+  grep -F 'blocked [key=decision-waiting-' "$MAIN/state/mate.status" | grep -F 'child=child' >/dev/null \
+    || fail "parent decision-wait line lost its child or blocked verb"
+  grep -F 'inactive terminal' "$MAIN/state/mate.status" >/dev/null \
+    && fail "open decision was reported to the parent as an inactive terminal outcome"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup 2>/dev/null
+  [ "$(grep -c 'waiting on decision publication for ' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "decision wait was published to the parent twice"
+  pass "a secondmate child's decision wait reaches the parent channel once"
+}
+test_secondmate_decision_wait_reaches_parent_once
+
 echo "all inactive reconciliation tests passed"

@@ -273,12 +273,14 @@ test_many_terminal_decisions_do_not_hide_newest_live_decision() {
     || fail "folded decisions had no full-list command"
   FM_STATE_OVERRIDE="$state" "$DRAIN" --list-open-decisions > "$out" \
     || fail "full decision list failed"
-  grep -F 'old-1 [key=old-1] resolved: moot: task metadata absent after teardown' "$out" >/dev/null \
-    || fail "torn-down decisions were not closed with a recorded reason"
+  grep -F 'old-1 [key=old-1]' "$out" | grep -F 'stale lane' >/dev/null \
+    || fail "full list omitted a torn-down task's decision"
+  grep -q 'resolved' "$state"/old-*.status \
+    && fail "drain wrote a resolution into a torn-down task's status log"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
-    || fail "second drain failed after moot closure"
-  grep -F '130 terminal decisions folded' "$out" >/dev/null \
-    || fail "closed terminal keys kept accumulating"
+    || fail "second drain failed"
+  grep -F '150 terminal decisions folded' "$out" >/dev/null \
+    || fail "a read-only drain changed the folded count"
   pass "150 stale terminal decisions cannot hide the newest live decision"
 }
 test_many_terminal_decisions_do_not_hide_newest_live_decision

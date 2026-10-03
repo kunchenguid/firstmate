@@ -106,6 +106,74 @@ test_torn_down_status_does_not_wake() {
   pass "a torn-down task's stale decision does not flood the age queue"
 }
 
+test_secondmate_second_reraise_escalates_to_parent_once() {
+  local dir mate state fakebin out pid now channel
+  dir=$(make_case secondmate-escalation); mate="$dir/mate"; state="$mate/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  channel="$dir/parent/state/mate.status"
+  mkdir -p "$mate"/{state,data,config,projects} "$dir/parent/state"
+  printf 'mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/parent" > "$mate/.fm-secondmate-parent"
+  now=$(date +%s)
+  printf 'needs-decision [key=dlp-clean] [at=%s]: clean behind active run?\n' "$((now - 20))" > "$state/docs.status"
+  printf 'kind=ship\n' > "$state/docs.meta"
+  prime_status_seen "$state" "$state/docs.status"
+
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 100 || fail "first re-raise did not wake the secondmate"
+  ! grep -F 'decision unanswered' "$channel" >/dev/null 2>&1 \
+    || fail "the first re-raise escalated to the parent early"
+  ack_wake "$state" || fail "first re-raise could not be acknowledged"
+
+  sleep 2
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 100 || fail "second re-raise did not wake the secondmate"
+  [ "$(grep -c 'decision unanswered' "$channel" 2>/dev/null)" = 1 ] \
+    || fail "second re-raise did not escalate exactly once: $(cat "$channel" 2>/dev/null)"
+  grep -E '^needs-decision \[key=decision-unanswered-[0-9a-f]+\].*: decision unanswered [0-9]+s: docs dlp-clean$' "$channel" >/dev/null \
+    || fail "parent escalation line lost its key, age, task, or decision key: $(cat "$channel")"
+  ack_wake "$state" || fail "second re-raise could not be acknowledged"
+
+  sleep 4
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  wait_for_exit "$pid" 100 || fail "third re-raise did not wake the secondmate"
+  [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a later re-raise duplicated the parent escalation"
+  ack_wake "$state" || fail "third re-raise could not be acknowledged"
+
+  printf 'resolved [key=dlp-clean] [at=%s]: yes, clean it\n' "$(date +%s)" >> "$state/docs.status"
+  prime_status_seen "$state" "$state/docs.status"
+  sleep 8
+  watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
+  sleep 3
+  kill -0 "$pid" 2>/dev/null || fail "a resolved decision still woke the secondmate"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a resolved decision escalated again"
+  ! ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "the resolved decision kept its age marker"
+  pass "the second unanswered re-raise escalates to the parent once and resolution silences it"
+}
+
+test_unreadable_marker_does_not_stop_supervision() {
+  local dir state fakebin out pid now marker
+  dir=$(make_case marker-symlink); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  now=$(date +%s)
+  printf 'needs-decision [key=a] [at=%s]: first\n' "$((now - 20))" > "$state/one.status"
+  printf 'needs-decision [key=b] [at=%s]: second\n' "$((now - 20))" > "$state/two.status"
+  printf 'kind=ship\n' > "$state/one.meta"
+  printf 'kind=ship\n' > "$state/two.meta"
+  prime_status_seen "$state" "$state/one.status"
+  prime_status_seen "$state" "$state/two.status"
+  marker="$state/.decision-age-$(printf '%s' 'one|a' | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi; })"
+  ln -s "$dir/elsewhere" "$marker"
+  watch_bg "$state" "$fakebin" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "a bad marker on one key stopped the other key's wake"
+  grep -F 'decision unanswered' "$out" | grep -F 'two b' >/dev/null \
+    || fail "the healthy key was not re-raised: $(cat "$out")"
+  ! grep -F 'decision-age scan failed' "$out" >/dev/null || fail "a per-key marker failure killed the cycle"
+  pass "a bad age marker skips only its own key"
+}
+
 test_rewake_dedup_and_resolution
 test_secondmate_child_uses_own_queue
+test_secondmate_second_reraise_escalates_to_parent_once
+test_unreadable_marker_does_not_stop_supervision
 test_torn_down_status_does_not_wake

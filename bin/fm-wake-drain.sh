@@ -6,12 +6,13 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
-# --list-open-decisions prints every current decision and recorded moot closure
-# without claiming or acknowledging queue rows. The ordinary view prints live
-# decisions newest first, closes at most 20 torn-down keys per drain, and folds
-# the remainder into a count. FM_OPEN_DECISIONS_MAX_ROWS (default 10000) is an
-# emergency live-row limit; any omitted live rows are named loudly with this
-# full-list command, never silently swallowed by the former 4 KB byte cap.
+# --list-open-decisions prints every current decision, including those of
+# torn-down tasks, without claiming or acknowledging queue rows and without
+# writing any status record. The ordinary view prints live decisions newest
+# first and folds torn-down tasks' decisions into a count.
+# FM_OPEN_DECISIONS_MAX_ROWS (default 10000) is an emergency live-row limit;
+# any omitted live rows are named loudly with this full-list command, never
+# silently swallowed by the former 4 KB byte cap.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -458,31 +459,6 @@ EOF
   [ "$shown" -gt 0 ] || return 0
 }
 
-# A task with no metadata has been torn down. Close its orphaned decisions in
-# the same status stream that owns their open/closed state, with a durable reason.
-# The per-task metadata lock prevents racing a new incarnation of that task.
-close_torn_down_decision() { # <task> <key>
-  local task=$1 key=$2 meta="$STATE/$1.meta" status="$STATE/$1.status" lock open row found=0 rc=0
-  case "$key" in captain-hold-*|pending-reply-*|remote-reply-continuity-*) return 1 ;; esac
-  lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock" || return 1
-  if [ ! -e "$meta" ] && [ ! -L "$meta" ] && [ -f "$status" ] && [ ! -L "$status" ]; then
-    open=$(status_open_decisions "$status")
-    while IFS= read -r row; do
-      case "$row" in "$key"$'\t'*) found=1; break ;; esac
-    done <<EOF
-$open
-EOF
-    if [ "$found" -eq 1 ]; then
-      fm_wake_status_append_self_announced "$STATE" "$status" \
-        "resolved [key=$key]: moot: task metadata absent after teardown" || rc=$?
-      if [ "$rc" -le 1 ]; then rc=0; else rc=1; fi
-    fi
-  fi
-  fm_lock_release "$lock"
-  return "$rc"
-}
-
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -500,7 +476,7 @@ EOF
 # common case.
 print_open_decisions_section() {
   local snapshot=${1:-} open task key verb note line item_bytes=220 origin epoch age now threshold
-  local rows='' rank meta max_rows shown=0 terminal_count=0 omitted_live=0 moot_closed=0
+  local rows='' rank meta max_rows shown=0 terminal_count=0 omitted_live=0
   max_rows=${FM_OPEN_DECISIONS_MAX_ROWS:-10000}
   case "$max_rows" in ''|0|0*|*[!0-9]*) max_rows=10000 ;; esac
   [ "${#max_rows}" -le 9 ] || max_rows=10000
@@ -522,9 +498,6 @@ print_open_decisions_section() {
     if [ -e "$meta" ] || [ -L "$meta" ]; then rank=1; fi
     if [ "$rank" -eq 0 ] && [ "$LIST_OPEN" -eq 0 ]; then
       terminal_count=$((terminal_count + 1))
-      if [ "$moot_closed" -lt 20 ] && close_torn_down_decision "$task" "$key"; then
-        moot_closed=$((moot_closed + 1))
-      fi
       continue
     fi
     epoch=0
@@ -573,25 +546,6 @@ EOF
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
-}
-
-print_moot_decisions_section() {
-  local f task line key note printed=0
-  for f in "$STATE"/*.status; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    task=${f##*/}; task=${task%.status}
-    while IFS= read -r line || [ -n "$line" ]; do
-      [ "$(status_line_verb "$line")" = resolved ] || continue
-      note=$(status_line_note "$line")
-      [ "$note" = 'moot: task metadata absent after teardown' ] || continue
-      key=$(_fm_decision_key "$line") || continue
-      if [ "$printed" -eq 0 ]; then
-        printf 'MOOT DECISIONS (closed with a recorded reason):\n' || return 1
-      fi
-      printf '%s [key=%s] resolved: %s\n' "$task" "$key" "$note" || return 1
-      printed=$((printed + 1))
-    done < "$f"
-  done
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
@@ -908,7 +862,6 @@ trap 'exit 143' TERM
 
 if [ "$LIST_OPEN" -eq 1 ]; then
   print_open_decisions_section
-  print_moot_decisions_section
   exit $?
 fi
 
