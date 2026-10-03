@@ -25,8 +25,9 @@
 #     and hold_bucket fields.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done in the backlog or in the Done archive (the
-#     home's .tasks.toml [markdown] archive, else data/done-archive.md), and
-#     missing ids stay open.
+#     [markdown] archive of the home's .tasks.toml, else of
+#     ~/.tasks-axi/config.toml, else data/done-archive.md), and missing ids
+#     stay open.
 #     There is no separate decision type: any captain-held task is the same
 #     primitive, whatever kind its row carries.
 #     hold_bucket is the single classification for every captain hold, decided
