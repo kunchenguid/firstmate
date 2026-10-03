@@ -3354,6 +3354,30 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
   pass "a missing remote ledger stays explicitly unreadable without remote summary computation"
 }
 
+test_agent_overview_mode_is_task_only_and_does_not_refresh_caches() {
+  local home fakebin json leftovers
+  home=$(make_home agent-overview); write_fixture "$home"
+  fakebin=$(make_fakebin "$TMP_ROOT/agent-overview-fakebin")
+  mkdir -p "$home/tmp"
+
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z NET_LOG="$home/net.log" TMPDIR="$home/tmp" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --agent-overview)
+  printf '%s' "$json" | jq -e '
+    .schema == "fm-agent-overview.v1"
+      and (.tasks | any(.id == "ship-task" and .current_state.state == "working"))
+      and (.tasks | any(.id == "mate" and any(.hints.open_decisions[]; .key == "race")))
+      and (keys | sort) == ["generated", "schema", "tasks"]
+  ' >/dev/null || fail "agent overview did not return authoritative task state and keyed waits only: $json"
+  [ ! -e "$home/state/secondmate-summary-cache" ] \
+    || fail "agent overview refreshed the observational secondmate cache"
+  [ ! -s "$home/net.log" ] || fail "agent overview performed an unexpected network call: $(cat "$home/net.log")"
+  leftovers=$(find "$home/tmp" -mindepth 1 -print -quit)
+  [ -z "$leftovers" ] || fail "agent overview left temporary task observations behind: $leftovers"
+  pass "agent overview returns task-only current-state data without persistent cache or network writes"
+}
+
+test_agent_overview_mode_is_task_only_and_does_not_refresh_caches
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
 test_relaunched_task_does_not_inherit_reused_endpoint_state
