@@ -26,7 +26,7 @@ The planned PR URL may be absent at submission; `attach-pr` records a full HTTPS
 `predecessors` names already submitted intents on the same repository and base.
 `predecessors-set` can change the list before an intent is queued, and refuses a cycle.
 Do not put raw prompts, credentials, secret projections, or full transcripts in a payload.
-`request_id` is a caller-generated stable idempotency key for every mutation, unique within its `home_id` or the administrative `@authority` actor; a `home_id` cannot start with `@`, so the two namespaces never collide.
+`request_id` is a caller-generated stable idempotency key for every mutation, unique within its `home_id` or administrative actor (`@authority`, or `@authority:<account>:<uid>` for operator abort); a `home_id` cannot start with `@`, so the two namespaces never collide.
 Reusing the key with identical operation and payload returns the exact stored result; reusing it for different content fails.
 The prior grant receipt can be replayed after a lease expires, but it cannot revive the grant: use `check` with the live fence before acting.
 
