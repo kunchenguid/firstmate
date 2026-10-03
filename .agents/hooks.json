@@ -1,0 +1,16 @@
+{
+  "subagent-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "invoke_subagent|define_subagent|send_message|manage_subagents",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -lc 'root=$(git rev-parse --show-toplevel 2>/dev/null || cd .. && pwd -P); [ -x \"$root/bin/fm-subagent-pretool-check.sh\" ] && exec \"$root/bin/fm-subagent-pretool-check.sh\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

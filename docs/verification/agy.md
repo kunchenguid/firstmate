@@ -153,6 +153,14 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## PreToolUse hooks and delegation tools
+
+Antigravity CLI and Antigravity 2.0 discover project lifecycle hooks in `.agents/hooks.json`.
+When Antigravity runs as a primary session, its built-in in-process subagent tools (`invoke_subagent`, `define_subagent`, `send_message`, `manage_subagents`) bypass Treehouse worktrees, Herdr/tmux tabs, and Firstmate fleet supervision records.
+A tracked `PreToolUse` hook in `.agents/hooks.json` forwards tool calls to `bin/fm-subagent-pretool-check.sh`.
+The hook receives a JSON payload on stdin containing `toolCall.name`, matches delegation-shaped stems, and returns `{"decision":"deny","reason":"..."}` on stdout with exit 0.
+The primary scope check (`bin/fm-primary-scope-lib.sh`) keeps the hook inert in task worktrees, preserving crewmate delegation tools while enforcing the fleet boundary in primary homes.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
