@@ -297,6 +297,7 @@ EOF
       "$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION" >/dev/null 2>&1 || true
     LAB_READY=0
   fi
+  find "$TMP_ROOT" -type d -name '*.git-hooks' -exec chmod u+w {} + 2>/dev/null || true
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_all EXIT
@@ -1294,6 +1295,90 @@ teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-te
 "$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
+# A model-switch relaunch after a positively missing projected pane recreates
+# the child under the same parent instead of flattening into it.
+RELAUNCH_ID=relaunch-child-r1
+mkdir -p "$HOME_DIR/data/$RELAUNCH_ID"
+write_ship_brief "$HOME_DIR" "$RELAUNCH_ID" 'Model-switch relaunch fixture.'
+spawn_task "$RELAUNCH_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/relaunch-first.out" 2> "$TMP_ROOT/relaunch-first.err" \
+  || fail "relaunch fixture spawn failed: $(cat "$TMP_ROOT/relaunch-first.err")"
+RELAUNCH_META="$HOME_DIR/state/$RELAUNCH_ID.meta"
+RELAUNCH_OLD_WT=$(remember_meta_worktree "$RELAUNCH_META")
+RELAUNCH_OLD_WSID=$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_OLD_PANE=$(grep '^herdr_pane_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_OLD_LABEL=$(lab workspace get "$RELAUNCH_OLD_WSID" | jq -r '.result.workspace.label')
+RELAUNCH_TOKEN=$(grep '^projection_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)
+lab pane close "$RELAUNCH_OLD_PANE" >/dev/null \
+  || fail "could not stop the relaunch fixture pane"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after stopping the relaunch fixture"
+assert_focus_is "$CAPTAIN_FOCUS" "relaunch fixture stop"
+lab pane get "$RELAUNCH_OLD_PANE" >/dev/null 2>&1 \
+  && fail "the stopped relaunch fixture pane is still readable"
+lab workspace get "$RELAUNCH_OLD_WSID" >/dev/null 2>&1 \
+  && fail "the stopped relaunch fixture workspace is still present"
+RELAUNCH_ORDER_BEFORE=$(lab workspace list | jq -r '.result.workspaces[].workspace_id')
+RELAUNCH_FOCUS=$(focus_snapshot)
+RELAUNCH_OLD_TAB=$(grep '^herdr_tab_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_REAL_MV=$(command -v mv)
+mkdir -p "$TMP_ROOT/relaunch-failbin"
+cat > "$TMP_ROOT/relaunch-failbin/mv" <<'SH'
+#!/usr/bin/env bash
+last="${@: -1}"
+[ "$last" = "$FM_FAIL_META" ] && exit 1
+exec "$FM_REAL_MV" "$@"
+SH
+chmod +x "$TMP_ROOT/relaunch-failbin/mv"
+if PATH="$TMP_ROOT/relaunch-failbin:$PATH" FM_REAL_MV="$RELAUNCH_REAL_MV" FM_FAIL_META="$RELAUNCH_META" \
+  FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" "$RELAUNCH_ID" --relaunch --harness "sh -c 'while :; do sleep 60; done'" \
+  > "$TMP_ROOT/relaunch-abort.out" 2> "$TMP_ROOT/relaunch-abort.err"; then
+  fail "missing-child relaunch should fail when its record cannot publish"
+fi
+[ "$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)" = "$RELAUNCH_OLD_WSID" ] \
+  && [ "$(grep '^workspace_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_OLD_WSID" ] \
+  && [ "$(grep '^tab_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_OLD_TAB" ] \
+  || fail "prepublication abort left the journal ahead of the prior task record"
+[ "$(lab workspace list | jq -r --arg token "$RELAUNCH_TOKEN" '[.result.workspaces[] | select(.label | endswith(" · p:" + $token))] | length')" = 0 ] \
+  || fail "prepublication abort retained a replacement token workspace"
+pass "real Herdr lab: a prepublication abort restores the old binding and permits retry"
+FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" "$RELAUNCH_ID" --relaunch --harness "sh -c 'while :; do sleep 60; done'" \
+  > "$TMP_ROOT/relaunch-resume.out" 2> "$TMP_ROOT/relaunch-resume.err" \
+  || fail "missing-child relaunch failed: $(cat "$TMP_ROOT/relaunch-resume.err")"
+RELAUNCH_NEW_WT=$(remember_meta_worktree "$RELAUNCH_META")
+RELAUNCH_NEW_WSID=$(grep '^herdr_workspace_id=' "$RELAUNCH_META" | cut -d= -f2-)
+RELAUNCH_NEW_PANE=$(grep '^herdr_pane_id=' "$RELAUNCH_META" | cut -d= -f2-)
+[ "$RELAUNCH_NEW_WT" = "$RELAUNCH_OLD_WT" ] \
+  || fail "missing-child relaunch did not reuse the recorded worktree"
+[ "$RELAUNCH_NEW_WSID" != "$RELAUNCH_OLD_WSID" ] && [ "$RELAUNCH_NEW_PANE" != "$RELAUNCH_OLD_PANE" ] \
+  || fail "missing-child relaunch did not mint a replacement endpoint"
+[ "$RELAUNCH_NEW_WSID" != "$FIRSTMATE_WSID" ] \
+  || fail "missing-child relaunch flattened the replacement into the parent workspace"
+[ "$(lab workspace get "$RELAUNCH_NEW_WSID" | jq -r '.result.workspace.label')" = "$RELAUNCH_OLD_LABEL" ] \
+  || fail "missing-child relaunch changed the child presentation label"
+[ "$(grep '^projection_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_TOKEN" ] \
+  && [ "$(grep '^workspace_id=' "$HOME_DIR/state/$RELAUNCH_ID.herdr-presentation" | cut -d= -f2-)" = "$RELAUNCH_NEW_WSID" ] \
+  || fail "missing-child relaunch did not advance the same-token journal to the new child"
+RELAUNCH_ORDER_AFTER=$(lab workspace list | jq -r '.result.workspaces[].workspace_id')
+[ "$(printf '%s\n' "$RELAUNCH_ORDER_AFTER" | grep -vxF "$RELAUNCH_NEW_WSID")" = "$RELAUNCH_ORDER_BEFORE" ] \
+  || fail "the relaunched child disturbed the pre-existing workspace order"
+lab workspace list | jq -e --arg parent "$FIRSTMATE_WSID" --arg child "$RELAUNCH_NEW_WSID" '
+  (.result.workspaces) as $spaces
+  | ([$spaces[].workspace_id] | index($parent)) as $p
+  | ([$spaces[].workspace_id] | index($child)) as $c
+  | $p != null and $c != null and $c > $p
+  | . and ([$spaces[range($p + 1; $c + 1)] | select(
+      (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$")) or
+      (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
+    )] | length == ($c - $p))
+' >/dev/null 2>&1 || fail "the relaunched child is not nested inside its parent block"
+assert_focus_is "$RELAUNCH_FOCUS" "missing-child relaunch"
+teardown_task "$RELAUNCH_ID" "$HOME_DIR" > "$TMP_ROOT/relaunch-teardown.out" 2> "$TMP_ROOT/relaunch-teardown.err" \
+  || fail "relaunched child teardown failed: $(cat "$TMP_ROOT/relaunch-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$RELAUNCH_OLD_WT" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$RELAUNCH_NEW_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a model-switch relaunch recreates the ordered child with the same token and captain focus"
+
 # Two homes recovering concurrently serialize on the named session lock and
 # each replace only their own exact husk.
 PRIMARY_WAVE_ID=resume-wave-primary
@@ -1322,8 +1407,25 @@ spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/p
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
-wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
-wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+PRIMARY_WAVE_STATUS=0
+BRAVO_WAVE_STATUS=0
+wait "$PRIMARY_WAVE_PID" || PRIMARY_WAVE_STATUS=$?
+wait "$BRAVO_WAVE_PID" || BRAVO_WAVE_STATUS=$?
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ] && [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  fail "both concurrent recoveries refused: $(cat "$TMP_ROOT/primary-wave-resume.err") $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ]; then
+  grep -Fq 'could not acquire its session lock; refusing a concurrent resume' "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "concurrent primary recovery failed unexpectedly: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "primary recovery retry after lock refusal failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+fi
+if [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  grep -Fq 'could not acquire its session lock; refusing a concurrent resume' "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "concurrent secondmate recovery failed unexpectedly: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "secondmate recovery retry after lock refusal failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)
