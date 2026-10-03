@@ -31,15 +31,28 @@ fm_lock_path_mtime() {
 }
 
 # fm_lock_lsof_holder <target>: 0 a process holds it, 1 provably none, 2 lsof
-# errored (cannot tell). Diagnostics print on the error path only.
+# errored (cannot tell). Judge by whether lsof LISTED a holder - a process row
+# always carries a numeric PID in its second column, while the column header,
+# lsof warnings and lsof error text never do - with lsof's found-match exit 0
+# accepted as the same verdict. -w suppresses lsof's non-fatal filesystem
+# warnings (docker overlayfs/nsfs stat warnings), and any warning text that
+# still reaches the output is stripped before exit 1 is read as a clean
+# no-match, so warnings alone never turn "no holder" into "cannot tell".
+# A real error - non-warning output with no listed holder, or an abnormal exit
+# with no output - still returns 2. Diagnostics print on the error path only.
 fm_lock_lsof_holder() {
-  local target=$1 output status
-  if output=$(lsof -- "$target" 2>&1); then
-    return 0
+  local target=$1 output status holders residue
+  if output=$(lsof -w -- "$target" 2>&1); then
+    status=0
   else
     status=$?
   fi
-  if [ "$status" -eq 1 ] && [ -z "$output" ]; then
+  holders=$(printf '%s\n' "$output" | awk 'NF > 1 && $2 ~ /^[0-9]+$/')
+  if [ "$status" -eq 0 ] || [ -n "$holders" ]; then
+    return 0
+  fi
+  residue=$(printf '%s\n' "$output" | grep -v -e '^lsof: *WARNING:' -e 'Output information may be incomplete' || true)
+  if [ "$status" -eq 1 ] && [ -z "$residue" ]; then
     return 1
   fi
   if [ -n "$output" ]; then
@@ -55,7 +68,8 @@ fm_lock_lsof_holder() {
 # fm_lock_has_live_holder <lock> <dir>: 0 if a live process holds $lock or the
 # companion $dir open, OR if the answer is uncertain - a missing lsof or an lsof
 # error is treated as "cannot prove no holder" (fail safe: assume live). Returns
-# 1 only when lsof reports provably no holder on both.
+# 1 only when lsof reports provably no holder on both. An empty <dir> skips the
+# companion check (lock holder alone decides); an empty <lock> checks only $dir.
 fm_lock_has_live_holder() {
   local lock=$1 dir=$2 status
   command -v lsof >/dev/null 2>&1 || return 0
@@ -90,7 +104,9 @@ fm_lock_age() {
 
 # fm_lock_is_provably_stale <lock> <dir> <min_age_secs>: THE proof. Returns 0 iff
 # the lock exists, has no live holder, and its mtime age is at least
-# <min_age_secs>. Returns non-zero on any uncertainty - never remove a lock this
+# <min_age_secs>. <dir> is the companion liveness directory; pass an empty
+# string when no directory can be a meaningful companion for this caller.
+# Returns non-zero on any uncertainty - never remove a lock this
 # returns non-zero for.
 fm_lock_is_provably_stale() {
   local lock=$1 dir=$2 min_age=$3 age

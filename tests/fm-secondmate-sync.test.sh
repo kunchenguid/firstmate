@@ -15,6 +15,10 @@
 #     recovers once through fm-lock-lib.sh's staleness proof: a provably-stale
 #     lock is removed and the merge retried; a lock a live process holds keeps
 #     today's skip and is never removed.
+#     lsof's non-fatal filesystem warnings (docker overlayfs/nsfs stat warnings)
+#     still prove "no holder" while a real lsof error stays cannot-tell, and the
+#     running second mate holding its own home as cwd never vetoes the proof -
+#     only a live holder of the lock file itself does.
 #   - No origin fetch happens in the local-HEAD sync path.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
@@ -41,6 +45,11 @@ set -u
 . "$ROOT/bin/fm-ff-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
+# The real lsof, captured before any test prepends a fakebin to PATH, for the
+# regression that needs genuine holder detection (same pattern as
+# tests/fm-teardown.test.sh).
+REAL_LSOF_FOR_TEST=$(command -v lsof)
 
 # Deterministic, isolated git identity for fixture commits.
 fm_git_identity fmtest fmtest@example.com
@@ -283,6 +292,34 @@ SH
   chmod +x "$1/lsof"
 }
 
+# lsof stub shaped exactly like the live-host failure: docker overlayfs/nsfs
+# filesystem stat warnings (with their continuation line) on stderr, no holder
+# listed, and lsof's no-match exit 1. This output must still prove "no holder".
+lsof_warn_no_holder() { # <fakebin>
+  cat > "$1/lsof" <<'SH'
+#!/usr/bin/env bash
+cat >&2 <<'W'
+lsof: WARNING: can't stat() overlay file system /var/lib/docker/rootfs/overlayfs/deadbeef
+      Output information may be incomplete.
+lsof: WARNING: can't stat() nsns file system /run/docker/netns/deadbeef
+      Output information may be incomplete.
+W
+exit 1
+SH
+  chmod +x "$1/lsof"
+}
+
+# lsof stub for a genuine failure: real error text, no usable result, exit 2.
+# This must stay "cannot tell" - the lock is kept and today's skip stands.
+lsof_real_error() { # <fakebin>
+  cat > "$1/lsof" <<'SH'
+#!/usr/bin/env bash
+echo "lsof: simulated fatal failure" >&2
+exit 2
+SH
+  chmod +x "$1/lsof"
+}
+
 test_ff_stale_index_lock_recovery() {
   local w c1 base fakebin lock lock2
   w=$(new_world ff-stale-lock)
@@ -322,6 +359,93 @@ test_ff_stale_index_lock_recovery() {
   assert_present "$lock2" "live lock: the index.lock must never be removed"
   [ "$(head_of "$w/sm2")" != "$base" ] || fail "live lock: home advanced despite the refused lock"
   pass "stale index.lock: a provably-stale lock is cleared and the ff retried once; a live lock is never removed"
+}
+
+# The live-host regression: lsof's non-fatal docker filesystem warnings used to
+# read as an lsof error, so the proof could never pass on that host. Warning-only
+# output with lsof's no-match exit must still prove "no holder"; a real lsof
+# error must still keep the lock and today's skip.
+test_ff_stale_index_lock_tolerates_lsof_warnings() {
+  local w c1 base fakebin lock lock2
+  w=$(new_world ff-stale-lock-warn)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  lock=$(git -C "$w/sm" rev-parse --git-path index.lock)
+  : > "$lock"
+  fakebin="$w/fakebin"
+  mkdir -p "$fakebin"
+  lsof_warn_no_holder "$fakebin"
+
+  PATH="$fakebin:$PATH" FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated despite lsof warnings, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_contains "$FF_OUT" "removed provably-stale git lock" "lsof warnings: recovery diagnostic missing"
+  assert_absent "$lock" "lsof warnings: warning-only output must still prove no holder and clear the lock"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "lsof warnings: home did not advance after recovery"
+
+  # A genuine lsof failure with no usable result keeps the lock and the skip.
+  git -C "$w/main" worktree add -q --detach "$w/sm2" "$c1"
+  lock2=$(git -C "$w/sm2" rev-parse --git-path index.lock)
+  : > "$lock2"
+  lsof_real_error "$fakebin"
+
+  PATH="$fakebin:$PATH" FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm2" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped on a real lsof error, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_contains "$FF_OUT" "not provably stale" "lsof error: refusal diagnostic missing"
+  assert_present "$lock2" "lsof error: the lock must be kept when lsof cannot tell"
+  [ "$(head_of "$w/sm2")" != "$base" ] || fail "lsof error: home advanced despite cannot-tell"
+  pass "stale index.lock: lsof warnings prove no holder; a real lsof error still cannot tell"
+}
+
+# The companion-dir regression: the proof used to pass the home itself as the
+# companion liveness directory, and the running second mate always holds its own
+# home as cwd, so the proof could never pass. The lock-file holder plus mtime age
+# must decide: a cwd holder of the home never vetoes recovery, while a live
+# process holding the lock file itself always does. Uses the REAL lsof so the
+# cwd and fd holders are genuine.
+test_ff_stale_index_lock_ignores_home_cwd_holder() {
+  local w c1 base lock lock2 holder
+  if [ -z "$REAL_LSOF_FOR_TEST" ]; then
+    pass "stale index.lock (real lsof): skipped, lsof unavailable"
+    return 0
+  fi
+  w=$(new_world ff-stale-lock-cwd)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  lock=$(git -C "$w/sm" rev-parse --git-path index.lock)
+  : > "$lock"
+  # A process with its cwd in the home - the running second mate's shape.
+  ( cd "$w/sm" && exec sleep 30 ) & holder=$!
+
+  FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm" "$base"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated while a cwd holder sits in the home, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_absent "$lock" "cwd holder: the home held as cwd must not veto the proof"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "cwd holder: home did not advance after recovery"
+
+  # A live process holding the lock FILE itself always vetoes removal.
+  git -C "$w/main" worktree add -q --detach "$w/sm2" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  lock2=$(git -C "$w/sm2" rev-parse --git-path index.lock)
+  : > "$lock2"
+  ( exec sleep 30 9>"$lock2" ) & holder=$!
+
+  FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm2" "$base"
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped while a live process holds the lock file, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_present "$lock2" "lock holder: a lock held open must never be removed"
+  [ "$(head_of "$w/sm2")" != "$base" ] || fail "lock holder: home advanced despite a live lock holder"
+  pass "stale index.lock: the home held as cwd never vetoes the proof; a live lock-file holder always does"
 }
 
 # --- T6: no origin fetch happens in the local-HEAD sync path -----------------
@@ -1410,6 +1534,8 @@ test_scratchpad2_does_not_dirty_home
 test_ff_diverged
 test_ff_inflight_feature_branch
 test_ff_stale_index_lock_recovery
+test_ff_stale_index_lock_tolerates_lsof_warnings
+test_ff_stale_index_lock_ignores_home_cwd_holder
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change

@@ -408,12 +408,16 @@ ff_index_lock_path() {
 
 # One recovery attempt for a fast-forward that failed on the target's OWN
 # index.lock "File exists" signature: remove the lock only when fm-lock-lib.sh's
-# fm_lock_is_provably_stale proves it dead (still present, no live holder of the
-# lock or the target dir, mtime age past the threshold), so the caller can retry
-# the fast-forward once. Any other failure, a lock path that is not the target's
-# own index.lock, or a lock that cannot be proven stale returns non-zero and
-# today's skip stands. Diagnostics print to stderr via fm_lock_log, which the
-# session-start bootstrap digest merges with stdout, so both outcomes surface.
+# fm_lock_is_provably_stale proves it dead (still present, no live holder, mtime
+# age past the threshold), so the caller can retry the fast-forward once.
+# The proof takes NO companion directory here: the live home itself is always
+# held open as cwd by its running second mate, so a companion check on the home
+# could never pass, while a live git keeps its own index.lock open for the whole
+# operation - so the lock-file holder plus mtime age is a complete proof.
+# Any other failure, a lock path that is not the target's own index.lock, or a
+# lock that cannot be proven stale returns non-zero and today's skip stands.
+# Diagnostics print to stderr via fm_lock_log, which the session-start bootstrap
+# digest merges with stdout, so both outcomes surface.
 ff_maybe_clear_stale_index_lock() { # <dir> <label> <merge-output>
   local dir=$1 label=$2 output=$3 err_lock lock age
   age=$(ff_stale_index_lock_age_secs)
@@ -421,7 +425,7 @@ ff_maybe_clear_stale_index_lock() { # <dir> <label> <merge-output>
   lock=$(ff_index_lock_path "$dir") || return 1
   [ "$err_lock" = "$lock" ] || return 1
   [ -e "$lock" ] || return 1
-  if fm_lock_is_provably_stale "$lock" "$dir" "$age"; then
+  if fm_lock_is_provably_stale "$lock" "" "$age"; then
     if ! rm -f -- "$lock"; then
       fm_lock_log "failed to remove provably-stale git lock $lock for $label; leaving it in place"
       return 1
