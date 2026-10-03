@@ -3067,6 +3067,30 @@ test_inject_msg_herdr_composer_guard_defers() {
   pass "inject_msg: herdr composer-guard defers before ever attempting a submit"
 }
 
+test_inject_msg_tmux_empty_pane_id_is_missing_target() {
+  local dir state fakebin
+  dir=$(make_supercase inject-tmux-empty-pane)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  # tmux 3.7 answers a target absent from the connected server with exit 0 and
+  # no output; the daemon must read that as a missing supervisor pane.
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  afk_enter "$state"
+  (
+    LOG="$dir/daemon.log"
+    pane_is_busy() { fail "busy guard should not be consulted for a missing supervisor pane"; }
+    fm_backend_send_text_submit() { fail "send_text_submit should not run for a missing supervisor pane"; }
+    if PATH="$fakebin:$PATH" FM_SUPERVISOR_BACKEND=tmux FM_SUPERVISOR_TARGET="pilot-primary:0.0" inject_msg "hello" "$state"; then
+      fail "inject_msg should fail when tmux prints no pane id for the supervisor target"
+    fi
+    grep -q 'inject failed: supervisor target pilot-primary:0.0 not found on tmux' "$LOG" \
+      || fail "inject_msg should log the missing supervisor target once"
+  ) || fail "tmux empty-pane-id inject_msg subshell failed"
+  pass "inject_msg: tmux exit 0 with empty output is a missing supervisor pane and is logged"
+}
+
 test_inject_msg_herdr_pane_gone_defers() {
   local dir state
   dir=$(make_supercase inject-herdr-gone)
@@ -3278,6 +3302,7 @@ test_pane_input_pending_herdr_dispatch
 test_inject_msg_herdr_busy_guard_defers
 test_inject_msg_herdr_composer_guard_defers
 test_inject_msg_herdr_pane_gone_defers
+test_inject_msg_tmux_empty_pane_id_is_missing_target
 test_inject_msg_herdr_submits_through_backend_dispatch
 test_inject_msg_defers_on_dead_shell_unknown
 test_inject_msg_defers_on_unrecognized_composer_state

@@ -1442,7 +1442,7 @@ inject_msg() {  # <message> [state]
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
   fm_backend_target_exists "$backend" "$target" \
-    || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; return 1; }
+    || { INJECT_LAST_FAILURE="supervisor target $target not found on $backend"; log "inject failed: $INJECT_LAST_FAILURE"; return 1; }
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     INJECT_LAST_FAILURE="deferred: supervisor pane busy (agent mid-turn)"

@@ -928,10 +928,14 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # primitive so callers that only need a fast alive/dead read (recovery
 # digests, the session-start fleet digest) do not re-derive it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
-  local backend=$1 target=$2 expected_label=${3:-} session pane
+  local backend=$1 target=$2 expected_label=${3:-} session pane tmux_pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # tmux 3.7 answers a target absent from the connected server (a pane that
+      # lives on another server) with exit 0 and EMPTY output, so only a
+      # printed pane id proves the pane exists.
+      tmux_pane=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+      [ -n "$tmux_pane" ]
       ;;
     herdr)
       fm_backend_source herdr || return 1

@@ -610,6 +610,30 @@ test_meta_get_and_backend_of_meta() {
   pass "fm_meta_get / fm_backend_of_meta: read last key=value and default backend to tmux"
 }
 
+test_tmux_target_exists_requires_pane_id() {
+  local fakebin=$TMP_ROOT/target-exists-fakebin
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${FM_FAKE_TMUX_MODE:-}" in
+  present) printf '%%7\n'; exit 0 ;;
+  empty) exit 0 ;;
+  error) printf "can't find session\n" >&2; exit 1 ;;
+esac
+exit 2
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_MODE=present fm_backend_target_exists tmux pilot:0.0 \
+    || fail "fm_backend_target_exists should accept a tmux target that prints its pane id"
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_MODE=empty fm_backend_target_exists tmux pilot:0.0; then
+    fail "fm_backend_target_exists should treat exit 0 with empty output as a missing tmux target"
+  fi
+  if PATH="$fakebin:$PATH" FM_FAKE_TMUX_MODE=error fm_backend_target_exists tmux pilot:0.0; then
+    fail "fm_backend_target_exists should treat a failed tmux query as a missing target"
+  fi
+  pass "fm_backend_target_exists: tmux needs a printed pane id (present, empty-output, and failed-query cases)"
+}
+
 test_resolve_selector_three_forms() {
   local state=$TMP_ROOT/resolve-state fakebin out
   mkdir -p "$state"
@@ -1227,6 +1251,7 @@ test_backend_source_shell_portable
 test_backend_source_requires_adapter_file
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
+test_tmux_target_exists_requires_pane_id
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
 test_send_tmux_contract
