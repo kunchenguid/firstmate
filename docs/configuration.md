@@ -1242,7 +1242,7 @@ Every home requires:
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
-Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
+Lavish is a presentation-only dependency for every captain-facing question that needs an answer and for structured reports; when it is unavailable, nonvisual work continues with the plain-text fallback.
 
 **Backend requirements**
 
