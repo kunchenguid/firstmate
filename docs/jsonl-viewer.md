@@ -26,7 +26,19 @@ Override it with `--host` and `--port`, or `FM_JSONL_VIEWER_HOST` and `FM_JSONL_
 The server provides plain HTTP without TLS termination.
 Binding to every interface can expose private conversations, tool output, and the bearer token to the network, so do not expose it to an untrusted network and put remote access behind an existing private tunnel or TLS reverse proxy.
 
-Open `http://SERVER:17847/`, enter the token in the page, and choose the task dashboard, a journal, or a task report.
+Open `http://SERVER:17847/` and enter the token on the dedicated login page.
+After authentication, the Viewer keeps each reading task on a distinct route and layout:
+
+| Page | Route | Layout and purpose |
+|---|---|---|
+| Dashboard | `/dashboard` | A collapsible task-list sidebar beside the selected task's identity, state, brief, or report |
+| Reports | `/reports` and `/report/<task-id>` | A report library beside a focused Markdown reading surface |
+| Supervisor Work Journal | `/journal/supervisor` and `/journal/supervisor/<session-id>` | A session list beside filters, pagination, follow controls, and chronological work-log entries |
+
+The top navigation switches among these authenticated pages without mixing login controls into the work area.
+The task sidebar can collapse and reopen without clearing the selected task, and narrow screens stack the list above the reading area so navigation remains available.
+Selected task, report, and journal identities are encoded in the route, so direct links, reload, and browser back and forward restore the same reading context after authentication.
+Legacy bookmarks to `/` continue to open the login flow and then land on the Dashboard.
 The dashboard summarizes processing, waiting or blocked, and archived or cancelled tasks without a separate Completed card or section.
 Completed records remain available through the task list and report view without being relabelled as archived.
 An explicitly archived task remains in the archived or cancelled group when its retained remote state is nonterminal or ambiguous, and the dashboard labels that remote status as unconfirmed without implying cancellation or success.
@@ -36,7 +48,7 @@ An explicitly archived task remains in the archived or cancelled group when its 
 The viewer does not use retained rich lifecycle records as an ordinary task source. It may read a valid historical `archived` fact only to keep an already explicit stop labelled `Cancelled`; malformed or non-archived legacy records are ignored and never require reconciliation.
 Each task shows explicit Brief and Report selectors, enables every canonical document that is actually available, and labels unavailable document types instead of inventing content.
 The initial selection remains the canonical report when present and otherwise the canonical brief.
-Tasks with a canonical report also provide an explicit Open task report action that switches to the report view without changing the canonical task identity.
+Tasks with a canonical report also provide an explicit Read full report action that navigates to the dedicated report route without changing the canonical task identity.
 The page sends the token only in the `Authorization` header for protected APIs.
 By default the token stays in page memory.
 Selecting **Remember access token** stores the validated token in same-origin browser local storage so that the page can reconnect after reload.

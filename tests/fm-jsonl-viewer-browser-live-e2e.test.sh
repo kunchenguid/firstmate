@@ -113,7 +113,7 @@ printf '# Archived task brief\n\nVisible archived instructions.\n' > "$ARCHIVED_
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 {"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"oldest ordered record"}]}}
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"first tied record"}]}}
-{"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
+{"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}},{"type":"text","text":"journal line one\n  journal line two"}]}}
 JSONL
 for index in $(seq 1 201); do
   printf '{"type":"message_end","message":{"role":"assistant","timestamp":%s,"content":[{"type":"text","text":"dense-browser-event-%s"}]}}\n' "$((1780001000000 + index))" "$index"
@@ -238,24 +238,23 @@ page.on("request", request => {
 });
 let failed;
 let storagePage;
+let directPage;
 try {
   await page.goto(process.env.VIEWER_URL, { waitUntil: "domcontentloaded", timeout: 3000 });
-  await page.locator("#task-follow").uncheck();
+  await page.locator("#task-follow").evaluate(element => { element.checked = false; });
   failNextTaskRequest = true;
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
   await page.locator("#remember-token").check();
   await page.locator("#connect").click();
   await page.locator("#task-status").filter({ hasText: "task overview is temporarily unavailable" }).waitFor({ state: "visible", timeout: 3000 });
   if (!(await page.locator("#sessions .empty").textContent()).startsWith("Task loading failed:")) throw new Error("left task list presented a loading error as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent.startsWith("Task loading failed:")))) throw new Error("task groups presented a loading error as empty categories");
   await captureEvidence("viewer-task-error-state");
   const initialTaskDelay = delayNextTaskRequest();
-  await page.locator("#connect").click();
+  await page.locator("#retry-tasks").click();
   await initialTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Loading task status…") throw new Error("initial task loading state was not explicit");
   if (await page.locator("#task-counts strong").evaluateAll(nodes => nodes.some(node => node.textContent === "0"))) throw new Error("unloaded task counts were presented as authoritative zeros");
   if (await page.locator("#sessions .empty").textContent() !== "Loading task status…") throw new Error("left task list presented loading as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent === "Loading task status…"))) throw new Error("task groups presented loading as empty categories");
   await captureEvidence("viewer-task-loading-state");
   await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
@@ -263,23 +262,29 @@ try {
   initialTaskDelay.release();
   await page.locator("#source").selectOption("tasks");
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (new URL(page.url()).pathname !== "/dashboard") throw new Error(`authenticated landing did not use the Dashboard route: ${page.url()}`);
+  if (!await page.locator('nav [data-route="dashboard"]').evaluate(element => element.classList.contains("active"))) throw new Error("Dashboard navigation identity was not active");
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
-  if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
-  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task dashboard section was rendered");
+  if (await page.locator('#sessions .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
-  if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
-  if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
-  await page.locator('#task-groups .task-card[data-category="history"]').first().click();
+  if (await page.locator('#sessions .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
+  if (await page.locator('#sessions .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
+  await page.locator('#sessions .task-card[data-category="history"]').first().click();
   await page.getByRole("heading", { name: "Archived task brief" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.locator("#task-document-report").isDisabled()) throw new Error("archived brief-only task did not show its unavailable report");
   await captureEvidence("viewer-task-dashboard-loaded");
+  await page.locator("#sidebar-toggle").click();
+  if (await page.locator("#sidebar-toggle").getAttribute("aria-expanded") !== "false") throw new Error("task Sidebar did not expose its collapsed state");
+  if (!await page.getByRole("heading", { name: "Archived task brief" }).isVisible()) throw new Error("collapsing task Sidebar lost the selected task document");
+  await page.locator("#sidebar-toggle").click();
+  if (await page.locator("#sidebar-toggle").getAttribute("aria-expanded") !== "true") throw new Error("task Sidebar could not be reopened");
   const refreshTaskDelay = delayNextTaskRequest();
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
   if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "12,2,1") throw new Error("background task refresh did not preserve loaded counts");
-  const dashboardReportCard = page.locator('#task-groups .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
-  if (!await page.locator("#task-groups").evaluate(element => element.getBoundingClientRect().bottom > window.innerHeight)) throw new Error("dashboard fixture was not tall enough to reproduce the off-screen detail");
+  const dashboardReportCard = page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
+  if (!await page.locator("#sessions").evaluate(element => element.scrollHeight > element.clientHeight)) throw new Error("dashboard fixture was not tall enough to exercise sidebar scrolling");
   await dashboardReportCard.click();
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
   if (!await page.locator("#task-detail").evaluate(element => {
@@ -316,10 +321,27 @@ try {
   await captureEvidence("viewer-task-detail-canonical-report");
   await page.locator("#open-task-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (new URL(page.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error(`task report did not navigate to its dedicated route: ${page.url()}`);
+  const sourceText = await page.locator("#report .report-source pre").textContent();
+  const expectedSource = fs.readFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_REPORT_ID}/report.md`, "utf8");
+  if (sourceText !== expectedSource) throw new Error("dedicated Report content differed from its selected canonical document");
   await captureEvidence("viewer-canonical-report-view");
+  await page.goBack();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (new URL(page.url()).pathname !== "/dashboard") throw new Error("browser Back did not restore the Dashboard route");
+  await page.goForward();
+  await page.locator("#report").getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (new URL(page.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error("browser Forward did not restore the Report route");
+  await page.getByRole("link", { name: "Reports", exact: true }).click();
+  if (new URL(page.url()).pathname !== "/reports" || await page.locator("#report-rendered").textContent()) throw new Error("identity-free Reports route retained the previously selected report");
+  if (await page.locator("#session-title").textContent() !== "Choose a report") throw new Error("identity-free Reports route did not expose its empty selection state");
   await page.locator("#source").selectOption("tasks");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().waitFor({ state: "visible", timeout: 3000 });
   if (await page.getByText("This must not replace the report.", { exact: true }).count()) throw new Error("task brief took precedence over its report");
+  await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
+  await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#close-task").click();
+  if (new URL(page.url()).pathname !== "/dashboard" || new URL(page.url()).search || await page.locator("#task-detail").isVisible()) throw new Error("closing a task did not synchronize the identity-free Dashboard route");
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
@@ -334,10 +356,10 @@ try {
   await page.getByText("No canonical task document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
 
   delayFirstReport = true;
-  await page.locator('#task-groups .task-card[data-category="processing"]').filter({ hasText: "Delayed report task" }).click();
+  await page.locator('#sessions .task-card[data-category="processing"]').filter({ hasText: "Delayed report task" }).click();
   await firstReportRequestStarted;
   await dashboardReportCard.click();
-  await page.locator('#task-groups .task-card[data-category="held"]').filter({ hasText: "Held with task instructions" }).click();
+  await page.locator('#sessions .task-card[data-category="held"]').filter({ hasText: "Held with task instructions" }).click();
   await dashboardReportCard.click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   const staleTaskDocumentResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID);
@@ -349,12 +371,29 @@ try {
   const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
   fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] ${process.env.VIEWER_BRIEF_ID} - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
   await page.locator('#sessions .task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
-  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task reappeared as a dedicated dashboard group after refresh");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   if (await page.locator("#token").inputValue() !== process.env.VIEWER_TOKEN) throw new Error("opted-in token was not restored after reload");
+  directPage = await browser.contexts()[0].newPage();
+  await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/report/${process.env.VIEWER_REPORT_ID}`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await directPage.locator("#report").getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 5000 });
+  if (new URL(directPage.url()).pathname !== `/report/${process.env.VIEWER_REPORT_ID}`) throw new Error("remembered login did not preserve a direct Report link");
+  await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/dashboard?task=${process.env.VIEWER_FIRST_REPORT_ID}&document=brief`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await directPage.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 5000 });
+  if (new URL(directPage.url()).searchParams.get("document") !== "report") throw new Error("unavailable brief deep link rendered a report without normalizing document identity");
+  await directPage.goto(`${new URL(process.env.VIEWER_URL).origin}/dashboard?task=missing-task-identity`, { waitUntil: "domcontentloaded", timeout: 3000 });
+  await directPage.getByRole("heading", { name: "Task unavailable" }).waitFor({ state: "visible", timeout: 5000 });
+  if (!await directPage.getByText("missing-task-identity", { exact: false }).count() || new URL(directPage.url()).searchParams.get("task") !== "missing-task-identity") throw new Error("unavailable task deep link lost its requested identity");
+  await directPage.close();
+  directPage = null;
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await captureEvidence("viewer-dashboard-narrow");
+  if (!await page.locator("nav").isVisible() || !await page.locator("#sidebar-toggle").isVisible()) throw new Error("narrow Dashboard trapped page or Sidebar navigation");
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.locator("#forget").click();
+  if (!await page.locator("#login-page").isVisible() || await page.locator("#app-shell").isVisible()) throw new Error("logout did not return to the distinct Login page");
   if (await page.locator("#token").inputValue()) throw new Error("forget did not clear the in-memory token");
   if (await page.evaluate(() => localStorage.length)) throw new Error("forget did not clear the saved token");
   await page.locator("#token").fill(process.env.VIEWER_TOKEN);
@@ -363,7 +402,7 @@ try {
   if (await page.evaluate(() => localStorage.length)) throw new Error("token was persisted without explicit opt-in");
   await page.evaluate(() => localStorage.setItem("firstmate.jsonlViewer.accessToken.v1", "invalid-saved-token"));
   await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator("#task-status").filter({ hasText: "Saved access token was rejected" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#login-status").filter({ hasText: "Saved access token was rejected" }).waitFor({ state: "visible", timeout: 3000 });
   await page.waitForTimeout(1200);
   if (rejectedSessionRequests !== 1) throw new Error(`invalid saved token retried ${rejectedSessionRequests} times`);
   if (await page.evaluate(() => localStorage.length) || await page.locator("#token").inputValue()) throw new Error("invalid saved token was not cleared");
@@ -381,8 +420,11 @@ try {
   if (!literal.includes("<img id=unsafe")) throw new Error("log markup was not shown literally");
   if (await page.locator("#unsafe").count()) throw new Error("log markup executed as HTML");
   if (!await page.getByText("Tool call: read_material").count()) throw new Error("tool call was not expandable");
+  const multilineBlock = page.getByText("journal line one\n  journal line two", { exact: true });
+  if (await multilineBlock.evaluate(element => getComputedStyle(element).whiteSpace) !== "pre-wrap") throw new Error("journal line breaks and indentation were not preserved");
   await page.locator("#source").selectOption("supervisor");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SUPERVISOR_ID.replace(/\.jsonl$/, "") }).click();
+  if (!new URL(page.url()).pathname.startsWith("/journal/supervisor/")) throw new Error(`Supervisor Work Journal did not use its dedicated route: ${page.url()}`);
   await page.getByText("ordinary text mentions openai-codex-compat-native-response", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.getByText("hidden supervisor event 150", { exact: true }).count()) throw new Error("supervisor native response was rendered on initial load");
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -525,6 +567,7 @@ try {
   releaseDelayed();
   releaseDelayedReport();
   if (storagePage && !storagePage.isClosed()) await storagePage.close();
+  if (directPage && !directPage.isClosed()) await directPage.close();
   await page.close();
 }
 if (failed) throw failed;
