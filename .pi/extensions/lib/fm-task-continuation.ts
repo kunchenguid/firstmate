@@ -6,20 +6,15 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { runCommandAsync } from "./fm-async-exec.ts";
 import { registerFirstmateTool } from "./fm-native-contract.ts";
-import { classifyFirstmateOperationalText, encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
-import { NATIVE_FEISHU_CUSTOM_TYPE, verifyFeishuSessionMessage } from "../../../bin/fm-feishu-state.mjs";
+import { encodeFirstmateOperationalInputWith } from "./fm-operational-input.ts";
 
 type Observation = { task_id: string; state: string; reason: string; key: string; record_token: string;
   goal: string; acceptance: string; current_state: string; remaining_gap: string; next_step: string;
   task_state: string; task_held: string; task_blocked: string; executor_state: string };
 type Reconciliation = { task_id: string; reason: string; key: string };
-type InputReceipt = { id: string; text: string; task?: string; answer?: string;
-  update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string;
-  brief_before_sha256?: string; brief_after_sha256?: string };
 type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; reconciliation: true }[];
   canNotify: () => boolean; canContinue: () => boolean };
 type InputPacing = { key: string; attempts: number; after: number; reserved?: string };
-const INPUT_ENTRY = "fm-continuation-input";
 const PACING_ENTRY = "fm-continuation-input-pacing";
 const MESSAGE = "fm-task-continuation";
 const ESCALATION = "fm-task-continuation-escalation";
@@ -52,9 +47,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 }) {
   const { root, home, state, owns } = options;
   const data = process.env.FM_DATA_OVERRIDE || join(home, "data");
-  const inputs = new Map<string, InputReceipt>();
-  // Only explicitly assigned intent transactions are recovered from the session.
-  // Chat remains in the native transcript, never a separately supervised goal.
   const pacing = new Map<string, InputPacing>();
   const submitted = new Set<string>();
   const delivered = new Map<string, number>();
@@ -84,34 +76,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  // Compatibility for dialog adapters: the native transcript owns chat evidence.
-  // Capturing a message does not enroll work or create an input obligation.
-  function capture(_text: string, _key?: string): string { return ""; }
-
-  function originalInput(ctx: ExtensionContext, id?: string): InputReceipt {
-    const entries = ctx.sessionManager.getBranch();
-    for (const entry of [...entries].reverse()) {
-      if (id && entry.id !== id && !(entry.type === "custom" && entry.customType === INPUT_ENTRY && (entry.data as InputReceipt)?.id === id)) continue;
-      // Historical unassigned capture is selectable only by exact receipt id
-      // after ordinary intake has supplied the task. It gains no clock or goal.
-      if (id && entry.type === "custom" && entry.customType === INPUT_ENTRY) {
-        const value = entry.data as InputReceipt;
-        if (value.id === id && !value.task && !value.answer && value.text?.trim()) return { id, text: value.text };
-      }
-      let content: unknown;
-      if (entry.type === "message" && entry.message.role === "user") content = entry.message.content;
-      else if (entry.type === "custom_message" && entry.customType === NATIVE_FEISHU_CUSTOM_TYPE) {
-        if (!verifyFeishuSessionMessage(home, entry)) throw new Error("original Feishu message needs immutable delivery proof; retain the task update for exact readback");
-        content = entry.content;
-      } else continue;
-      const text = typeof content === "string" ? content : Array.isArray(content)
-        ? content.filter(part => part?.type === "text" && typeof part.text === "string").map(part => part.text).join("") : "";
-      if (!text.trim() || classifyFirstmateOperationalText(text)) continue;
-      return { id: entry.id, source_entry_id: entry.id, text };
-    }
-    throw new Error("Select an original user message from the current session; ambiguous task routing requires clarification through ordinary intake.");
-  }
-
   function instruction(lines: string[]): string {
     return "Unfinished task records require goal-directed MAIN follow-through:\n" +
       lines.join("\n") + "\nUse fm_task_continuation read/update for the task goal, acceptance method, current state, remaining gap and next step. " +
@@ -135,7 +99,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         if (!progress.recorded) {
           const reason = progress.task_state === "done"
             ? "Done row retains a nonempty compact gap; MAIN must reopen/start it before routing the recorded next step"
-            : "authenticated intent, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
+            : "task brief, executor generation, hold, block, or disposition changed; MAIN must refresh compact progress before continuation";
           const key = createHash("sha256").update(`${id}\0${progress.record_token}\0${reason}`).digest("hex");
           reconciliations.push({ task_id: id, reason, key });
           continue;
@@ -325,7 +289,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   const restoreSession = (_event: unknown, ctx: ExtensionContext) => {
     generation++;
     context = ctx;
-    inputs.clear();
     pacing.clear();
     delivered.clear();
     const entries = ctx?.sessionManager?.getBranch?.() ?? ctx?.sessionManager?.getEntries?.() ?? [];
@@ -338,10 +301,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
         const pace = entry.data as InputPacing & { id: string };
         if (typeof pace?.id === "string" && /^(progress|reconcile):/.test(pace.id)) pacing.set(pace.id, pace);
       }
-      if (entry.type !== "custom" || entry.customType !== INPUT_ENTRY) continue;
-      const value = entry.data as InputReceipt;
-      if (value?.task && typeof value?.id === "string" && typeof value.text === "string") inputs.set(value.id,
-        value.update_brief && !value.route_entry_id ? { ...value, route_entry_id: entry.id } : value);
     }
   };
   pi.on("session_start", restoreSession);
@@ -396,56 +355,5 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       }
     },
   });
-  // Authenticated intent updates require native-session provenance, so they
-  // retain one separate purpose-specific tool. Discovery and history already
-  // remain available from fm-task-state.sh progress-list and the backlog.
-  registerFirstmateTool(pi, {
-    name: "fm_task_intent_update", label: "Update task intent",
-    description: "Append one selected original user message to an existing task through the authenticated intent owner. This does not update progress, execute work, or accept the goal.",
-    executionMode: "sequential",
-    parameters: Type.Object({ task: Type.String(), input: Type.Optional(Type.String()) }),
-    async execute(_id, params, _signal, _update, ctx: ExtensionContext) {
-      try {
-        if (!owns()) throw new Error("this session does not own the fleet lock");
-        if (!atom(params.task)) throw new Error("intent update requires an existing canonical task id");
-        const input = params.input && inputs.get(params.input) || originalInput(ctx, params.input);
-        const sessionFile = ctx.sessionManager.getSessionFile();
-        if (!sessionFile) throw new Error("task update requires a persisted original session");
-        let routed = inputs.get(input.id);
-        if (routed && routed.task !== params.task) throw new Error("original intent update belongs to another task");
-        if (!routed) {
-          routed = { ...input, task: params.task, update_brief: true, pending: true };
-          pi.appendEntry(INPUT_ENTRY, routed);
-          const entry = ctx.sessionManager.getBranch().at(-1);
-          if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent receipt was not persisted");
-          routed = { ...routed, route_entry_id: entry.id };
-          inputs.set(input.id, routed);
-        }
-        if (!routed.brief_before_sha256 || !routed.brief_after_sha256) {
-          const plan = await command(["intent-plan", params.task, "--session-file", sessionFile,
-            "--entry-id", routed.route_entry_id!, "--input", input.id]);
-          if (plan.mode === "compact") {
-            routed = { ...routed, route_entry_id: undefined,
-              brief_before_sha256: plan.before_sha256, brief_after_sha256: plan.after_sha256 };
-            pi.appendEntry(INPUT_ENTRY, routed);
-            const entry = ctx.sessionManager.getBranch().at(-1);
-            if (entry?.type !== "custom" || entry.customType !== INPUT_ENTRY) throw new Error("task intent plan was not persisted");
-            routed = { ...routed, route_entry_id: entry.id };
-            inputs.set(input.id, routed);
-          }
-        }
-        const result = await command(["update-brief", params.task, "--session-file", sessionFile,
-          "--entry-id", routed.route_entry_id!, "--input", input.id]);
-        if (routed.pending) {
-          routed = { ...routed, pending: false };
-          pi.appendEntry(INPUT_ENTRY, routed);
-          inputs.set(input.id, routed);
-        }
-        return { content: [{ type: "text" as const, text: JSON.stringify(result) }], details: undefined };
-      } catch (error) {
-        return { content: [{ type: "text" as const, text: String(error) }], details: undefined, isError: true };
-      }
-    },
-  });
-  return { preserve, capture, sessionFile: () => context?.sessionManager.getSessionFile(), inputBarrier: (task?: string) => [...inputs.values()].some((input) => input.task === task && input.pending) };
+  return { preserve, sessionFile: () => context?.sessionManager.getSessionFile() };
 }

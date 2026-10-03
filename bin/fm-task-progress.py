@@ -136,7 +136,7 @@ def context_relation(stored: str | None, stored_identity: str | None, current: s
         return "mismatch"
     if not isinstance(value, dict):
         return "mismatch"
-    # Goal, brief digest and executor generation are the authenticated intent
+    # Goal, brief digest and executor generation are the task identity
     # identity. Only backlog disposition/hold/block changes may explain a stale
     # compact context without authorizing new work.
     for state in {str(value.get("task_state", "")), "in_flight", "queued", "done"}:

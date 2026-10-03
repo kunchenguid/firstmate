@@ -1289,6 +1289,9 @@ families_for_changed_path() {
     bin/fm-task-progress.py|bin/fm-task-progress-lib.sh)
       printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
+    tests/continuation-native.mjs)
+      printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"
+      ;;
     bin/fm-stow-run.sh|bin/fm-heartbeat-receipt.py)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"
       printf '%s\n' real-herdr-gated

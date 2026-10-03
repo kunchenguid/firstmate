@@ -78,9 +78,6 @@ async function install() {
 async function rawTool(params) {
   return tools.get('fm_task_continuation').execute('call', params, undefined, undefined, context());
 }
-async function rawIntent(params) {
-  return tools.get('fm_task_intent_update').execute('call', params, undefined, undefined, context());
-}
 async function tool(params, ok = true) {
   const result = await rawTool(params);
   assert.equal(Boolean(result.isError), !ok, JSON.stringify(result));
@@ -91,7 +88,7 @@ let continuation = await install();
 const mainSchema = tools.get('fm_task_continuation').parameters;
 assert.deepEqual(Object.keys(mainSchema.properties).sort(), ['action', 'progress', 'record_token', 'task']);
 assert.deepEqual(mainSchema.properties.action.anyOf.map(value => value.const), ['read', 'update']);
-assert.deepEqual(Object.keys(tools.get('fm_task_intent_update').parameters.properties).sort(), ['input', 'task']);
+assert.equal(tools.has('fm_task_intent_update'), false, 'removed intent-update tool remained registered');
 assert.deepEqual(JSON.parse(command('fm-task-state.sh', ['progress-list']).stdout).tasks, ['task']);
 const empty = await tool({ action: 'read', task: 'task' });
 assert.equal(empty.goal, 'Deliver compact continuation');
@@ -111,9 +108,6 @@ assert.deepEqual({ goal: updated.goal, acceptance: updated.acceptance, current_s
 { goal: 'Deliver compact continuation', ...progress });
 assert.equal(existsSync(home + '/data/task/lifecycle.json'), false, 'ordinary progress created lifecycle state');
 
-const beforeChat = session.getBranch().length;
-for (const text of ['你好', '继续', '谢谢']) continuation.capture(text);
-assert.equal(session.getBranch().length, beforeChat, 'ordinary chat created progress bookkeeping');
 await fire('session_shutdown', { reason: 'topic-switch' });
 session = SessionManager.open(session.getSessionFile());
 continuation = await install();
@@ -180,38 +174,34 @@ assert.equal(completed.next_step, '');
 assert.equal((await fire('agent_before_settle')).some(value => value?.continue), false,
   'accepted compact result remained an active reminder');
 
-session.appendMessage({ role: 'user', content: [{ type: 'text', text: 'Clarify the acceptance wording.' }], timestamp: Date.now() });
-const correction = session.getLeafId();
-const appendIntentEntry = session.appendCustomEntry.bind(session);
-let interruptConfirmation = true;
-session.appendCustomEntry = (name, value) => {
-  if (name === 'fm-continuation-input' && value.pending === false && interruptConfirmation) {
-    interruptConfirmation = false;
-    throw new Error('fixture: interrupted after compact brief commit');
-  }
-  return appendIntentEntry(name, value);
-};
-const interruptedIntent = await rawIntent({ task: 'task', input: correction });
-assert.equal(interruptedIntent.isError, true, 'compact intent interruption was not exposed');
-assert.match(interruptedIntent.content[0].text, /interrupted after compact brief commit/);
+const processedRequirement = '确认不要通过枚举逐项覆盖这些场景。\n\n### 验收\n使用行为测试证明开放式分类仍然成立。';
+const briefBeforeEdit = readFileSync(home + '/data/task/brief.md', 'utf8');
+const backlogBeforeBriefEdit = readFileSync(home + '/data/backlog.md');
+writeFileSync(home + '/data/task/brief.md', `# Task\n## Captain's intent\n${processedRequirement}\n\n## Firstmate spec\nVerify the public fixture\n`);
+const processedBrief = readFileSync(home + '/data/task/brief.md', 'utf8');
+assert.notEqual(processedBrief, briefBeforeEdit, 'ordinary brief edit did not change the task contract');
+assert.equal(processedBrief.split(processedRequirement).length, 2,
+  'ordinary brief edit did not store literal Chinese multiline processed requirements exactly once');
+assert.match(processedBrief, /## Firstmate spec\nVerify the public fixture/,
+  'ordinary brief edit lost the existing Firstmate specification');
+assert.deepEqual(readFileSync(home + '/data/backlog.md'), backlogBeforeBriefEdit,
+  'ordinary brief edit wrote task progress or lifecycle state');
 assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'compact intent correction enrolled a rich lifecycle');
-session.appendCustomEntry = appendIntentEntry;
+  'ordinary brief edit created a rich lifecycle record');
+const extractedIntent = spawnSync('bash', ['-c', '. "$1/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$2" "## Captain\'s intent"',
+  '_', process.env.REAL_ROOT, home + '/data/task/brief.md'], { encoding: 'utf8' });
+assert.equal(extractedIntent.status, 0, extractedIntent.stderr);
+assert.match(extractedIntent.stdout, /确认不要通过枚举逐项覆盖这些场景/,
+  'downstream review intent extraction did not see the processed requirement');
 await fire('session_shutdown', { reason: 'intent-recovery' });
 session = SessionManager.open(session.getSessionFile());
 continuation = await install();
-const intentResult = await rawIntent({ task: 'task', input: correction });
-assert.equal(Boolean(intentResult.isError), false, JSON.stringify(intentResult));
-assert.equal(readFileSync(home + '/data/task/brief.md', 'utf8').split('Clarify the acceptance wording.').length, 2,
-  'compact intent retry duplicated or lost the authenticated correction');
-assert.equal(existsSync(home + '/data/task/lifecycle.json'), false,
-  'compact intent recovery created a rich lifecycle record');
 const correctedRead = await tool({ action: 'read', task: 'task' });
 assert.notEqual(correctedRead.record_token, completed.record_token,
-  'authenticated intent change did not invalidate the old progress scope');
-assert.equal(correctedRead.recorded, false, 'authenticated intent change left old progress active');
+  'ordinary brief edit did not invalidate the old progress scope');
+assert.equal(correctedRead.recorded, false, 'ordinary brief edit left old progress active');
 assert.equal(correctedRead.context_relation, 'mismatch',
-  'authenticated intent change did not expose the stale compact scope');
+  'ordinary brief edit did not expose the stale compact scope');
 assert.deepEqual({ acceptance: correctedRead.acceptance, current_state: correctedRead.current_state,
   remaining_gap: correctedRead.remaining_gap, next_step: correctedRead.next_step },
 { acceptance: finalProgress.acceptance, current_state: finalProgress.current_state,
@@ -221,12 +211,14 @@ const staleScope = await rawTool({ action: 'update', task: 'task', record_token:
     remaining_gap: 'Old scope must remain refused', next_step: 'Do not execute this stale step' } });
 assert.equal(staleScope.isError, true, 'old progress scope remained writable after intent changed');
 assert.match(staleScope.content[0].text, /task record changed/);
-const correctedProgress = { ...progress, current_state: 'Authenticated correction is recorded',
+const correctedProgress = { ...progress, current_state: 'The ordinary brief correction is recorded',
   remaining_gap: 'The clarified acceptance check remains', next_step: 'Run the explicitly permitted clarified check' };
 const repermitted = await tool({ action: 'update', task: 'task', record_token: correctedRead.record_token,
   progress: correctedProgress });
 assert.equal(repermitted.next_step, correctedProgress.next_step,
   'fresh MAIN scope did not permit the revised next step');
+assert.equal(repermitted.recorded, true, 'fresh MAIN progress did not restore the edited brief scope');
+assert.equal(repermitted.context_relation, 'exact', 'fresh MAIN progress did not bind the edited brief exactly');
 
 const compactRead = await rawTool({ action: 'read', task: 'task' });
 const compactResponseBytes = Buffer.byteLength(compactRead.content[0].text);
@@ -241,7 +233,6 @@ console.log('evidence - task continuation IO ' + JSON.stringify({
   compactResumeCalls: 1,
   compactReadResponseBytes: compactResponseBytes,
   continuedReminderAdmissions: offered.length + 1,
-  progressWritesForThreeOrdinaryChatTurns: 0,
   progressWritesForUnchangedUpdate: 0,
 }));
 console.log('ok - installed Pi SDK compact workflow: original-row goal and acceptance survive restart; MAIN receives a canonical-id actionable reminder and accepts only after the gap is cleared');

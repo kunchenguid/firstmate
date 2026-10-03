@@ -118,20 +118,20 @@ assert_equals "$before" "$(sha256sum "$HOME_DIR/data/backlog.md" | awk '{print $
 assert_equals "$token" "$(printf '%s' "$again" | jq -r .record_token)" \
   "an unchanged update changed its read token"
 
-printf '%s\n' 'Authenticated user correction changes the task intent.' > "$HOME_DIR/data/ordinary/brief.md"
+printf '%s\n' 'An ordinary brief edit changes the task intent.' > "$HOME_DIR/data/ordinary/brief.md"
 out=$(progress update-progress ordinary --expected-token "$token" --progress "$record" 2>&1)
 rc=$?
 expect_code 6 "$rc" "stale authenticated-intent basis"
 assert_contains "$out" "task record changed" "brief correction did not invalidate compact progress authority"
-after_intent=$(progress progress ordinary) || fail "progress read after authenticated intent correction failed"
+after_intent=$(progress progress ordinary) || fail "progress read after ordinary brief correction failed"
 if [ "$(printf '%s' "$after_intent" | jq -r .record_token)" = "$token" ]; then
-  fail "authenticated intent correction retained the old progress token"
+  fail "ordinary brief correction retained the old progress token"
 fi
 printf '%s' "$after_intent" | jq -e '
   .recorded==false and .context_relation=="mismatch" and
   .remaining_gap=="Validation has not passed" and
   .next_step=="Run the authorized validation and review its result"' >/dev/null \
-  || fail "authenticated intent correction did not expose stale progress for MAIN-only reconciliation"
+  || fail "ordinary brief correction did not expose stale progress for MAIN-only reconciliation"
 corrected_record='{"acceptance":"The corrected task behavior passes","current_state":"The corrected intent is recorded","remaining_gap":"The corrected validation remains","next_step":"Run the corrected validation"}'
 corrected=$(progress update-progress ordinary --expected-token "$(printf '%s' "$after_intent" | jq -r .record_token)" \
   --progress "$corrected_record") || fail "corrected intent progress update failed"
@@ -359,13 +359,13 @@ assert_equals $'artifact-order\ndash-body\nlegacy-cloud\nnatural-artifact\nremot
 FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
   '. "$1"; fm_cleanup_completion_mode ordinary g2' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" >/dev/null \
   || fail "Done disposition invalidated identity-bound empty compact completion"
-printf '%s\n' 'New authenticated intent opens work after the old acceptance.' >"$HOME_DIR/data/ordinary/brief.md"
+printf '%s\n' 'A new brief intent opens work after the old acceptance.' >"$HOME_DIR/data/ordinary/brief.md"
 out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" bash -c \
   '. "$1"; fm_cleanup_completion_mode ordinary g2' _ "$ROOT/bin/fm-cleanup-receipt-lib.sh" 2>&1)
 rc=$?
-expect_code 6 "$rc" "completion after authenticated intent change"
+expect_code 6 "$rc" "completion after task brief change"
 assert_contains "$out" 'not MAIN-accepted' \
-  "raw empty progress bypassed the authenticated intent binding"
+  "raw empty progress bypassed the task brief binding"
 mkdir -p "$HOME_DIR/data/historical-terminal"
 jq -n '{schema:"fm-task-lifecycle.v2",task_id:"historical-terminal",execution_generation:"legacy-g1",disposition:"archived"}' \
   >"$HOME_DIR/data/historical-terminal/lifecycle.json"

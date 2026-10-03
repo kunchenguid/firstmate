@@ -14,7 +14,7 @@ A worker return, process exit, report, passing test, pull request, merge, or emp
 
 The task title remains the goal. The block contains only `acceptance`, `current_state`, `remaining_gap`, and `next_step`, plus its format marker. There is no per-task lifecycle JSON, mirrored task record, evidence ledger, goal scheduler, assessment state machine, or model-maintained coordination record.
 
-The read result carries an opaque `record_token`. An update must return that token, so a changed title, body, task state, authenticated intent, executor generation, hold, or dependency block invalidates the stale write. Identical updates do not write. MAIN is the only writer and updates the block only after a material change.
+The read result carries an opaque `record_token`. An update must return that token, so a changed title, body, task state, task brief, executor generation, hold, or dependency block invalidates the stale write. Identical updates do not write. MAIN is the only writer and updates the block only after a material change.
 
 The token is a stale-read guard, not semantic evidence or an atomic compare-and-swap guarantee. The configured task backend cannot combine comparison and publication, so an unrelated body writer racing between the check and publication remains a known narrow limitation.
 
@@ -36,7 +36,11 @@ The Pi primary discovers eligible tasks through `progress-list`. A token-bound c
 
 The durable wake queue and branch outcome sequence remain delivery owners. Acknowledging a presented notification is sequence-bound and does not enroll or reconcile another goal record. Re-presenting unchanged work does not create a second goal wake. Topic switches and reloads recover from the backlog row rather than transcript history.
 
-`fm_task_continuation` exposes only `read` and `update`. The authenticated `fm_task_intent_update` path still appends a selected captain correction to the original intent through [`fm-task-intent.py`](../bin/fm-task-intent.py). That owner authenticates the native session input and atomically changes only `brief.md`; it creates no progress or lifecycle record. Cross-task work returns to MAIN, which uses the existing durable handoff owner rather than a branch-side lifecycle patch.
+`fm_task_continuation` exposes only `read` and `update`.
+When requirements change, MAIN edits the original `brief.md` through its ordinary file tools so `## Captain's intent` contains the consolidated processed requirement while the rest of the task contract remains intact.
+The edited prose preserves the intended scope without claiming to be a verbatim quote, and MAIN separately refreshes compact progress and relays the change to the worker.
+There is no dedicated intent-update tool, source-message selector, mapping, receipt, or intent history.
+Cross-task work returns to MAIN, which uses the existing durable handoff owner rather than a branch-side lifecycle patch.
 
 ## Existing owners remain authoritative
 
