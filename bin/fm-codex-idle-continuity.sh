@@ -237,7 +237,7 @@ handed_over() {
       if ($7 + 0 > 128) outcome = "handover"; else outcome = "failed"
     }
     /^watcher: FAILED - cycle ended without an actionable reason/ {
-      if (outcome == "handover" || outcome == "started") outcome = "handover"; else outcome = "failed"
+      if (outcome != "handover") outcome = "failed"
     }
     /^watcher: FAILED - attached watcher pid=/ && / stalled / { outcome = "failed" }
     /^watcher: FAILED - no live watcher/ { outcome = "failed" }

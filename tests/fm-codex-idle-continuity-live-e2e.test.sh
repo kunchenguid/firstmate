@@ -125,7 +125,9 @@ supervised=0
 last=$(hits)
 rearmed=0
 delivered=0
-baseline=0
+# Captures from the poll before the re-arm is noticed. A close that lands in
+# the same poll as that notice is after this count, so it still counts.
+baseline=$(captures)
 for _ in $(seq 1 360); do
   kill -0 "$codex_pid" 2>/dev/null || fail "Codex exited before the idle gap"
   now=$(hits)
@@ -133,12 +135,14 @@ for _ in $(seq 1 360); do
     supervised=1
     if [ "$rearmed" -eq 0 ] && [ "$now" -gt "$last" ]; then
       rearmed=1
-      baseline=$(captures)
     fi
     if [ "$rearmed" -eq 1 ] && [ "$(captures)" -gt "$baseline" ]; then
       delivered=1
       break
     fi
+  fi
+  if [ "$rearmed" -eq 0 ]; then
+    baseline=$(captures)
   fi
   last=$now
   sleep 1

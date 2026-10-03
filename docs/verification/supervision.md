@@ -533,14 +533,16 @@ On 2026-09-24 with codex-cli 0.154.0, `bash tests/fm-codex-idle-continuity.test.
 A one-shot `codex exec` cannot show this, because the supervisor exits with its Codex owner and `codex exec` exits as soon as the Stop hook returns.
 Codex's hook documentation for that version parses `async` and does not run asynchronous command hooks, so the supervisor is detached with a perl fork and `setsid`, which also runs on macOS where util-linux `setsid` is absent, and the Stop hook returns.
 `bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` from the session that owns the lock stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
-A checkpoint whose process was not in that session left the supervisor running.
+A checkpoint whose process was not in that session left the supervisor running and exited as a quiet bounded checkpoint.
+An arm that printed `watcher: started` and then `cycle ended without an actionable reason` stopped after three closes and queued one give-up check.
 A supervisor whose arm attached to a checkpoint's watcher re-armed its own watcher after that checkpoint ended, and when the recorded owner exited during that attachment the checkpoint's watcher stayed up.
 Against an arm that reported only attached closes or signal exits, the supervisor kept running past five cycles, because an exit it did not cause is a handover rather than a failure.
 An attached arm whose later line was `attached watcher ... stalled` stopped after three closes, the same as three `watcher: FAILED - no live watcher` closes, queuing one `check: codex idle continuity stopped` line into the thread first.
 A lock directory whose `starting` file named a live hook pid, and which had no supervisor pid yet, was left in place by a second allowing stop and was not treated as a finished handover.
 Three more allowing stops against that still-broken arm started no supervisor and queued no second check, and after one successful `bin/fm-watch-checkpoint.sh` the next allowing stop started a supervisor again, which queued the next episode's single check.
 An arm that turned on away mode and returned a `signal:` close left nothing in the thread and no `--stop` call, and the supervisor exited without arming again.
-An allowing stop in a home opted into `config/supervision-host` started no idle supervisor and no arm, because host-opted Codex homes are not covered yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)).
+An allowing stop in a home opted into `config/supervision-host` started no idle supervisor and no arm, including when that file's text is `off`, because host-opted Codex homes are not covered yet ([#5899](https://github.com/kunchenguid/firstmate/issues/5899)).
+A home opted out with `config/supervision-host-off` still started the idle supervisor.
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

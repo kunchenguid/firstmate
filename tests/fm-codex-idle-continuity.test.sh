@@ -201,6 +201,9 @@ foreign_rc=0
 FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 \
   >"$TMP_ROOT/foreign-cp.out" 2>"$TMP_ROOT/foreign-cp.err" || foreign_rc=$?
 supervisor_up || fail "a checkpoint from a session that does not own the lock stopped the idle supervisor (rc=$foreign_rc)"
+[ "$foreign_rc" -eq 124 ] || fail "a non-owner checkpoint exited $foreign_rc instead of a quiet checkpoint: $(cat "$TMP_ROOT/foreign-cp.out" "$TMP_ROOT/foreign-cp.err")"
+grep -F 'checkpoint: no actionable wake within 1s' "$TMP_ROOT/foreign-cp.out" >/dev/null \
+  || fail "a non-owner checkpoint did not report a quiet bound: $(cat "$TMP_ROOT/foreign-cp.out")"
 printf 'ok - a checkpoint from a session that does not own the lock leaves the idle supervisor running\n'
 
 FM_ROOT_OVERRIDE="$TURNS" FM_HOME="$TURNS" "$CONT" --handover </dev/null || fail "handover of a live supervisor failed"
@@ -259,6 +262,7 @@ case "\$(cat '$STUB/mode')" in
   handover) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   taken) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - watcher cycle exited 143 without an actionable reason\n' ;;
   stall) printf 'watcher: attached pid=1 (beacon 0s)\nwatcher: FAILED - attached watcher pid=1 stalled (beacon 9s at or past hard bound 8s)\n' ;;
+  started-fail) printf 'watcher: started pid=1 (beacon fresh)\nwatcher: FAILED - cycle ended without an actionable reason\n' ;;
   hold) printf 'watcher: attached pid=1 (beacon 0s)\n'; exec sleep 600 ;;
   broken) printf 'watcher: FAILED - no live watcher with a fresh beacon\n' ;;
 esac
@@ -340,14 +344,21 @@ sleep 2
 printf 'ok - a home opted into the supervision host starts no idle supervisor\n'
 
 printf 'off\n' > "$STUB/config/supervision-host"
+: > "$STUB/arms"
+stub_stop
+sleep 2
+[ ! -d "$SLOCK" ] || fail "a supervision-host file whose text is off started an idle supervisor"
+[ "$(arms)" -eq 0 ] || fail "a supervision-host file whose text is off armed $(arms) times"
+rm -f "$STUB/config/supervision-host"
+: > "$STUB/config/supervision-host-off"
 printf 'handover\n' > "$STUB/mode"
 : > "$STUB/arms"
 stub_stop
-wait_until 75 at_least_arms 1 || fail "a home whose supervision-host file says off started no idle supervisor"
+wait_until 75 at_least_arms 1 || fail "a home opted out with supervision-host-off started no idle supervisor"
 FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-codex-idle-continuity.sh" --handover </dev/null \
-  || fail "handover of the off-home supervisor failed"
-rm -f "$STUB/config/supervision-host"
-printf 'ok - a home whose supervision-host file says off still starts the idle supervisor\n'
+  || fail "handover of the opted-out supervisor failed"
+rm -f "$STUB/config/supervision-host-off"
+printf 'ok - a supervision-host file opts out of idle continuity, and supervision-host-off does not\n'
 
 foreign_stop() {
   printf '%s' "$payload" | FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" \
@@ -411,6 +422,17 @@ wait_until 75 test ! -d "$SLOCK" || fail "an attached watcher that later stalled
 grep -F 'check: codex idle continuity stopped after 3 failed watcher arms' "$STUB/queue" >/dev/null \
   || fail "a stall after attached queued no give-up check: $(cat "$STUB/queue" 2>/dev/null)"
 printf 'ok - a stall after watcher: attached spends the failure budget\n'
+
+rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
+printf 'started-fail\n' > "$STUB/mode"
+: > "$STUB/arms"
+: > "$STUB/queue"
+stub_stop
+wait_until 75 test ! -d "$SLOCK" || fail "a started arm that ended with no actionable reason never ended the supervisor"
+[ "$(arms)" -eq 3 ] || fail "a started arm that ended with no actionable reason spent $(arms) arms instead of 3"
+grep -F 'check: codex idle continuity stopped after 3 failed watcher arms' "$STUB/queue" >/dev/null \
+  || fail "a started arm that ended with no actionable reason queued no give-up check: $(cat "$STUB/queue" 2>/dev/null)"
+printf 'ok - a started arm that ends with no actionable reason spends the failure budget\n'
 
 rm -f "$SSTATE/.codex-idle-continuity-failure-notified"
 printf 'hold\n' > "$STUB/mode"

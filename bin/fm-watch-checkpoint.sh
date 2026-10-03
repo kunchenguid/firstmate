@@ -68,11 +68,26 @@ esac
 # supervisor. When this process does own the lock, handover has to finish
 # before a watcher starts; a startup that has not recorded its pid yet is
 # still that supervisor.
+idle_supervisor_live() {
+  local pid
+  [ -s "$STATE/.codex-idle-continuity.lock/pid" ] || return 1
+  IFS= read -r pid < "$STATE/.codex-idle-continuity.lock/pid" || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
 handover_idle_supervisor() {
   if [ -f "$SCRIPT_DIR/fm-session-lock-lib.sh" ]; then
     # shellcheck source=bin/fm-session-lock-lib.sh
     . "$SCRIPT_DIR/fm-session-lock-lib.sh"
     if ! fm_session_lock_owned_by_self "$STATE"; then
+      # This session does not own supervision. Waiting out the bound without
+      # starting a second watcher leaves the owner's supervisor in place.
+      if idle_supervisor_live; then
+        sleep "$SECONDS_ARG"
+        printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
+        exit 124
+      fi
       return 0
     fi
   fi
