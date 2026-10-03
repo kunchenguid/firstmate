@@ -938,6 +938,142 @@ test_tracked_claude_entries_inert_under_grok() {
   pass "tracked .claude/settings.json entries: $guarded inert under grok, the documented subagent exception still armed, all live under Claude"
 }
 
+# Exercise the executable while this shell keeps the FIFO writer open. Closing
+# the writer only after the assertion distinguishes payload handling from EOF.
+# Poll by iteration with CI headroom; the old cat-based path cannot finish at
+# all while fd 9 remains open, regardless of machine speed.
+run_stop_with_open_stdin() {
+  local dir=$1 command=$2 payload=$3 expected=$4 pid writer attempt completed status out
+  mkfifo "$dir/input"
+  exec 9<> "$dir/input"
+  (
+    cd "$dir" || exit 1
+    PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" bash -c "$command" \
+      < "$dir/input" 9>&- > "$dir/output" 2>&1
+    printf '%s\n' "$?" > "$dir/status"
+  ) 9>&- &
+  pid=$!
+  printf '%s' "$payload" >&9 &
+  writer=$!
+  completed=0
+  for ((attempt=0; attempt<60; attempt++)); do
+    if [ -f "$dir/status" ]; then
+      completed=1
+      break
+    fi
+    sleep 0.1
+  done
+  kill "$writer" 2>/dev/null || true
+  wait "$writer" 2>/dev/null || true
+  exec 9>&-
+  # Release EOF even on the regression path before reaping the hook.
+  wait "$pid" 2>/dev/null || true
+  [ "$completed" -eq 1 ] || fail "Stop waited for stdin EOF instead of evaluating the received payload"
+  status=$(cat "$dir/status")
+  out=$(cat "$dir/output")
+  expect_code "$expected" "$status" "open stdin must preserve the Stop verdict"
+  if [ "$expected" -eq 2 ]; then
+    assert_contains "$out" 'TURN WOULD END BLIND' "open stdin must still block missing supervision"
+  else
+    [ -z "$out" ] || fail "allowed Stop with open stdin produced output: $out"
+  fi
+}
+
+test_hook_evaluates_payload_without_stdin_eof() {
+  local dir interpreter index=0
+  # /bin/bash is stock Bash 3.2 on supported macOS hosts, even when PATH
+  # selects Homebrew Bash for the suite and the tracked hook command.
+  for interpreter in bash /bin/bash; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-open-stdin-$index")
+    : > "$dir/state/task1.meta"
+    run_stop_with_open_stdin "$dir" "exec $interpreter bin/fm-turnend-guard.sh" \
+      '{"stop_hook_active":false}' 2
+    index=$((index + 1))
+  done
+  pass "fm-turnend-guard: PATH and stock Bash retain JSON and block missing supervision without stdin EOF"
+}
+
+test_hook_large_payload_without_stdin_eof() {
+  local dir interpreter index=0 payload
+  # The generated Stop protocol contains braces inside strings, escapes,
+  # and a trailing field that must be parsed as false.
+  payload=$(printf '%204800s' '' | jq -Rs '{last_assistant_message:(. + "}\\\"tail"),stop_hook_active:false}')
+  for interpreter in bash /bin/bash; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-large-stdin-$index")
+    : > "$dir/state/task1.meta"
+    run_stop_with_open_stdin "$dir" "exec $interpreter bin/fm-turnend-guard.sh" "$payload" 2
+    index=$((index + 1))
+  done
+  pass "fm-turnend-guard: 200 KB Stop payload blocks missing supervision while stdin stays open"
+}
+
+test_hook_slow_chunks_preserve_payload() {
+  local dir interpreter index=0
+  for interpreter in bash /bin/bash; do
+    dir=$(make_primary_dir "$TMP_ROOT/hook-slow-stdin-$index")
+    : > "$dir/state/task1.meta"
+    if ! PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$dir" \
+      python3 - "$dir/bin/fm-turnend-guard.sh" "$interpreter" <<'PYTEST'
+import json
+import subprocess
+import sys
+import time
+
+payload = json.dumps({"last_assistant_message": "x" * 16384,
+                      "stop_hook_active": False}).encode()
+proc = subprocess.Popen([sys.argv[2], sys.argv[1]], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    for offset in range(0, len(payload), 4096):
+        if offset:
+            time.sleep(1)
+        proc.stdin.write(payload[offset:offset + 4096])
+        proc.stdin.flush()
+    # Leave stdin open and demand the verdict before allowing EOF.
+    proc.wait(timeout=6)
+    assert proc.returncode == 2, f"slow Stop unexpectedly allowed: {proc.returncode}"
+    assert b"TURN WOULD END BLIND" in proc.stderr.read()
+finally:
+    proc.stdin.close()
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait()
+PYTEST
+    then
+      fail "slow chunks within the idle bound must parse and block missing supervision"
+    fi
+    index=$((index + 1))
+  done
+  pass "fm-turnend-guard: arriving chunks reset the idle wait and preserve the complete Stop payload"
+}
+
+test_codex_stop_preserves_verdicts_without_stdin_eof() {
+  local command scenario dir payload expected identity
+  command=$(jq -r '.hooks.Stop[0].hooks[0].command' "$ROOT/.codex/hooks.json")
+  for scenario in missing healthy retry empty incomplete; do
+    dir=$(make_primary_dir "$TMP_ROOT/codex-open-stdin-$scenario")
+    mark_codex_hook_root "$dir"
+    : > "$dir/state/task1.meta"
+    # Multiline JSON with escaped content and no terminal newline must survive
+    # the bounded read just as EOF-terminated hook payloads do.
+    payload=$'{\n  "stop_hook_active": false,\n  "session_id": "escaped\\\"value"\n}'
+    expected=0
+    case "$scenario" in
+      missing) expected=2 ;;
+      healthy)
+        identity=$(watcher_identity "$dir" "$$") || fail "could not identify live watcher holder"
+        record_watcher_lock "$dir" "$$" "$identity"
+        touch "$dir/state/.last-watcher-beat"
+        ;;
+      retry) payload='{"stop_hook_active":true}' ;;
+      empty) payload='' ;;
+      incomplete) payload='{"stop_hook_active":' ;;
+    esac
+    run_stop_with_open_stdin "$dir" "$command" "$payload" "$expected"
+  done
+  pass ".codex/hooks.json: open stdin preserves missing/healthy watcher, retry, empty and invalid payload verdicts"
+}
+
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root() {
   local settings command dir expected_root outside payload out status
   settings="$ROOT/.codex/hooks.json"
@@ -2241,6 +2377,10 @@ test_grok_adapter_snake_case_native_and_camel_precedence
 test_grok_adapter_invalid_inputs_start_neither_path
 test_grok_adapter_missing_jq_and_no_supervision_allow
 test_tracked_claude_entries_inert_under_grok
+test_hook_evaluates_payload_without_stdin_eof
+test_hook_large_payload_without_stdin_eof
+test_hook_slow_chunks_preserve_payload
+test_codex_stop_preserves_verdicts_without_stdin_eof
 test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_opencode_plugin_anchors_guard_to_worktree
