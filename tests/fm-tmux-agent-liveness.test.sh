@@ -116,8 +116,14 @@ if [ -n "$CC_BIN" ] && mkdir -p "$LAB/kiro" "$LAB/impostor" &&
   cp "$LAB/kiro/kiro-cli-term" "$LAB/kiro/sh (kiro-cli-term)"
   cp "$LAB/kiro/kiro-cli-term" "$LAB/impostor/kiro-cli-term"
   cp -P "$STANDIN_BIN" "$LAB/impostor/sh (kiro-cli-term)"
+  cp "$LAB/kiro/kiro-cli-term" "$LAB/kiro/notashell (kiro-cli-term)"
   KIRO_TERM_DIR="$LAB/kiro"
 fi
+# The waiter `treehouse get` leaves below a spawned pane's shell, resolved
+# from PATH the same way fm-spawn's pane resolves it.
+mkdir -p "$LAB/treehouse-bin"
+cp -P "$STANDIN_BIN" "$LAB/treehouse-bin/treehouse"
+PATH="$LAB/treehouse-bin:$PATH"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -311,7 +317,7 @@ if [ -n "$KIRO_TERM_DIR" ]; then
   esac
   wait_for_state "$SESSION:wrapped" dead \
     || fail "an idle Kiro-wrapped shell must classify dead"
-  pass "tmux liveness: an idle Kiro-wrapped shell classifies dead from its inner pty"
+  pass "tmux liveness: an idle Kiro-wrapped shell classifies dead from its shell descendants"
 
   new_window impostor "$LAB/impostor/sh (kiro-cli-term)" 900
   wait_for_state "$SESSION:impostor" ambiguous \
@@ -341,16 +347,24 @@ if [ -n "$KIRO_TERM_DIR" ]; then
     || fail "a Kiro-wrapped shell with a background Codex-like descendant must classify alive"
   pass "tmux liveness: a Kiro-wrapped shell retains a background agent descendant as alive"
 
-  # fm-spawn's `treehouse get` leaves a non-shell process waiting below the
-  # shell, so a background stranger follows the unwrapped foreground rule.
   new_window wrapped-other "$KIRO_TERM_DIR/sh (kiro-cli-term)" /bin/sh -i
   wait_for_state "$SESSION:wrapped-other" dead \
     || fail "the second Kiro-wrapped shell must start idle"
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped-other" "$LAB/bin/notaharness 900 &" Enter
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped-other" "$LAB/treehouse-bin/treehouse 900 &" Enter
   sleep 0.5
   wait_for_state "$SESSION:wrapped-other" dead \
-    || fail "a Kiro-wrapped shell with only a background stranger must read dead like an unwrapped shell"
-  pass "tmux liveness: a Kiro-wrapped shell judges its inner pty by the foreground rule"
+    || fail "a Kiro-wrapped shell with only the treehouse waiter below it must read dead"
+  pass "tmux liveness: a Kiro-wrapped shell with the treehouse waiter reads dead"
+
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SESSION:wrapped-other" "$LAB/bin/notaharness 900 &" Enter
+  wait_for_state "$SESSION:wrapped-other" ambiguous \
+    || fail "a Kiro-wrapped shell with an unrelated background descendant must read ambiguous"
+  pass "tmux liveness: a Kiro-wrapped shell with an unrelated background descendant stays ambiguous"
+
+  new_window notashell "$KIRO_TERM_DIR/notashell (kiro-cli-term)" /bin/sh -i
+  wait_for_state "$SESSION:notashell" ambiguous \
+    || fail "a genuine kiro-cli-term copy without a shell name must stay ambiguous"
+  pass "tmux liveness: a Kiro wrapper name without a known shell stays ambiguous"
 else
   printf '# skip: no C compiler with forkpty for the Kiro wrapper stand-in\n'
 fi

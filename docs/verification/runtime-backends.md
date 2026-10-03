@@ -197,8 +197,8 @@ FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-l
 
 On macOS 26.6.1 with tmux 3.7b, the portable regression ran a compiled non-shell stand-in, copied as `sh (kiro-cli-term)` beside its own `kiro-cli-term`, which holds the pane tty and runs `/bin/sh` on a separate pty in a private tmux server.
 The wrapped pane read `dead` while idle and again after its agent exited, `alive` with a Codex-like foreground child or background descendant, and `ambiguous` with an unrelated foreground child.
-A background stranger below the inner shell read `dead`, as it does below an unwrapped shell.
-A `sh (kiro-cli-term)` executable whose bytes differ from the `kiro-cli-term` beside it read `ambiguous`.
+With a background stand-in resolved as the `treehouse` on `PATH` below the inner shell it read `dead`, and an unrelated background descendant made it `ambiguous`.
+A `sh (kiro-cli-term)` executable whose bytes differ from the `kiro-cli-term` beside it read `ambiguous`, as did a byte-identical copy named `notashell (kiro-cli-term)`.
 The same regression passed in an `ubuntu:24.04` container.
 
 ```sh

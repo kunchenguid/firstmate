@@ -261,15 +261,10 @@ fm_backend_tmux_foreground_comms() {  # <target>
 # Pair each foreground name with its pid, so a terminal wrapper holding the tty
 # can be proven from its executable rather than its writable process title.
 fm_backend_tmux_foreground_pid_comms() {  # <target>
-  local tty
+  local tty pid pgid tpgid comm
   tty=$(tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
   [ -n "$tty" ] || return 1
-  fm_backend_tmux_tty_foreground_pid_comms "$tty"
-}
-
-fm_backend_tmux_tty_foreground_pid_comms() {  # <tty>
-  local pid pgid tpgid comm
-  LC_ALL=C ps -t "${1#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -296,24 +291,32 @@ fm_backend_tmux_pid_executable() {  # <pid> -> resolved executable path
 # pane's tty and runs the real shell on a pty of its own. Its name is not proof,
 # so the executable must also be the kiro-cli-term installed beside it.
 fm_backend_tmux_pid_is_kiro_wrapper() {  # <pid>
-  local executable term
+  local executable base term
   executable=$(fm_backend_tmux_pid_executable "$1") || return 1
-  case "${executable##*/}" in
+  base=${executable##*/}
+  case "$base" in
     *' (kiro-cli-term)') ;;
     *) return 1 ;;
   esac
+  [ "$(fm_agent_process_classify_name "${base% (kiro-cli-term)}")" = shell ] || return 1
   term="${executable%/*}/kiro-cli-term"
   [ -f "$term" ] || return 1
-  [ "$executable" -ef "$term" ] || cmp -s "$executable" "$term"
+  [ "$executable" -ef "$term" ] && return 0
+  [ "$(fm_backend_tmux_file_size "$executable")" = "$(fm_backend_tmux_file_size "$term")" ] || return 1
+  cmp -s "$executable" "$term"
 }
 
-# A verified wrapper is judged from below: any harness descendant reads
-# `alive`, and otherwise the foreground group of the wrapper's own pty settles
-# the negative verdicts exactly as the pane tty does for an unwrapped shell.
+fm_backend_tmux_file_size() {  # <path>
+  stat -L -c %s "$1" 2>/dev/null || stat -L -f %z "$1" 2>/dev/null
+}
+
+# A verified wrapper is judged from below. Any harness descendant reads
+# `alive`. Only a tree of verified shells, plus the waiting `treehouse get`
+# process fm-spawn leaves below the shell, reads `dead`, because `dead` licenses
+# a relaunch onto the worktree. Both are proven from the resolved executable.
 fm_backend_tmux_kiro_wrapper_state() {  # <wrapper pid> -> dead|alive|ambiguous
-  local wrapper_tty rows pids pid comm args argv0 tty inner_tty='' foreground name inner_shell=0 inner_other=0
-  wrapper_tty=$(LC_ALL=C ps -p "$1" -o tty= 2>/dev/null) || { printf ambiguous; return; }
-  wrapper_tty=${wrapper_tty//[[:space:]]/}
+  local treehouse rows pids pid comm args argv0 executable other=0
+  treehouse=$(command -v treehouse 2>/dev/null) || treehouse=
   rows=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || { printf ambiguous; return; }
   pids=$(printf '%s\n' "$rows" | awk -v root="$1" '
     { parent[$1] = $2; pid[NR] = $1 }
@@ -343,30 +346,14 @@ fm_backend_tmux_kiro_wrapper_state() {  # <wrapper pid> -> dead|alive|ambiguous
       printf alive
       return
     fi
-    if [ -z "$inner_tty" ]; then
-      tty=$(LC_ALL=C ps -p "$pid" -o tty= 2>/dev/null)
-      tty=${tty//[[:space:]]/}
-      case "$tty" in
-        ''|'?'|'??'|"$wrapper_tty") ;;
-        *) inner_tty=$tty ;;
-      esac
-    fi
+    executable=$(fm_backend_tmux_pid_executable "$pid") || { other=1; continue; }
+    [ "$(fm_agent_process_classify_name "$executable")" = shell ] && continue
+    [ -n "$treehouse" ] && [ "$executable" -ef "$treehouse" ] && continue
+    other=1
   done <<EOF
 $pids
 EOF
-  [ -n "$inner_tty" ] || { printf dead; return; }
-  foreground=$(fm_backend_tmux_tty_foreground_pid_comms "$inner_tty")
-  while IFS=$'\t' read -r pid name; do
-    [ -n "$name" ] || continue
-    case "$(fm_agent_process_classify_name "$name")" in
-      agent) printf alive; return ;;
-      shell) inner_shell=1 ;;
-      *) inner_other=1 ;;
-    esac
-  done <<EOF
-$foreground
-EOF
-  if [ "$inner_other" -eq 0 ] && [ "$inner_shell" -eq 1 ]; then printf dead; else printf ambiguous; fi
+  if [ "$other" -eq 0 ]; then printf dead; else printf ambiguous; fi
 }
 
 # The foreground group's full command lines. Needed because a node-bundle
