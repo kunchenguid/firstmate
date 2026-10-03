@@ -719,7 +719,7 @@ fm_backend_herdr_projection_journal_write_v2() {  # <journal> <task-id> <token> 
 }
 
 # fm_backend_herdr_projection_journal_bind: upgrade one exact version 1
-# attempt to a version 2 binding after the live projection and parent relation
+# attempt to a version 2 binding after the live projection and parent identity
 # have both been verified under the session lock.
 fm_backend_herdr_projection_journal_bind() {  # <journal> <task-id> <home> <session> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local journal=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
@@ -2706,8 +2706,12 @@ fm_backend_herdr_projection_parent_workspace_exact() {  # <session> <parent-labe
 }
 
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
-# workspace, its single task tab/pane, its unique token label, and its current
-# position inside the exact parent workspace's contiguous child block.
+# workspace, its single task tab/pane, its unique token label, and that the
+# recorded parent workspace still exists with its expected label.
+# Contiguous UI nesting after the parent is best-effort ordering only
+# (fm_backend_herdr_projection_order_best_effort) and is never required for a
+# durable restart binding: interleaved multi-home layouts, foreign workspaces,
+# and failed moves must not leave journals stuck at version 1.
 # This read-only predicate grants no mutation authority by itself.
 fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label> <task-label>
   local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
@@ -2719,13 +2723,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
     --arg parent_workspace "$parent_workspace" \
     --arg parent_label "$parent_label" \
     --arg workspace_label "$workspace_label" '
-      def is_new_child:
-        (.label | type) == "string"
-        and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
-      def is_legacy_child_for($owner):
-        (.label | type) == "string"
-        and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
-        and (.label | startswith($owner + "/"));
       (.result.workspaces // null) as $spaces
       | select(($spaces | type) == "array")
       | select(([$spaces[]? | select(.workspace_id == $workspace)] | length) == 1)
@@ -2733,15 +2730,6 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
       | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)) and .workspace_id == $workspace)] | length) == 1)
       | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
-      | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
-      | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
-      | select(($parents | length) == 1 and ($children | length) == 1)
-      | ($parents[0]) as $parent_index
-      | ($children[0]) as $child_index
-      | select($child_index > $parent_index)
-      | reduce range($parent_index + 1; $child_index) as $i
-          (true; . and (($spaces[$i] | is_new_child) or ($spaces[$i] | is_legacy_child_for($parent_label))))
-      | select(. == true)
     ' >/dev/null 2>&1 || return 1
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
   printf '%s' "$tabs" | jq -e --arg tab "$tab" --arg task_label "$task_label" '
@@ -2807,7 +2795,7 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
     "$meta_workspace" "$meta_tab" "$meta_pane" \
     "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" "$parent_label" \
     "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" "$task_label"; then
-    echo "warning: herdr presentation binding for $id has an ambiguous, renamed, foreign, or non-nested live shape; spawning flat" >&2
+    echo "warning: herdr presentation binding for $id has an ambiguous, renamed, or foreign live shape; spawning flat" >&2
     return 2
   fi
   state=$(fm_backend_herdr_pane_agent_state "$session" "$meta_pane")

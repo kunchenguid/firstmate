@@ -251,8 +251,9 @@ Only a fresh task with neither metadata nor an existing presentation journal is 
 Creation proceeds in this order:
 
 1. Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token, before asking Herdr to create anything.
-2. After the new workspace converges to one exact task endpoint beneath one exact parent workspace id, the journal advances to a version 2 binding.
+2. After the new workspace converges to one exact task endpoint bound to one exact parent workspace id, the journal advances to a version 2 binding.
    That binding records the physical home, named session, endpoint, parent, and immutable expected labels.
+   That bind requires exact live identity, not contiguous placement in the session layout.
 
 Another parent with the same presentation label does not prevent publication or participate in restart reclaim.
 
@@ -264,7 +265,7 @@ Neither token, title, nor journal authorizes send, capture, task ownership, Tree
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses.
 It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
-The parent is the placement and ordering reference the projection is bound under.
+The parent is the placement and ordering reference for best-effort grouping.
 
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
@@ -373,9 +374,10 @@ The replacement is allowed only when all of these agree:
 - The metadata endpoint.
 - The unique token match.
 - The workspace shape and labels.
-- The parent identity and placement.
+- The recorded parent workspace identity and label.
 - The non-target focus snapshot.
 
+Contiguous UI nesting under that parent is best-effort grouping only and is never required for publication or reclaim of the restart binding.
 The replacement tab and pane are created and verified before the old pane is rechecked and closed.
 Then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
@@ -454,6 +456,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 ### Operational compromises
 
 - Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
+- Restart-binding publication records exact home, session, endpoint, parent, and labels after the projected create converges; it does not wait on contiguous ordering, so a failed or skipped move still leaves a durable binding when identity is exact.
 - A failed journal publication or projected workspace create stops that spawn instead of falling back flat.
   So a Herdr create failure surfaces as a spawn failure in every Herdr home, rather than only in homes that opted in.
   Every earlier degradation on the fresh projected-create path (no session server, contended presentation lock, absent or ambiguous parent) still warns and continues flat.

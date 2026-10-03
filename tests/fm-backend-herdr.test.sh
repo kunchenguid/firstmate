@@ -3457,6 +3457,48 @@ SH
   pass "herdr presentation ordering: malformed socket metadata is warning-only and read-only"
 }
 
+# Restart-binding identity must not depend on contiguous UI nesting under the
+# parent. Interleaved multi-home fleets routinely leave projected children after
+# secondmates or foreign workspaces when ordering is best-effort or skipped;
+# requiring a contiguous child block kept every journal at version 1 and caused
+# stale panels to accumulate across Herdr restarts.
+test_projection_live_binding_matches_ignores_intervening_layout() {
+  local dir log resp fb token label status
+  dir="$TMP_ROOT/projection-live-binding-layout"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token="ZyXwVuTsRqPoNmLkJiHgFe"
+  label="└ bind-layout · p:$token"
+  # Parent firstmate, then a sibling firstmate husk, a secondmate, a foreign
+  # human space, and only then the projected child - the exact class of
+  # interleaved layout that blocked version 2 publication on the live fleet.
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\"},{\"workspace_id\":\"wX\",\"label\":\"firstmate\"},{\"workspace_id\":\"wS\",\"label\":\"2ndmate-sm-other\"},{\"workspace_id\":\"wH\",\"label\":\"notes\"},{\"workspace_id\":\"w2\",\"label\":\"$label\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-bind-layout"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_live_binding_matches \
+        fmtest "'"$token"'" w2 w2:t2 w2:p2 w1 firstmate "'"$label"'" fm-bind-layout
+    ' "$ROOT"
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "exact projected identity with intervening non-child workspaces must still match for restart binding (rc=$status)"
+
+  : > "$log"; rm -f "$resp"/*.out "$resp"/*.exit "$resp/.count"
+  # Missing parent identity must still refuse - only nesting was removed.
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w2\",\"label\":\"$label\"}]}}" > "$resp/1.out"
+  if PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_live_binding_matches \
+        fmtest "'"$token"'" w2 w2:t2 w2:p2 w1 firstmate "'"$label"'" fm-bind-layout
+    ' "$ROOT"; then
+    fail "live binding must still refuse when the recorded parent workspace is absent"
+  fi
+  pass "herdr presentation live binding: exact identity matches without contiguous nesting; missing parent still refuses"
+}
+
 test_projection_reclaim_refusal_matrix_is_non_mutating() {
   local dir state home other_home home_real journal legacy token label out mutation_log
   dir="$TMP_ROOT/projection-reclaim-refusals"; state="$dir/state"; home="$dir/home"; other_home="$dir/other-home"
@@ -5904,6 +5946,7 @@ test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
+test_projection_live_binding_matches_ignores_intervening_layout
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
