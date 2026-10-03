@@ -2115,6 +2115,87 @@ test_live_blocker_is_not_charted_queue_work() {
   pass "Bearings keeps a live blocker in structured live state and never converts it to Charted Next queue work"
 }
 
+# An escalated pending-reply record stays in decisions until it resolves.
+# A record that has not escalated does not.
+test_escalated_pending_reply_stays_in_decisions_until_resolved() {
+  local home fakebin json dir corr
+  home=$(make_home escalated-reply); write_fixture "$home"
+  mkdir -p "$home/config"
+  : > "$home/config/pending-reply-resurface"
+  fakebin=$(make_fakebin "$home")
+  dir="$home/state/pending-replies"
+  mkdir -p "$dir"
+  corr=abcdef0123456789
+  cat > "$dir/$corr" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=mate
+phase=escalated
+request_summary=finish the report
+EOF
+  cat > "$dir/0123456789abcdef" <<EOF
+schema=fm-pending-reply.v1
+corr_id=0123456789abcdef
+task_id=mate
+phase=awaiting_report
+request_summary=not yet
+EOF
+  cat > "$dir/fedcba9876543210" <<EOF
+schema=fm-pending-reply.v1
+corr_id=fedcba9876543210
+task_id=mate
+phase=escalated
+request_summary=operator handled it
+parent_status=$home/state/mate.status
+EOF
+  {
+    printf 'blocked [key=pending-reply-fedcba9876543210]: pending-reply-missed: task=mate pending-reply-id=fedcba9876543210 request=operator handled it\n'
+    printf 'resolved [key=pending-reply-fedcba9876543210]: pending-reply-resolved: task=mate pending-reply-id=fedcba9876543210 via=operator-resolve-key\n'
+  } >> "$home/state/mate.status"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
+    (.decisions_open | any(.[]; .key == $key and (.summary | contains("finish the report"))))
+      and (.decisions_open | any(.[]; .key == "pending-reply-0123456789abcdef") | not)
+      and (.decisions_open | any(.[]; .key == "pending-reply-fedcba9876543210") | not)
+  ' >/dev/null || fail "bearings did not list exactly the open escalated pending reply: $json"
+  cat > "$dir/$corr" <<EOF
+schema=fm-pending-reply.v1
+corr_id=$corr
+task_id=mate
+phase=resolved
+request_summary=finish the report
+EOF
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e --arg key "pending-reply-$corr" '
+    (.decisions_open | any(.[]; .key == $key) | not)
+  ' >/dev/null || fail "resolved pending reply stayed in bearings: $json"
+  pass "bearings lists an escalated pending reply until it resolves"
+}
+
+# Escalated pending replies do not count against the decision limit, so none is
+# cut; captain holds past the limit are still counted and disclosed.
+test_escalated_pending_replies_are_exempt_from_decision_limit() {
+  local home fakebin json dir i corr
+  home=$(make_home escalated-limit); write_large_fixture "$home" 3
+  mkdir -p "$home/config"
+  : > "$home/config/pending-reply-resurface"
+  fakebin=$(make_fakebin "$home")
+  dir="$home/state/pending-replies"
+  mkdir -p "$dir"
+  for i in 1 2 3; do
+    corr="abcdef012345678$i"
+    printf 'schema=fm-pending-reply.v1\ncorr_id=%s\ntask_id=mate\nphase=escalated\nrequest_summary=request %s\n' \
+      "$corr" "$i" > "$dir/$corr"
+  done
+  json=$(FM_BEARINGS_DECISIONS=2 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | select(.key | startswith("pending-reply-"))] | length) == 3
+      and ([.decisions_open[] | select(.verb == "captain-hold")] | length) == 2
+      and ([.omitted[].surface] | index("decisions_open showing 5 of 6") != null)
+  ' >/dev/null || fail "the decision limit cut an escalation or hid the overflow: $json"
+  pass "escalated pending replies are exempt from the decision limit"
+}
+
 # Captain's Call is populated only from the durable keyed open-decision set. The
 # anti-leak guard: action-free highlights - a working task, a completed scout,
 # queued/gated items, landed work - must never surface as an open decision, so they
@@ -3387,6 +3468,8 @@ test_landed_default_handles_no_landed_items
 test_all_landed_keeps_complete_global_order
 test_landed_bounded_and_disclosed
 test_live_blocker_is_not_charted_queue_work
+test_escalated_pending_reply_stays_in_decisions_until_resolved
+test_escalated_pending_replies_are_exempt_from_decision_limit
 test_captains_call_anti_leak
 test_main_orphan_in_flight_is_disclosed_not_invented
 test_main_unstructured_current_is_disclosed_with_structured_sibling
