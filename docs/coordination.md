@@ -54,6 +54,8 @@ Claims default to a 900-second lease, with a caller heartbeat recommended every 
 `renew` requires the exact active claim, participant generation, intent version and fence.
 `release` has the same fence checks and cannot delete a later holder's claim.
 Expiry and session replacement revoke authority and branch writer ownership, never local work.
+After a release, expiry, or session revocation, the same home can claim the same intent under its current session generation and then call `queue-ready` again with a fresh fence.
+An intent with an unsettled merge attempt or a recorded landing cannot be reclaimed.
 Lease expiry is committed with its outbox event before the requested operation runs, so a refused late `renew` still leaves the claim expired.
 The short lease does not erase a migration number reservation.
 Before a namespace's first `reserve`, the operator must inspect the repository's existing migration numbering and use `migration-seed` with the first unused number.
@@ -78,14 +80,16 @@ The slot moves through `syncing`, `validating`, `awaiting-checks`, `attempting`,
 An unreadable or empty rollup fails closed, including when the forge cannot expose protection settings.
 Every phase read compares the latest published head with the live head supplied by the caller; validation, checks, and attempt also compare the live base with the recorded base.
 A mismatch releases preparation into `sync-needed`, and `queue-abort` releases an unattempted slot for an explicit reason.
-Neither operation can release an in-flight or unknown forge attempt.
+Revoking a claim before a forge attempt releases any held slot with a `slot-claim-revoked` event and moves queued preparation to `repair-needed` for re-admission.
+These pre-attempt transitions cannot release an in-flight or unknown forge attempt.
 
 `queue-attempt` requires current head and base evidence, successful check evidence at the current manifest version, and explicit captain-hold, away, and merge-authority attestations.
 It records the attempt event and returns the `bin/fm-pr-merge.sh` command for the owning task home.
 The caller must run that existing guarded wrapper separately; this store never calls a lower-level merge operation.
 The wrapper remains authoritative for live hold, away, check, and merge authority gates.
 The attestations here are advisory until the step-4 dispatch and merge boundaries enforce this protocol.
-A successful wrapper result can be confirmed with `queue-reconcile`; a definitive wrapper refusal can be recorded with `queue-result`.
+A wrapper refusal or ambiguous reply reported through `queue-result` leaves the slot `outcome-unknown` until `queue-reconcile` proves landing or non-landing from the forge.
+Caller-supplied refusal flags and base OIDs cannot settle an attempt.
 A refused candidate may re-enter `queue-ready` after its owner repairs the issue, creating a new attempt event without changing the prior terminal record.
 A timeout or lost reply goes to `outcome-unknown`, retaining the slot across process restarts.
 `queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to read the exact GitHub PR and the current base OID.

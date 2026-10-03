@@ -127,6 +127,14 @@ def emit(db, event_type, request_id, payload):
 
 
 def revoke(db, claim, state, reason):
+    item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (claim["intent_id"],)).fetchone()
+    if item is not None and item["state"] in {"ready", "syncing", "validating", "awaiting-checks", "sync-needed", "repair-needed"}:
+        slot = db.execute("SELECT * FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"])).fetchone()
+        if slot is not None:
+            require(slot["state"] in {"syncing", "validating", "awaiting-checks"}, "cannot revoke an unsettled merge slot")
+            db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+            emit(db, "slot-claim-revoked", None, {"intent_id": item["intent_id"], "claim_id": claim["claim_id"], "generation": slot["generation"], "prior_state": item["state"], "reason": reason})
+        db.execute("UPDATE queue_items SET state='repair-needed',base_oid=NULL,validation_id=NULL,manifest_version=NULL,updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
     db.execute("UPDATE claims SET state=? WHERE claim_id=? AND state='active'", (state, claim["claim_id"]))
     db.execute("DELETE FROM branch_owners WHERE claim_id=?", (claim["claim_id"],))
     db.execute("UPDATE intents SET state=? WHERE intent_id=?", (state, claim["intent_id"]))
@@ -257,11 +265,10 @@ def terminal_outcome(db, item, request_id, outcome, p):
         require(forge == "merged" and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
         merge_oid = oid(p.get("merge_oid"), "merge_oid")
         require(observed_base != item["base_oid"], "merged base must advance")
-    elif forge == "refused":
+    else:
+        require(forge == "refused", "live forge read must prove the attempted head did not land")
         require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
         require(p.get("_settled_attempt") == item["attempt_event_id"], "merge wrapper was not proven gone before the forge reads")
-    else:
-        require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
     db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
     db.execute("UPDATE queue_items SET state=?,updated_at=? WHERE intent_id=?", (outcome, stamp(), item["intent_id"]))
@@ -410,13 +417,11 @@ def queue_operation(db, op, p):
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
         require(item["state"] == "attempting", "slot is not attempting")
-        if p.get("outcome") == "unknown":
-            db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
-            db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
-            event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"]})
-            return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
-        require(p.get("outcome") == "refused", "merged outcome requires live queue-reconcile")
-        return terminal_outcome(db, item, request_id, p["outcome"], p)
+        require(p.get("outcome") in {"unknown", "refused"}, "merged outcome requires live queue-reconcile")
+        db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
+        event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "reported_outcome": p["outcome"]})
+        return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
     if op == "queue-reconcile":
         require(item["state"] == "outcome-unknown", "slot outcome is not unknown")
         return terminal_outcome(db, item, request_id, p["_forge_outcome"], p)
@@ -546,10 +551,16 @@ def run_operation(db, op, p):
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None, "intent does not exist")
         participant(db, p, intent["repo"])
-        require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
+        require(intent["home_id"] == p["home_id"], "intent holder mismatch")
         if op == "claim":
             require(intent["version"] == p.get("version"), "intent version mismatch")
-            require(intent["state"] == "submitted", "intent cannot be claimed in current state")
+            require(intent["state"] in {"submitted", "expired", "released", "revoked"}, "intent cannot be claimed in current state")
+            if intent["state"] == "submitted":
+                require(intent["generation"] == p["generation"], "intent generation mismatch")
+            else:
+                require(intent["generation"] <= p["generation"], "intent generation is newer than claimant")
+            queued = db.execute("SELECT state FROM queue_items WHERE intent_id=?", (intent_id,)).fetchone()
+            require(queued is None or queued[0] not in {"attempting", "outcome-unknown", "merged"}, "unsettled or landed intent cannot be reclaimed")
             ttl = p.get("ttl_seconds", 900)
             require(isinstance(ttl, int) and 1 <= ttl <= 86400, "ttl_seconds must be 1..86400")
             candidate = [tuple(x) for x in json.loads(intent["resources_json"])]
@@ -567,9 +578,10 @@ def run_operation(db, op, p):
             for kind, name in candidate:
                 db.execute("INSERT INTO claim_resources(claim_id,kind,name) VALUES(?,?,?)", (claim_id, kind, name))
             db.execute("INSERT INTO branch_owners(repo,branch,claim_id,fence,home_id,generation) VALUES(?,?,?,?,?,?)", (intent["repo"], intent["branch"], claim_id, fence, p["home_id"], p["generation"]))
-            db.execute("UPDATE intents SET state='claimed' WHERE intent_id=?", (intent_id,))
+            db.execute("UPDATE intents SET state='claimed',generation=? WHERE intent_id=?", (p["generation"], intent_id))
             event_id = emit(db, "claim-granted", request_id, {"intent_id": intent_id, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires})
             return {"ok": True, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires, "event_id": event_id}
+        require(intent["generation"] == p["generation"], "intent generation mismatch")
         claim = active_claim(db, p, intent)
         if op == "attach-pr":
             url = pr_url(p.get("pr_url"), intent["repo"])

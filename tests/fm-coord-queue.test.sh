@@ -76,9 +76,10 @@ pass 'repo manifest fails closed and holds refuse a merge decision'
 
 attempt=$(coord queue-attempt "$(printf '{"request_id":"attempt-a","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")")
 attempt_id=$(field "$attempt" attempt_event_id)
-unknown=$(coord queue-result "$(printf '{"request_id":"result-unknown","intent_id":"a","generation":%s,"outcome":"unknown"}' "$gen3")")
-[ "$(field "$unknown" state)" = outcome-unknown ] || fail 'timeout must retain unknown outcome'
+unknown=$(coord queue-result "$(printf '{"request_id":"result-forged-refusal","intent_id":"a","generation":%s,"outcome":"refused","wrapper_refused":true,"pr_merged":false,"observed_base_oid":"%s"}' "$gen3" "$base_new")")
+[ "$(field "$unknown" state)" = outcome-unknown ] || fail 'caller-supplied refusal and base OID must not settle a merge attempt'
 reject queue-next '{"request_id":"next-while-unknown","repo":"owner/repo","base":"main"}' 'unknown outcome must occupy slot'
+pass 'caller-supplied refusal evidence leaves the slot outcome-unknown'
 mkdir "$tmp/bin"
 cat > "$tmp/bin/gh-axi" <<'EOF'
 #!/usr/bin/env bash
@@ -269,3 +270,58 @@ python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("UPD
 coord queue-abort "$(printf '{"request_id":"abort-b","intent_id":"b","slot_generation":%s,"reason":"legacy url"}' "$(field "$next_b" generation)")" > /dev/null
 reject queue-ready "$(printf '{"request_id":"ready-b-legacy","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" 'queue-ready must refuse a stored PR URL that reconciliation cannot evaluate'
 pass 'queue-ready refuses an unevaluable PR URL'
+
+db=$tmp/revocation.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-recovery","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-recovery-1","home_id":"a"}')" generation)
+queue_state() { coord inspect '{}' | python3 -c 'import json,sys; print(next(q["state"] for q in json.load(sys.stdin)["queue"] if q["intent_id"]==sys.argv[1]))' "$1"; }
+slot_count() { coord inspect '{}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["slots"]))'; }
+reclaim() {
+  id=$1; generation=$2; head=$3
+  grant=$(coord claim "$(printf '{"request_id":"reclaim-%s-%s","intent_id":"%s","home_id":"a","generation":%s,"version":1}' "$id" "$generation" "$id" "$generation")")
+  claim_id=$(field "$grant" claim_id)
+  fence=$(field "$grant" fence)
+  coord queue-ready "$(printf '{"request_id":"requeue-%s-%s","intent_id":"%s","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$id" "$generation" "$id" "$generation" "$claim_id" "$fence" "$head")" > /dev/null
+}
+
+candidate released a "$ga" "$head_a"
+released_claim=$claim_id released_fence=$fence
+picked=$(coord queue-next '{"request_id":"next-released","repo":"owner/repo","base":"main"}')
+coord release "$(printf '{"request_id":"release-queued","home_id":"a","generation":%s,"claim_id":"%s","fence":%s}' "$ga" "$released_claim" "$released_fence")" > /dev/null
+[ "$(slot_count)" = 0 ] || fail 'release must free an unattempted integration slot'
+[ "$(queue_state released)" = repair-needed ] || fail 'released queue item must be re-admittable'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="slot-claim-revoked" and e["payload"]["intent_id"]=="released" for e in json.load(sys.stdin)["events"])' || fail 'pre-attempt slot release needs a durable event'
+ga=$(field "$(coord session '{"request_id":"session-recovery-2","home_id":"a"}')" generation)
+reclaim released "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reclaimed","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = released ] || fail 'same intent must re-enter after a new generation claims it'
+coord queue-abort "$(printf '{"request_id":"abort-reclaimed","intent_id":"released","slot_generation":%s,"reason":"test complete"}' "$(field "$picked" generation)")" > /dev/null
+pass 'release frees the slot and a new session can re-admit the same intent'
+
+candidate expired a "$ga" "$head_b"
+coord renew "$(printf '{"request_id":"shorten-queued","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"ttl_seconds":1}' "$ga" "$claim_id" "$fence")" > /dev/null
+sleep 1.2
+[ "$(queue_state expired)" = repair-needed ] || fail 'expiry must remove ready work from the queue'
+ga=$(field "$(coord session '{"request_id":"session-recovery-3","home_id":"a"}')" generation)
+reclaim expired "$ga" "$head_b"
+[ "$(queue_state expired)" = ready ] || fail 'expired item must re-enter ready under the new generation'
+pass 'expiry removes stale ready work and supports re-admission'
+
+picked=$(coord queue-next '{"request_id":"next-expired","repo":"owner/repo","base":"main"}')
+coord queue-synced "$(printf '{"request_id":"sync-expired","intent_id":"expired","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true}' "$ga" "$claim_id" "$fence" "$(field "$picked" generation)" "$head_b" "$base")" > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-recovery-4","home_id":"a"}')" generation)
+[ "$(slot_count)" = 0 ] || fail 'session revocation must free a validating slot before a forge attempt'
+[ "$(queue_state expired)" = repair-needed ] || fail 'revoked validation must be re-admittable'
+reclaim expired "$ga" "$head_b"
+[ "$(queue_state expired)" = ready ] || fail 'revoked item must re-enter ready under the new generation'
+pass 'session revocation frees the validating slot and supports re-admission'
+
+coord manifest-set '{"request_id":"manifest-recovery","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+attempt_unknown expired a "$ga" "$claim_id" "$fence" "$head_b" 3
+coord release "$(printf '{"request_id":"release-unsettled","home_id":"a","generation":%s,"claim_id":"%s","fence":%s}' "$ga" "$claim_id" "$fence")" > /dev/null
+[ "$(slot_count)" = 1 ] || fail 'claim release must not free an unknown forge outcome'
+[ "$(queue_state expired)" = outcome-unknown ] || fail 'unknown outcome must survive claim revocation'
+ga=$(field "$(coord session '{"request_id":"session-recovery-5","home_id":"a"}')" generation)
+reject claim "$(printf '{"request_id":"reclaim-unsettled","intent_id":"expired","home_id":"a","generation":%s,"version":1}' "$ga")" 'unsettled intent must not be reclaimed'
+pass 'claim revocation cannot release or re-admit an unsettled merge attempt'
