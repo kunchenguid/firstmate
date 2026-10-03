@@ -172,18 +172,22 @@
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   new adapters. For Codex, registration and launch use the same absolute store:
+#   a raw command's leading CODEX_HOME assignment selects it, otherwise this
+#   process's CODEX_HOME is used. An empty or unset value falls back to .codex
+#   under the effective HOME, including a raw HOME prefix. Store-selection
+#   prefixes must be literal paths,
+#   with shell expansion refused. The raw CODEX_HOME prefixes are replaced by one
+#   resolved assignment, retained even under launch-environment filtering.
+#   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
-#   A --secondmate launch of a Firstmate-seeded home (the existing
-#   .fm-secondmate-home marker validate_firstmate_home_for_spawn already requires)
-#   also adds --approve when that help advertises it, so the first unattended
-#   launch does not stall on Pi's "Trust project folder?" dialog for that home
-#   path; --approve is session-scoped to the launch cwd and does not rewrite the
-#   operator's trust.json. Ordinary Pi worker launches never receive --approve.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   Scoped Pi approval is inserted after the executable in the final launch
+#   command, after template substitution; the Pi harness reference owns the
+#   qualifying-worktree policy.
 #   Devin is worker-only: --permission-mode dangerous and
 #   --respect-workspace-trust false allow unattended tools in a fresh worktree.
 #   --config points at a private per-task snapshot of the user config with
@@ -346,9 +350,6 @@
 #                  supplies its own trailing space, empty never used)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
-#     __PIAPPROVE__ optional --approve on a seeded Pi/pi-signed secondmate when
-#                  that executable advertises the flag (empty otherwise; session
-#                  trust for the launch cwd only, never a trust.json rewrite)
 #     __PIRESUME__ optional relaunch-only `--session <reference>` that keeps a
 #                  Pi replacement on the session the endpoint's runtime already
 #                  reports (relaunch_resume_args below owns it; it supplies its
@@ -407,6 +408,8 @@
 # busy turn - answering the dialog first if it renders anyway - before
 # reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
 # is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# Codex and Pi folder-trust policy is owned by their harness-adapter references;
+# bin/fm-codex-trust.sh owns Codex registration and its structural refusals.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -414,7 +417,7 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
+# Claude also refuses a failed pre-launch trust registration: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
 # starts in - the task worktree, or the secondmate home for a --secondmate spawn -
@@ -1887,17 +1890,6 @@ pi_supports_tui_mode() {
   printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--tui-mode([[:space:]=]|$)'
 }
 
-# Same help-probe shape as pi_supports_tui_mode for the session-scoped project
-# trust flag. A seeded secondmate home carries tracked .pi/extensions that gate
-# Pi behind "Trust project folder?" on first launch; --approve trusts that
-# launch cwd for the run without rewriting ~/.pi/agent/trust.json.
-pi_supports_approve() {
-  local executable=$1 help
-  help=$("$executable" --help 2>&1) || return 1
-  # Pi prints "--approve, -a"; allow comma (and any non-token char) after the name.
-  printf '%s\n' "$help" | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'
-}
-
 # omp pre-launch model validation. `omp models --json` (omp 18.1.11) prints
 # {"models":[{"provider","id","selector":"<provider>/<id>",...}]} for built-in and
 # auto-discovered providers only; it never lists a provider an extension
@@ -2034,9 +2026,9 @@ launch_template() {
   # PRIMARY-session infrastructure that already stands down in a child worktree.
   # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
   # hooks; disabling the feature runs none of them and leaves the operator's
-  # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
-  # release that drops this flag fails the launch loudly instead of silently
-  # restoring the modal.
+  # hook-trust decisions untouched. An unknown feature name is a hard codex
+  # error, so a future release that drops this flag fails the launch loudly
+  # instead of silently restoring the modal.
   # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
   # session-start digest, and cd/arm seatbelts are exactly those project hooks
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
@@ -2050,7 +2042,7 @@ launch_template() {
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE____PIAPPROVE____PIRESUME__'
+    printf '%s' '__PIBIN____PITUIMODE____PIRESUME__'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
@@ -2227,15 +2219,52 @@ launch_template() {
 case "$ARG3" in
 *' '*) # raw launch command (unverified-adapter escape hatch)
   RAW_LAUNCH=1
-  LAUNCH=$ARG3
-  HARNESS=""
-  for word in $LAUNCH; do
-    case "$word" in [A-Za-z_]*=*) continue ;; *)
-      HARNESS=$(basename "$word")
-      break
-      ;;
-    esac
-  done
+  RAW_LAUNCH_DETAILS=$(python3 - "$ARG3" <<'PY'
+import os
+import re
+import shlex
+import sys
+raw = sys.argv[1]
+lexer = shlex.shlex(raw, posix=True)
+lexer.whitespace_split = True
+lexer.commenters = ""
+prefix = []
+start = 0
+try:
+    while True:
+        word = lexer.get_token()
+        end = lexer.instream.tell()
+        assignment = re.fullmatch(r"([A-Za-z_][A-Za-z_0-9]*)=(.*)", word or "", re.DOTALL)
+        if assignment is None:
+            break
+        prefix.append((assignment[1], assignment[2], raw[start:end]))
+        start = end
+    harness = os.path.basename(word or "")
+    store = ""
+    launch = raw
+    if harness == "codex":
+        values = dict((name, value) for name, value, _ in prefix)
+        for name, value, _ in prefix:
+            if name in ("CODEX_HOME", "HOME") and any(char in value for char in "$\x60\n\r\t"):
+                raise ValueError(f"raw Codex {name} must be a literal path; use an explicit absolute store")
+        store = values.get("CODEX_HOME", os.environ.get("CODEX_HOME", ""))
+        home = values.get("HOME", os.environ.get("HOME", ""))
+        if not store and home:
+            store = home + "/.codex"
+        if not store or not os.path.isabs(store) or any(char in store for char in "\n\r"):
+            raise ValueError("raw Codex launch requires an absolute CODEX_HOME or HOME to select its trust store")
+        launch = "".join(part for name, _, part in prefix if name != "CODEX_HOME") + raw[start:]
+    print(harness)
+    print(store)
+    print(launch, end="")
+except ValueError as err:
+    sys.exit(f"error: cannot resolve raw launch store: {err}")
+PY
+  ) || exit 1
+  HARNESS=${RAW_LAUNCH_DETAILS%%$'\n'*}
+  RAW_LAUNCH_DETAILS=${RAW_LAUNCH_DETAILS#*$'\n'}
+  RAW_CODEX_HOME=${RAW_LAUNCH_DETAILS%%$'\n'*}
+  LAUNCH=${RAW_LAUNCH_DETAILS#*$'\n'}
   ;;
 '')
   # No explicit harness: resolve from config. A secondmate AGENT launches on the
@@ -2316,15 +2345,6 @@ pi | pi-signed)
     PI_TUI_MODE=' --tui-mode regular'
   fi
   LAUNCH=${LAUNCH//__PITUIMODE__/$PI_TUI_MODE}
-  # Seeded-home signal is .fm-secondmate-home (required by
-  # validate_firstmate_home_for_spawn before any secondmate launch reaches
-  # the pane). Session-only --approve; never expand to a parent path or
-  # rewrite the operator trust store.
-  PI_APPROVE=
-  if [ "$KIND" = secondmate ] && pi_supports_approve "$PI_BIN"; then
-    PI_APPROVE=' --approve'
-  fi
-  LAUNCH=${LAUNCH//__PIAPPROVE__/$PI_APPROVE}
   LAUNCH="FM_PI_HARNESS=$HARNESS $LAUNCH"
   ;;
 cursor)
@@ -4341,6 +4361,15 @@ fi
 spawn_enter_recorded_worktree
 spawn_assert_agent_worktree
 
+SPAWN_FOLDER_TRUST_ALLOWED=0
+case "$HARNESS" in
+codex | pi | pi-signed)
+  if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    SPAWN_FOLDER_TRUST_ALLOWED=1
+  fi
+  ;;
+esac
+
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
 # created below. The dialog gates the pane before the brief is ever read, and it
@@ -4376,6 +4405,27 @@ claude*)
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
+  fi
+  ;;
+codex)
+  if [ "$RAW_LAUNCH" = 1 ]; then
+    CODEX_LAUNCH_HOME=$RAW_CODEX_HOME
+  else
+    CODEX_LAUNCH_HOME=${CODEX_HOME:-}
+    if [ -z "$CODEX_LAUNCH_HOME" ] && [ -n "${HOME:-}" ]; then
+      CODEX_LAUNCH_HOME="$HOME/.codex"
+    fi
+  fi
+  if [ "$SPAWN_FOLDER_TRUST_ALLOWED" = 1 ]; then
+    if [ "$KIND" = secondmate ]; then
+      spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    else
+      spawn_trust_args=("$WT" "$PROJ_ABS")
+    fi
+    if ! CODEX_HOME="$CODEX_LAUNCH_HOME" "$FM_ROOT/bin/fm-codex-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+      echo "error: could not pre-register codex folder trust for $WT; refusing to launch the worker; inspect window $T and the registration error above" >&2
+      exit 1
+    fi
   fi
   ;;
 agy)
@@ -5084,7 +5134,32 @@ LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
-pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
+pi | pi-signed)
+  LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"}
+  if [ "$SPAWN_FOLDER_TRUST_ALLOWED" = 1 ]; then
+    LAUNCH=$(python3 - "$LAUNCH" <<'PY'
+import re
+import shlex
+import sys
+launch = sys.argv[1]
+lexer = shlex.shlex(launch, posix=True)
+lexer.whitespace_split = True
+lexer.commenters = ""
+try:
+    while True:
+        word = lexer.get_token()
+        if word is None:
+            raise ValueError("launch has no executable")
+        if not re.match(r"[A-Za-z_][A-Za-z_0-9]*=", word):
+            break
+    end = lexer.instream.tell()
+    print(launch[:end] + " --approve " + launch[end:], end="")
+except ValueError as err:
+    sys.exit(f"error: cannot apply Pi project approval to launch: {err}")
+PY
+    ) || exit 1
+  fi
+  ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
@@ -5119,6 +5194,9 @@ case "$LAUNCH" in
   LAUNCH=${LAUNCH//__CLAUDEADDDIRS__/$CLAUDE_ADD_DIRS}
   ;;
 esac
+if [ "$HARNESS" = codex ] && [ -n "$CODEX_LAUNCH_HOME" ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_LAUNCH_HOME") $LAUNCH"
+fi
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"

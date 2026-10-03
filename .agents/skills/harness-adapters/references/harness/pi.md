@@ -30,10 +30,14 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/`, including a clean worktree and a freshly seeded secondmate home.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, or in the pinned root's `trust.json` under a worker account pin, so later spawns in the same pooled slot under that root skip it.
-For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` owns the capability-gated project-trust approval mechanics; [runtime verification](../../../../../docs/verification/runtime-backends.md#pi-seeded-secondmate-project-trust) owns the regression evidence.
+A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree: "Trust project folder?", offering Trust, Trust parent folder, Trust (this session only), Do not trust, and Do not trust (this session only), with the cursor on Trust.
+Saved decisions are keyed per canonical directory with a walk up through the parents, the closest one winning, in `<$PI_CODING_AGENT_DIR or ~/.pi/agent>/trust.json`.
+For a qualifying linked pool worktree, both canonical and raw launch commands for ships, scouts, and local secondmates carry Pi's own `--approve`, a per-run decision consulted before saved decisions that persists nothing.
+Secondmate seed markers do not grant folder trust: both Pi identities require a linked pool worktree for `--approve`, while standalone and other attended checkouts keep manual folder approval.
+For an attended checkout, accept the selected Trust option with Enter and verify the instructions begin processing.
+Approval loads the directory's `.pi` resources and project extensions for that run.
+The [maintainer verification record](../../../../../docs/verification/runtime-backends.md#folder-and-project-trust-on-a-fresh-worktree) owns versioned vendor observations and the live refresh command.
+The store's per-directory scope is why a launch flag is the right shape here rather than a pre-registered entry: a pooled worktree path would otherwise add one store entry per slot, and a worker account pin relocates that store, so a writer would have to resolve the pin first.
 
 ## Worker turn-end extension
 

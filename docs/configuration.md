@@ -804,7 +804,7 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
-Pi-family secondmates can start unattended in Firstmate-seeded homes without accepting project trust manually; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the capability requirement, session-only approval scope, and older-version fallback, with [regression evidence](verification/runtime-backends.md#pi-seeded-secondmate-project-trust).
+The [Codex](../.agents/skills/harness-adapters/references/harness/codex.md) and [Pi-family](../.agents/skills/harness-adapters/references/harness/pi.md) harness references own automatic folder approval and the attended-checkout boundary.
 
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
@@ -959,7 +959,7 @@ Choose the minimum additions for the authentication method actually in use:
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
 | Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
-| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
+| Custom provider store | For stores without explicit launch assignments, configured location variables such as `GROK_HOME` or `XDG_CONFIG_HOME`; Firstmate's explicit Codex, Claude, and Muse store assignments survive filtering. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |
@@ -1237,12 +1237,15 @@ Every home requires:
 - chrome-devtools-axi.
 - Compatible tasks-axi, as specified in "Backlog backend" above.
 - Compatible quota-axi.
+- `python3` for the home's backlog tooling and raw launch-command parsing, including raw Pi and Claude launches.
 
 [`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) owns the axi-family floor policy and the gh-axi and lavish-axi floors, while [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh) and [`bin/fm-quota-axi-lib.sh`](../bin/fm-quota-axi-lib.sh) hold their own tools' floor constants.
 This section is the single owner of that universal toolchain list; backend guides' prerequisites point here and add only their backend-specific tools.
 
 In that list, no-mistakes runs the validation pipeline, gh-axi and chrome-devtools-axi cover GitHub and browser operations, and tasks-axi plus quota-axi back backlog mutations and quota-aware array dispatch.
 Lavish is a presentation-only dependency for visual decisions and reports; nonvisual work can proceed with plain text when it is unavailable.
+The home's own backlog tooling already requires the interpreter, so raw launch plumbing makes that requirement explicit rather than implicit.
+Reimplementing launch-line parsing in shell would be more fragile in the code path that decides whether a worker stops at a human trust prompt.
 
 **Backend requirements**
 
@@ -1268,6 +1271,7 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 
 **Feature-specific requirements**
 
+- Codex folder-trust registration requires Python 3.11 or newer with its standard `tomllib` module.
 - When `config/crew-dispatch.json` exists, bootstrap also requires `jq` for dispatch profile validation.
 - When Relay is opted in, bootstrap also requires `curl` and `jq` before arming the relay poll shim.
 

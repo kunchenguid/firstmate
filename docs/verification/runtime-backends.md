@@ -510,8 +510,8 @@ The composer-classification record below observes the same gate from the other s
 
 ## Pi seeded-secondmate project trust
 
-[`fm-spawn.sh --help`](../../bin/fm-spawn.sh) owns the seeded-secondmate project-trust approval contract and compatibility fallback.
-The live guard below isolates Pi's trust-gate behavior in secondmate-shaped homes; portable launch-command coverage separately verifies that spawn selects the flag for the intended launches.
+[Pi's harness reference](../../.agents/skills/harness-adapters/references/harness/pi.md) owns the qualifying linked-pool-worktree scope for automatic project trust.
+The live guard below isolates Pi's runtime trust-gate behavior in secondmate-shaped homes; it does not establish that a standalone seeded home qualifies for automatic approval.
 
 Verified 2026-10-02 on pi 0.82.0 through the default-on live guard (disposable `PI_CODING_AGENT_DIR` / `HOME` only; never `~/.pi`):
 
@@ -527,7 +527,7 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 # all fm-pi-seeded-home-trust-live-e2e checks passed (3)
 ```
 
-Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
+Portable scope coverage lives in `tests/fm-codex-trust.test.sh`, and `tests/fm-spawn-dispatch-profile.test.sh` verifies both Pi identities keep manual trust for standalone secondmate homes.
 
 ## Launch-prompt backstop signatures
 
@@ -2456,3 +2456,40 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Folder and project trust on a fresh worktree
+
+The current launch and trust boundaries are owned by the [Codex](../../.agents/skills/harness-adapters/references/harness/codex.md) and [Pi](../../.agents/skills/harness-adapters/references/harness/pi.md) adapter references.
+
+Verified 2026-10-02 on Linux with codex-cli 0.159.2 and Pi 0.99.2, both against a throwaway config root (`CODEX_HOME`, `PI_CODING_AGENT_DIR`) so the operator's own stores were untouched:
+
+| Fact | Observed |
+| --- | --- |
+| Codex store | `[projects."<path>"] trust_level = "trusted"` in `${CODEX_HOME:-~/.codex}/config.toml`, the table Codex itself writes |
+| Codex scope | answering "Trust this folder?" inside a LINKED WORKTREE persists the entry for the REPOSITORY ROOT, and a root entry written ahead of launch removes the dialog for that worktree |
+| Codex scope, negative | an entry for a directory above the repository root leaves the dialog standing |
+| Codex, command line | `-c 'projects."<path>".trust_level="trusted"'` is accepted and ignored for this decision, so the persisted store is the only non-interactive path |
+| Codex, decline path | Escape records no trust entry |
+| Pi store | `<$PI_CODING_AGENT_DIR or ~/.pi/agent>/trust.json`, keyed per canonical directory with the closest parent entry winning |
+| Pi, per-run flag | `--approve` is consulted before the saved decisions, suppresses "Trust project folder?", still loads that directory's `.pi` resources and project extensions, and writes no store entry |
+
+Refresh the vendor half with the live guard, which replays the real launch flags Firstmate builds and reads the rendered pane, and the mechanics with the portable regression:
+
+```sh
+bin/fm-test-run.sh tests/fm-folder-trust-live-e2e.test.sh
+bin/fm-test-run.sh tests/fm-codex-trust.test.sh
+```
+
+Observed output on the versions above:
+
+```text
+ok - live: codex codex-cli 0.159.2 gates an unregistered fresh worktree on the folder-trust dialog
+ok - live: codex codex-cli 0.159.2 launches into a pre-registered fresh worktree with no dialog
+ok - live: codex codex-cli 0.159.2 keys folder trust on the repository root, not an ancestor
+ok - live: pi 0.99.2 gates an untrusted fresh directory on the project-trust prompt
+ok - live: pi 0.99.2 launches with --approve, shows no prompt, and persists nothing
+```
+
+The portable suite covers the store write, preservation of unrelated configuration, TOML key equivalence and operator decisions, concurrent writers, launch-store selection, fixture isolation, and structural refusals.
+The helper's [header](../../bin/fm-codex-trust.sh) owns registration safeguards; the [spawn header](../../bin/fm-spawn.sh) owns launch-store selection, including raw commands and environment filtering.
+The separate [hook-trust boundary](../../.agents/skills/harness-adapters/references/harness/codex.md#hook-trust) is refreshed by `tests/fm-codex-hook-layer-live-e2e.test.sh`.

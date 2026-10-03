@@ -313,9 +313,11 @@ make_spawn_fakebin() {
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
 # CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
 # that need a delivery contract pass those flags themselves.
-fm_test_run_spawn() {
+fm_test_run_spawn() (
   local home=$1 pane=$2 fakebin=$3
   shift 3
+  local spawn_home=$home/user-home
+  export CODEX_HOME="${FM_TEST_CODEX_HOME-$spawn_home/.codex}"
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
   # HOME; without it the suite would write the developer's real ~/.claude.json.
@@ -326,7 +328,6 @@ fm_test_run_spawn() {
   # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
   # so every launch-shape assertion in the suite keeps reading the same command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
-  local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
@@ -335,7 +336,7 @@ fm_test_run_spawn() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \
     PATH="$fakebin:$PATH" \
     "$ROOT/bin/fm-spawn.sh" "$@" 2>&1
-}
+)
 
 # --- send-world stubs -------------------------------------------------------
 

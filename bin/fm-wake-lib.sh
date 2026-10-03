@@ -1498,7 +1498,7 @@ fm_treehouse_project_lock_path() {  # <project-dir>
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.
 fm_treehouse_pool_slot() {  # <project-dir> <worktree>
-  local project=$1 worktree=$2 slot pool state project_common slot_common
+  local project=$1 worktree=$2 slot pool state project_common slot_common slot_git slot_top
   [ -d "$project" ] && [ -d "$worktree" ] || return 1
   slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
   pool=$(dirname "$(dirname "$slot")")
@@ -1508,6 +1508,12 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   slot_common=$(git -C "$slot" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   project_common=$(CDPATH='' cd -- "$project_common" 2>/dev/null && pwd -P) || return 1
   slot_common=$(CDPATH='' cd -- "$slot_common" 2>/dev/null && pwd -P) || return 1
+  slot_git=$(git -C "$slot" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  slot_git=$(CDPATH='' cd -- "$slot_git" 2>/dev/null && pwd -P) || return 1
+  [ "$slot_git" != "$slot_common" ] || return 1
+  slot_top=$(git -C "$slot" rev-parse --show-toplevel 2>/dev/null) || return 1
+  slot_top=$(CDPATH='' cd -- "$slot_top" 2>/dev/null && pwd -P) || return 1
+  [ "$slot_top" = "$slot" ] || return 1
   [ "$project_common" = "$slot_common" ]
 }
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Live guard for fm-spawn's Pi seeded-secondmate --approve preflight.
+# Live guard for Pi's session-scoped project-trust approval in seeded homes.
 #
 # Reproduces the Pi "Trust project folder?" stall on a freshly seeded
 # secondmate-shaped home (tracked .pi/extensions + .fm-secondmate-home) under a
-# disposable PI_CODING_AGENT_DIR, then proves the spawn-side --approve flag
+# disposable PI_CODING_AGENT_DIR, then proves the runtime --approve flag
 # clears that stall without rewriting the disposable trust store. An unseeded
 # path without --approve still prompts.
 #
@@ -40,7 +40,7 @@ VERSION_OUT=$("$PI_BIN" --version 2>&1) || fail "pi --version failed: $VERSION_O
 note "live pi version: $VERSION_OUT"
 
 if ! "$PI_BIN" --help 2>&1 | grep -Eq -- '(^|[[:space:]])--approve([^[:alnum:]_-]|$)'; then
-  note "installed pi does not advertise --approve; spawn omits the flag and this guard has nothing to prove"
+  note "installed pi does not advertise --approve; this runtime guard cannot exercise the flag"
   echo "# fm-pi-seeded-home-trust-live-e2e: skipped (no --approve on installed pi)"
   exit 0
 fi

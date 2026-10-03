@@ -16,9 +16,13 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Model discovery | Open the current interactive session's `/model` picker. |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
-A directory trust dialog appears on the first run for a repository root: "Do you trust the contents of this directory?"
-Accept it with Enter and verify the instructions begin processing.
-The decision persists for the repository, so later worktrees of the same project skip it.
+A directory trust dialog appears on the first run for a repository root: "Folder access … Trust this folder?", with "Trust and continue" already selected and "Quit" second.
+Saved folder approval covers the canonical repository root and its worktrees; `../../../bin/fm-codex-trust.sh` owns the store format and registration safeguards.
+For a qualifying linked pool worktree, `../../../bin/fm-spawn.sh` requires successful registration through `../../../bin/fm-codex-trust.sh` before launching Codex, so registration failure stops the launch and successful registration removes the folder prompt.
+Secondmate seed markers do not grant folder trust: both registration modes require a linked pool worktree, while standalone and other attended checkouts keep manual folder approval.
+For an attended checkout, accept the selected "Trust and continue" option with Enter and verify the instructions begin processing.
+Bounded read-to-replace race: an independent writer can still add a distinct project's trusted entry after the final read and before replacement; losing that entry causes a recoverable folder re-prompt, without losing project data or granting trust to another project.
+The [maintainer verification record](../../../../../docs/verification/runtime-backends.md#folder-and-project-trust-on-a-fresh-worktree) owns versioned vendor observations and the live refresh command.
 
 ## Hook trust
 
