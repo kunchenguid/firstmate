@@ -112,15 +112,14 @@ Shape is not varying *with* mode there, it is varying *inside* every value of mo
 
 ### Why shape is not the forge either
 
-Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bearing in four places today:
+Shape already exists on GitHub, it predates Gerrit entirely, and it is load-bearing in three places today:
 
 - `bin/fm-pr-merge.sh` defaults a GitHub merge to `--squash` when the caller selects no method.
-- `bin/fm-fleet-sync.sh`'s branch pruning reasons about it explicitly, dropping the ancestry check on the grounds that pull requests in this fleet are squash-merged, so a merged branch is never an ancestor and such a check would prune nothing.
 - `bin/fm-teardown.sh`'s landed-work test accepts content present in the default branch precisely because a squash collapses the branch's commits and per-commit patch identities stop matching.
 - `bin/fm-ff-lib.sh` reconciles a clean secondmate divergence through a three-way tree proof, as happens after an upstream squash merge.
 
 It appears nowhere in the registry.
-A property that four mechanisms depend on, across pruning, teardown safety, merging, and secondmate convergence, and that no project has ever declared, is not a Gerrit concept arriving with Gerrit.
+A property that three mechanisms depend on, across teardown safety, merging, and secondmate convergence, and that no project has ever declared, is not a Gerrit concept arriving with Gerrit.
 It is an existing axis that has been pinned to one value by assumption for long enough to become invisible.
 That it survived being invisible says how rarely it varies, not where it belongs.
 
@@ -218,7 +217,7 @@ This is a property of Gerrit and no amount of tooling changes it.
 Every mechanism that reasons about a remote branch therefore has no counterpart here - the gone-upstream prune in `bin/fm-fleet-sync.sh`, the remote-reachability leg of `bin/fm-teardown.sh`'s landed-work test, and the `refs/pull/<n>/head` fetch in `bin/fm-review-diff.sh`.
 There is no separate namespace either, because there are no forks, so the change is the only remote artifact the work ever has.
 The teardown test and the review diff each already have a fallback that reasons about content or about the local branch, and on Gerrit the fallback is not a fallback, it is the only path.
-The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]`, the prune never fires, and ship branches accumulate locally after teardown.
+The prune has no fallback at all: a `refs/for/<branch>` push creates no upstream tracking ref, so nothing ever reads `[gone]` and the prune never fires; successful teardown retires its own ship branch.
 That raises the stakes on the content leg of the landed-work test specifically, since it becomes the sole proof that unlanded work is not about to be discarded.
 This is also a property of Gerrit.
 
