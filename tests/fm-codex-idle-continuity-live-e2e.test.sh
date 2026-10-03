@@ -10,8 +10,11 @@
 #
 # The source is registered only after the first turn is idle, and it lives
 # for a while after each run, so the model's in-turn drain does not race the
-# idle-gap re-run. A re-run counts only when it lands while the turn is idle
-# and the idle supervisor lock is owned by the Codex pid.
+# idle-gap re-run. A re-run counts only when it lands while the idle
+# supervisor lock is owned by the Codex pid and that supervisor's own arm
+# started the watcher. The pane is not required to be idle then: the
+# supervisor queues each close into the thread before it re-arms, so Codex is
+# usually busy with that queued turn when the next run lands.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -61,8 +64,14 @@ pane_text() {
   tmux -L "$SOCKET" capture-pane -p -S -300 -t idle 2>/dev/null || true
 }
 
+supervisor_started_watcher() {
+  grep -q '^watcher: started ' "$HOME_DIR/state/.codex-idle-continuity.lock/arm.out" 2>/dev/null
+}
+
+# A queued close arrives as a prompt line. Tool output of an in-turn
+# checkpoint can print the same text, and it does not count.
 captures() {
-  pane_text | grep -c 'process-event result captured' || true
+  pane_text | grep -c '^› check: process-event result captured' || true
 }
 
 send_prompt() {
@@ -122,6 +131,7 @@ done
 send_prompt 'Reply with exactly OK2. Do not retire, register, or modify any process-event source; it is an intentional test fixture. Follow the normal wake drain protocol otherwise.'
 
 supervised=0
+watching=0
 last=$(hits)
 rearmed=0
 delivered=0
@@ -131,15 +141,23 @@ baseline=$(captures)
 for _ in $(seq 1 360); do
   kill -0 "$codex_pid" 2>/dev/null || fail "Codex exited before the idle gap"
   now=$(hits)
-  if turn_idle && [ "$(supervisor_owner)" = "$codex_pid" ]; then
+  if [ "$(supervisor_owner)" = "$codex_pid" ]; then
     supervised=1
-    if [ "$rearmed" -eq 0 ] && [ "$now" -gt "$last" ]; then
+    # `watching` comes from an earlier poll, so the run counted here started
+    # after the supervisor's watcher did. arm.out is empty between two arms,
+    # which is why the flag is kept rather than read again in this poll.
+    if [ "$watching" -eq 1 ] && [ "$now" -gt "$last" ]; then
       rearmed=1
+    fi
+    if supervisor_started_watcher; then
+      watching=1
     fi
     if [ "$rearmed" -eq 1 ] && [ "$(captures)" -gt "$baseline" ]; then
       delivered=1
       break
     fi
+  else
+    watching=0
   fi
   if [ "$rearmed" -eq 0 ]; then
     baseline=$(captures)
