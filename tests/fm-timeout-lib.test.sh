@@ -327,7 +327,30 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+test_runs_under_set_u_on_a_bash_without_bashpid() {
+  local out rc=0
+  # Stock macOS bash 3.2 has no BASHPID; unsetting it gives the same shape
+  # on any newer bash, so the public entry point must not dereference it bare.
+  out=$(
+    set -u
+    unset BASHPID
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    PATH=$PERL_ONLY fm_exec_timed 5 1 bash -c 'echo bounded' 2>&1
+  ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "fm_exec_timed died under set -u without BASHPID (rc=$rc): $out"
+  [ "$out" = bounded ] || fail "fm_exec_timed lost the command output without BASHPID: $out"
+  pass "fm_exec_timed runs under set -u on a bash without BASHPID"
+}
+
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
+# BASHPID regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_passes_the_command_status_and_output_through
+test_runs_under_set_u_on_a_bash_without_bashpid
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound

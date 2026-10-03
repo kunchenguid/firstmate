@@ -493,6 +493,17 @@ jobs:
             exit 1
           }
 
+          # fm_exec_timed must not dereference BASHPID, which stock Bash 3.2
+          # lacks, under set -u; every bounded call, spawn included, runs it.
+          timeout_output=$(FM_TEST_ONLY=test_runs_under_set_u_on_a_bash_without_bashpid \
+            /bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$timeout_output"
+          timeout_count=$(printf '%s\n' "$timeout_output" | grep -c '^ok - ')
+          [ "$timeout_count" -eq 1 ] || {
+            echo "::error::expected 1 timeout-lib BASHPID bash 3.2 regression, got $timeout_count"
+            exit 1
+          }
+
           backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
             FM_TEST_BASH=/bin/bash \
             /bin/bash tests/fm-backend.test.sh)
