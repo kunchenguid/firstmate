@@ -68,6 +68,10 @@ make_watch_stubs() {  # <dir> -> echoes fakebin dir
 set -u
 case "${1:-}" in
   send-keys)
+    if [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ]; then
+      printf 'send failed\n' >> "${FM_SEND_LOG:-/dev/null}"
+      exit 1
+    fi
     shift
     literal=0
     while [ $# -gt 0 ]; do
@@ -756,6 +760,70 @@ test_watcher_busy_bookkeeping_failure_surfaces() {
   pass "watcher: unwritable busy bookkeeping surfaces without typing"
 }
 
+test_watcher_successor_escalation_stays_quiet() {
+  local mode=$1 dir rec agent='' missing=0 check
+  dir=$(busy_case "successor-$mode")
+  busy_steer_check "$dir" "$(idle_capture "$dir")"
+  grep -q 'Firstmate instruction waiting' "$dir/send.log" || fail "predecessor did not ring"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "queued successor")
+  mv "$dir/state/t1.inbox/001.msg" "$dir/state/t1.inbox/handled/"
+  case "$mode" in
+    busy)
+      busy_steer_check "$dir"
+      [ ! -s "$dir/state/.wake-queue" ] || fail "successor escalated on its first busy check"
+      ;;
+    dead) agent=zsh ;;
+    missing) missing=1 ;;
+    unwritable) mkdir "$dir/state/t1.inbox/.busy-state" ;;
+  esac
+  FM_FAKE_TMUX_AGENT="$agent" FM_FAKE_TMUX_MISSING="$missing" busy_steer_check "$dir"
+  grep -qF "$rec" "$dir/state/.wake-queue" || fail "$mode successor did not escalate"
+  for check in 1 2 3; do
+    FM_FAKE_TMUX_AGENT="$agent" FM_FAKE_TMUX_MISSING="$missing" busy_steer_check "$dir"
+    [ "$(wc -l < "$dir/state/.wake-queue" | tr -d ' ')" = 1 ] \
+      || fail "$mode successor escalation repeated with stale predecessor ring history"
+  done
+  [ "$(cut -f1 "$dir/state/t1.inbox/.ring-state")" = 001.msg ] \
+    || fail "$mode successor changed the predecessor's delivery history"
+  [ "$(wc -l < "$dir/send.log" | tr -d ' ')" = 1 ] || fail "$mode successor was typed into"
+  [ -f "$rec" ] || fail "$mode successor lost its unhandled instruction"
+  mv "$rec" "$dir/state/t1.inbox/handled/"
+  rec=$(inbox_lib "$dir/state" fm_task_inbox_write "$dir/state" t1 "next instruction")
+  [ "$(FM_TASK_INBOX_GRACE_SECS=0 inbox_lib "$dir/state" fm_task_inbox_due_action "$dir/state" t1)" = "ring $rec" ] \
+    || fail "$mode successor escalation suppressed the next instruction"
+  pass "watcher: $mode successor escalates once despite stale predecessor ring history"
+}
+
+test_watcher_nonbusy_attempt_resets_busy_streak() {
+  local mode=$1 dir capture send_fail=0
+  dir=$(busy_case "busy-reset-$mode")
+  busy_steer_check "$dir"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "$mode first busy check escalated"
+  capture=$(idle_capture "$dir")
+  case "$mode" in
+    protected)
+      printf '╭──────────────────╮\n│ captain draft    │\n╰──────────────────╯\n' > "$capture"
+      ;;
+    failed) send_fail=1 ;;
+  esac
+  FM_FAKE_TMUX_SEND_FAIL="$send_fail" busy_steer_check "$dir" "$capture"
+  case "$mode" in
+    protected) [ ! -s "$dir/send.log" ] || fail "protected composer was typed into" ;;
+    failed) grep -q '^send failed$' "$dir/send.log" || fail "delivery failure was not exercised" ;;
+  esac
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 1 ] \
+    || fail "$mode delivery did not consume one ordinary attempt"
+  busy_steer_check "$dir"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "$mode non-busy delivery did not reset the busy streak"
+  busy_steer_check "$dir"
+  grep -q 'stuck-busy after 2 consecutive' "$dir/state/.wake-queue" \
+    || fail "$mode fresh busy streak did not escalate at the bound"
+  [ "$(cut -f2 "$dir/state/t1.inbox/.ring-state")" = 1 ] \
+    || fail "$mode busy checks changed the ordinary attempt ladder"
+  [ -f "$dir/state/t1.inbox/001.msg" ] || fail "$mode lost the unhandled instruction"
+  pass "watcher: a non-busy $mode delivery breaks the busy streak and preserves the attempt ladder"
+}
+
 test_watcher_quiet_on_healthy_inbox() {
   local dir state out log pid
   dir=$(setup_watch_case healthy)
@@ -1018,6 +1086,12 @@ test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_busy_budget_resets_on_ring_and_ack
 test_watcher_busy_bookkeeping_failure_surfaces
+test_watcher_successor_escalation_stays_quiet busy
+test_watcher_successor_escalation_stays_quiet dead
+test_watcher_successor_escalation_stays_quiet missing
+test_watcher_successor_escalation_stays_quiet unwritable
+test_watcher_nonbusy_attempt_resets_busy_streak protected
+test_watcher_nonbusy_attempt_resets_busy_streak failed
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
