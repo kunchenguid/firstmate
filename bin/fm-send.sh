@@ -222,18 +222,7 @@ if [ -n "$TARGET_META" ]; then
     fm_lease_guard "$LEASE_GUARD_TASK" "steer (fm-send)"
     send_exit_status=0
     trap 'send_exit_status=$?; fm_lease_guard_release; exit "$send_exit_status"' EXIT
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     if [ -z "$ACTION_ID" ]; then
-      if ! fm_task_lifecycle_execution_guard "$LEASE_GUARD_TASK"; then
-        if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ] &&
-          printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -e --arg task "$LEASE_GUARD_TASK" \
-            'type == "object" and (.[$task] | type == "string" and length > 0)' >/dev/null 2>&1; then
-          echo "FM_BRANCH_EFFECT_AUTHORITY_REQUIRED:$LEASE_GUARD_TASK: lifecycle effect requires exact readback or MAIN reconciliation" >&2
-          exit 6
-        fi
-        exit 1
-      fi
       if [ "$(fm_lease_actor)" = branch ] && [ -n "${FM_BRANCH_PROGRESS_BINDINGS:-}" ]; then
         branch_progress_token=$(printf '%s' "$FM_BRANCH_PROGRESS_BINDINGS" | jq -er --arg task "$LEASE_GUARD_TASK" '.[$task] // empty' 2>/dev/null || true)
         printf '%s' "${FM_BRANCH_TASK_SCOPE:-[]}" | jq -e --arg task "$LEASE_GUARD_TASK" \
@@ -258,16 +247,6 @@ if [ -n "$TARGET_META" ]; then
         COMPACT_PROGRESS_PAYLOAD_SHA=$(printf '%s' "$branch_current_progress" | python3 -c \
           'import hashlib,json,sys; print(hashlib.sha256(json.load(sys.stdin)["next_step"].encode()).hexdigest())') || exit 1
         FM_SEND_EXPECTED_SPAWN_GEN=$(fm_meta_get "$TARGET_META" spawn_gen)
-      fi
-      if [ "$(fm_lease_actor)" = branch ] &&
-        [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$LEASE_GUARD_TASK/lifecycle.json" ]; then
-        branch_lifecycle=$(fm_task_lifecycle read "$LEASE_GUARD_TASK") || exit 1
-        if printf '%s' "$branch_lifecycle" | jq -e \
-          '.schema == "fm-task-lifecycle.v2" and (.next_action.phase == "prepared" or
-           .next_action.phase == "attempted" or .next_action.phase == "uncertain")' >/dev/null; then
-          echo 'REFUSED: delegated steer with an active lifecycle action requires --action-id' >&2
-          exit 6
-        fi
       fi
     fi
   fi
@@ -341,12 +320,6 @@ if [ -n "$ACTION_ID$EXPECTED_GENERATION" ]; then
   [ "${1-}" != --key ] || exit 2
   FM_SEND_EXPECTED_SPAWN_GEN=$EXPECTED_GENERATION
 fi
-if [ -n "$TARGET_META" ] && [ -z "$RESOLVE_KEYS" ]; then
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  fm_task_lifecycle_execution_allowed "$(fm_send_id_from_meta "$TARGET_META")" || exit 1
-fi
-
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
 fi
@@ -609,19 +582,7 @@ else
       fi
     fi
     if [ -n "$ACTION_ID" ]; then
-      BODY_SHA=$(printf '%s' "$MESSAGE" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')
-      EFFECT_RESULT=$(fm_task_lifecycle effect "$INBOX_TASK_ID" --action-id "$ACTION_ID" --payload-sha256 "$BODY_SHA") || {
-        fm_lock_release "$INBOX_META_LOCK"
-        exit 6
-      }
-      if [ "$(printf '%s' "$EFFECT_RESULT" | jq -r '.next_action.phase')" = confirmed ]; then
-        fm_lock_release "$INBOX_META_LOCK"
-        exit 0
-      fi
       INBOX_RECORD=$(fm_task_inbox_write_handoff "$STATE" "$INBOX_TASK_ID" "$MESSAGE" "action.$ACTION_ID" "$CURRENT_INBOX_SPAWN_GEN") || inbox_write_rc=$?
-      if [ "${inbox_write_rc:-0}" -eq 0 ]; then
-        fm_task_lifecycle bind-inbox "$INBOX_TASK_ID" --action-id "$ACTION_ID" --receipt-ref "$INBOX_RECORD" >/dev/null || inbox_write_rc=$?
-      fi
     elif [ "$IDEMPOTENT" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" '' \
         "$CURRENT_INBOX_SPAWN_GEN" "$COMPACT_PROGRESS_TOKEN") || inbox_write_rc=$?

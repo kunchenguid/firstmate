@@ -1682,6 +1682,43 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+test_main_accepted_compact_task_stays_terminal_and_quiet() {
+  local dir state fakebin out capture_file window key pane_hash sig pid current
+  dir=$(make_case terminal-compact-accepted); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-accepted"
+  mkdir -p "$dir/data/accepted"
+  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' > "$dir/.tasks.toml"
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/data/backlog.md"
+  FM_HOME="$dir" "$ROOT/bin/fm-tasks-axi.sh" add accepted 'Accepted compact task' --kind ship \
+    --body 'Preserve terminal business state until cleanup.' --start >/dev/null \
+    || fail 'accepted watcher task creation failed'
+  printf 'Verify the accepted compact behavior.\n' > "$dir/data/accepted/brief.md"
+  printf 'backend=herdr\nwindow=%s\nkind=ship\nspawn_gen=accepted-g1\n' "$window" > "$state/accepted.meta"
+  current=$(FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" progress accepted) \
+    || fail 'accepted watcher progress read failed'
+  FM_HOME="$dir" "$ROOT/bin/fm-task-state.sh" update-progress accepted \
+    --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
+    --progress '{"acceptance":"The requested result is reviewed","current_state":"MAIN accepted the result","remaining_gap":"","next_step":""}' \
+    >/dev/null || fail 'accepted watcher progress update failed'
+  printf 'done: implementation returned\n' > "$state/accepted.status"
+  sig=$(seen_sig "$state/accepted.status"); printf '%s' "$sig" > "$state/.seen-accepted_status"
+  printf 'accepted and awaiting safe cleanup' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text 'accepted and awaiting safe cleanup')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_FAKE_HERDR_WINDOW="$window" \
+    FM_FAKE_HERDR_CAPTURE="$capture_file" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || { reap "$pid"; fail 'MAIN-accepted compact task woke instead of remaining terminal'; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail 'MAIN-accepted compact task queued another stale wake'; }
+  reap "$pid"
+  pass 'MAIN-accepted compact task remains terminal and quiet while safe cleanup is pending'
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -4566,6 +4603,7 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_main_accepted_compact_task_stays_terminal_and_quiet
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

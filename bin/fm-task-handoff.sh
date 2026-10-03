@@ -3,7 +3,7 @@
 # outcome to another local worker without crossing a supervision lease.
 #
 # Usage:
-#   fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> [--action-id <prepared-id>] <text...>
+#   fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> <text...>
 #   fm-task-handoff.sh retry <handoff-id>
 #   fm-task-handoff.sh retry-task <target-task>
 #   fm-task-handoff.sh retry-all
@@ -34,11 +34,9 @@
 # the delivered status is repaired by the next retry, which finds the same
 # handoff id in the inbox rather than writing a duplicate.
 #
-# Delegated v2 sources require a prepared action binding. Its immutable header
-# binds both goal/brief/execution identities and source delegation revision.
-# Delivery takes sorted, nonblocking task/meta locks under the command lock;
-# contention retains the pending record instead of holding one task for another.
-# After attempted, retry never enqueues: observe the exact original inbox receipt.
+# Delivery takes the target metadata/inbox lock under the command lock.
+# After an inbox record exists, retry never enqueues another copy: it observes
+# the exact stable handoff id and repairs only the delivery status.
 # Scope is deliberately local and textual. Recorded crewmate/scout task
 # selectors on every supported local runtime backend use the shared durable
 # inbox and backend doorbell. Historical persistent-home and remote-home
@@ -79,13 +77,9 @@ HANDOFF_ROOT="$STATE/task-handoffs"
 HANDOFF_RECORDS="$HANDOFF_ROOT/records"
 HANDOFF_STATUS="$HANDOFF_ROOT/status"
 HANDOFF_LOCK="$STATE/.fm-lease-command.lock"
-HANDOFF_ACTION_ID=
-HANDOFF_META_HELD=0
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
 
 usage() {
-  echo "usage: fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> [--action-id <prepared-id>] <text...> | retry <handoff-id> | retry-task <target-task> | retry-all | inspect <handoff-id>" >&2
+  echo "usage: fm-task-handoff.sh send <source-task> <target-task> --id <handoff-id> <text...> | retry <handoff-id> | retry-task <target-task> | retry-all | inspect <handoff-id>" >&2
   exit 2
 }
 
@@ -185,19 +179,12 @@ handoff_prepare_record_locked() {  # <id> <source> <target> <body>
     rm -f "$want" "$have"
     return 0
   fi
-  local binding=null
-  if [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$source/lifecycle.json" ]; then
-    binding=$(fm_task_lifecycle handoff-binding "$source" --target "$target" --action-id "$HANDOFF_ACTION_ID") || return 6
-  elif [ -n "$HANDOFF_ACTION_ID" ]; then
-    echo 'REFUSED: bound handoff source is unknown' >&2; return 6
-  fi
   tmp=$(umask 077; mktemp "$HANDOFF_RECORDS/.record.XXXXXX") || return 1
   {
     printf 'schema=%s\n' "$FM_TASK_HANDOFF_SCHEMA"
     printf 'id=%s\n' "$id"
     printf 'from=%s\n' "$source"
     printf 'target=%s\n' "$target"
-    [ "$binding" = null ] || printf 'lifecycle=%s\n' "$binding"
     printf 'created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf -- '--\n'
     printf '%s' "$body"
@@ -225,48 +212,7 @@ handoff_retryable_locked() {  # <id> <reason>
   return "$FM_LEASE_REFUSE_EXIT"
 }
 
-# These helpers execute inside this subshell; its lock flag is deliberately local.
-# shellcheck disable=SC2030,SC2031
-handoff_deliver_locked() (  # <id>; release short critical locks on every exit
-  local id=$1 record source target task lock binding
-  local -a locks=()
-  record=$(handoff_record_path "$id")
-  binding=$(handoff_record_field "$record" lifecycle 2>/dev/null || true)
-  if [ -z "$binding" ]; then
-    _handoff_deliver_locked "$id"
-    exit $?
-  fi
-  source=$(handoff_record_field "$record" from)
-  target=$(handoff_record_field "$record" target)
-  trap 'for lock in "${locks[@]}"; do fm_lock_release "$lock"; done' EXIT
-  for task in $(printf '%s\n%s\n' "$source" "$target" | LC_ALL=C sort -u); do
-    lock="$STATE/.fm-lease-task-$task.lock"
-    if ! fm_lock_try_acquire "$lock"; then
-      handoff_retryable_locked "$id" "task critical section is busy; immutable handoff retained"
-      exit $?
-    fi
-    locks+=("$lock")
-    if [ -e "$STATE/.short-operation-$task.json" ] || { fm_lease_live "$task" && [ "$FM_LEASE_ACTOR" != "$(fm_lease_actor)" ]; }; then
-      handoff_retryable_locked "$id" "task has another effect owner"
-      exit $?
-    fi
-  done
-  for task in $(printf '%s\n%s\n' "$source" "$target" | LC_ALL=C sort -u); do
-    lock=$(fm_meta_lock_path "$STATE/$task.meta") || exit 1
-    if ! fm_lock_try_acquire "$lock"; then
-      handoff_retryable_locked "$id" "task metadata is busy; immutable handoff retained"
-      exit $?
-    fi
-    locks+=("$lock")
-  done
-  HANDOFF_META_HELD=1
-  _handoff_deliver_locked "$id"
-)
-
-handoff_release_meta() {
-  # shellcheck disable=SC2031 # Called within the lock-owning subshell.
-  [ "$HANDOFF_META_HELD" = 1 ] || fm_lock_release "$1"
-}
+handoff_deliver_locked() { _handoff_deliver_locked "$1"; }
 
 _handoff_deliver_locked() {  # <id>
   local id=$1 record state source target body_file body actor meta kind remote backend endpoint meta_lock inbox_record write_rc=0 ring_rc=0
@@ -341,8 +287,7 @@ _handoff_deliver_locked() {  # <id>
       ;;
   esac
   meta_lock=$(fm_meta_lock_path "$meta") || return 1
-  # shellcheck disable=SC2031 # Called within the lock-owning subshell.
-  if [ "$HANDOFF_META_HELD" != 1 ] && ! fm_task_inbox_lock_acquire "$meta_lock"; then
+  if ! fm_task_inbox_lock_acquire "$meta_lock"; then
     handoff_retryable_locked "$id" "target '$target' metadata could not be locked for delivery validation"
     return $?
   fi
@@ -351,52 +296,14 @@ _handoff_deliver_locked() {  # <id>
     || [ "$(fm_backend_target_of_meta "$meta")" != "$endpoint" ] \
     || [ "$(fm_meta_get "$meta" kind)" = secondmate ] \
     || [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
-    handoff_release_meta "$meta_lock"
+    fm_lock_release "$meta_lock"
     handoff_reject_locked "$id" "target '$target' retired or changed route during delivery validation"
     return $?
   fi
-  # The original handoff remains durable on a semantic stop or uncertainty.
+  # The original handoff record and exact inbox id are the no-replay authority.
   # A delivered retry above is readback only, never another enqueue.
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  local binding bound_effect effect_rc
-  binding=$(handoff_record_field "$record" lifecycle 2>/dev/null || true)
-  if [ -n "$binding" ]; then
-    if ! fm_task_lifecycle_execution_guard "$target"; then
-      handoff_release_meta "$meta_lock"
-      handoff_retryable_locked "$id" "bound handoff requires identity/authority reconciliation or effect readback"
-      return $?
-    fi
-    effect_rc=0
-    bound_effect=$(fm_task_lifecycle handoff-effect "$source" --target "$target" --record "$record") || effect_rc=$?
-    if [ "$effect_rc" -eq 7 ]; then
-      handoff_release_meta "$meta_lock"
-      handoff_reject_locked "$id" "its exact bound source is terminal; no delivery occurred and the retained instruction must not be retried"
-      return $?
-    fi
-    if [ "$effect_rc" -ne 0 ]; then
-      handoff_release_meta "$meta_lock"
-      handoff_retryable_locked "$id" "bound handoff requires identity/authority reconciliation or effect readback"
-      return $?
-    fi
-    inbox_record=$(printf '%s' "$bound_effect" | jq -r '.readback // empty')
-    if [ -n "$inbox_record" ]; then
-      handoff_release_meta "$meta_lock"
-      handoff_write_state "$id" delivered '' "$inbox_record" || return 1
-      printf 'task handoff %s delivery recovered by readback at %s\n' "$id" "$inbox_record"
-      return 0
-    fi
-  elif [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$source/lifecycle.json" ] && [ "$(jq -r .schema "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$source/lifecycle.json")" = fm-task-lifecycle.v2 ]; then
-    handoff_release_meta "$meta_lock"
-    handoff_retryable_locked "$id" "legacy handoff cannot acquire a delegated task's authority"
-    return $?
-  elif ! fm_task_lifecycle_execution_guard "$source" || ! fm_task_lifecycle_execution_guard "$target"; then
-    handoff_release_meta "$meta_lock"
-    handoff_retryable_locked "$id" "semantic stop or uncertain effect requires main reconciliation"
-    return $?
-  fi
   inbox_record=$(fm_task_inbox_write_handoff "$STATE" "$target" "$body" "$id" "$(fm_meta_get "$meta" spawn_gen)") || write_rc=$?
-  handoff_release_meta "$meta_lock"
+  fm_lock_release "$meta_lock"
   if [ "$write_rc" -eq 2 ]; then
     handoff_reject_locked "$id" "target inbox already contains handoff id '$id' with a different instruction"
     return $?
@@ -473,11 +380,6 @@ case "$CMD" in
     [ "${1:-}" = --id ] && [ "$#" -ge 3 ] || usage
     ID=$2
     shift 2
-    if [ "${1:-}" = --action-id ]; then
-      [ $# -ge 3 ] || usage
-      HANDOFF_ACTION_ID=$2
-      shift 2
-    fi
     MESSAGE=$*
     handoff_valid_atom "$SOURCE" || usage
     handoff_valid_atom "$TARGET" || usage

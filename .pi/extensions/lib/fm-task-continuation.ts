@@ -16,16 +16,15 @@ type Reconciliation = { task_id: string; reason: string; key: string };
 type InputReceipt = { id: string; text: string; task?: string; answer?: string;
   update_brief?: boolean; pending?: boolean; route_entry_id?: string; source_entry_id?: string;
   brief_before_sha256?: string; brief_after_sha256?: string };
-type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; recovery?: boolean; reconciliation?: boolean }[];
+type Admission = { content: string; admissions: string[]; escalations: { id: string; task: string; reason: string; reconciliation: true }[];
   canNotify: () => boolean; canContinue: () => boolean };
-type InputPacing = { key: string; attempts: number; after: number; reserved?: string; escalatedAt?: number;
-  recoveryAttempts?: number; recoveryAfter?: number; recoveryReserved?: string };
+type InputPacing = { key: string; attempts: number; after: number; reserved?: string };
 const INPUT_ENTRY = "fm-continuation-input";
 const PACING_ENTRY = "fm-continuation-input-pacing";
 const MESSAGE = "fm-task-continuation";
 const ESCALATION = "fm-task-continuation-escalation";
 const INTERVAL_MS = 30_000;
-const ATTEMPTS = 2;
+const MAX_REMINDER_INTERVALS = 10;
 const BATCH = 8;
 const atom = (s: string) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(s);
 
@@ -74,11 +73,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     if (epoch !== generation || !owns()) throw new Error("continuation generation changed");
     if (result.status !== 0) throw new Error(result.stderr.trim() || "task continuation operation failed");
     return JSON.parse(result.stdout);
-  }
-
-  async function enroll(task: string) {
-    if (!atom(task)) throw new Error("invalid task identity");
-    return command(["enroll", task]);
   }
 
   // Outcome delivery never creates continuation state.  MAIN writes progress
@@ -204,11 +198,11 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
       if (!pace || pace.key !== item.key) pace = { key: item.key, attempts: 0, after: 0 };
       if (pace.reserved && delivered.has(pace.reserved)) {
         const at = delivered.get(pace.reserved)!;
-        pace.attempts = Math.min(ATTEMPTS, pace.attempts + 1);
-        pace.after = at + INTERVAL_MS * pace.attempts;
+        pace.attempts += 1;
+        pace.after = at + INTERVAL_MS * Math.min(pace.attempts, MAX_REMINDER_INTERVALS);
         pace.reserved = undefined;
       }
-      if (!pace.reserved && pace.attempts < ATTEMPTS && Date.now() >= pace.after) {
+      if (!pace.reserved && Date.now() >= pace.after) {
         pace.reserved = `n.${item.key}.${pace.attempts + 1}`;
       }
       if (pace.reserved && !submitted.has(pace.reserved) && !delivered.has(pace.reserved)) {
@@ -229,12 +223,6 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           lines.push(`${item.task_id}: ${item.reason}`);
           admissions.push(id);
         }
-      } else if (pace.attempts >= ATTEMPTS) {
-        const escalation = `e.${item.key}`;
-        if (!submitted.has(escalation) && !delivered.has(escalation)) {
-          escalations.push({ id: escalation, task: item.task_id,
-            reason: `two bounded branch continuations did not materially advance the recorded next step: ${item.reason}` });
-        }
       }
       pacing.set(paceId, pace);
       pi.appendEntry(PACING_ENTRY, { id: paceId, ...pace });
@@ -249,24 +237,21 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     }
   }
 
-  function escalationEntry(admission: Admission, includeRecovery = true) {
-    const items = admission.escalations.filter((item) => includeRecovery || !item.recovery);
+  function escalationEntry(admission: Admission) {
+    const items = admission.escalations;
     if (!items.length) return;
-    const lines = items.map(({ task, reason }) =>
-      `${task}: ${reason.startsWith("task progress read refused;") ? reason : `two automatic coordination requests produced no verified continuation: ${reason}`}.`);
+    const lines = items.map(({ task, reason }) => `${task}: ${reason}.`);
     return {
       type: "custom_message" as const, customType: ESCALATION, display: true,
       content: "Continuation needs executable main coordination:\n" + lines.join("\n") + "\n" +
-        (items.some((item) => item.recovery) ? "Persistent recovery: prior coordination returned without a verified next action. Perform the authorized next tool/handoff action now; another observation-only response leaves responsibility pending.\n" : "") +
-        (items.some((item) => item.reconciliation) ? "Task-record read refusals require explicit reconciliation; no receiver or execution state was inferred. " : "") +
-        (items.some((item) => !item.reconciliation) ? "Initial request budgets stay exhausted; later recovery is counted separately. " : "") +
+        "Task-record read refusals require explicit reconciliation; no receiver or execution state was inferred. " +
         "These tasks remain open. This is not completion or a task blocker. " +
         "Assign an authorized executor and verify receipt/start, reconcile a real dependency, or provide acceptance evidence. " +
-        "If an effect may already have happened, read it back before any retry. Unrelated input does not reset the budget.",
+        "If an effect may already have happened, read it back before any retry. Unrelated input does not close these tasks.",
       details: { admissions: items.map(({ id }) => id),
         task: items.length === 1 ? items[0].task : undefined,
         tasks: items.map(({ task }) => task), owner: "main",
-        kind: items.every((item) => item.reconciliation) ? "task-record-reconciliation" : "coordination-failure" },
+        kind: "task-record-reconciliation" },
     };
   }
 
@@ -364,7 +349,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     context = ctx;
     const admission = await check(ctx);
     if (admission && admission.canContinue()) {
-      const escalation = escalationEntry(admission, false);
+      const escalation = escalationEntry(admission);
       if (escalation) for (const id of escalation.details.admissions) submitted.add(id);
       for (const id of admission.admissions) submitted.add(id);
       return { entries: [...(escalation ? [escalation] : []), ...(admission.admissions.length ? [{ type: "custom_message" as const, customType: MESSAGE,
@@ -405,7 +390,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
   });
   // Authenticated intent updates require native-session provenance, so they
   // retain one separate purpose-specific tool. Discovery and history already
-  // remain available from fm-task-state.sh progress-list/lifecycle.
+  // remain available from fm-task-state.sh progress-list and the backlog.
   registerFirstmateTool(pi, {
     name: "fm_task_intent_update", label: "Update task intent",
     description: "Append one selected original user message to an existing task through the authenticated intent owner. This does not update progress, execute work, or accept the goal.",

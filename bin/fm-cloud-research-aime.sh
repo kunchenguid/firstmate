@@ -327,8 +327,6 @@ cmd_dispatch_locked() {
     [ "$meta_rc" -eq 2 ] && die "task metadata appeared during AIME preparation"
     die "cannot publish AIME task metadata"
   fi
-  fm_task_lifecycle_under_meta bind-execution "$id" --expected-generation "$AIME_PRIOR_GENERATION" >/dev/null \
-    || die 'AIME execution retained; goal binding needs reconciliation before any provider create'
   fm_aime_artifact_store "$id" probe "$probe" >/dev/null \
     || { rm -rf -- "$root"; die "cannot checkpoint AIME probe"; }
 
@@ -417,18 +415,10 @@ cmd_dispatch() {
     esac
   done
   [ -n "$instructions" ] || die "dispatch requires --instructions <private-file>"
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
   # shellcheck source=bin/fm-lease-lib.sh
   . "$SCRIPT_DIR/fm-lease-lib.sh"
   fm_lease_forbid_branch 'remote dispatch' || exit $?
   fm_lease_guard "$id" 'AIME dispatch' || exit $?
-  fm_task_lifecycle_execution_allowed "$id" || exit 1
-  AIME_PRIOR_GENERATION=
-  if [ -e "$DATA/$id/lifecycle.json" ] || [ -L "$DATA/$id/lifecycle.json" ]; then
-    AIME_PRIOR_GENERATION=$(fm_task_lifecycle read "$id" | jq -r '.execution_generation') || exit 1
-    [ "$AIME_PRIOR_GENERATION" = unassigned-g1 ] || die 'prior execution belongs to this task; adopt its original identity, never redispatch'
-  fi
   lock=$(fm_aime_task_lock_path "$id")
   fm_lock_acquire_wait "$lock" || die "cannot lock AIME task $id"
   trap 'fm_lock_release "$lock"; fm_lease_guard_release' EXIT
@@ -453,9 +443,6 @@ cmd_adopt_locked() {
   phase=$AIME_STATE_PHASE
   case "$phase" in
     create-not-started|created)
-      # shellcheck source=bin/fm-task-lifecycle-lib.sh
-      . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-      fm_task_lifecycle_execution_allowed "$id" || exit 1
       ;;
   esac
   case "$phase" in
@@ -761,12 +748,9 @@ cmd_retire() {
   local id=${1-} source lock report meta_lock
   [ "$#" -eq 1 ] || usage
   fm_aime_task_id_valid "$id" || die "invalid task id"
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  case "$(fm_task_lifecycle mode "$id")" in
-    accepted|archived|legacy) ;;
-    *) die 'AIME goal is unfinished or unknown; reconcile acceptance/archive before retirement' ;;
-  esac
+  # shellcheck source=bin/fm-task-progress-lib.sh
+  . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+  fm_task_progress_completion_guard "$id" || die 'AIME goal is unfinished; MAIN must clear the compact remaining gap before retirement'
   "$SCRIPT_DIR/fm-procevent-aime.sh" prepare-retire "$id" >/dev/null \
     || die "AIME task retirement preparation failed"
   lock=$(fm_aime_task_lock_path "$id")
@@ -777,7 +761,7 @@ cmd_retire() {
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"' EXIT
     fm_aime_state_load "$id" || die "AIME task state is missing or invalid"
-    case "$(fm_task_lifecycle mode "$id")" in accepted|archived|legacy) ;; *) die 'goal disposition changed before retirement' ;; esac
+    fm_task_progress_completion_guard "$id" || die 'compact goal changed before retirement'
     case "$AIME_STATE_PHASE" in
       terminal-success|terminal-failure) ;;
       *) die "AIME task is not safely terminal: phase=$AIME_STATE_PHASE" ;;

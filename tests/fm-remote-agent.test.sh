@@ -1521,18 +1521,6 @@ test_followup_identity_and_unknown_submission() {
   old_sha=$(shasum -a 256 "$home/data/$id/report.md" | cut -d' ' -f1)
   printf 'Read existing artifacts only; retain the original query identities. Supply the missing CSV link.\n' > "$home/data/$id/followup.txt"
   chmod 600 "$home/data/$id/followup.txt"
-  python3 - "$home" "$id" <<'PY'
-import json,hashlib,pathlib,sys
-h=pathlib.Path(sys.argv[1]);task=sys.argv[2];p=h/'data'/task
-d=json.loads((p/'lifecycle.json').read_text());d['assessment']['outcome']='Provider terminal; requested CSV still missing'
-d['assessment']['remaining_gap']='CSV link absent';payload=p/'followup.txt'
-d['next_action']={'id':task+'.g1.a1','kind':'remote-followup','phase':'prepared','expected_execution_generation':'remote-1',
-'payload_ref':str(payload),'payload_sha256':hashlib.sha256(payload.read_bytes()).hexdigest(),'receipt_ref':None,
-'attempts':0,'attempt_limit':1,'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'}
-d['next_action_seq']=2
-out=h/'next.json';out.write_text(json.dumps(d));out.chmod(0o600)
-PY
-  FM_HOME="$home" "$STATE_CMD" reconcile "$id" --expected-revision 1 --record "$home/next.json" >/dev/null || fail 'prepare remote goal action'
   local REMOTE_TASK_ID=80002
   if FM_IDA_FAKE_NO_FOLLOWUP=1 run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/unsupported.out" 2>&1; then fail 'unsupported continuation accepted'; fi
   assert_grep 'unsupported-continuation' "$home/unsupported.out" 'missing capability reason'
@@ -1557,22 +1545,17 @@ PY
   wait_phase "$home" "$id" terminal-success
   printf 'Read existing artifacts only\n' > "$home/data/$id/followup.txt"
   chmod 600 "$home/data/$id/followup.txt"
-  python3 - "$home" "$id" <<'PY'
-import json,hashlib,pathlib,sys
-h=pathlib.Path(sys.argv[1]);t=sys.argv[2];p=h/'data'/t;d=json.loads((p/'lifecycle.json').read_text());f=p/'followup.txt'
-d['next_action']={'id':t+'.g1.a1','kind':'remote-followup','phase':'prepared','expected_execution_generation':'remote-1',
-'payload_ref':str(f),'payload_sha256':hashlib.sha256(f.read_bytes()).hexdigest(),'receipt_ref':None,'attempts':0,'attempt_limit':1,
-'recheck_at':'2000-01-01T00:00:00Z','deadline':'2099-01-01T00:00:00Z'};d['next_action_seq']=2
-f=h/'next.json';f.write_text(json.dumps(d));f.chmod(0o600)
-PY
-  FM_HOME="$home" "$STATE_CMD" reconcile "$id" --expected-revision 1 --record "$home/next.json" >/dev/null || fail 'prepare unknown action'
   REMOTE_TASK_ID=80002
   FM_IDA_FAKE_MODE=timeout-created run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" >/dev/null 2>&1 || rc=$?
   [ "$rc" != 0 ] || fail 'lost response reported success'
   if run_ida "$home" "$fakebin" followup "$id" --action-id "$id.g1.a1" --expected-terminal-generation 1 --instructions "$home/data/$id/followup.txt" > "$home/replay" 2>&1; then fail 'ambiguous turn adopted by order'; fi
   [ "$(grep -c '^command:ida-region-sg-deep-research-create$' "$home/bytedcli.log")" = 2 ] || fail 'ambiguous followup was created twice'
   [ "$(phase_of "$home" "$id")" = submission-unknown ] || fail 'unknown submission lost'
-  FM_HOME="$home" "$STATE_CMD" lifecycle "$id" | jq -e '.disposition=="open" and .execution_generation=="remote-2" and .next_action.phase=="uncertain" and .next_action.expected_execution_generation=="remote-1"' >/dev/null || fail 'ambiguous submission lost supervised goal identity'
+  jq -e '.phase=="submission-unknown" and .generation==2 and
+    .provider_state.followup_action_id=="ida-followup-unknown.g1.a1" and
+    .provider_state.parent_generation==1 and .provider_state.submit_attempted==true' \
+    "$(state_file "$home" "$id")" >/dev/null || fail 'ambiguous submission lost its exact operation identity'
+  assert_absent "$home/data/$id/lifecycle.json" 'followup operation created rich lifecycle state'
   pass 'lost followup response remains unknown; replay performs reads only and never repeats create'
 }
 

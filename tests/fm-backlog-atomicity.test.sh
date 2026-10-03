@@ -41,7 +41,6 @@ command -v tasks-axi >/dev/null 2>&1 || {
   exit 0
 }
 
-python3 "$ROOT/tests/retirement-business.py" "$ROOT" "$TMP_ROOT/retirement-business" || exit $?
 
 # --- fixture ----------------------------------------------------------------
 
@@ -630,14 +629,25 @@ EOF
 }
 
 fixture_delivery() {  # <case-dir> <id> <data-dir> <generation> <delivery-url>
-  local case_dir=$1 id=$2 data=$3 generation=$4 url=$5 facts
-  facts=$(jq -cn --arg url "$url" \
-    '{url:$url,head:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}') \
-    || fail 'cannot prepare fixture delivery receipt'
+  local case_dir=$1 id=$2 data=$3 generation=$4 url=$5
   FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" \
-    python3 "$ROOT/bin/fm-task-lifecycle.py" owner-receipt "$id" \
-      --kind merge --execution-generation "$generation" \
-      --facts "$facts" >/dev/null || fail 'fixture delivery receipt failed'
+    FM_STATE_OVERRIDE="$(home_of "$case_dir")/state" bash -c \
+      '. "$1"; fm_merge_receipt_record "$2" "$3" "$4" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' \
+      fixture "$ROOT/bin/fm-merge-receipt-lib.sh" "$id" "$generation" "$url" >/dev/null \
+      || fail 'fixture delivery receipt failed'
+}
+
+fixture_accept_progress() { # <case-dir> <id> <data-dir>
+  local case_dir=$1 id=$2 data=$3 current token
+  current=$(FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" \
+    FM_STATE_OVERRIDE="$(home_of "$case_dir")/state" \
+    "$ROOT/bin/fm-task-state.sh" progress "$id") || fail 'fixture progress read failed'
+  token=$(printf '%s' "$current" | jq -r .record_token)
+  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" \
+    FM_STATE_OVERRIDE="$(home_of "$case_dir")/state" \
+    "$ROOT/bin/fm-task-state.sh" update-progress "$id" --expected-token "$token" --progress \
+      '{"acceptance":"The fixture completion behavior is verified","current_state":"The synthetic task result is accepted","remaining_gap":"","next_step":""}' \
+      >/dev/null || fail 'fixture acceptance failed'
 }
 
 run_spawn() {  # <case-dir> <args...>
@@ -879,7 +889,7 @@ test_a_leftover_markdown_symlink_does_not_brick_a_beads_home() {
 }
 
 test_completion_omits_the_file_for_a_beads_done() {
-  local case_dir home id out
+  local case_dir home id out body
   id=atomic-completion-beads-b1
   case_dir=$(make_home completion-beads "$id")
   home=$(home_of "$case_dir")
@@ -889,14 +899,26 @@ test_completion_omits_the_file_for_a_beads_done() {
   # row probe, and the close must all address the configured backend without
   # requiring or overriding a markdown file.
   rm -f "$home/data/backlog.md"
+  body="$case_dir/beads-body"
+  printf '%s\n' 'Complete the Beads cleanup fixture.' > "$body"
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
 case "\${1:-}" in
   --version) printf '%s\n' '0.2.5' ;;
   update)
-    [ "\${2:-}" = --help ] || exit 1
-    printf '%s\n' '--archive-body'
+    if [ "\${2:-}" = --help ]; then
+      printf '%s\n' '--archive-body'
+    else
+      [ "\${2:-}" = "$id" ] || exit 1
+      shift 2
+      while [ "\$#" -gt 0 ]; do
+        case "\$1" in
+          --body-file) cp "\$2" "$body"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+    fi
     ;;
   mv)
     [ "\${2:-}" = --help ] || exit 1
@@ -912,7 +934,9 @@ case "\${1:-}" in
     esac
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
+    printf '%s\n' '  title: Beads completion task'
     printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '  body: %s\n' "\$(jq -Rs . "$body")"
     ;;
   done)
     [ "\${2:-}" = "$id" ] || exit 1
@@ -928,7 +952,10 @@ case "\${1:-}" in
 esac
 SH
   chmod +x "$case_dir/fakebin/tasks-axi"
-  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-beads-done"
+  write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-beads-done" \
+    "pr=local:fixture" "pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  PATH="$case_dir/fakebin:$PATH" fixture_accept_progress "$case_dir" "$id" "$home/data"
+  fixture_delivery "$case_dir" "$id" "$home/data" spawn-beads-done local:fixture
 
   out=$(run_teardown "$case_dir" "$id") \
     || fail "Beads completion teardown failed without a markdown backlog: $out"
@@ -1131,15 +1158,11 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
     || fail "immediate-child absolute dispatch mutated a different backlog"
   # This case tests path addressing after a real dispatch. Keep its execution
   # generation and explicitly accept the fixture before testing completion.
-  local generation assessment
+  local generation
   generation=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")
   rm -f "$(home_of "$case_dir")/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=$generation"
-  assessment="$case_dir/accepted.json"
-  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$data/$id/lifecycle.json" > "$assessment"
-  chmod 600 "$assessment"
-  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
-    reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_accept_progress "$case_dir" "$id" "$data"
   fixture_delivery "$case_dir" "$id" "$data" "$generation" 'local:/fixture#main'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
@@ -1167,15 +1190,11 @@ test_bare_relative_data_dispatches_and_completes() {
     || fail "bare relative dispatch mutated a different backlog"
   # This case tests path addressing after a real dispatch. Keep its execution
   # generation and explicitly accept the fixture before testing completion.
-  local generation assessment
+  local generation
   generation=$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")
   rm -f "$(home_of "$case_dir")/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=$generation"
-  assessment="$case_dir/accepted.json"
-  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$data/$id/lifecycle.json" > "$assessment"
-  chmod 600 "$assessment"
-  FM_HOME="$(home_of "$case_dir")" FM_DATA_OVERRIDE="$data" "$ROOT/bin/fm-task-state.sh" \
-    reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_accept_progress "$case_dir" "$id" "$data"
   fixture_delivery "$case_dir" "$id" "$data" "$generation" 'local:/fixture#main'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_teardown "$case_dir" "$id") \
@@ -1433,29 +1452,6 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "launch delivery failed after committing backlog state $(row_state "$case_dir" "$id")"
   pass "dispatch commits neither record nor backlog state before launch delivery succeeds"
-}
-
-test_failed_launch_delivery_does_not_confirm_goal_action() {
-  local case_dir id home candidate out rc=0
-  id=atomic-dispatch-action-delivery-fails
-  case_dir=$(make_home dispatch-action-delivery-fails "$id")
-  home=$(home_of "$case_dir")
-  add_item "$case_dir" "$id"
-  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
-  candidate="$case_dir/action.json"
-  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | jq \
-    '.next_action={id:"atomic-dispatch-action-delivery-fails.g1.a1",kind:"spawn",phase:"prepared",expected_execution_generation:"unassigned-g1",payload_ref:.assessment.evidence[0].ref,payload_sha256:.assessment.evidence[0].sha256,receipt_ref:null,attempts:0,attempt_limit:1,recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z"} | .next_action_seq=2' > "$candidate"
-  chmod 600 "$candidate"
-  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
-  break_launch_delivery "$case_dir"
-
-  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
-    --action-id "$id.g1.a1" --expected-generation unassigned-g1) || rc=$?
-  [ "$rc" -ne 0 ] || fail "spawn reported success though action launch delivery failed"
-  jq -e '.execution_generation=="unassigned-g1" and .next_action.phase=="attempted" and .next_action.attempts==1' \
-    "$home/data/$id/lifecycle.json" >/dev/null \
-    || fail "failed launch delivery was recorded as a confirmed new execution"
-  pass "failed launch delivery retains an attempted action and never confirms a new execution"
 }
 
 test_dispatch_defers_interruption_across_backlog_commit() {
@@ -1871,10 +1867,7 @@ test_completed_cleanup_bookkeeping_retry_preserves_resources() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   out=$(run_ship_spawn "$case_dir" "$id") || fail "spawn failed: $out"
-  local assessment="$case_dir/accepted.json"
-  jq '.disposition="accepted" | .assessment.remaining_gap=""' "$home/data/$id/lifecycle.json" > "$assessment"
-  chmod 600 "$assessment"
-  FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$assessment" >/dev/null || fail 'fixture acceptance failed'
+  fixture_accept_progress "$case_dir" "$id" "$home/data"
   printf 'preserve completed local changes\n' > "$case_dir/wt/retained.txt"
   printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$home/state/$id.meta"
   fixture_delivery "$case_dir" "$id" "$home/data" \
@@ -2928,14 +2921,17 @@ EOF
   out=$(run_ship_spawn "$case_dir" "$id") || fail "no-backlog spawn failed: $out"
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog spawn did not publish its task record"
-  fm_test_archive_goal "$(home_of "$case_dir")" "$id"
+  printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$(home_of "$case_dir")/state/$id.meta"
+  fixture_delivery "$case_dir" "$id" "$(home_of "$case_dir")/data" \
+    "$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")" \
+    'https://github.com/example/firstmate/pull/42'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") || fail "no-backlog teardown failed: $out"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "no-backlog teardown retained its task record"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "no-backlog teardown recorded a close marker"
-  pass "a home with no backlog remains exempt from lifecycle transitions"
+  pass "a home with no backlog remains exempt from ordinary progress transitions"
 }
 
 test_spawn_refuses_a_special_file_tasks_config() {
@@ -3055,6 +3051,8 @@ test_dispatch_and_completion_are_structural() {
   meta="$home/state/$id.meta"
   printf 'pr=%s\n' "$pr" >> "$meta"
   fm_test_archive_goal "$home" "$id"
+  fixture_delivery "$case_dir" "$id" "$home/data" \
+    "$(sed -n 's/^spawn_gen=//p' "$meta")" "$pr"
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "structural teardown failed: $out"
@@ -3079,16 +3077,19 @@ test_unlanded_copy_is_retained_while_completed_cleanup_finishes() {
   git -C "$case_dir/wt" -c user.name=fmtest -c user.email=fmtest@example.invalid \
     commit -q -m "unlanded fixture work"
   fm_test_archive_goal "$home" "$id"
+  printf 'pr=https://github.com/example/firstmate/pull/15\n' >> "$home/state/$id.meta"
+  fixture_delivery "$case_dir" "$id" "$home/data" \
+    "$(sed -n 's/^spawn_gen=//p' "$home/state/$id.meta")" \
+    'https://github.com/example/firstmate/pull/15'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(run_teardown "$case_dir" "$id") \
     || fail "completed cleanup was blocked by unlanded work: $out"
 
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "completed cleanup reopened an explicitly archived goal"
-  jq -e '.disposition=="archived"' "$home/data/$id/lifecycle.json" >/dev/null \
-    || fail 'completed cleanup changed explicit archive'
-  jq -e '.owner_receipts.cleanup[-1].facts.copyDisposition=="retained-unlanded"' \
-    "$home/data/$id/lifecycle.json" >/dev/null || fail 'completed cleanup lost the retained-unlanded disposition'
+  jq -e '.completion.facts.copyDisposition=="retained-unlanded"' \
+    "$home/state/$id.cleanup.json" >/dev/null || fail 'completed cleanup lost the retained-unlanded disposition'
+  assert_absent "$home/data/$id/lifecycle.json" 'completed cleanup created rich lifecycle state'
   assert_present "$case_dir/wt/unlanded.txt" 'completed cleanup discarded unlanded content'
   assert_absent "$home/state/$id.meta" \
     "completed cleanup retained the retired task record"
@@ -3124,7 +3125,10 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
     || fail "manual-backend spawn failed: $out"
   assert_contains "$out" "spawned $id" "manual-backend spawn did not report success"
 
-  FM_DATA_OVERRIDE="$data" fm_test_archive_goal "$(home_of "$case_dir")" "$id"
+  printf 'pr=https://github.com/example/firstmate/pull/42\n' >> "$(home_of "$case_dir")/state/$id.meta"
+  fixture_delivery "$case_dir" "$id" "$data" \
+    "$(sed -n 's/^spawn_gen=//p' "$(home_of "$case_dir")/state/$id.meta")" \
+    'https://github.com/example/firstmate/pull/42'
   fixture_closed_endpoint "$case_dir" "$id"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "manual-backend teardown failed: $out"
@@ -3142,7 +3146,6 @@ if [ "${FM_BACKLOG_ENROLLED_ONLY:-0}" = 1 ]; then
   test_immediate_child_absolute_data_dispatches_and_completes
   test_bare_relative_data_dispatches_and_completes
   test_completed_cleanup_bookkeeping_retry_preserves_resources
-  test_failed_launch_delivery_does_not_confirm_goal_action
   test_home_without_a_backlog_dispatches_and_completes
   test_dispatch_and_completion_are_structural
   test_unlanded_copy_is_retained_while_completed_cleanup_finishes
@@ -3179,7 +3182,6 @@ test_dispatch_preserves_record_when_postlaunch_transition_fails
 test_dispatch_preserves_record_despite_removal_failure
 test_dispatch_preserves_busy_despite_removal_failure
 test_dispatch_rolls_back_before_a_failed_launch_delivery
-test_failed_launch_delivery_does_not_confirm_goal_action
 test_dispatch_defers_interruption_across_backlog_commit
 test_deferred_signal_reads_back_preserved_state
 test_deferred_signal_never_claims_unverified_preservation

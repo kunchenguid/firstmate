@@ -1435,7 +1435,6 @@ test_local_executor_wrappers_delegate_unchanged() {
   mkdir -p "$root/bin" "$root/home/state"
   cp "$ROOT/bin/fm-task-dispatch.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-state.sh" "$root/bin/"
-  cp "$ROOT/bin/fm-task-lifecycle-lib.sh" "$root/bin/"
   cp "$ROOT/bin/fm-task-retire.sh" "$root/bin/"
   cat >"$root/bin/fm-spawn.sh" <<'SH'
 #!/usr/bin/env bash

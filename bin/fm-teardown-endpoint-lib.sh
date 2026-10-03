@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Endpoint phase owned by fm-teardown.sh, under its lease/control/meta locks.
-# state/<id>.cleanup.json is the sole cleanup receipt: v1 task/spawn/goal
+# state/<id>.cleanup.json is the sole cleanup receipt: v1 task/spawn
 # binding, exact launch journal hash, and independent phase postconditions.
 # No operation in this file returns a directory, releases a slot, resets git,
 # traverses/kills processes by path, removes task metadata, or closes a whole
@@ -11,12 +11,15 @@
 # Narrow replay hook for the existing backlog-close owner, which already
 # validated the task generation under its metadata lock. No endpoint calls.
 fm_teardown_cleanup_record_closed() {
-  local STATE=$1 ID=$2 DATA=$3 lifecycle ENDPOINT_GENERATION ENDPOINT_GOAL ENDPOINT_RECEIPT
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-task-lifecycle-lib.sh"
-  lifecycle=$(fm_task_lifecycle read "$ID") || return 1
-  ENDPOINT_GENERATION=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
-  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  local STATE=$1 ID=$2 DATA=$3 ENDPOINT_GENERATION ENDPOINT_RECEIPT meta="$2"
+  # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-cleanup-receipt-lib.sh"
+  meta="$STATE/$ID.meta"
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    ENDPOINT_GENERATION=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  else
+    ENDPOINT_GENERATION=$(jq -er '.spawn_gen' "$STATE/$ID.cleanup.json") || return 1
+  fi
   ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
   teardown_endpoint_receipt record_close confirmed backlog-paired-resource-record-retained
 }
@@ -25,12 +28,12 @@ teardown_endpoint_receipt() { # <phase> <pending|confirmed|retained> <reason>
   local phase=$1 status=$2 reason=$3 tmp
   tmp=$(umask 077; mktemp "$STATE/.${ID}.cleanup.XXXXXX") || return 1
   if [ -e "$ENDPOINT_RECEIPT" ] || [ -L "$ENDPOINT_RECEIPT" ]; then
-    if ! fm_task_lifecycle cleanup-read "$ID" > "$tmp"; then
+    if ! fm_cleanup_receipt read "$ID" "$ENDPOINT_GENERATION" > "$tmp"; then
       rm -f "$tmp"; return 1
     fi
   else
-    jq -n --arg id "$ID" --arg generation "$ENDPOINT_GENERATION" --argjson goal "$ENDPOINT_GOAL" \
-      '{schema:"fm-task-cleanup.v1",task_id:$id,spawn_gen:$generation,goal_revision:$goal,phases:{}}' > "$tmp"
+    jq -n --arg id "$ID" --arg generation "$ENDPOINT_GENERATION" \
+      '{schema:"fm-task-cleanup.v1",task_id:$id,spawn_gen:$generation,phases:{}}' > "$tmp"
   fi
   if jq -e --arg phase "$phase" --arg status "$status" --arg reason "$reason" \
       '.phases[$phase].state==$status and .phases[$phase].reason_code==$reason' "$tmp" >/dev/null; then
@@ -41,7 +44,6 @@ teardown_endpoint_receipt() { # <phase> <pending|confirmed|retained> <reason>
     '.phases[$phase]={state:$status,reason_code:$reason}' "$tmp") || { rm -f "$tmp"; return 1; }
   printf '%s\n' "$updated" > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$ENDPOINT_RECEIPT" || return 1
-  fm_task_lifecycle link-cleanup "$ID" >/dev/null
 }
 
 teardown_endpoint_refuse() { # <phase> <reason>
@@ -111,7 +113,7 @@ teardown_endpoint_identity() {
       ENDPOINT_IDENTITY_REASON=duplicate-endpoint-claim; return 1
     fi
   done
-  [ "$(fm_task_lifecycle cleanup-binding "$ID")" = "$ENDPOINT_JOURNAL_HASH" ] || return 1
+  [ "$(fm_cleanup_receipt binding "$ID" "$ENDPOINT_GENERATION")" = "$ENDPOINT_JOURNAL_HASH" ] || return 1
   [ "$(fm_backend_herdr_session_instance "$ENDPOINT_SESSION")" = "$ENDPOINT_INSTANCE" ] || return 1
   teardown_endpoint_process_identity
 }
@@ -144,21 +146,16 @@ teardown_endpoint_capture_current_identity() {
 }
 
 teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata intact
-  local expected=$1 lifecycle journal lock before after before_ws after_ws siblings focus agent pane_status legacy_structural=0
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  lifecycle=$(fm_task_lifecycle read "$ID") || return 1
-  printf '%s' "$lifecycle" | jq -e '.disposition=="accepted" or .disposition=="archived"' >/dev/null || {
-    echo 'REFUSED: endpoint cleanup requires semantic acceptance or explicit archive' >&2; return 1;
-  }
-  ENDPOINT_GENERATION=$(printf '%s' "$lifecycle" | jq -r '.execution_generation')
-  ENDPOINT_GOAL=$(printf '%s' "$lifecycle" | jq -r '.goal_revision')
+  local expected=$1 journal lock before after before_ws after_ws siblings focus agent pane_status legacy_structural=0
+  # shellcheck source=bin/fm-cleanup-receipt-lib.sh
+  . "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
+  ENDPOINT_GENERATION=$expected
+  fm_cleanup_completion_guard "$ID" "$ENDPOINT_GENERATION" || return $?
   [ -n "$expected" ] && [ "$expected" = "$ENDPOINT_GENERATION" ] && \
     [ "$(fm_meta_get "$META" spawn_gen)" = "$expected" ] || return 1
   ENDPOINT_RECEIPT="$STATE/$ID.cleanup.json"
   teardown_endpoint_directory_observation || return 1
   teardown_endpoint_receipt record_close retained endpoint-only-keeps-records || return 1
-  fm_task_lifecycle link-cleanup "$ID" >/dev/null || return 1
   [ "$(fm_meta_get "$META" kind)" != secondmate ] || { teardown_endpoint_refuse pane_close unsupported-secondmate; return 1; }
   [ "$(fm_meta_get "$META" backend)" = herdr ] || { teardown_endpoint_refuse pane_close unsupported-backend; return 1; }
   fm_backend_validate_task_endpoint "$META" "$ID" || { teardown_endpoint_refuse pane_close metadata-identity-invalid; return 1; }
@@ -178,7 +175,7 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
   else
     # v1 journals are non-authoritative correlators. Use only the exact endpoint
     # already validated from this task's meta, then independently bind it to the
-    # lifecycle generation and the continuously owned Herdr session.
+    # executor generation and the continuously owned Herdr session.
     ENDPOINT_SESSION=$(fm_backend_meta_exact_value "$META" herdr_session) || {
       teardown_endpoint_refuse pane_close historical-endpoint-identity-missing; return 1;
     }
@@ -217,14 +214,13 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
     }
     legacy_structural=1
   fi
-  ENDPOINT_JOURNAL_HASH=$(fm_task_lifecycle cleanup-binding "$ID") || {
+  ENDPOINT_JOURNAL_HASH=$(fm_cleanup_receipt binding "$ID" "$ENDPOINT_GENERATION") || {
     teardown_endpoint_refuse pane_close launch-binding-changed; return 1;
   }
   local binding_tmp
   binding_tmp=$(umask 077; mktemp "$STATE/.${ID}.cleanup-binding.XXXXXX") || return 1
   jq --arg sha "$ENDPOINT_JOURNAL_HASH" '.journal_sha256=$sha' "$ENDPOINT_RECEIPT" > "$binding_tmp" \
     && mv -f "$binding_tmp" "$ENDPOINT_RECEIPT" || return 1
-  fm_task_lifecycle link-cleanup "$ID" >/dev/null || return 1
   [ "$FM_BACKEND_VALIDATED_TARGET" = "$ENDPOINT_SESSION:$ENDPOINT_PANE" ] || {
     teardown_endpoint_refuse pane_close endpoint-binding-mismatch; return 1;
   }
@@ -240,7 +236,7 @@ teardown_endpoint_phase() { # <expected-spawn-gen>; leaves durable metadata inta
   pane_status=$(fm_backend_herdr_pane_presence_state "$ENDPOINT_SESSION" "$ENDPOINT_PANE")
   case "$pane_status" in
     dead)
-      if ! fm_task_lifecycle cleanup-read "$ID" | jq -e '.phases.agent_exit.state=="confirmed"' >/dev/null; then
+      if ! fm_cleanup_receipt read "$ID" "$ENDPOINT_GENERATION" | jq -e '.phases.agent_exit.state=="confirmed"' >/dev/null; then
         teardown_endpoint_receipt agent_exit retained agent-state-unknown || return 1
       fi
       teardown_endpoint_receipt pane_close confirmed already-absent || return 1

@@ -53,7 +53,8 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=no-mistakes" \
+    "spawn_gen=merge-g1"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -508,10 +509,7 @@ test_verified_merge_records_pr_and_head() {
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
   : > "$case_dir/gh-axi.log"
   mkdir -p "$case_dir/home/data/task-x1"
-  printf 'spawn_gen=lifecycle-merge-g1\n' >> "$case_dir/state/task-x1.meta"
   printf 'Verify the requested behavior after merge.\n' > "$case_dir/home/data/task-x1/brief.md"
-  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-task-state.sh" enroll task-x1 >/dev/null || fail "merge lifecycle enrollment failed"
 
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
@@ -525,8 +523,9 @@ test_verified_merge_records_pr_and_head() {
   assert_grep 'pr_head=deadbeefcafefeed0000000000000000deadbeef' "$case_dir/state/task-x1.meta" \
     "records-before-merge: pr_head= was not recorded"
   assert_logged_gh_merge "$case_dir" 9 example/repo --squash
-  jq -e '.disposition == "open" and .owner_receipts.merge[-1].facts.head == "deadbeefcafefeed0000000000000000deadbeef"' \
-    "$case_dir/home/data/task-x1/lifecycle.json" >/dev/null || fail "forge receipt missing or auto-accepted the goal"
+  jq -e '.schema == "fm-merge-receipt.v1" and .execution_generation == "merge-g1" and .head == "deadbeefcafefeed0000000000000000deadbeef"' \
+    "$case_dir/state/task-x1.merge-receipts.jsonl" >/dev/null || fail "forge receipt missing or malformed"
+  assert_absent "$case_dir/home/data/task-x1/lifecycle.json" "forge merge created rich goal state"
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
 }
 
@@ -2310,6 +2309,7 @@ test_distinct_merged_prs_keep_distinct_wakes() {
   grep -vE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
     > "$case_dir/state/task-x1.meta.rebind"
   mv "$case_dir/state/task-x1.meta.rebind" "$case_dir/state/task-x1.meta"
+  sed -i 's/^spawn_gen=.*/spawn_gen=merge-g2/' "$case_dir/state/task-x1.meta"
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$second_url" \
     >"$case_dir/stdout-2" 2>"$case_dir/stderr-2" \
     || fail "distinct-merge-wakes: second merge failed"

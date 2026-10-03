@@ -156,8 +156,8 @@ mkdir -p "$STATE"
 # (inbox_steer_check below).
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
-# shellcheck source=bin/fm-task-lifecycle-lib.sh
-. "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
+# shellcheck source=bin/fm-cleanup-receipt-lib.sh
+. "$SCRIPT_DIR/fm-cleanup-receipt-lib.sh"
 # The away-posture record (state/.afk-contract) is the posture in both the
 # attended and the afk session; bin/fm-afk-contract.sh owns its schema and this
 # watcher reads only its presence (afk_record_present below).
@@ -352,6 +352,21 @@ window_label() {
   local w=$1 task
   task=$(window_to_task "$w" "$STATE")
   [ -n "$task" ] && printf 'fm-%s' "$task"
+}
+
+# A MAIN-accepted compact task or explicit current/archive disposition is
+# terminal business state even when its endpoint and metadata remain available
+# for safe cleanup. The cleanup owner also supplies the narrow read-only
+# compatibility check for a historical terminal/archive fact, but never lets it
+# override a current original-task row.
+task_business_terminal() {  # <task>
+  local task=$1 meta generation
+  [ -n "$task" ] || return 1
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  generation=$(sed -n 's/^spawn_gen=//p' "$meta" | tail -1)
+  [ -n "$generation" ] || return 1
+  FM_STATE_OVERRIDE="$STATE" fm_cleanup_completion_guard "$task" "$generation" >/dev/null 2>&1
 }
 
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
@@ -1946,10 +1961,10 @@ EOF
   while IFS= read -r w; do
     task=$(window_to_task "$w" "$STATE")
     # Status/result publication above remains active for stopped tasks. Only
-    # execution liveness and re-ringing are excluded by the shared reader.
-    if [ -n "$task" ]; then
-      lifecycle_mode=$(fm_task_lifecycle mode "$task" 2>/dev/null) || lifecycle_mode=unknown
-      case "$lifecycle_mode" in open|legacy) ;; *) continue ;; esac
+    # execution liveness and re-ringing stop after the business disposition
+    # owner proves this original task terminal.
+    if task_business_terminal "$task"; then
+      continue
     fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.

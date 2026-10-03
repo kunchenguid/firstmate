@@ -176,17 +176,6 @@ cmd_dispatch() {
     esac
   done
   [ -n "$instructions" ] || die "dispatch requires --instructions <private-file>"
-  # A removed execution record does not erase a previously submitted query.
-  # Reopening the business goal cannot silently turn into a fresh create.
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  fm_task_lifecycle_execution_allowed "$id" || exit 1
-  local prior_goal prior_generation=''
-  if [ -e "$DATA/$id/lifecycle.json" ] || [ -L "$DATA/$id/lifecycle.json" ]; then
-    prior_goal=$(fm_task_lifecycle read "$id") || exit 1
-    prior_generation=$(printf '%s' "$prior_goal" | jq -r '.execution_generation')
-    [ "$prior_generation" = unassigned-g1 ] || die 'prior remote execution belongs to this task; recover its identity or use an explicitly authorized new task, never redispatch'
-  fi
   [ -f "$DATA/$id/brief.md" ] && [ ! -L "$DATA/$id/brief.md" ] || die "ordinary Firstmate brief is missing or unsafe: data/$id/brief.md"
   fm_remote_instruction_validate "$id" "$instructions" || exit 1
   fm_ida_config_load || die "iDA remote agent is disabled: config is missing or invalid"
@@ -211,7 +200,6 @@ cmd_dispatch() {
     die "cannot publish iDA task metadata"
   fi
   fm_lock_release "$lock"; trap - EXIT
-  fm_task_lifecycle_mutate bind-execution "$id" --expected-generation "$prior_generation" >/dev/null || die 'iDA record retained; goal initialization needs reconciliation before arming'
   "$SCRIPT_DIR/fm-procevent-ida.sh" arm "$id" >/dev/null || die "iDA task was recorded but its process-event source could not be armed; use adopt"
   "$SCRIPT_DIR/fm-procevent.sh" reconcile >/dev/null || die "iDA task was recorded but process-event reconciliation failed; use adopt"
   printf 'submitted: %s provider=ida session-marker=%s\n' "$id" "$marker"
@@ -238,8 +226,6 @@ cmd_followup() (
   fm_ida_config_load && [ "$IDA_CONFIG_ENABLED" = true ] || die 'iDA continuation is disabled'
   # shellcheck source=bin/fm-lease-lib.sh
   . "$SCRIPT_DIR/fm-lease-lib.sh"
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
   fm_lease_guard "$id" 'iDA followup' || exit $?
   meta_lock=$(fm_meta_lock_path "$STATE/$id.meta") || exit 1
   lock=$(fm_remote_task_lock_path "$id") || exit 1
@@ -256,8 +242,6 @@ cmd_followup() (
   if [ "$current_action" = "$action" ]; then
     [ "$sha" = "$REMOTE_STATE_INSTRUCTION_SHA256" ] && \
       [ "$(jq -r '.provider_state.parent_generation' "$REMOTE_STATE_FILE")" = "$expected" ] || die 'followup action collision'
-    fm_task_lifecycle bind-execution "$id" --expected-generation "remote-$expected" --action-id "$action" --phase uncertain >/dev/null \
-      || die 'prepared provider generation requires reconciliation; no create repeated'
     session=$IDA_STATE_SESSION_ID
     task=$IDA_STATE_TASK_ID
     if [ -z "$task" ]; then
@@ -278,9 +262,6 @@ cmd_followup() (
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure) ;; *) die 'followup requires the expected terminal execution; cancellation is not restart authority' ;; esac
     session=$IDA_STATE_SESSION_ID; parent_task=$IDA_STATE_TASK_ID
     [ -n "$session" ] && [ -n "$parent_task" ] || die 'original session/turn identity missing'
-    fm_task_lifecycle_execution_allowed "$id" || exit 1
-    record=$(fm_task_lifecycle read "$id") || exit 1
-    [ "$(printf '%s' "$record" | jq -r '.next_action.phase')" = prepared ] || die 'followup action already attempted; reconcile without creating'
     fm_run_timed 30 "$SCRIPT_DIR/fm-bytedcli-mcp-call.sh" capabilities-followup > "$root/capabilities" 2> "$root/error" || die 'unsupported-continuation: official same-session create/list/get capability unavailable'
     fm_run_bash_timeout 30 fm_ida_run_bytedcli --json --as user ida --region sg deep-research list --session-id "$session" > "$root/baseline" 2> "$root/error" || die 'cannot establish original turn baseline'
     fm_ida_structured_success "$root/baseline" || die 'turn baseline unavailable'
@@ -303,11 +284,7 @@ cmd_followup() (
       --argjson baseline "$baseline" --arg report "$preserved_report" \
       '.provider_state + {parent_generation:$parent,parent_task_id:.provider_state.task_id,parent_report_ref:$report,
         followup_action_id:$action,session_marker:$marker,task_id:null,baseline_task_ids:$baseline,submit_attempted:true}' "$REMOTE_STATE_FILE")
-    fm_task_lifecycle authorize "$id" --action-id "$action" --kind remote-followup \
-      --expected-generation "remote-$expected" < "$instructions" >/dev/null || exit 1
     fm_remote_state_begin_followup "$id" "$expected" "$instructions" "$sha" "$provider" || die 'cannot checkpoint followup; no provider create issued'
-    fm_task_lifecycle bind-execution "$id" --expected-generation "remote-$expected" --action-id "$action" --phase uncertain >/dev/null \
-      || die 'prepared provider generation retained; no create issued'
     jq -n --rawfile content "$instructions" --arg name "$marker" --arg session "$session" \
       '{content:$content,name:$name,timeoutMs:"30000",sessionId:$session}' > "$root/arguments"
     chmod 600 "$root/arguments"
@@ -325,13 +302,7 @@ cmd_followup() (
   if [ "$IDA_STATE_TASK_ID" != "$task" ]; then
     fm_remote_state_transition "$id" submitted '' '' followup-identity-confirmed not-armed '' '' '' "$provider" || exit 1
   fi
-  old_generation="remote-$expected"
-  fm_task_lifecycle bind-execution "$id" --expected-generation "$old_generation" --action-id "$action" >/dev/null || die 'provider turn identified; lifecycle binding pending, replay the same action'
   fm_lock_release "$lock"; fm_lock_release "$meta_lock"; fm_lease_guard_release
-  if ! fm_task_lifecycle_execution_allowed "$id" >/dev/null 2>&1; then
-    printf 'followup identity retained: %s; terminal business disposition leaves waiter stopped\n' "$id"
-    return 0
-  fi
   case "$REMOTE_STATE_PHASE" in
     terminal-success|terminal-failure|terminal-cancelled) ;;
     *) "$SCRIPT_DIR/fm-procevent-ida.sh" arm "$id" >/dev/null || die 'turn identity retained; waiter arming pending, replay same action' ;;
@@ -605,17 +576,14 @@ cmd_retire() {
     # Same order as continuation: lease, metadata, provider state.
     # shellcheck source=bin/fm-lease-lib.sh
     . "$SCRIPT_DIR/fm-lease-lib.sh"
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
     fm_lease_guard "$id" 'iDA retirement' || exit $?
     meta_lock=$(fm_meta_lock_path "$STATE/$id.meta") || die "cannot resolve task meta lock"
     trap 'fm_lock_release "$meta_lock"; fm_lock_release "$lock"; fm_lease_guard_release' EXIT
     fm_lock_acquire_wait "$meta_lock" || die "cannot lock task metadata"
     fm_lock_acquire_wait "$lock" || die "cannot lock iDA task"
-    case "$(fm_task_lifecycle mode "$id")" in
-      accepted|archived|legacy) ;;
-      *) die 'iDA goal is unfinished or unknown; reconcile acceptance/archive before retirement' ;;
-    esac
+    # shellcheck source=bin/fm-task-progress-lib.sh
+    . "$SCRIPT_DIR/fm-task-progress-lib.sh"
+    fm_task_progress_completion_guard "$id" || die 'iDA goal is unfinished; MAIN must clear the compact remaining gap before retirement'
     fm_ida_state_load "$id" || die "iDA task state is missing or invalid"
     case "$REMOTE_STATE_PHASE" in terminal-success|terminal-failure|terminal-cancelled) ;; *) die "iDA task is not safely terminal: phase=$REMOTE_STATE_PHASE" ;; esac
     report=$(fm_remote_report_path "$id") || die "cannot resolve report path"

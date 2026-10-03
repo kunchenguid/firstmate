@@ -289,7 +289,7 @@ family_for_basename() {
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-trace-context-lib.test.sh|\
-    fm-transition-lib.test.sh|fm-task-lifecycle.test.sh|fm-task-progress.test.sh|\
+    fm-transition-lib.test.sh|fm-task-progress.test.sh|\
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
@@ -310,7 +310,6 @@ family_for_basename() {
     fm-backend-herdr-focus-flash-e2e.test.sh|\
     fm-backend-herdr-stale-active-tab-e2e.test.sh|\
     fm-backend-herdr-agent-exit-shell-e2e.test.sh|\
-    fm-periodic-stow-herdr-live-e2e.test.sh|\
     fm-herdr-attached-viewer-live-e2e.test.sh|fm-herdr-session-cleanup-e2e.test.sh|\
     fm-backend-herdr-smoke.test.sh|\
     fm-control-herdr-smoke.test.sh|fm-agent-process-live-e2e.test.sh)
@@ -331,7 +330,7 @@ family_for_basename() {
     fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-traex-harness-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
-    fm-herdr-pi-stale-registration-live-e2e.test.sh|fm-teardown-lifecycle-herdr-e2e.test.sh|\
+    fm-herdr-pi-stale-registration-live-e2e.test.sh|\
     fm-jsonl-viewer-browser-live-e2e.test.sh|\
     fm-short-agent-live-e2e.test.sh|fm-short-operations-herdr.test.sh|fm-pi-branch-live-e2e.test.sh|fm-pi-branch-status-live.test.sh|\
     fm-calm-pi-herdr-live-e2e.test.sh|fm-pi-branch-responsiveness-live-e2e.test.sh|\
@@ -701,7 +700,6 @@ tests/fm-task-inbox.test.sh 25369
 tests/fm-task-progress.test.sh 2923
 tests/fm-tasks-axi.test.sh 1690
 tests/fm-teardown-endpoint-safety.test.sh 4620
-tests/fm-teardown-lifecycle-herdr-e2e.test.sh 98268
 tests/fm-teardown.test.sh 97603
 tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
@@ -1311,21 +1309,6 @@ families_for_changed_path() {
     bin/fm-task-progress.py|bin/fm-task-progress-lib.sh)
       printf '%s\n' "__script__:fm-task-progress.test.sh"
       ;;
-    bin/fm-task-lifecycle.py|bin/fm-task-lifecycle-lib.sh)
-      printf '%s\n' "__script__:fm-task-handoff.test.sh" "__script__:fm-pi-branch-extension.test.sh"
-      ;;
-    tests/lifecycle-semantic.py)
-      printf '%s\n' "__script__:fm-task-handoff.test.sh"
-      ;;
-    tests/lifecycle-native.mjs)
-      printf '%s\n' "__script__:fm-pi-branch-extension.test.sh"
-      ;;
-    tests/retirement-business.py)
-      printf '%s\n' "__script__:fm-backlog-atomicity.test.sh"
-      ;;
-    tests/retirement-observations.py)
-      printf '%s\n' "__script__:fm-task-lifecycle.test.sh"
-      ;;
     bin/fm-stow-run.sh|bin/fm-heartbeat-receipt.py)
       printf '%s\n' "__script__:fm-periodic-stow.test.sh"
       printf '%s\n' real-herdr-gated
@@ -1373,12 +1356,11 @@ families_for_changed_path() {
       ;;
     .pi/extensions/lib/fm-task-continuation.ts)
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh __script__:fm-pi-primary-types.test.sh
-      printf '%s\n' __script__:fm-periodic-stow-herdr-live-e2e.test.sh
+      printf '%s\n' real-herdr-gated
       ;;
     .pi/extensions/fm-periodic-stow.ts)
       printf '%s\n' __script__:fm-periodic-stow.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
-      printf '%s\n' __script__:fm-periodic-stow-herdr-live-e2e.test.sh
       printf '%s\n' live-harness-optin
       ;;
     .pi/extensions/lib/fm-operational-input.ts)

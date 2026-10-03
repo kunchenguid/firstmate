@@ -109,26 +109,36 @@ EOF
   : > "$dir/runtime.log.w1:p-$id.closed"
 }
 
-stage_archived_action() {  # <case> <id> <kind> <phase>
-  local dir=$1 id=$2 kind=$3 phase=$4 candidate receipt_sha action_id
-  action_id="$id.g1.a1"
+stage_archived_action() {  # <case> <id> <historical-kind> <historical-phase>
+  local dir=$1 id=$2 receipt tmp url head
   mkdir -p "$dir/home/data/$id"
   printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
-  candidate="$dir/$id-action.json"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | jq --arg id "$action_id" --arg kind "$kind" \
-    '.next_action={id:$id,kind:$kind,phase:"prepared",expected_execution_generation:.execution_generation,payload_ref:.assessment.evidence[0].ref,payload_sha256:.assessment.evidence[0].sha256,receipt_ref:null,attempts:0,attempt_limit:1,recheck_at:"2000-01-01T00:00:00Z",deadline:"2099-01-01T00:00:00Z"} | .next_action_seq=2' > "$candidate"
-  chmod 600 "$candidate"
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
-  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase attempted >/dev/null \
-    || fail 'fixture action attempt failed'
-  if [ "$phase" = uncertain ]; then
-    receipt_sha=$(shasum -a 256 "$dir/home/data/$id/brief.md" | awk '{print $1}')
-    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" action "$id" --action-id "$action_id" --phase uncertain \
-      --receipt-ref "data/$id/brief.md" --receipt-sha256 "$receipt_sha" >/dev/null \
-      || fail 'fixture uncertain action receipt failed'
-  fi
+  cat > "$dir/home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+    'Completed cleanup fixture' --kind ship --body 'Preserve operation receipts.' --start >/dev/null \
+    || fail 'fixture task creation failed'
   fm_test_archive_goal "$dir/home" "$id"
+  url="https://github.com/example/firstmate/pull/1"
+  head=1111111111111111111111111111111111111111
+  printf 'pr=%s\npr_head=%s\n' "$url" "$head" >> "$dir/home/state/$id.meta"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+    '. "$1/bin/fm-merge-receipt-lib.sh"; fm_merge_receipt_record "$2" "$3" "$4" "$5"' \
+    _ "$ROOT" "$id" "s-$id" "$url" "$head" >/dev/null || fail 'fixture merge receipt creation failed'
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" bash -c \
+    '. "$1/bin/fm-cleanup-receipt-lib.sh"; fm_cleanup_receipt create "$2" "$3"' \
+    _ "$ROOT" "$id" "s-$id" >/dev/null || fail 'fixture cleanup receipt creation failed'
+  receipt="$dir/home/state/$id.cleanup.json"
+  tmp="$dir/$id-cleanup.json"
+  if ! jq '.phases.prior_cleanup_attempt={state:"pending",reason_code:"attempted-effect-requires-exact-readback"}' \
+      "$receipt" > "$tmp" || ! mv "$tmp" "$receipt"; then
+    fail 'fixture uncertain cleanup receipt failed'
+  fi
 }
 
 mark_case_as_treehouse_pool() {  # <case>
@@ -682,7 +692,7 @@ test_historical_secondmate_record_refuses_without_mutation() {
 }
 
 test_open_goal_preserves_resources_before_cleanup() {
-  local dir id=open-goal variant rc
+  local dir id=open-goal variant rc current historical_hash
   local -a args=()
   for variant in normal forced endpoint-only; do
     dir=$(make_case "open-goal-$variant")
@@ -694,11 +704,31 @@ test_open_goal_preserves_resources_before_cleanup() {
     mkdir -p "$dir/home/data/$id"
     printf 'Deliver the complete requested result\n' > "$dir/home/data/$id/brief.md"
     printf 'Only a partial milestone is complete\n' > "$dir/home/data/$id/report.md"
+    cat > "$dir/home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+    printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
+    FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add "$id" \
+      'Open cleanup fixture' --kind scout --body 'Continue until the requested result is accepted.' --start >/dev/null \
+      || fail 'open-goal task creation failed'
+    current=$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress "$id") \
+      || fail 'open-goal progress read failed'
+    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress "$id" \
+      --expected-token "$(printf '%s' "$current" | jq -r .record_token)" \
+      --progress '{"acceptance":"The requested result is reviewed","current_state":"Only a partial milestone exists","remaining_gap":"The final result is not accepted","next_step":"Continue the authorized work"}' \
+      >/dev/null || fail 'open-goal progress update failed'
+    # Retained private rich state from an older scope must never override the
+    # current original task's nonempty gap.
+    jq -n --arg id "$id" --arg generation "s-$id" \
+      '{schema:"fm-task-lifecycle.v2",task_id:$id,execution_generation:$generation,disposition:"accepted"}' \
+      > "$dir/home/data/$id/lifecycle.json"
+    historical_hash=$(shasum "$dir/home/data/$id/lifecycle.json")
     # No user decision remains, but the requested result is still unfinished.
     FM_HOME="$dir/home" "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null
-    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" init "$id" >/dev/null
     cp "$dir/home/state/$id.meta" "$dir/meta-before"
-    cp "$dir/home/data/$id/lifecycle.json" "$dir/goal-before"
     cp "$dir/pool/1/.fm-slot-owner" "$dir/claim-before"
     args=()
     case "$variant" in
@@ -710,10 +740,11 @@ test_open_goal_preserves_resources_before_cleanup() {
       FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
       "$TEARDOWN" "$id" "${args[@]}" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
     [ "$rc" -ne 0 ] || fail "$variant teardown accepted an unfinished goal"
-    assert_contains "$(cat "$dir/stderr")" 'task goal is still open' \
+    assert_contains "$(cat "$dir/stderr")" 'compact task open-goal is not MAIN-accepted' \
       "$variant teardown did not refuse for the unfinished goal"
     cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "$variant changed task metadata"
-    cmp -s "$dir/goal-before" "$dir/home/data/$id/lifecycle.json" || fail "$variant changed the goal"
+    [ "$(shasum "$dir/home/data/$id/lifecycle.json")" = "$historical_hash" ] \
+      || fail "$variant rewrote retained historical lifecycle data"
     cmp -s "$dir/claim-before" "$dir/pool/1/.fm-slot-owner" || fail "$variant changed the slot claim"
     assert_present "$dir/worktree/sentinel" "$variant removed unfinished work"
     assert_present "$dir/home/data/$id/report.md" "$variant removed the partial report"
@@ -753,8 +784,9 @@ test_completed_endpoint_ignores_historical_admission_gates() {
         [ "$rc" = 0 ] || fail "$variant historical evidence blocked completed window closure: $(cat "$dir/stderr")"
         assert_present "$dir/runtime.log.w1:p-$id.closed" 'exact completed pane was not closed'
         jq -e '.phases.pane_close.state=="confirmed"' "$dir/home/state/$id.cleanup.json" >/dev/null || fail 'endpoint absence was not recorded'
-        FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | \
-          jq -e '.disposition=="archived" and .next_action.phase=="uncertain"' >/dev/null || fail 'closure changed historical business evidence'
+        assert_absent "$dir/home/data/$id/lifecycle.json" 'endpoint closure recreated rich lifecycle state'
+        grep -Fq -- "$id" "$dir/home/data/backlog.md" \
+          || fail 'endpoint-only closure lost the original task record'
         ;;
     esac
     assert_present "$dir/home/state/$id.meta" 'endpoint-only cleanup erased the task record'
@@ -808,8 +840,12 @@ test_completed_pool_uncertain_ownership_retains_copy() {
     assert_present "$dir/pool/1/project/.git" 'unproved copy ownership allowed deletion'
     assert_absent "$dir/home/state/$id.meta" 'completed resource record was not archived'
     ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'unproved pool ownership allowed return'
-    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-      "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" >/dev/null || fail 'retired pool copy observation failed'
+    if FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+      "$TEARDOWN" "$id" --copy-only --expect-spawn-gen "s-$id" > "$dir/copy.out" 2> "$dir/copy.err"; then
+      fail 'retired pool copy without an exact binding unexpectedly succeeded'
+    fi
+    assert_contains "$(cat "$dir/copy.err")" 'missing exact retained copy binding' \
+      'retired pool copy refusal did not name the missing immutable binding'
     ! grep -Fq 'treehouse <return>' "$dir/runtime.log" || fail 'copy-only returned an unproved/foreign pool slot'
   done
   pass 'uncertain or foreign pool ownership retains the copy while completed windows and records retire'
@@ -865,8 +901,9 @@ test_retained_copy_only_followthrough() {
         ;;
     esac
     [ "$(shasum "$dir/home/data/$id/report.md")" = "$before_report" ] || fail 'copy follow-through changed the report'
-    FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" lifecycle "$id" | \
-      jq -e '.disposition=="archived" and .next_action.phase=="uncertain"' >/dev/null || fail 'copy-only revived business or accepted its uncertain effect'
+    assert_absent "$dir/home/data/$id/lifecycle.json" 'copy-only recreated rich lifecycle state'
+    grep -Fq -- "- [x] $id -" "$dir/home/data/backlog.md" \
+      || fail 'copy-only changed completed task evidence'
     if [ "$variant" = dirty ] || [ "$variant" = disposal-interruption ] || [ "$variant" = disposal-before-effect ]; then
       # One actual relevant release: commit and integrate the original copy.
       git -C "$dir/worktree" add sentinel

@@ -1,7 +1,7 @@
 # Task, report, and agent journal viewer
 
 `fm-jsonl-viewer.mjs` provides a read-only browser dashboard for one Firstmate home's tasks, canonical task documents, ShortTask journals, and supervision-branch sessions.
-Task discovery and classification use the structured fleet snapshot, task lifecycle disposition, current backlog, and configured Done archive rather than the last status-log line.
+Task discovery and classification use the structured fleet snapshot, current backlog, and configured Done archive rather than the last status-log line.
 The only content artifacts it exposes are `state/short-agents/<short-id>/journal.jsonl`, `state/branch-session/*.jsonl`, and canonical `data/<task>/report.md` or `data/<task>/brief.md` files below the selected canonical home.
 It does not expose arbitrary paths, follow symlinks, modify a journal or task document, or offer chat and lifecycle controls.
 

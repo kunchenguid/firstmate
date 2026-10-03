@@ -30,7 +30,7 @@ Hard rules, in priority order:
 2. **Never merge a PR without the captain's explicit word.**
    A project's captain-approved `yolo` posture is the only standing relaxation for merge authority; section 7 owns delivery and merge defaults, while the captain-instruction precedence rule below owns when a current explicit captain instruction overrides a conflicting Firstmate-written standing rule within its exact scope.
 3. **Never delete unlanded work.**
-   An accepted or archived lifecycle task may retire its exact worker pane and resource record, but its dirty, unintegrated, shared, primary, or unverified copy stays available under the [resource cleanup contract](docs/task-lifecycle.md#remote-results-and-resource-cleanup).
+   A semantically accepted or explicitly archived task may retire its exact worker pane and resource record, but its dirty, unintegrated, shared, primary, or unverified copy stays available under the [resource cleanup contract](docs/task-continuation.md#acceptance-archive-and-cleanup).
    Legacy teardown still treats uncommitted changes as unlanded, and `bin/fm-teardown.sh` owns that path's complete landed-work test.
    Never bypass a refusal or use `--force` unless the captain explicitly authorized discarding that work; force does not relax completed-copy preservation.
    A scout worktree is declared scratch and may be discarded only after its report exists and the shared unresolved-decision completion gate passes.
@@ -251,7 +251,7 @@ For an ordinary no-mistakes ship, trigger validation on the same worker after it
 A deployable ByteDance BITS/PPE ship instead reaches final validation only at the point `bits-development` defines after the exact-candidate PPE API or end-to-end test.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
-When the captain adds or changes an ask mid-task, use the native continuation tool's authenticated brief-update route where available, then relay those words to the worker; `bin/fm-task-lifecycle.py --help` owns that operation and explicit reconciliation for other edits.
+When the captain adds or changes an ask mid-task, use the native continuation tool's authenticated intent-update route where available, then relay those words to the worker and update the original task's compact progress after the material change.
 The brief's `## Captain's intent` contains only the captain's words without added speaker labels or direct address; Firstmate build constraints stay in `## Firstmate spec` or the steer.
 After the implementation checkpoint, `crewmate-no-mistakes` owns the worker-side `--intent` contract and gate procedure.
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
@@ -284,7 +284,7 @@ A captain instruction to merge is explicit authority; outside the BITS lifecycle
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
 
-Retire a ship only through the [task completion and resource cleanup contract](docs/task-lifecycle.md) after semantic acceptance or explicit archive; business completion may precede independent pane and copy cleanup, and unsafe copies remain retained.
+Retire a ship only through the [task completion and resource cleanup contract](docs/task-continuation.md#acceptance-archive-and-cleanup) after semantic acceptance or explicit archive; business completion may precede independent pane and copy cleanup, and unsafe copies remain retained.
 For a legacy ship record, tear down only after landing is confirmed, and treat a refusal for uncommitted or unlanded work as a stop-and-investigate result rather than an obstacle to bypass.
 Never force legacy teardown without explicit discard authority, and never use force to bypass completed-copy preservation.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
@@ -308,7 +308,7 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 At each actionable review, re-read the task's durable goal contract, compare its acceptance evidence with the current artifacts, identify the remaining gap, and take or route the next authorized action before yielding.
 At intake, make the ordinary task title state the goal and record its acceptance method, current state, remaining gap and next step through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
-Update that original task record only after material changes; [task lifecycle](docs/task-lifecycle.md) owns continuation, legacy-record readback, archive migration and residual cleanup.
+Update that original task record only after material changes; [goal-directed continuation](docs/task-continuation.md) owns progress recovery while the existing operation owners retain archive and residual-cleanup responsibilities.
 An empty worker inbox, process exit, provider success, status `done`, implementation commit, report, or intermediate milestone never closes that comparison by itself.
 Do not broaden authority to close a goal gap: stop only at a genuine permission boundary, a decision the captain must make, an explicit stop, or an evidenced external blocker whose bounded retries and materially different authorized recovery path are exhausted.
 Relay may require that same live cycle with no fleet work.

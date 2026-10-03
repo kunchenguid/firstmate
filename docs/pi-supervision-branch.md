@@ -82,11 +82,11 @@ An unreadable task record produces a scoped reconciliation request without inven
 
 Ordinary chat creates no progress record.
 For an authenticated follow-up, MAIN uses the separate `fm_task_intent_update` tool, which appends the selected original input through the existing interruption-safe intent owner.
-Discovery stays in the heartbeat owner's `progress-list` call and read-only history stays in the lifecycle owner's CLI; neither appears in MAIN's daily read/update schema.
-The Branch registration exposes only `read` for the exact admitted task, whether that admission is compact or a retained historical lifecycle record.
-Historical records are not scanned, mutated or reactivated as current work through this tool.
+Discovery stays in the heartbeat owner's `progress-list` call; it does not add another history or progress source to MAIN's daily read/update schema.
+The Branch registration exposes only `read` for the exact compact-progress task admitted from the original backlog.
+Historical rich-lifecycle records are neither admissions nor readable through this tool.
 No continuation path creates a second scheduler, task store or lifecycle progress record.
-[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/lifecycle-native.mjs` cover original-row persistence, MAIN-only updates, canonical identity reminders, restart recovery, quiet unchanged execution and compact native calls.
+[`tests/fm-task-progress.test.sh`](../tests/fm-task-progress.test.sh) and `tests/continuation-native.mjs` cover original-row persistence, MAIN-only updates, canonical identity reminders, restart recovery, quiet unchanged execution and compact native calls.
 
 ## Components and their owners
 
@@ -161,7 +161,7 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   That asymmetry is a known limitation of the routine delivery representation rather than of the ordering above, it predates delivery moving off Pi's render thread, and closing it means giving routine delivery a durable idempotent record - tracked as follow-up `fm-pi-routine-delivery-idempotency-followup-r1` and pinned meanwhile by `tests/fm-pi-branch-extension.test.sh`.
 - Consistency: `bin/fm-lease-lib.sh` owns the per-task lease contract, the main-only role partition, and the deliberate CONFUSED-AGENT-GRADE threat model these guards target (captain-decided; adversarial-grade separation is out of scope and tracked as follow-up design work); `bin/fm-lease.sh` is the command surface.
   The guards are wired into `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh` (overlap, lease-checked, with claim serialization retained through the mutation) and `fm-pr-merge.sh`, `fm-merge-local.sh`, and `fm-spawn.sh` (main-owned, branch refused; a relaunch through `fm-control` stays branch-legal recovery).
-  During compact continuation, the progress token and exact current MAIN-authored `next_step` permit idempotent same-worker inbox continuation; v2 and cross-task effects still require their exact delegated action id and existing effect, inbox, and receipt owners.
+  During compact continuation, the progress token and exact current MAIN-authored `next_step` permit idempotent same-worker inbox continuation; cross-task work uses the durable handoff owner, while attempted effects remain fenced by their existing operation, inbox, and receipt owners.
 - Autonomy: supervision is default-on for every task once a Pi primary session owns the fleet lock (docs/configuration.md "Pi supervision branch"); no captain grant file is required.
   A fleet-wide heartbeat is separately eligible when its safe subset contains a heartbeat row, a resolvable task-local signal or stale row, or an identity-bound iDA result check (see "Heartbeat routing" below).
   Main-owned checks, decision-owned signal/stale rows, and structurally valid unresolved task rows are excluded and remain queued; malformed or unreadable queue data and every watcher-failure alarm keep the whole wake on main.
@@ -306,12 +306,11 @@ Live guards: `FM_PI_BRANCH_LIVE_E2E=1 tests/fm-pi-branch-live-e2e.test.sh` exerc
 Record dated current results in [docs/verification/runtime-backends.md](verification/runtime-backends.md).
 The strict typecheck in `tests/fm-pi-primary-types.test.sh` pins the extension against the installed Pi package.
 
-## Historical delegated task continuation
+## Historical task records
 
-The branch no longer receives a delegated lifecycle projection for ordinary task progress.
+The branch receives no lifecycle projection for ordinary task progress.
 It can still process eligible wake rows and perform already-authorized operations through their existing owners, but it cannot write the compact task progress block or make final semantic acceptance.
 Material branch results return through the ordinary outcome channel so MAIN can review the artifact, advance the next step, and update the original task row.
 
-Historical lifecycle delegation, policy and action records remain readable for recovery of effects that were already prepared, attempted or uncertain before this simplification.
-They do not enroll tasks, produce new routine progress admissions or become a second active progress source.
-Their existing identity, authority, receipt and no-replay checks remain authoritative until those historical effects are reconciled.
+The branch does not read or continue historical lifecycle, policy or action records.
+An existing operation owner may narrowly read an immutable historical terminal or merge fact when that is required to preserve an already attempted or uncertain effect; that compatibility never admits work to the branch or reactivates the removed engine.

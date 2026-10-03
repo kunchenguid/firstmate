@@ -689,35 +689,8 @@ if [ -n "$ACK_THROUGH" ]; then
     ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:' "$MAIN_ROWS_FILE") || exit 1
     ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:' "$MAIN_ROWS_FILE") || exit 1
   fi
-  # Only exact signal task ids in this actor's claim participate. Capture
-  # before dropping the queue lock; mutations use the independent task owner.
-  CONTINUATION_TASKS=
-  if [ "${PI_CODING_AGENT:-}" = true ]; then
-    CONTINUATION_ROWS=$MAIN_ROWS_FILE
-    [ "$ACTOR" != branch ] || CONTINUATION_ROWS=$ELIGIBLE_ROWS_FILE
-    CONTINUATION_TASKS=$(awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$CONTINUATION_ROWS" '
-      BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
-      $2 <= cutoff && ($2 in owned) && $3 == "signal" {
-        key=$4; sub(/\.(status|turn-ended)$/, "", key); print key
-      }' "$FM_WAKE_QUEUE" | sort -u) || exit 1
-  fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
-  # shellcheck source=bin/fm-task-lifecycle-lib.sh
-  . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-  while IFS= read -r task; do
-    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
-    [ -f "${FM_DATA_OVERRIDE:-$FM_HOME/data}/$task/brief.md" ] || continue
-    if [ "$ACTOR" = main ]; then
-      if [ "$(fm_task_lifecycle read "$task")" = null ]; then
-        fm_task_lifecycle_mutate init "$task" >/dev/null || exit 1
-      else
-        fm_task_lifecycle_ack_guard "$task" || exit 1
-      fi
-    else
-      fm_task_lifecycle_ack_guard "$task" || exit 1
-    fi
-  done <<< "$CONTINUATION_TASKS"
   if ! acknowledge_inactive_outcomes acknowledge "$ACK_FINGERPRINTS" \
     || ! acknowledge_inactive_outcomes acknowledge-notice "$ACK_NOTICE_FINGERPRINTS"; then
     echo "wake drain: inactive outcome receipt could not be recorded safely" >&2

@@ -121,7 +121,7 @@ You never:
 - write to any project checkout or worktree;
 - talk to the captain, post publicly, or send anything outside this home's fleet.
 Legacy task steering, confirmed-landed teardown, lifecycle control, PR checks and backlog status moves retain their existing lease rules.
-For explicitly delegated v2 tasks, use only the lifecycle delegation envelope; retirement and executor replacement remain MAIN-owned.
+Cross-task work uses the durable handoff owner; retirement and executor replacement remain MAIN-owned.
 While away mode is active you receive no wakes at all; the away daemon owns supervision then.
 
 # Discipline

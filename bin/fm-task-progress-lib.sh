@@ -252,14 +252,17 @@ fm_task_progress_list() ( # active task ids, one per line
 
 # Legacy teardown remains available for records that never adopted compact
 # continuation. Once the ordinary task body contains compact progress, cleanup
-# requires the exact current MAIN-owned satisfied state. Explicit archives pass
-# through the lifecycle owner's archived mode before this helper is consulted.
+# requires the exact current MAIN-owned satisfied state. Explicit archive state
+# is read by the cleanup owner rather than encoded into this progress block.
 fm_task_progress_completion_guard() ( # <task>
   local id=$1 data=${FM_DATA_OVERRIDE:-${FM_HOME:?}/data}
   local context projection detail_error detail_status root backend file
   # shellcheck disable=SC2031 # This guard is intentionally isolated in a subshell.
   local FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-10}
-  root=$(fm_backlog_root "$data") || return $?
+  root=$(fm_backlog_root "$data") || {
+    echo "error: task $id cannot be torn down because its backlog data directory is inaccessible: $data" >&2
+    return 1
+  }
   backend=$(fm_tasks_axi_backend "$root") || return $?
   if [ "$backend" = markdown ]; then
     file=$(fm_backlog_file "$data") || return $?

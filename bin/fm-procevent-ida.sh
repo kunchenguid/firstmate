@@ -514,9 +514,6 @@ observe_or_submit() ( # <id> <allow-submit:true|false>
   elif [ "$LIST_TRUNCATED" = true ]; then
     ambiguous_observation "$id" reconcile truncated-session-list 0
   elif [ "$allow_submit" = true ] && [ "$REMOTE_STATE_PHASE" = submission-not-started ]; then
-    # shellcheck source=bin/fm-task-lifecycle-lib.sh
-    . "$SCRIPT_DIR/fm-task-lifecycle-lib.sh"
-    fm_task_lifecycle_execution_allowed "$id" || die 'task disposition forbids provider submission'
     submit_observation "$id" "$root"
   else
     ambiguous_observation "$id" reconcile session-marker-not-found 0

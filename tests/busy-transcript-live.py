@@ -356,16 +356,11 @@ esac
             mode.write_text('hold')
             send('Hold the simulated response.')
             wait('busy ' + tool + '-transcript')
-            # Public lifecycle observation uses the ordinary launch receipt and
-            # actual installed vendor activity without requiring an extra steer.
-            data = state.parent / 'data' / tool
-            data.mkdir(parents=True, exist_ok=True)
-            (data / 'brief.md').write_text('Disposable compatibility observation.\n')
-            life_env = dict(recovery_env, FM_HOME=str(state.parent))
-            command('python3', root / 'bin/fm-task-lifecycle.py', 'init', tool, env=life_env)
-            observation = json.loads(command(root / 'bin/fm-task-state.sh', 'observe', tool, env=life_env))
-            assert observation['state'] == 'running', observation
-            print('ok - ' + tool + ' ordinary launch observed through public lifecycle without steering', flush=True)
+            # The exact installed vendor activity remains observable without an
+            # extra steer; task-goal progress is owned separately by the compact
+            # backlog record and is not inferred from this transcript.
+            assert recovery.read().startswith('busy ' + tool + '-transcript')
+            print('ok - ' + tool + ' ordinary launch remains observable without steering', flush=True)
             control('interrupt')
             wait('idle ' + tool + '-transcript')
             print('ok - ' + tool + ' active turn and user interrupt', flush=True)
