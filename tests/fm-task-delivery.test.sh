@@ -23,6 +23,9 @@ PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
+# Knowledge-landing fixtures configure non-Git project directories.
+# Never let Git discover the developer checkout above an in-repo TMPDIR.
+export GIT_CEILING_DIRECTORIES="$TMP_ROOT${GIT_CEILING_DIRECTORIES:+:$GIT_CEILING_DIRECTORIES}"
 
 # A home with one registered project, one project directory, and a fake tmux that
 # refuses, so a spawn that clears the delivery checks still creates nothing.
@@ -430,9 +433,13 @@ test_promotion_persists_the_selected_ship_branch() {
 test_promotion_branch_command_is_shell_safe() {
   local home id prefix marker meta instructions command repo branch
   home="$TMP_ROOT/promote-branch-shell-safe/home"
-  marker="$TMP_ROOT/promote-branch-shell-safe-marker"
+  repo="$TMP_ROOT/promote-branch-shell-safe-repo"
+  marker="$repo/promotion-marker"
   id=promote-branch-safe-e3
-  prefix="\$(touch\${IFS}$marker)/"
+  # A TMPDIR under a hidden directory is not a valid Git ref component.
+  # Keep the injection marker relative to the checkout executing the command.
+  # shellcheck disable=SC2016 # The generated command must preserve this literally.
+  prefix='$(touch${IFS}promotion-marker)/'
   meta="$home/state/$id.meta"
   mkdir -p "$home/state"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
@@ -447,7 +454,6 @@ test_promotion_branch_command_is_shell_safe() {
   # shellcheck disable=SC2016  # Single quotes are required: the sed expression holds literal backticks.
   command=$(sed -n 's/.*create your branch: `\(.*\)`\.$/\1/p' "$instructions")
   [ -n "$command" ] || fail "promotion instructions exposed no branch-creation command"
-  repo="$TMP_ROOT/promote-branch-shell-safe-repo"
   git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
   ( cd "$repo" && eval "$command" ) || fail "promotion branch-creation command did not run"
   assert_absent "$marker" "promotion branch command executed the prefix's command substitution"
@@ -487,6 +493,317 @@ EOF
   assert_contains "$out" "merged fix/$id into local $main" \
     "local merge did not report the immutable recorded branch"
   pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
+}
+
+# The checker protocol is independent of any real checker's policy. These
+# cases drive the real landing entrypoint with real commits, a home opted in
+# through config/knowledge-landing, and a checker that deliberately separates
+# policy refusals, broken checks and moving refs.
+knowledge_case() {  # <name> [project-path-in-home] [checker: yes|no]
+  KNOW_HOME="$TMP_ROOT/knowledge-$1/home"
+  KNOW_PROJECT="$KNOW_HOME/${2:-projects/notes}"
+  KNOW_ID=knowledge-task
+  KNOW_GATE='tools/check landing.py'
+  KNOW_APPROVAL="$KNOW_HOME/data/landing-approvals/$KNOW_ID"
+  mkdir -p "$KNOW_HOME/state" "$KNOW_HOME/config" "$(dirname "$KNOW_APPROVAL")" \
+    "$KNOW_PROJECT/$(dirname "$KNOW_GATE")"
+  printf '%s\n' '# opted in' "checker=$KNOW_GATE" 'approvals=data/landing-approvals' \
+    'ok=OK notes only: ' 'ok=OK drafts only: ' 'project=projects/notes' \
+    > "$KNOW_HOME/config/knowledge-landing"
+  git -C "$KNOW_PROJECT" init -q -b main || fail "knowledge fixture init failed"
+  git -C "$KNOW_PROJECT" config user.name fixture
+  git -C "$KNOW_PROJECT" config user.email fixture@example.invalid
+  if [ "$1" != missing ] && [ "${3:-yes}" = yes ]; then
+    cat > "$KNOW_PROJECT/$KNOW_GATE" <<'PY'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+base, head, _, root = sys.argv[1:]
+case = os.environ.get("FM_KNOW_CASE", "pass")
+Path(os.environ["FM_HOME"], "gate-args").write_text("\n".join(sys.argv[1:]))
+if case == "crash":
+    raise RuntimeError("fixture checker failed")
+if case == "empty":
+    sys.exit(0)
+if case == "mismatch":
+    head = base
+if case == "merge-base":
+    base = head
+print("check-landing: base %s head %s merge-base %s; 1 change(s)" % (base, head, base))
+if case in ("refused", "unexpected"):
+    print("FAIL A forbidden.py: requires approval")
+    print("REFUSED 1 finding(s) in 1 change(s)")
+    sys.exit(2 if case == "refused" else 3)
+if case == "error":
+    print("ERROR fixture has no readable schema")
+    print("fixture schema diagnostic on stderr", file=sys.stderr)
+    sys.exit(2)
+if case == "incomplete":
+    sys.exit(0)
+if case == "race-ship":
+    subprocess.run(["git", "-C", root, "update-ref", "refs/heads/fix/knowledge-task",
+                    "refs/heads/bad"], check=True)
+if case == "race-base":
+    subprocess.run(["git", "-C", root, "update-ref", "refs/heads/main", "refs/heads/bad"], check=True)
+if case == "dirty":
+    Path(root, "untracked").write_text("concurrent edit")
+if case == "unknown-ok":
+    print("OK something else: 1 change(s)")
+elif case == "drafts":
+    print("OK drafts only: 1 change(s)")
+else:
+    print("OK notes only: 1 change(s)")
+PY
+  fi
+  printf 'base\n' > "$KNOW_PROJECT/base"
+  git -C "$KNOW_PROJECT" add .
+  git -C "$KNOW_PROJECT" commit -qm base || fail "knowledge fixture base commit failed"
+  KNOW_BASE=$(git -C "$KNOW_PROJECT" rev-parse HEAD)
+  git -C "$KNOW_PROJECT" checkout -qb "fix/$KNOW_ID"
+  printf 'a note\n' > "$KNOW_PROJECT/note.md"
+  git -C "$KNOW_PROJECT" add .
+  git -C "$KNOW_PROJECT" commit -qm note || fail "knowledge fixture note commit failed"
+  KNOW_HEAD=$(git -C "$KNOW_PROJECT" rev-parse HEAD)
+  git -C "$KNOW_PROJECT" checkout -qb bad
+  printf 'unchecked code\n' > "$KNOW_PROJECT/forbidden.py"
+  git -C "$KNOW_PROJECT" add .
+  git -C "$KNOW_PROJECT" commit -qm bad || fail "knowledge fixture bad commit failed"
+  KNOW_BAD=$(git -C "$KNOW_PROJECT" rev-parse HEAD)
+  git -C "$KNOW_PROJECT" checkout -q main
+  printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$KNOW_PROJECT" "$KNOW_ID" \
+    > "$KNOW_HOME/state/$KNOW_ID.meta"
+}
+
+knowledge_merge() {  # <checker-case> [shell-form] [landing-home] [config-override]
+  env ${4:+"FM_CONFIG_OVERRIDE=$4"} \
+    FM_HOME="${3:-$KNOW_HOME}" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$KNOW_HOME/state" \
+    FM_KNOW_CASE="$1" \
+    bash -c "${2:-\"\$1\" \"\$2\"}" _ "$MERGE_LOCAL" "$KNOW_ID" \
+    > "$KNOW_HOME/out" 2>&1
+}
+
+test_knowledge_landing_protocol() {
+  local case approval
+  for case in pass drafts refused stale symlink fifo missing empty error crash incomplete mismatch merge-base unexpected unknown-ok; do
+    knowledge_case "$case"
+    approval=$KNOW_APPROVAL
+    # A matching approval must never turn a checker failure into permission.
+    case "$case" in
+      stale) printf '%s\n' "$KNOW_BASE" > "$approval" ;;
+      symlink) printf '%s\n' "$KNOW_HEAD" > "$approval-target"; ln -s "$approval-target" "$approval" ;;
+      fifo) mkfifo "$approval" ;;
+      *) printf '%s\n' "$KNOW_HEAD" > "$approval" ;;
+    esac
+    case "$case" in
+      pass|drafts|refused)
+        knowledge_merge "$case" || fail "knowledge $case refused: $(cat "$KNOW_HOME/out")"
+        [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] \
+          || fail "knowledge $case landed a different commit"
+        assert_contains "$(cat "$KNOW_HOME/gate-args")" "$KNOW_BASE" "checker did not receive base OID"
+        assert_contains "$(cat "$KNOW_HOME/gate-args")" "$KNOW_HEAD" "checker did not receive head OID"
+        ;;
+      *)
+        if knowledge_merge "$([ "$case" != stale ] && [ "$case" != symlink ] && [ "$case" != fifo ] && printf '%s' "$case" || printf refused)"; then
+          fail "knowledge $case unexpectedly landed"
+        fi
+        [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] \
+          || fail "knowledge $case changed main"
+        case "$case" in
+          error)
+            assert_contains "$(cat "$KNOW_HOME/out")" "ERROR fixture has no readable schema" "checker error was hidden"
+            assert_contains "$(cat "$KNOW_HOME/out")" "fixture schema diagnostic on stderr" "checker stderr was hidden"
+            ;;
+          crash)
+            assert_contains "$(cat "$KNOW_HOME/out")" "RuntimeError: fixture checker failed" "checker traceback was hidden"
+            ;;
+          unexpected)
+            assert_contains "$(cat "$KNOW_HOME/out")" "FAIL A forbidden.py" "unexpected-exit verdict was hidden"
+            ;;
+        esac
+        ;;
+    esac
+  done
+  pass "fm-merge-local: configured pass verdicts and exact approvals; broken checks never approved"
+}
+
+test_knowledge_landing_shell_forms_and_scope() {
+  local form
+  # shellcheck disable=SC2016 # Positional arguments expand in the invoked Bash.
+  for form in 'if "$1" "$2"; then exit 0; else exit 1; fi' \
+    'env bash "$1" "$2"' 'command "$1" "$2" # trailing comment' \
+    '< /dev/null "$1" "$2"' 'eval '\''"$1" "$2"'\'''; do
+    knowledge_case "shell-$RANDOM"
+    if knowledge_merge refused "$form"; then fail "shell form bypassed knowledge refusal: $form"; fi
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "refused shell form moved main"
+  done
+  knowledge_case alias
+  ln -s "$KNOW_PROJECT" "$KNOW_HOME/notes-alias"
+  printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$KNOW_HOME/notes-alias" "$KNOW_ID" \
+    > "$KNOW_HOME/state/$KNOW_ID.meta"
+  if knowledge_merge refused; then fail "project path alias bypassed knowledge refusal"; fi
+  knowledge_case linked-worktree projects/notes no
+  git -C "$KNOW_PROJECT" checkout -q --detach || fail "configured checkout detach failed"
+  git -C "$KNOW_PROJECT" worktree add -q "$KNOW_HOME/notes-linked" main \
+    || fail "linked worktree fixture failed"
+  printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$KNOW_HOME/notes-linked" "$KNOW_ID" \
+    > "$KNOW_HOME/state/$KNOW_ID.meta"
+  if knowledge_merge pass; then fail "configured project without its checker landed through a linked checkout"; fi
+  assert_contains "$(cat "$KNOW_HOME/out")" "knowledge checker is missing" "configured project did not require its checker"
+  knowledge_case ordinary projects/ordinary no
+  knowledge_merge crash || fail "ordinary project gained a knowledge-check requirement: $(cat "$KNOW_HOME/out")"
+  [ ! -e "$KNOW_HOME/gate-args" ] || fail "ordinary project invoked the knowledge checker"
+  pass "fm-merge-local: shell spelling and aliases cannot bypass the configured gate; ordinary projects are unaffected"
+}
+
+test_knowledge_landing_opt_in() {
+  # Without the home setting, even a project named vault that carries a
+  # checker keeps the existing landing path.
+  knowledge_case default-off projects/vault
+  rm "$KNOW_HOME/config/knowledge-landing"
+  knowledge_merge refused || fail "default-off home ran the knowledge check: $(cat "$KNOW_HOME/out")"
+  [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] || fail "default-off landing missed the ship commit"
+  [ ! -e "$KNOW_HOME/gate-args" ] || fail "default-off home invoked the checker"
+
+  # A configured project that is not a Git work tree, or is nested inside
+  # another repository, matches nothing and leaves other landings alone.
+  knowledge_case non-git projects/outer no
+  mkdir -p "$KNOW_HOME/projects/notes" "$KNOW_PROJECT/plain"
+  printf 'project=projects/outer/plain\n' >> "$KNOW_HOME/config/knowledge-landing"
+  knowledge_merge pass || fail "non-Git or nested configured project refused an unrelated landing: $(cat "$KNOW_HOME/out")"
+  [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] || fail "non-Git configured project blocked the landing"
+
+  knowledge_case malformed projects/ordinary no
+  printf 'checker=../escape.py\n' > "$KNOW_HOME/config/knowledge-landing"
+  if knowledge_merge pass; then fail "malformed knowledge-landing config was ignored"; fi
+  [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "malformed config moved main"
+  assert_contains "$(cat "$KNOW_HOME/out")" "needs one relative checker=" "malformed config was not named"
+  pass "fm-merge-local: the knowledge check is a per-home opt-in; non-Git and nested project settings match nothing"
+}
+
+test_knowledge_landing_home_mismatch() {
+  local elsewhere relocated override
+  elsewhere="$TMP_ROOT/elsewhere"
+  relocated="$TMP_ROOT/relocated-config"
+  mkdir -p "$elsewhere/data" "$elsewhere/state" "$relocated"
+  # The owning home's setting and approval records apply under another
+  # FM_HOME, whether its config is found beside the state or relocated.
+  for override in '' "$relocated"; do
+    knowledge_case "home-mismatch${override:+-override}"
+    [ -z "$override" ] || mv "$KNOW_HOME/config/knowledge-landing" "$override/knowledge-landing"
+    if knowledge_merge refused '' "$elsewhere" "$override"; then
+      fail "mismatched FM_HOME bypassed knowledge refusal (config override: ${override:-none})"
+    fi
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "mismatched home moved main"
+    assert_contains "$(cat "$KNOW_HOME/out")" "explicit approval of $KNOW_HEAD in $KNOW_APPROVAL" \
+      "mismatched home did not require the owning home's approval"
+    printf '%s\n' "$KNOW_HEAD" > "$KNOW_APPROVAL"
+    knowledge_merge refused '' "$elsewhere" "$override" \
+      || fail "owning home's exact approval was not found under a mismatched FM_HOME: $(cat "$KNOW_HOME/out")"
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] || fail "approved mismatched-home landing missed the ship commit"
+  done
+  pass "fm-merge-local: the owning home's setting and approvals apply under a mismatched FM_HOME"
+}
+
+test_knowledge_landing_python_environment() {
+  local target poison
+  for target in fm-knowledge-landing.py 'check landing.py'; do
+    knowledge_case "python-$target"
+    poison="$KNOW_HOME/poison"
+    mkdir -p "$poison"
+    # Python loads sitecustomize from PYTHONPATH before executing either script.
+    # Exercise each interpreter separately so both isolation boundaries matter.
+    cat > "$poison/sitecustomize.py" <<'PY'
+import os
+import sys
+
+if os.path.basename(sys.argv[0]) == os.environ["FM_PYTHON_TARGET"]:
+    if os.environ["FM_PYTHON_TARGET"] == "check landing.py":
+        base, head = sys.argv[1:3]
+        print("check-landing: base %s head %s merge-base %s" % (base, head, base))
+        print("OK notes only: forged")
+    sys.stdout.flush()
+    os._exit(0)
+PY
+    if PYTHONPATH="$poison" FM_PYTHON_TARGET="$target" knowledge_merge refused; then
+      fail "inherited Python environment bypassed knowledge refusal at $target"
+    fi
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "Python injection moved main"
+    assert_contains "$(cat "$KNOW_HOME/out")" "FAIL A forbidden.py" "Python isolation did not preserve the actual verdict"
+  done
+  pass "fm-merge-local: helper and checker ignore inherited Python startup customization"
+}
+
+test_knowledge_landing_inherited_git_config() {
+  local form
+  # Inherited command-line Git config must not change which checkout the
+  # landing inspects and updates, nor hide that checkout's state from it.
+  for form in count parameters; do
+    knowledge_case "git-config-$form"
+    mkdir -p "$KNOW_HOME/decoy"
+    git -C "$KNOW_PROJECT" archive main | tar -x -C "$KNOW_HOME/decoy" || fail "decoy checkout fixture failed"
+    if inherited_git_config "$form" core.worktree "$KNOW_HOME/decoy" knowledge_merge refused; then
+      fail "inherited $form config bypassed knowledge refusal"
+    fi
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "inherited $form config moved main"
+    printf 'concurrent edit\n' > "$KNOW_PROJECT/untracked"
+    if inherited_git_config "$form" status.showUntrackedFiles no knowledge_merge pass; then
+      fail "inherited $form config hid a dirty checkout"
+    fi
+    assert_contains "$(cat "$KNOW_HOME/out")" "dirty working tree" "inherited $form config did not name the dirty checkout"
+    rm "$KNOW_PROJECT/untracked"
+    inherited_git_config "$form" core.worktree "$KNOW_HOME/decoy" knowledge_merge pass \
+      || fail "inherited $form config refused a valid landing: $(cat "$KNOW_HOME/out")"
+    [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] || fail "inherited $form config missed the ship commit"
+    [ -f "$KNOW_PROJECT/note.md" ] && [ -z "$(git -C "$KNOW_PROJECT" status --porcelain)" ] \
+      || fail "inherited $form config left the task checkout stale"
+    [ ! -e "$KNOW_HOME/decoy/note.md" ] || fail "inherited $form config updated another checkout"
+  done
+  pass "fm-merge-local: inherited Git config cannot redirect or hide the landing checkout"
+}
+
+inherited_git_config() {  # <count|parameters> <key> <value> <command...>
+  local form=$1 key=$2 value=$3
+  shift 3
+  if [ "$form" = count ]; then
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=$key GIT_CONFIG_VALUE_0=$value "$@"
+  else
+    GIT_CONFIG_PARAMETERS="'$key'='$value'" "$@"
+  fi
+}
+
+test_knowledge_landing_ref_races() {
+  local case fakebin real_git
+  for case in race-ship race-base dirty; do
+    knowledge_case "$case"
+    if knowledge_merge "$case"; then fail "$case landed after validation inputs changed"; fi
+    if [ "$case" = race-base ]; then
+      [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BAD" ] || fail "merge overwrote concurrent main movement"
+    else
+      [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_BASE" ] || fail "$case moved main"
+    fi
+    assert_contains "$(cat "$KNOW_HOME/out")" "changed during validation" "$case did not name changed inputs"
+  done
+
+  knowledge_case late-race
+  fakebin="$KNOW_HOME/fakebin"
+  mkdir -p "$fakebin"
+  real_git=$(command -v git)
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${3:-}" = merge ] && [ "${4:-}" = --ff-only ]; then
+  "$FM_REAL_GIT" -C "$2" update-ref refs/heads/fix/knowledge-task refs/heads/bad || exit 1
+fi
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fakebin/git"
+  PATH="$fakebin:$PATH" FM_REAL_GIT="$real_git" knowledge_merge pass \
+    || fail "late ship-ref movement prevented checked commit landing: $(cat "$KNOW_HOME/out")"
+  [ "$(git -C "$KNOW_PROJECT" rev-parse HEAD)" = "$KNOW_HEAD" ] || fail "merge followed the unchecked moving branch"
+  [ "$(git -C "$KNOW_PROJECT" rev-parse "fix/$KNOW_ID")" = "$KNOW_BAD" ] || fail "late-race fixture did not move the ship ref"
+  [ ! -e "$KNOW_PROJECT/forbidden.py" ] || fail "late-race unchecked content landed"
+  pass "fm-merge-local: changed inputs refuse and the last-moment ship-ref race lands only the checked OID"
 }
 
 # A registered name may contain spaces, and the lookup must match the whole
@@ -1623,6 +1940,13 @@ test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
+test_knowledge_landing_protocol
+test_knowledge_landing_shell_forms_and_scope
+test_knowledge_landing_opt_in
+test_knowledge_landing_home_mismatch
+test_knowledge_landing_python_environment
+test_knowledge_landing_inherited_git_config
+test_knowledge_landing_ref_races
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally

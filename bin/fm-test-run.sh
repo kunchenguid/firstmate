@@ -743,7 +743,7 @@ tests/fm-dispatch-resolve.test.sh 10051
 tests/fm-documentation-audiences.test.sh 1301
 tests/fm-dod-lib.test.sh 2035
 tests/fm-extension-binding.test.sh 11105
-tests/fm-fleet-ledger.test.sh 19980
+tests/fm-fleet-ledger.test.sh 75980
 tests/fm-fleet-snapshot-view.test.sh 23334
 tests/fm-fleet-sync.test.sh 40541
 tests/fm-forge-detect.test.sh 193
@@ -1602,7 +1602,12 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-merge-local.sh|bin/fm-knowledge-landing.py)
+      printf '%s\n' "__script__:fm-task-delivery.test.sh"
+      printf '%s\n' "__script__:fm-captain-hold-lifecycle.test.sh"
+      printf '%s\n' pr-forge
+      ;;
+    bin/fm-pr-*|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;
