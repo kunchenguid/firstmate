@@ -124,6 +124,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-composer-lib.sh"
 
+# shellcheck source=bin/fm-backend-launch-env-lib.sh
+. "$FM_BACKEND_ZELLIJ_ROOT/bin/fm-backend-launch-env-lib.sh"
+
 # Verified minimum: report.md recommends "likely Zellij 0.44 or newer" for
 # returned pane/tab IDs and dump-screen --pane-id; empirically verified
 # against the installed 0.44.0 (docs/zellij-backend.md).
@@ -233,10 +236,16 @@ fm_backend_zellij_session_exists() {  # <session>
 # against an EXISTING session prints "Session already exists" and exits 1 -
 # harmless here because existence is checked first and the launch is
 # backgrounded, its exit status never inspected.
+#
+# This launch births the zellij server, which hands its startup environment to
+# every pane created later, so the subshell drops the launcher's color control
+# first (bin/fm-backend-launch-env-lib.sh) exactly as the tmux and Herdr
+# adapters do.
 fm_backend_zellij_server_ensure() {  # <session>
   local session=$1 i
   fm_backend_zellij_session_exists "$session" && return 0
-  ( nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
+  ( fm_backend_launch_env_color_scrub
+    nohup zellij attach -b "$session" </dev/null >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     fm_backend_zellij_session_exists "$session" && return 0
     sleep 0.5

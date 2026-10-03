@@ -523,8 +523,10 @@ When the selected named server is not running, the adapter launches it without t
 - Firstmate home and directory overrides.
 - Harness identity markers.
 - The supervision-model override.
+- The launcher's color control (`NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`).
 
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness, and a launcher that ran under `NO_COLOR=1` would leave every later crew pane monochrome.
+The color list is shared with the tmux and zellij adapters through `bin/fm-backend-launch-env-lib.sh`, so the three server-start paths cannot drift apart.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
 

@@ -708,6 +708,16 @@ assert_not_contains() {
   esac
 }
 
+# assert_line <haystack> <line> <msg>: <haystack> must contain <line> as a
+# whole line, so a shorter key cannot be satisfied by a longer line that
+# merely contains it (FORCE_COLOR=<unset> inside CLICOLOR_FORCE=<unset>).
+assert_line() {
+  case $'\n'"$1"$'\n' in
+    *$'\n'"$2"$'\n'*) : ;;
+    *) fail "$3 (missing line: '$2')"$'\n'"--- output ---"$'\n'"$1" ;;
+  esac
+}
+
 # expect_code <expected> <actual> <label>
 expect_code() {
   local expected=$1 actual=$2 label=$3
