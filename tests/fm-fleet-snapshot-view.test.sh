@@ -1176,7 +1176,6 @@ EOF
     out=$(PERL_HASH_SEED=$seed FM_HOME="$home" \
       FM_SNAPSHOT_NOW=2026-07-25T00:00:00Z "$SNAPSHOT" --secondmate-home-summary) \
       || fail "home summary failed under PERL_HASH_SEED=$seed"
-    out=$(printf '%s' "$out" | jq -c 'del(.generated_epoch)')
     printf '%s' "$out" | jq -e '.landed[0].completion == {date:"2026-07-06",verb:"merged"}' >/dev/null \
       || fail "home summary lost the landed completion: $out"
     if [ -z "$first" ]; then
