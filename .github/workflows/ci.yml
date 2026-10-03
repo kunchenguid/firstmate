@@ -503,6 +503,17 @@ jobs:
             exit 1
           }
 
+          # fm_exec_timed runs under set -u, where stock Bash lacks BASHPID.
+          # The GNU-timeout case reports a pass even when it skips, so require
+          # all 17 tests to report a result.
+          timeout_output=$(/bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$timeout_output"
+          timeout_count=$(printf '%s\n' "$timeout_output" | grep -c '^ok - ')
+          [ "$timeout_count" -eq 17 ] || {
+            echo "::error::expected 17 fm-timeout-lib bash 3.2 regressions, got $timeout_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
