@@ -51,7 +51,7 @@ It does not block the launch-then-send gates: readiness leads with the `Welcome 
 ## Interrupt: confirmed under real tmux
 
 A single Escape was observed to print `Agent cancelled` during an active tool call under real tmux 3.6a (an isolated `tmux -L <private-socket>` session, not the shared fleet session); use the documented control postcondition to determine whether it stopped.
-The launch-then-send live guard (`../../../tests/fm-rovo-signals-live-e2e.test.sh`) now reproduces it over a raw PTY too: an earlier single fixed-timer Escape landed unreliably (the interrupt instant is timing-sensitive over a bare PTY), so the guard sends Escape across the live tool-call window until the cancel renders - a deterministic way to reproduce a timing-sensitive interrupt, and confirmed to print `Agent cancelled` every run.
+The launch-then-send live guard (`../../../tests/fm-rovo-signals-live-e2e.test.sh`) reproduces it over a raw PTY too: a single fixed-timer Escape lands unreliably (the interrupt instant is timing-sensitive over a bare PTY), so the guard sends Escape across the live tool-call window until the cancel renders - a deterministic way to reproduce a timing-sensitive interrupt, and confirmed to print `Agent cancelled` every run.
 Escape is the interrupt key and is what `fm_control_interrupt_key` returns.
 `fm_control_interrupt_ack_source` still records `none` for rovo - the same conservative choice already made for claude/codex/grok/kimi/cursor, a control-plane fact independent of whether the render happens to appear - so the control plane sends the key and lets its own postcondition, not a parsed string, decide whether the agent actually stopped.
 
