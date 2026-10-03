@@ -2524,6 +2524,99 @@ EOF
   pass "newest filed gates are selected before snapshot bounds"
 }
 
+# One captain answering decisions across several projects reads them one project
+# at a time: every decision and gate row names its project from structured records,
+# and Captain's Call arrives grouped by project without losing a row.
+test_decisions_and_gates_carry_their_project_and_group_by_it() {
+  local home mate fakebin json
+  home=$(make_home project-grouped)
+  : > "$home/data/secondmates.md"
+  mkdir -p "$home/projects/gamma"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-one - First alpha call (repo: alpha) (kind: captain) (hold: choose alpha route) (hold-kind: captain)
+- [ ] beta-one - First beta call (repo: beta) (kind: captain) (hold: choose beta route) (hold-kind: captain)
+- [ ] loose-call - Call with no project (kind: captain) (hold: choose a route) (hold-kind: captain)
+- [ ] alpha-two - Second alpha call (repo: alpha) (kind: captain) (hold: choose alpha backup) (hold-kind: captain)
+- [ ] gamma-meta - Call whose project is in its task record (kind: captain) (hold: choose gamma route) (hold-kind: captain)
+- [ ] beta-gate - Beta work behind a date (repo: beta) (kind: ship) (hold: revisit) (hold-kind: captain) (hold-until: 2026-08-01)
+
+## Done
+EOF
+  fm_write_meta "$home/state/gamma-meta.meta" \
+    "window=firstmate:fm-gamma-meta" "worktree=$home/projects/gamma" \
+    "project=$home/projects/gamma" "harness=claude" "kind=ship" "mode=no-mistakes"
+  mate="$TMP_ROOT/project-grouped-mate"
+  make_valid_secondmate_home grouped-mate "$mate"
+  append_secondmate_registry "$home" grouped-mate "$mate"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] delta-call - Secondmate delta call (repo: delta) (kind: captain) (hold: choose delta route) (hold-kind: captain)
+- [ ] mate-alpha - Secondmate alpha call (repo: alpha) (kind: captain) (hold: choose mate alpha route) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | [.id, .repo]]
+      == [["alpha-one","alpha"],["alpha-two","alpha"],["grouped-mate/mate-alpha","alpha"],
+          ["beta-one","beta"],["loose-call",null],["gamma-meta","gamma"],
+          ["grouped-mate/delta-call","delta"]])
+      and (.gates | any(.[]; .id == "beta-gate" and .repo == "beta"))
+  ' >/dev/null || fail "decisions were not carried with their project and grouped by it: $json"
+  json=$(FM_BEARINGS_DECISIONS=3 run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.decisions_open[] | .id] == ["alpha-one","beta-one","loose-call"])
+      and (.omitted | any(.[]; .surface == "decisions_open showing 3 of 7"))
+  ' >/dev/null || fail "grouping changed which decisions the bound keeps: $json"
+  json=$(run "$home" "$fakebin")
+  assert_contains "$json" 'decisions_open[7]{id,key,verb,summary,owner,repo}:' \
+    "the TOON decision rows do not carry the project"
+  pass "decision and gate rows carry their project, and Captain's Call groups by it without dropping a row"
+}
+
+# The focus window is opt-in: with none set Bearings is unchanged, and while one is
+# set every held outcome stays listed and every held decision stays in Captain's Call.
+test_focus_window_keeps_held_items_visible() {
+  local home fakebin json
+  home=$(make_home focus-visible)
+  : > "$home/data/secondmates.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-call - Alpha call (repo: alpha) (kind: captain) (hold: choose alpha route) (hold-kind: captain)
+- [ ] beta-call - Beta call (repo: beta) (kind: captain) (hold: choose beta route) (hold-kind: captain)
+
+## Done
+EOF
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e 'has("focus") | not' >/dev/null \
+    || fail "Bearings reported a focus window nobody set: $json"
+  FM_HOME="$home" "$ROOT/bin/fm-focus.sh" set alpha >/dev/null || fail "could not set the focus window"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-focus.sh" route --task beta-call --class decision \
+    --summary "beta needs a call")" = "held 1 beta" ] || fail "the beta decision was not held"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-focus.sh" route --task mate/gamma-pr --project gamma \
+    --class review-ready --summary "gamma PR ready")" = "held 2 gamma" ] || fail "the gamma PR was not held"
+  [ "$(FM_HOME="$home" "$ROOT/bin/fm-focus.sh" route --task beta-call --class completion \
+    --summary "beta audit finished")" = "held 3 beta" ] || fail "the beta completion was not held"
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    (.focus.state == "active") and (.focus.projects == "alpha")
+      and ([.focus.held[] | [.task, .project, .class]]
+           == [["beta-call","beta","decision"],["beta-call","beta","completion"],
+               ["mate/gamma-pr","gamma","review-ready"]])
+      and ([.decisions_open[] | .id] == ["alpha-call","beta-call"])
+  ' >/dev/null || fail "a held outcome or its decision left Bearings: $json"
+  pass "the focus window is absent by default and never hides a held item from Bearings"
+}
+
 # A captain scanning Underway must be able to tell WHICH task a row is, and the
 # board orders Charted Next by the durable filed date, so both facts have to come
 # out of fleet state rather than being invented at render time.
@@ -3395,6 +3488,8 @@ test_working_captain_holds_keep_their_bucket_surfaces
 test_active_children_project_independent_of_home_captain_hold
 test_nameless_legacy_summary_uses_its_durable_identifier
 test_newest_filed_gates_are_selected_before_snapshot_bounds
+test_decisions_and_gates_carry_their_project_and_group_by_it
+test_focus_window_keeps_held_items_visible
 test_underway_and_gate_rows_carry_the_durable_name_and_filed_date
 test_mixed_secondmate_roles_partial_state_and_captain_readiness
 test_main_captain_readiness_matches_secondmate_projection
