@@ -193,29 +193,35 @@ Run the live guard after any harness upgrade and before trusting or refreshing t
 FM_HARNESS_LIVENESS_DRIFT=1 bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-### Wrapped-shell liveness, 2026-10-04
+### Kiro-wrapped liveness, 2026-10-04
 
-On macOS 26.6.1 with tmux 3.7b, the portable real-process regression launched `/bin/sh` through a `sh (kiro-cli-term)` symlink in a private tmux server.
-The wrapped shell read `dead` while idle, `alive` with a Codex-like child, and `ambiguous` with an unrelated child.
-A shell-like title on a non-shell executable remained `ambiguous`, and a background Codex-like descendant below the wrapped shell remained `alive`.
+On macOS 26.6.1 with tmux 3.7b, the portable regression ran a compiled non-shell stand-in, copied as `sh (kiro-cli-term)` beside its own `kiro-cli-term`, which holds the pane tty and runs `/bin/sh` on a separate pty in a private tmux server.
+The wrapped pane read `dead` while idle and again after its agent exited, `alive` with a Codex-like foreground child or background descendant, and `ambiguous` with an unrelated foreground child.
+A background stranger below the inner shell read `dead`, as it does below an unwrapped shell.
+A `sh (kiro-cli-term)` executable whose bytes differ from the `kiro-cli-term` beside it read `ambiguous`.
+The same regression passed in an `ubuntu:24.04` container.
 
 ```sh
 bash tests/fm-tmux-agent-liveness.test.sh
-bash tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_HARNESS_LIVENESS_DRIFT=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh
 ```
 
-The default-on live guard launched every installed harness both directly and below the wrapped shell without submitting a prompt.
+The live guard launched every installed harness both directly and below the stand-in wrapper without submitting a prompt.
 Observed bounded output:
 
 ```text
-ok - wrapped-shell liveness: claude 2.1.288 (Claude Code) reads dead idle and alive with the installed agent
-ok - wrapped-shell liveness: codex codex-cli 0.157.1 reads dead idle and alive with the installed agent
-ok - wrapped-shell liveness: opencode 1.18.34 reads dead idle and alive with the installed agent
-ok - wrapped-shell liveness: kimi 2.1.1 reads dead idle and alive with the installed agent
-ok - wrapped-shell liveness: cursor 2026.09.26-dd393fe reads dead idle and alive with the installed agent
+ok - Kiro-wrapped liveness: claude 2.1.288 (Claude Code) reads dead idle and alive with the installed agent
+ok - Kiro-wrapped liveness: codex codex-cli 0.157.1 reads dead idle and alive with the installed agent
+ok - Kiro-wrapped liveness: opencode 1.18.34 reads dead idle and alive with the installed agent
+ok - Kiro-wrapped liveness: kimi 2.1.1 reads dead idle and alive with the installed agent
+ok - Kiro-wrapped liveness: cursor 2026.09.26-dd393fe reads dead idle and alive with the installed agent
 # unverified on this machine (not installed): pi pi-signed grok muse
 # checked 5 installed harness(es)
 ```
+
+A manual check used the real Kiro CLI integration: `/bin/zsh -il` in a private tmux server became `zsh (kiro-cli-term)`, a byte copy of the installed `kiro-cli-term`, with `/bin/zsh` on a second pty.
+The pane read `dead` idle, `alive` with the installed Codex in the foreground, and `dead` after that Codex process was killed with `SIGKILL`.
+That `dead` verdict is the state that `bin/fm-control.sh` relaunch and `bin/fm-spawn.sh --relaunch` require.
 
 ### 2026-09-06 default-on drift refresh, and the Cursor editor CLI collision
 

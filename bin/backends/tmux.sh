@@ -258,14 +258,18 @@ fm_backend_tmux_foreground_comms() {  # <target>
       done
 }
 
-# Pair each foreground name with its pid when a decorated shell name needs
-# executable proof. A title such as `zsh (kiro-cli-term)` is writable process
-# text and cannot, on its own, authorize relaunch onto that pane.
+# Pair each foreground name with its pid, so a terminal wrapper holding the tty
+# can be proven from its executable rather than its writable process title.
 fm_backend_tmux_foreground_pid_comms() {  # <target>
-  local tty pid pgid tpgid comm
+  local tty
   tty=$(tmux display-message -p -t "$1" '#{pane_tty}' 2>/dev/null) || return 1
   [ -n "$tty" ] || return 1
-  LC_ALL=C ps -t "${tty#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
+  fm_backend_tmux_tty_foreground_pid_comms "$tty"
+}
+
+fm_backend_tmux_tty_foreground_pid_comms() {  # <tty>
+  local pid pgid tpgid comm
+  LC_ALL=C ps -t "${1#/dev/}" -o pid=,pgid=,tpgid=,comm= 2>/dev/null \
     | while read -r pid pgid tpgid comm; do
         [ -n "$comm" ] || continue
         [ "$pgid" = "$tpgid" ] || continue
@@ -287,26 +291,31 @@ fm_backend_tmux_pid_executable() {  # <pid> -> resolved executable path
   printf '%s\n' "$path"
 }
 
-fm_backend_tmux_pid_is_wrapped_shell() {  # <pid> <comm>
-  local base=${2##*/} executable args
-  if ! [[ "$base" =~ ^(sh|bash|zsh|dash|ash|ksh|mksh|tcsh|csh|fish)[[:space:]]+\([^()]+\)$ ]]; then
-    # Linux comm may truncate the suffix. The full leading argv[0] can supply
-    # the decorated name, but the executable check below remains mandatory.
-    args=$(LC_ALL=C ps -p "$1" -o args= 2>/dev/null) || return 1
-    [[ "$args" =~ ^(.*/)?(sh|bash|zsh|dash|ash|ksh|mksh|tcsh|csh|fish)[[:space:]]+\([^()]+\)($|[[:space:]]) ]] || return 1
-  fi
+# The Kiro CLI shell integration runs each shell through a copy of its
+# kiro-cli-term binary named `<shell> (kiro-cli-term)`. That copy holds the
+# pane's tty and runs the real shell on a pty of its own. Its name is not proof,
+# so the executable must also be the kiro-cli-term installed beside it.
+fm_backend_tmux_pid_is_kiro_wrapper() {  # <pid>
+  local executable term
   executable=$(fm_backend_tmux_pid_executable "$1") || return 1
-  [ "$(fm_agent_process_classify_name "$executable")" = shell ]
+  case "${executable##*/}" in
+    *' (kiro-cli-term)') ;;
+    *) return 1 ;;
+  esac
+  term="${executable%/*}/kiro-cli-term"
+  [ -f "$term" ] || return 1
+  [ "$executable" -ef "$term" ] || cmp -s "$executable" "$term"
 }
 
-# Only a decorated shell takes this additional descendant check. A background
-# child of an ordinary idle shell retains the existing foreground-only rule.
-fm_backend_tmux_wrapped_shell_descendant_state() {  # <target> -> dead|alive|ambiguous
-  local pane_pid rows pids pid comm args argv0 other=0
-  pane_pid=$(tmux display-message -p -t "$1" '#{pane_pid}' 2>/dev/null) || { printf ambiguous; return; }
-  [[ "$pane_pid" =~ ^[0-9]+$ ]] || { printf ambiguous; return; }
+# A verified wrapper is judged from below: any harness descendant reads
+# `alive`, and otherwise the foreground group of the wrapper's own pty settles
+# the negative verdicts exactly as the pane tty does for an unwrapped shell.
+fm_backend_tmux_kiro_wrapper_state() {  # <wrapper pid> -> dead|alive|ambiguous
+  local wrapper_tty rows pids pid comm args argv0 tty inner_tty='' foreground name inner_shell=0 inner_other=0
+  wrapper_tty=$(LC_ALL=C ps -p "$1" -o tty= 2>/dev/null) || { printf ambiguous; return; }
+  wrapper_tty=${wrapper_tty//[[:space:]]/}
   rows=$(LC_ALL=C ps -axo pid=,ppid= 2>/dev/null) || { printf ambiguous; return; }
-  pids=$(printf '%s\n' "$rows" | awk -v root="$pane_pid" '
+  pids=$(printf '%s\n' "$rows" | awk -v root="$1" '
     { parent[$1] = $2; pid[NR] = $1 }
     END {
       if (!(root in parent)) exit 1
@@ -325,8 +334,8 @@ fm_backend_tmux_wrapped_shell_descendant_state() {  # <target> -> dead|alive|amb
   ') || { printf ambiguous; return; }
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
-    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || { other=1; continue; }
-    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || { other=1; continue; }
+    comm=$(LC_ALL=C ps -p "$pid" -o comm= 2>/dev/null) || continue
+    args=$(LC_ALL=C ps -p "$pid" -o args= 2>/dev/null) || continue
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify_name "$comm" "$argv0")" = agent ] \
       || [ "$(fm_agent_process_classify_name "$argv0" "$argv0")" = agent ] \
@@ -334,14 +343,30 @@ fm_backend_tmux_wrapped_shell_descendant_state() {  # <target> -> dead|alive|amb
       printf alive
       return
     fi
-    if [ "$(fm_agent_process_classify_name "$comm")" != shell ] \
-      && ! fm_backend_tmux_pid_is_wrapped_shell "$pid" "$comm"; then
-      other=1
+    if [ -z "$inner_tty" ]; then
+      tty=$(LC_ALL=C ps -p "$pid" -o tty= 2>/dev/null)
+      tty=${tty//[[:space:]]/}
+      case "$tty" in
+        ''|'?'|'??'|"$wrapper_tty") ;;
+        *) inner_tty=$tty ;;
+      esac
     fi
   done <<EOF
 $pids
 EOF
-  if [ "$other" -eq 1 ]; then printf ambiguous; else printf dead; fi
+  [ -n "$inner_tty" ] || { printf dead; return; }
+  foreground=$(fm_backend_tmux_tty_foreground_pid_comms "$inner_tty")
+  while IFS=$'\t' read -r pid name; do
+    [ -n "$name" ] || continue
+    case "$(fm_agent_process_classify_name "$name")" in
+      agent) printf alive; return ;;
+      shell) inner_shell=1 ;;
+      *) inner_other=1 ;;
+    esac
+  done <<EOF
+$foreground
+EOF
+  if [ "$inner_other" -eq 0 ] && [ "$inner_shell" -eq 1 ]; then printf dead; else printf ambiguous; fi
 }
 
 # The foreground group's full command lines. Needed because a node-bundle
@@ -407,7 +432,7 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
 # distinguish a truly idle pane from a rewritten process title.
 fm_backend_tmux_agent_state() {  # <target>
   local target=$1 comm session window windows inventory_status
-  local foreground argv0s name pid descendant_state fg_seen=0 fg_shell=0 fg_other=0 fg_wrapped=0
+  local foreground argv0s name pid wrapper='' wrapper_state fg_seen=0 fg_shell=0 fg_other=0
   case "$target" in
     *:*:*|'':*|*:'') printf 'unreadable'; return 0 ;;
     *:*) ;;
@@ -438,9 +463,8 @@ fm_backend_tmux_agent_state() {  # <target>
       agent) printf 'alive'; return 0 ;;
       shell) fg_shell=1 ;;
       *)
-        if fm_backend_tmux_pid_is_wrapped_shell "$pid" "$name"; then
-          fg_shell=1
-          fg_wrapped=1
+        if fm_backend_tmux_pid_is_kiro_wrapper "$pid"; then
+          wrapper=$pid
         else
           fg_other=1
         fi
@@ -498,14 +522,14 @@ EOF
   # A readable foreground process group settles the negative verdicts: only a
   # group that is nothing but shells is confidently agent-free.
   if [ "$fg_seen" -eq 1 ]; then
-    if [ "$fg_wrapped" -eq 1 ]; then
-      descendant_state=$(fm_backend_tmux_wrapped_shell_descendant_state "$target")
-      if [ "$descendant_state" = alive ]; then
+    if [ -n "$wrapper" ]; then
+      wrapper_state=$(fm_backend_tmux_kiro_wrapper_state "$wrapper")
+      if [ "$wrapper_state" = alive ]; then
         printf alive
       elif [ "$fg_other" -eq 1 ]; then
         printf ambiguous
       else
-        printf '%s' "$descendant_state"
+        printf '%s' "$wrapper_state"
       fi
     elif [ "$fg_other" -eq 0 ] && [ "$fg_shell" -eq 1 ]; then
       printf 'dead'
