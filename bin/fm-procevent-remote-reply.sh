@@ -99,6 +99,19 @@ DOCUMENT_LOCAL_FAILURE=2
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,66p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
+# Lifecycle-lock EXIT traps must compose temporary-path cleanup with lock
+# release; installing only one would silently drop the other obligation.
+# Track ingest/fetch paths outside function locals so cleanup survives unwinding.
+# Those traps name the lock through LIFECYCLE_LOCK because cmd_ingest's own
+# local lock would shadow the subshell's when a die fires inside it.
+INGEST_TMP=''
+FETCH_ERR=''
+FETCH_TMP=''
+cleanup_temp_paths() {
+  rm -rf -- ${INGEST_TMP:+"$INGEST_TMP"} ${FETCH_ERR:+"$FETCH_ERR"} ${FETCH_TMP:+"$FETCH_TMP"}
+}
+trap cleanup_temp_paths EXIT
+
 sha256_file() {
   if command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{print $1}'
@@ -109,13 +122,7 @@ sha256_file() {
   fi
 }
 
-empty_hash() {
-  local tmp
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-empty-hash.XXXXXX") || return 1
-  : > "$tmp"
-  sha256_file "$tmp"
-  rm -f -- "$tmp"
-}
+empty_hash() { sha256_file /dev/null; }
 
 validate_id() {
   case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac
@@ -245,7 +252,8 @@ cmd_arm() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_arm_locked "$id"
   )
 }
@@ -397,17 +405,22 @@ fetch_document() { # <id> <remote-relative> <result-var>
   case "$parent_real" in "$base"|"$base"/*) ;; *) return "$DOCUMENT_LOCAL_FAILURE" ;; esac
   [ ! -L "$destination" ] || return "$DOCUMENT_LOCAL_FAILURE"
   err=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-remote-doc-reason.XXXXXX") || return "$DOCUMENT_LOCAL_FAILURE"
-  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_ERR=$err
+  tmp=$(umask 077; mktemp "$parent/.remote-doc.XXXXXX") || { rm -f -- "$err"; FETCH_ERR=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_TMP=$tmp
   "$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-file.sh get "$rel" "$MAX_DOC_BYTES" < /dev/null > "$tmp" 2> "$err" || rc=$?
   if [ "$rc" -ne 0 ]; then
     FETCH_DOC_REASON=$(summarize_fetch_reason "$err" "$rel")
     rm -f -- "$tmp" "$err"
+    FETCH_TMP='' FETCH_ERR=''
     [ "$rc" -ne "$SSH_UNAVAILABLE" ] || return "$SSH_UNAVAILABLE"
     return 1
   fi
   rm -f -- "$err"
-  chmod 600 "$tmp" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
-  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_ERR=''
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; FETCH_TMP=''; return "$DOCUMENT_LOCAL_FAILURE"; }
+  FETCH_TMP=''
   local_rel="data/remote-secondmates/$id/$rel"
   printf -v "$result_var" '%s' "$local_rel"
 }
@@ -506,7 +519,7 @@ cmd_ingest() {
   blank=$(LC_ALL=C awk '$0 == "" { print NR; exit }' "$result")
   case "$blank" in ''|*[!0-9]*) die "result has no payload boundary" ;; esac
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-reply-ingest.XXXXXX") || die "cannot create ingest staging directory"
-  trap 'rm -rf -- "$tmp"' EXIT
+  INGEST_TMP=$tmp
   payload="$tmp/payload"
   tail -n "+$((blank + 1))" "$result" > "$payload"
   actual_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d ' ')
@@ -553,6 +566,8 @@ cmd_ingest() {
     fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
+    rm -rf -- "$tmp"
+    INGEST_TMP=''
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
   fi
@@ -633,8 +648,8 @@ EOF
     write_cursor "$id" "$to" "$to_hash" || { fm_lock_release "$lock"; die "cannot commit remote reply cursor"; }
   fi
   fm_lock_release "$lock"
-  trap - EXIT
   rm -rf -- "$tmp"
+  INGEST_TMP=''
   printf 'ingested: %s appended=%s offset=%s\n' "$id" "$appended" "$to"
 }
 
@@ -683,7 +698,8 @@ cmd_handle() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_handle_locked "$@"
   )
 }
@@ -753,7 +769,8 @@ cmd_retire() {
   lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
   (
     fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
-    trap 'fm_lock_release "$lock"' EXIT
+    LIFECYCLE_LOCK=$lock
+    trap 'cleanup_temp_paths; fm_lock_release "$LIFECYCLE_LOCK"' EXIT
     cmd_retire_quiesce_locked "$id" "$force" || return 1
     cmd_retire_finalize_locked "$id" "$force"
   )
