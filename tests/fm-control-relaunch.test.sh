@@ -157,6 +157,7 @@ case "${1:-}" in
     # Model the one thing an endpoint re-creation depends on: the window now
     # appears in the session inventory, so the very next agent-state read stops
     # answering `missing`. Echo a stable window id the way the real -P -F does.
+    # A freshly created pane is a shell, matching a real new-window.
     shift
     name=
     while [ $# -gt 0 ]; do
@@ -168,6 +169,7 @@ case "${1:-}" in
     done
     printf '%s\n' "$name" >> "$D/windows"
     printf '%s\n' "$name" >> "$D/created-windows"
+    printf 'zsh' > "$D/command"
     printf '@9\n'
     exit 0 ;;
 esac
@@ -1839,6 +1841,16 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
 # prerequisite, so a task whose pane or workspace was destroyed could not be
 # reclaimed by anything, and any no-mistakes approval it was parked on had no
 # seat left to answer it.
+#
+# #5007 closed the herdr half by proving absence (a stopped server is adopted;
+# a destroyed pane rebinds). It left tmux `missing` as unproven, which kept the
+# same circular deadlock for a local ship whose recorded tmux window is gone:
+# --relaunch still demanded exit, and exit still refused. A window omitted from
+# a successful inventory of the recorded session is positive absence, so both
+# verbs now treat it as gone. A missing session or dead server on this seat's
+# socket is not - the window may be on another tmux server - so both verbs
+# still refuse it, with a remedy that names neither verb as the other's
+# prerequisite. `unreadable` still refuses.
 
 # strand_endpoint <case-dir> <id>: make a tmux endpoint read `missing` the way
 # a destroyed window does - a successful session inventory that omits the exact
@@ -1847,44 +1859,87 @@ strand_endpoint() {  # <case-dir> <id>
   : > "$1/fake/windows"
 }
 
-# Every tmux `missing` refuses on BOTH verbs, whatever produced it. tmux is the
-# one verified backend whose absence cannot be proven from a task record: the
-# record carries no socket identity for the endpoint, and any inventory
-# describes only the server this process happens to address. So a window that
-# is merely on a server this seat cannot reach is indistinguishable from one
-# that was destroyed, and neither verb will guess.
-assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
-  local dir=$1 id=$2 what=$3 out rc brief_before
+# A tmux `missing` must not deadlock: exit reports the endpoint gone, and
+# --relaunch creates one replacement window in the recorded session. Neither
+# verb may name the other as a prerequisite, and unlanded work is untouched.
+assert_tmux_missing_reclaims() {  # <case-dir> <id> <what-was-staged>
+  local dir=$1 id=$2 what=$3 out rc brief_before head_before window_before
+
+  window_before=$(meta_field "$dir" "$id" window)
+  brief_before=$(cat "$dir/home/data/$id/brief.md")
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+
+  out=$(run_control "$dir" "$id" exit); rc=$?
+  expect_code 0 "$rc" "exit must treat a tmux missing endpoint as already gone ($what)"$'\n'"$out"
+  assert_contains "$out" "endpoint-gone" \
+    "exit should report the gone-endpoint outcome ($what)"
+  assert_not_contains "$out" "stop the agent first" \
+    "exit must not send the caller to relaunch's refusal ($what)"
+  assert_not_contains "$out" "reconcile the task" \
+    "exit must not demand a reconcile verb ($what)"
+  [ ! -s "$dir/fake/literal" ] || fail "a gone-endpoint exit must send nothing ($what)"
+  [ "$(meta_field "$dir" "$id" window)" = "$window_before" ] \
+    || fail "exit must leave the recorded endpoint exactly as it found it ($what)"
 
   out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
-  expect_code 1 "$rc" "relaunch must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_absent "$dir/fake/created-windows" "a refused relaunch must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused relaunch must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must send nothing into any pane ($what)"
-
-  brief_before=$(cat "$dir/home/data/$id/brief.md")
-  out=$(run_control "$dir" "$id" exit); rc=$?
-  expect_code 1 "$rc" "exit must refuse a tmux endpoint whose absence cannot be proven ($what)"$'\n'"$out"
-  assert_not_contains "$out" "endpoint-gone" \
-    "exit must not report a stop it cannot see ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused exit must send nothing into any pane ($what)"
-
-  out=$(run_control "$dir" "$id" relaunch --note "this note must never reach a live agent"); rc=$?
-  expect_code 1 "$rc" "the relaunch transaction must fail closed ($what)"$'\n'"$out"
+  expect_code 0 "$rc" "relaunch must reclaim a tmux missing endpoint ($what)"$'\n'"$out"
+  assert_not_contains "$out" "positively agent-free endpoint" \
+    "relaunch must not demand exit for a positively missing endpoint ($what)"
+  assert_present "$dir/fake/created-windows" "relaunch must create one replacement window ($what)"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "a reclaim moved the worktree's HEAD ($what)"
   [ "$(cat "$dir/home/data/$id/brief.md")" = "$brief_before" ] \
-    || fail "a refused relaunch edited instructions an agent that may still be running is reading ($what)"
-  assert_absent "$dir/fake/created-windows" "a refused transaction must not create a window ($what)"
-  assert_absent "$dir/fake/created-sessions" "a refused transaction must not create a session ($what)"
-  [ ! -s "$dir/fake/literal" ] || fail "a refused transaction must launch nothing ($what)"
+    || fail "a spawn --relaunch must not rewrite instructions ($what)"
 }
 
-test_tmux_refuses_a_window_missing_from_its_session() {
+test_tmux_reclaims_a_window_missing_from_its_session() {
   local dir
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
+  printf 'never committed\n' > "$dir/wt/dirty.txt"
   strand_endpoint "$dir" rl60
-  assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
+  assert_tmux_missing_reclaims "$dir" rl60 "window absent from a readable session inventory"
+  [ "$(cat "$dir/wt/dirty.txt")" = "never committed" ] \
+    || fail "a reclaim destroyed or rewrote an uncommitted change"
+  [ "$(meta_field "$dir" rl60 window)" = 'fmses:fm-rl60' ] \
+    || fail "the rebound endpoint should keep the recorded session and window name, got $(meta_field "$dir" rl60 window)"
+  assert_absent "$dir/fake/created-sessions" \
+    "a window missing from a live session must not mint a second session"
+  pass "tmux: a window absent from its session is reclaimed rather than deadlocking exit and relaunch"
+}
+
+# A missing session or no server on this seat's socket says nothing about a
+# window on another tmux server, so both verbs refuse. The refusal must be
+# actionable and must not send the operator from one verb to the other.
+assert_tmux_unfindable_session_refuses() {  # <case-dir> <id> <what-was-staged>
+  local dir=$1 id=$2 what=$3 out rc brief_before window_before
+
+  window_before=$(meta_field "$dir" "$id" window)
+  brief_before=$(cat "$dir/home/data/$id/brief.md")
+
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "relaunch must refuse a tmux session this seat cannot find ($what)"$'\n'"$out"
+  assert_contains "$out" "tmux new-session -d -s fmses" \
+    "relaunch must name a remedy for an unfindable session ($what)"
+  assert_not_contains "$out" "stop the agent first" \
+    "relaunch must not send the caller to exit ($what)"
+
+  out=$(run_control "$dir" "$id" exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse a tmux session this seat cannot find ($what)"$'\n'"$out"
+  assert_not_contains "$out" "endpoint-gone" \
+    "exit must not report a stop it cannot see ($what)"
+  assert_contains "$out" "tmux new-session -d -s fmses" \
+    "exit must name a remedy for an unfindable session ($what)"
+  assert_not_contains "$out" "reconcile the task" \
+    "exit must not demand a reconcile verb ($what)"
+
+  assert_absent "$dir/fake/created-windows" "a refusal must not create a window ($what)"
+  assert_absent "$dir/fake/created-sessions" "a refusal must not create a session ($what)"
+  [ ! -s "$dir/fake/literal" ] || fail "a refusal must send nothing into any pane ($what)"
+  [ "$(meta_field "$dir" "$id" window)" = "$window_before" ] \
+    || fail "a refusal must leave the recorded endpoint as it found it ($what)"
+  [ "$(cat "$dir/home/data/$id/brief.md")" = "$brief_before" ] \
+    || fail "a refusal must not rewrite instructions ($what)"
 }
 
 test_tmux_refuses_a_session_that_cannot_be_found() {
@@ -1892,11 +1947,11 @@ test_tmux_refuses_a_session_that_cannot_be_found() {
   dir=$(new_case tmux-nosession rl61)
   add_ship_task "$dir" rl61 claude
   # Real tmux's answer to a renamed session, and to a different
-  # TMUX_TMPDIR/socket: definitive about the SESSION, silent about whether the
-  # window and its agent survived elsewhere.
+  # TMUX_TMPDIR/socket: definitive about the SESSION on this server, silent
+  # about whether the window and its agent survived on another.
   : > "$dir/fake/session-missing"
-  assert_tmux_missing_refuses "$dir" rl61 "recorded session not found"
-  pass "tmux: an unfindable session refuses both verbs, so a live agent is never duplicated"
+  assert_tmux_unfindable_session_refuses "$dir" rl61 "recorded session not found"
+  pass "tmux: an unfindable session refuses both verbs with a remedy naming neither"
 }
 
 test_tmux_refuses_when_the_server_is_gone() {
@@ -1906,8 +1961,8 @@ test_tmux_refuses_when_the_server_is_gone() {
   # No server on the socket this process addresses. Another server may still be
   # running the task's window, and the record cannot say which socket is its.
   : > "$dir/fake/server-dead"
-  assert_tmux_missing_refuses "$dir" rl62 "no tmux server on this socket"
-  pass "tmux: a dead server on this socket refuses both verbs rather than proving absence"
+  assert_tmux_unfindable_session_refuses "$dir" rl62 "no tmux server on this socket"
+  pass "tmux: a dead server on this socket refuses both verbs with a remedy naming neither"
 }
 
 test_reclaim_refuses_an_unreadable_endpoint() {
@@ -2444,7 +2499,7 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
-test_tmux_refuses_a_window_missing_from_its_session
+test_tmux_reclaims_a_window_missing_from_its_session
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint

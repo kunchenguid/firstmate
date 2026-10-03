@@ -325,19 +325,21 @@ fm_control_backend_state_verified() {  # <backend>
 # re-creating the endpoint - must come through here rather than trusting the
 # raw verdict.
 #
-# Whether absence is provable AT ALL is a property of the backend, not of the
-# reading:
-#   herdr CAN prove it. Every read goes through fm_backend_herdr_cli, which
-#     passes `--session <session>`, so the recheck starts and reads the session
-#     the RECORD names, through that session's own socket. The answer is about
-#     the task's endpoint and nothing else.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+# Whether a `missing` read needs a second proof is a property of the backend:
+#   herdr MUST recheck. fm_backend_herdr_agent_state maps a positively STOPPED
+#     session server to `missing` (issue #4091), which is "no agent is running
+#     right now" rather than "the pane was destroyed". Stopping and restarting
+#     a named Herdr server preserves pane ids, so this function starts the
+#     recorded session's server (only the server) and re-reads the pane.
+#     `dead` means it survived and is adopted; `alive` means the agent came
+#     back and refuses; a second `missing` is gone.
+#   tmux re-reads the EXACT recorded session (`=session`). A successful
+#     inventory that omits the window is gone: the session the record names is
+#     on this server and the window is not in it. A missing session or no
+#     server on this seat's socket is unproven, because a task record carries
+#     no socket identity and the window may live on another tmux server. Its
+#     reason names a remedy that is neither verb, so --relaunch and exit never
+#     send the operator to each other.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
@@ -347,7 +349,35 @@ fm_control_endpoint_absence_verdict() {  # <backend> <target>
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      local session window windows inventory_status
+      session=
+      case "$target" in
+        *:*:*|'':*|*:'') ;;
+        *:*) session=${target%%:*}; window=${target#*:} ;;
+      esac
+      [ -n "$session" ] || { printf 'unproven\tthe recorded tmux endpoint %s is not a session:window address' "'$target'"; return 0; }
+      windows=$(fm_backend_tmux_window_inventory "=$session")
+      inventory_status=$?
+      case "$inventory_status" in
+        0)
+          if ! printf '%s\n' "$windows" | grep -Fqx -- "$window"; then
+            printf 'gone\t'
+            return 0
+          fi
+          case "$(fm_backend_tmux_agent_state "$target")" in
+            dead) printf 'dead\t' ;;
+            alive) printf 'alive\t' ;;
+            *) printf 'unproven\tthe recorded tmux window %s is present again but its agent state could not be classified' "'$target'" ;;
+          esac
+          ;;
+        2)
+          # shellcheck disable=SC2016 # Backticks are literal command text in the operator message.
+          printf 'unproven\ttmux session %s is not on the tmux server this seat addresses, and a task record carries no socket identity, so a window on another tmux server cannot be ruled out. Rerun from a shell on the tmux server that hosts %s (check TMUX, TMUX_TMPDIR, and -L); or, once you have confirmed no agent for this task runs on any tmux server, create the empty session on this server with `tmux new-session -d -s %s` and rerun, so its inventory can prove the window gone' "'$session'" "'$session'" "$session"
+          ;;
+        *)
+          printf 'unproven\tthe window inventory of tmux session %s could not be read' "'$session'"
+          ;;
+      esac
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is
