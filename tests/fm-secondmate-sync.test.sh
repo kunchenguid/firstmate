@@ -11,6 +11,10 @@
 #     home (updated), is a no-op on an already-current home (current, no nudge),
 #     and refuses - leaving work untouched - on a dirty, diverged, or
 #     in-flight (feature-branch) home.
+#   - A fast-forward blocked by the home's own orphaned index.lock (File exists)
+#     recovers once through fm-lock-lib.sh's staleness proof: a provably-stale
+#     lock is removed and the merge retried; a lock a live process holds keeps
+#     today's skip and is never removed.
 #   - No origin fetch happens in the local-HEAD sync path.
 #   - The bootstrap sweep fast-forwards every live secondmate home and sends a
 #     reread nudge ONLY for a running secondmate whose instruction surface
@@ -261,6 +265,63 @@ test_ff_inflight_feature_branch() {
     "a home on a feature branch is skipped"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "in-flight home HEAD moved (work at risk)"
   pass "T5 in-flight: a home on a feature branch is skipped, its work preserved"
+}
+
+# --- stale index.lock: an orphaned lock no longer blocks the sync forever -----
+# The regression: a killed git process leaves a 0-byte index.lock in the
+# secondmate home's worktree git dir, and every sync then skips forever with
+# "fast-forward failed: error: Unable to create ...index.lock: File exists."
+# A fast-forward that fails on exactly that signature gets ONE recovery attempt
+# through fm-lock-lib.sh's staleness proof: a provably-stale lock is removed and
+# the fast-forward retried once, so the home advances again; a lock a live
+# process still holds is never removed and today's skip stands.
+lsof_shim() { # <fakebin> <exit-status>: fleet-sync/teardown-style lsof stub
+  cat > "$1/lsof" <<SH
+#!/usr/bin/env bash
+exit $2
+SH
+  chmod +x "$1/lsof"
+}
+
+test_ff_stale_index_lock_recovery() {
+  local w c1 base fakebin lock lock2
+  w=$(new_world ff-stale-lock)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  # The orphaned 0-byte lock, exactly as a killed git process leaves it.
+  lock=$(git -C "$w/sm" rev-parse --git-path index.lock)
+  : > "$lock"
+  fakebin="$w/fakebin"
+  mkdir -p "$fakebin"
+  lsof_shim "$fakebin" 1 # lsof: provably no holder
+
+  PATH="$fakebin:$PATH" FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm" "$base"
+
+  [ "$FF_STATUS" = updated ] || fail "FF_STATUS: expected updated after stale-lock recovery, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_contains "$FF_OUT" "removed provably-stale git lock" "stale lock: recovery diagnostic missing"
+  assert_contains "$FF_OUT" "secondmate sm: updated " "stale lock: home did not report its advance after recovery"
+  [ "$(head_of "$w/sm")" = "$base" ] || fail "home did not advance after the stale index.lock was cleared"
+  assert_absent "$lock" "stale lock: the proven-stale index.lock must be removed"
+
+  # A lock a live process still holds is never removed: skip preserved.
+  git -C "$w/main" worktree add -q --detach "$w/sm2" "$c1"
+  bump_primary "$w" instr
+  base=$(primary_head_commit "$w/main")
+  lock2=$(git -C "$w/sm2" rev-parse --git-path index.lock)
+  : > "$lock2"
+  lsof_shim "$fakebin" 0 # lsof: a live holder
+
+  PATH="$fakebin:$PATH" FM_FF_STALE_INDEX_LOCK_AGE_SECS=0 run_ff "$w/sm2" "$base"
+
+  [ "$FF_STATUS" = skipped ] || fail "FF_STATUS: expected skipped for a live lock, got '$FF_STATUS' (out: $FF_OUT)"
+  assert_contains "$FF_OUT" "secondmate sm: skipped: fast-forward failed: error: Unable to create" \
+    "live lock: today's skip line must stand"
+  assert_contains "$FF_OUT" "not provably stale" "live lock: refusal diagnostic missing"
+  assert_present "$lock2" "live lock: the index.lock must never be removed"
+  [ "$(head_of "$w/sm2")" != "$base" ] || fail "live lock: home advanced despite the refused lock"
+  pass "stale index.lock: a provably-stale lock is cleared and the ff retried once; a live lock is never removed"
 }
 
 # --- T6: no origin fetch happens in the local-HEAD sync path -----------------
@@ -1348,6 +1409,7 @@ test_ff_dirty
 test_scratchpad2_does_not_dirty_home
 test_ff_diverged
 test_ff_inflight_feature_branch
+test_ff_stale_index_lock_recovery
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
