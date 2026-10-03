@@ -859,6 +859,30 @@ test_kimi_refuses_a_backend_without_a_viewport_capture() {
   pass "fm-spawn: Kimi refuses a backend that cannot read the viewport, before launching"
 }
 
+test_kimi_remains_refused_on_orca_with_a_viewport() {
+  local id rec out rc
+  id=kimi-orca-unverified-y9
+  rec=$(make_spawn_case orca-unverified "$id")
+  read_spawn_record "$rec"
+  cat >"$FAKEBIN_DIR/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$FAKEBIN_DIR/orca"
+  rc=0
+  out=$(FM_BACKEND=orca run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi on Orca must refuse before its lifecycle is verified"
+  assert_contains "$out" 'Kimi on Orca remains unverified for readiness and typed submission' \
+    "the new Orca viewport must not enable unverified Kimi control"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi launched on Orca despite its lifecycle refusal"
+  pass "fm-spawn: an Orca viewport does not silently enable Kimi"
+}
+
 test_kimi_answers_a_trust_dialog_with_a_wrapped_hint() {
   local id rec out rc
   id=kimi-trust-wrapped-y9
@@ -1146,6 +1170,7 @@ test_kimi_banner_before_the_dialog_paints_does_not_pass_readiness
 test_kimi_answered_dialog_left_in_history_does_not_restart_the_answer
 test_kimi_blank_viewport_frame_costs_only_its_poll
 test_kimi_refuses_a_backend_without_a_viewport_capture
+test_kimi_remains_refused_on_orca_with_a_viewport
 test_kimi_answers_a_trust_dialog_with_a_wrapped_hint
 test_kimi_blank_frame_between_banners_restarts_the_ready_count
 test_kimi_failed_viewport_read_fails_readiness_at_once

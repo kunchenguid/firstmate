@@ -494,17 +494,19 @@ test_unverified_harness_is_refused() {
 test_backend_key_capability_matrix() {
   local backend key
   for backend in tmux herdr zellij cmux; do
-    # C-u is the composer clear muse's interrupt needs; every session provider
-    # but Orca normalizes it (bin/backends/*.sh).
+    # C-u is the composer clear muse's interrupt needs; these backends
+    # normalize it (bin/backends/*.sh).
     for key in Escape Enter C-c C-u; do
       fm_control_backend_supports_key "$backend" "$key" \
         || fail "$backend should be able to deliver $key"
     done
   done
   fm_control_backend_supports_key orca Escape \
-    && fail "orca's terminal API has no Escape and must not claim it"
+    && fail "Orca must not claim Escape without a verified harness identity"
   fm_control_backend_supports_key orca C-u \
-    && fail "orca's terminal API has no composer clear and must not claim one"
+    && fail "Orca must not claim composer clear without a verified harness identity"
+  fm_control_backend_supports_key orca Escape droid || fail "Orca Droid must deliver Escape"
+  fm_control_backend_supports_key orca C-u droid || fail "Orca Droid must clear its composer"
   fm_control_backend_supports_key orca C-c || fail "orca should deliver C-c"
   fm_control_backend_supports_key orca Enter || fail "orca should deliver Enter"
   pass "fm-control-lib: the backend key matrix matches each adapter's real send-key surface"
@@ -549,6 +551,39 @@ test_orca_refuses_an_escape_harness_interrupt() {
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
   pass "fm-control interrupt: a backend that cannot deliver the harness's key refuses instead of sending another"
+}
+
+test_orca_droid_relaunch_refuses_a_non_droid_replacement_before_stopping() {
+  local dir out rc before
+  dir=$(new_case orca-droid-switch)
+  add_task "$dir" t1 droid ship orca "term-1"
+  {
+    sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta"
+    echo "terminal=term-1"
+    echo "orca_worktree_id=wt-1::/orca/wt-1"
+    echo "busy_gen=gen-original"
+    echo "spawn_gen=gen-original"
+  } > "$dir/home/state/t1.meta.new"
+  mv "$dir/home/state/t1.meta.new" "$dir/home/state/t1.meta"
+  # Any Orca call is logged: a refusal must not reach the live terminal.
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_FAKE_DIR/orca.log"
+exit 1
+SH
+  chmod +x "$dir/fakebin/orca"
+  before=$(cat "$dir/home/state/t1.meta")
+  out=$(run_control "$dir" t1 relaunch --harness claude --note x); rc=$?
+  expect_code 1 "$rc" "relaunching Orca Droid onto claude should refuse"$'\n'"$out"
+  assert_contains "$out" "only Droid's start and stop can be verified" \
+    "the refusal should name the unverifiable replacement"
+  if grep -Eq 'send|close' "$dir/fake/orca.log" 2>/dev/null; then
+    fail "a refused relaunch must not interrupt or close the Orca Droid worker: $(cat "$dir/fake/orca.log")"
+  fi
+  [ "$(cat "$dir/home/state/t1.meta")" = "$before" ] \
+    || fail "a refused relaunch must leave the worker's record and generation untouched"
+  [ ! -e "$dir/home/state/t1.control-relaunch" ] || fail "a refused relaunch must not open a transaction"
+  pass "fm-control relaunch: Orca Droid refuses a non-Droid replacement before stopping the worker"
 }
 
 test_unverified_state_backends_refuse_stop_verbs() {
@@ -1083,6 +1118,7 @@ test_prefixed_recorded_harness_reaches_each_control_verb
 test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
+test_orca_droid_relaunch_refuses_a_non_droid_replacement_before_stopping
 test_unverified_state_backends_refuse_stop_verbs
 test_state_verified_backends_are_exactly_tmux_and_herdr
 test_window_label_is_refused_with_the_exact_id

@@ -120,5 +120,5 @@ Rejected stale-generation events emit no turn-end notification.
 The live guard checks main-turn completion, Claude hook isolation, commit attribution, doorbell acknowledgement, idle and busy interruption, the revert picker, process liveness, exit, and native resume.
 The shared process classifier supplies the same native identity to tmux and Herdr; Herdr interrupt, steering, and identity were exercised in a lab session, while Herdr `exit` refuses as described above.
 Zellij, Orca, and cmux were inspected through their existing backend-neutral delivery and key capability surfaces, not live-tested here.
-Orca's existing lack of Escape delivery means a Devin interrupt is refused there.
+Orca's Escape delivery has not been verified for Devin, so its interrupt remains refused there.
 A direct keyboard cancellation bypassing `fm-control` can retain a busy record until normal completion or session exit; no primary supervision guarantee is implied by these worker hooks.

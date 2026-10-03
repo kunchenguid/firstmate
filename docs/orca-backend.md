@@ -24,7 +24,8 @@ No manual repository registration is required.
 
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
-Enter and Ctrl-C are supported; Escape is not.
+Enter and Ctrl-C are supported for every harness.
+Escape and Ctrl+U are verified for Droid on Orca 1.4.217 and 1.4.218 through raw terminal bytes; other harnesses do not inherit that lifecycle control capability.
 
 ## Task shape and metadata
 
@@ -72,7 +73,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - Orca is macOS-only and explicit-only.
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
-- Escape is unsupported.
+- Escape and Ctrl+U are verified for Droid only.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.

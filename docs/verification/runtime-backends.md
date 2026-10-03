@@ -2456,3 +2456,37 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Factory Droid CLI
+
+Verified on 2026-10-01 with Droid 0.230.0, tmux 3.6a, and Orca 1.4.218 on Darwin 25.5.0 arm64.
+`droid --help` accepts an interactive positional prompt, `--settings`, and `--auto high`.
+`droid exec --help` lists model IDs and each model's supported reasoning levels, while interactive Droid receives model and effort through its per-task settings file.
+The [Factory CLI](https://docs.factory.com/droid-cli/cli-reference.md), [settings](https://docs.factory.com/droid-cli/settings.md), and [hooks](https://docs.factory.com/harness/hooks.md) references own those vendor contracts.
+Firstmate probes an explicit model before creating an endpoint, records a requested effort in task metadata, and omits it from runtime settings when no explicit model is given or that model does not support it.
+The settings replace the task's `statusLine` with `printf firstmate`, leave the operator's `hooksDisabled` policy intact, select Auto (High), and register `UserPromptSubmit`, `Stop`, `Notification`, and `SessionEnd` hooks.
+Spawn answers the fresh-worktree trust dialog only when `Trust this folder` is visibly selected and requires the launch prompt hook to acknowledge the brief.
+Droid dispatch is limited to tmux and Orca until the composer and lifecycle are verified live on other backends.
+
+The tmux composer proof uses the live `droid` process identity, the bounded box, a `[⏱ …]` timer row with a nonempty trailing integration indicator after `|`, and the task-owned status row.
+The Orca proof requires `terminal read --screen` to return `source=screen` and the exact recorded task terminal, then applies the same box, timer, and status-row check.
+The live captures showed `TMUX ⧉` on tmux and `IDE ◌` on Orca, while the production parser accepts other trailing integration indicators.
+The opt-in Orca guard still asserts the observed `IDE ◌` indicator as a version drift check.
+An unrelated process, stale frame, extra row, or unknown terminal reads `unknown` and cannot authorize typed input.
+Orca 1.4.218 delivered Droid's raw Escape and Ctrl+U keys, while its current-generation `SessionEnd` hook proved exit before relaunch or teardown.
+The live interrupt checks observed a busy running tool, then an idle hook and missing completion marker before the tool's 45-second duration; control conservatively reports `cancel=unconfirmed` because the vendor offers no separate cancellation acknowledgement.
+
+Refresh commands:
+
+```sh
+bash tests/fm-droid-harness.test.sh
+bash tests/fm-backend-orca.test.sh
+FM_LIVE=1 bash tests/fm-harness-liveness-drift-live-e2e.test.sh
+FM_DROID_SIGNALS=1 bash tests/fm-droid-signals-live-e2e.test.sh
+FM_DROID_ORCA_SIGNALS=1 bash tests/fm-droid-orca-signals-live-e2e.test.sh
+```
+
+The real tmux and Orca scouts each received an explicit `gpt-5.6-luna` model and `low` effort, wrote their report, acknowledged an inbox steer, settled a turn-end hook, accepted a typed steer, interrupted a busy turn, relaunched with the same model and effort under a fresh generation, exited, and tore down their task wiring.
+The Orca scout also preserved its exact terminal handle and worktree ID across relaunch and removed the isolated worktree at teardown.
+The live liveness guard reported `droid 0.230.0: title='droid'`, `ancestry verdicts=[comm droid]`, and `checked 6 installed harness(es)` on tmux.
+The opt-in guards print five `ok` checks each, and the private task evidence contains their full stdout, report, viewport, and terminal transcript.
