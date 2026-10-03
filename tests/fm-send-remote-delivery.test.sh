@@ -29,6 +29,9 @@
 #      slash) keeps its exit-3 delivered-unconfirmed contract, never closes a
 #      --resolve-key decision unconfirmed, and keeps a marked expectation
 #      armed.
+#   9. A delivered remote steer never leaves its caller to infer delivery: a
+#      `sent:` confirmation states the remote inbox delivery, and no advisory
+#      line may stand alone without the delivered fact.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -205,6 +208,26 @@ pending_record() {  # <home>
 
 drain_out() {  # <home>
   FM_STATE_OVERRIDE="$1/state" "$DRAIN" 2>/dev/null
+}
+
+# Assert no labelled advisory line of a DELIVERED send stands without the
+# delivery fact. A bare "notice:"/"warning:" line is the exact ambiguity that
+# made an already-delivered remote steer get resent. Unlabelled lines are not
+# this send's vocabulary (the supervision guard prints its own banner, which
+# states its own continue-line), so they are not judged here.
+assert_no_bare_advisory() { # <report-file> <msg>
+  local line pending=
+  while IFS= read -r line; do
+    case "$line" in
+      notice:* | *"notice: "* | warning:* | *"warning: "* | advisory\ **)
+        case "$line" in
+          *"durably recorded "* | *delivered* | *"WILL still be sent"*) ;;
+          *) pending="$pending$line"$'\n' ;;
+        esac
+        ;;
+    esac
+  done < "$1"
+  [ -z "$pending" ] || fail "$2"$'\n'"a labelled line carried no delivery fact:"$'\n'"$pending"
 }
 
 send_env() {  # <fakebin> <parent-home> <ssh-log> [extra env...] -- <cmd...>
@@ -785,6 +808,84 @@ test_local_pending_does_not_close_resolve_key() {
   pass "fm-send local: an unconfirmed submit still never closes a --resolve-key decision"
 }
 
+# --- delivered remote steer reporting ---------------------------------------
+# A remote steer whose only report is an advisory gets read as a refused send
+# and sent again. These pin the positive verdict and the remote inbox write.
+
+test_delivered_remote_steer_reports_delivery() {
+  local dir fb ssh_log home rhome rc err recs count
+  dir="$TMP_ROOT/sent-confirm"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/sent.ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home sent-confirm)
+  home=$(setup_remote_parent_home sent-confirm "$rhome")
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 0 "$rc" "a delivered remote steer must exit 0: $err"
+  assert_contains "$err" "sent: steer to remote secondmate rsm durably recorded in its steering inbox" \
+    "a delivered remote steer must report its own delivery"
+  assert_contains "$err" "do not resend" \
+    "the delivery report must state that a resend is not wanted"
+  assert_not_contains "$err" "error:" "a delivered remote steer must not carry an error report"
+  recs=$(remote_inbox_records "$rhome")
+  count=$(printf '%s\n' "$recs" | grep -c . || true)
+  [ "$count" = 1 ] || fail "exactly one far-side record must exist, found $count: $recs"
+  assert_contains "$(cat "$recs")" "please rename the metric" \
+    "the far-side record must carry the steer text"
+  assert_no_bare_advisory "$dir/err" \
+    "every advisory a delivered remote steer reports must carry the delivery fact"
+  [ ! -s "$dir/out" ] || fail "a delivered send must keep stdout clean: $(cat "$dir/out")"
+  pass "fm-send remote: a delivered steer reports sent and writes its remote record"
+}
+
+test_delivered_remote_steer_advisory_cannot_read_as_refusal() {
+  local dir fb ssh_log home rhome rc err recs count advisory
+  dir="$TMP_ROOT/sent-advisory"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/advisory.ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home sent-advisory)
+  home=$(setup_remote_parent_home sent-advisory "$rhome")
+  # Simulate losing both the pending-reply delivery commit and its prepared
+  # recovery marker, so an advisory is the only trouble this send can report.
+  cat > "$fb/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+source_arg=${@: -2:1}
+target_arg=${@: -1}
+if [ "${FM_FAIL_DELIVERY_CONFIRM:-0}" = 1 ] \
+  && grep -q '^confirmed=' "$source_arg" 2>/dev/null; then
+  rm -f "$target_arg"
+  exit 1
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$fb/mv"
+
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAIL_DELIVERY_CONFIRM=1 \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  err=$(cat "$dir/err")
+  expect_code 0 "$rc" \
+    "lost reply bookkeeping must never report a delivered remote steer as a failed send: $err"
+  assert_contains "$err" "sent: steer to remote secondmate rsm durably recorded in its steering inbox" \
+    "a delivered remote steer must still report delivery when reply tracking fails"
+  recs=$(remote_inbox_records "$rhome")
+  count=$(printf '%s\n' "$recs" | grep -c . || true)
+  [ "$count" = 1 ] || fail "exactly one far-side record must exist, found $count: $recs"
+  assert_contains "$err" "reply-tracking-degraded" \
+    "lost reply bookkeeping must still be named on a delivered steer"
+  advisory=$(printf '%s\n' "$err" | grep -F 'reply-tracking-degraded' | head -1)
+  assert_contains "$advisory" "advisory (steer delivered)" \
+    "trouble reported after a delivered send must be labelled as advisory on a delivered steer"
+  assert_contains "$advisory" "durably recorded in the remote inbox" \
+    "the advisory must state that remote delivery succeeded"
+  assert_not_contains "$err" "error:" "lost reply bookkeeping is not a send failure"
+  assert_no_bare_advisory "$dir/err" \
+    "no advisory may stand alone without the delivered fact on a delivered steer"
+  pass "fm-send remote: a reply-bookkeeping advisory cannot be read as a refused send"
+}
+
 test_remote_steer_lands_in_remote_inbox
 test_remote_rerun_is_idempotent
 test_remote_retry_failure_preserves_ambiguous_expectation
@@ -801,5 +902,7 @@ test_remote_send_budget_bounds_busy_lane
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key
 test_local_secondmate_pending_keeps_expectation_armed
+test_delivered_remote_steer_reports_delivery
+test_delivered_remote_steer_advisory_cannot_read_as_refusal
 
 echo "all fm-send-remote-delivery tests passed"
