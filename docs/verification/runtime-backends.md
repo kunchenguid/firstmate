@@ -1,5 +1,7 @@
 # Runtime backend verification
 
+The optional Astra checkpoint/replay tool has separate [Codex and Herdr continuity verification](context-continuity.md); it changes no existing backend adapter.
+
 Audience: maintainer verification.
 
 This record contains reusable version-scoped evidence for active runtime guarantees.

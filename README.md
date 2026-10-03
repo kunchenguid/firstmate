@@ -56,6 +56,8 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ## Quick Start
 
+For Astra, follow the [context continuity standard effective 2026-09-24](docs/context-continuity.md) for native compaction settings, durable checkpoints and verified fresh-context replay.
+
 ### Requirements
 
 - A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, or Cursor Agent CLI.
@@ -212,6 +214,7 @@ Firstmate's skills live in two separate places with different audiences:
 
 ## Documentation
 
+- [docs/context-continuity.md](docs/context-continuity.md) - Astra context continuity policy, current support, optional Rust tool and recovery.
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
 - [docs/configuration.md](docs/configuration.md) - environment variables, `FM_HOME`, runtime backend selection, optional Relay and its X and Discord setup steps, trusted external process-event adapter setup, the files you set, and harness support.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
