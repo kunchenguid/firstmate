@@ -36,10 +36,17 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
+# A fast-forward can fail forever on the target's OWN index.lock left behind by
+# a killed git process ("Unable to create ...index.lock: File exists"). That one
+# failure gets a single recovery attempt: the lock is removed only when
+# fm-lock-lib.sh proves it stale (no live holder, mtime age past the threshold)
+# and the fast-forward is retried once; an unproven lock keeps today's skip.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-lock-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-lock-lib.sh"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -362,6 +369,70 @@ live_secondmate_meta_records() {
   done
 }
 
+# Minimum mtime age before a blocked index.lock may be judged stale and removed.
+# Read at call time - this is a sourced library serving many sweeps in one shell -
+# and an invalid or missing value falls back to 30s.
+ff_stale_index_lock_age_secs() {
+  local age=${FM_FF_STALE_INDEX_LOCK_AGE_SECS:-30}
+  case "$age" in ''|*[!0-9]*) age=30 ;; esac
+  printf '%s\n' "$age"
+}
+
+# Extract the index.lock path from a git "Unable to create '<path>': File
+# exists" failure, or return 1. Only an index.lock path matches, so any other
+# File exists failure (a branch ref lock, packed-refs.lock) never does.
+ff_index_lock_error_path() {
+  local match
+  match=$(printf '%s\n' "$1" | grep -m1 -Eo "Unable to create ['\"][^'\"]*/index\\.lock['\"]") || return 1
+  match=${match#Unable to create }
+  match=${match%\'}
+  match=${match%\"}
+  match=${match#\'}
+  match=${match#\"}
+  printf '%s\n' "$match"
+}
+
+# Absolute path to $dir's index.lock, or return 1 when it cannot be resolved.
+ff_index_lock_path() {
+  local dir=$1 lock abs_dir
+  lock=$(git -C "$dir" rev-parse --git-path index.lock 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs_dir=$(resolved_existing_dir "$dir") || return 1
+      printf '%s/%s\n' "$abs_dir" "$lock"
+      ;;
+  esac
+}
+
+# One recovery attempt for a fast-forward that failed on the target's OWN
+# index.lock "File exists" signature: remove the lock only when fm-lock-lib.sh's
+# fm_lock_is_provably_stale proves it dead (still present, no live holder of the
+# lock or the target dir, mtime age past the threshold), so the caller can retry
+# the fast-forward once. Any other failure, a lock path that is not the target's
+# own index.lock, or a lock that cannot be proven stale returns non-zero and
+# today's skip stands. Diagnostics print to stderr via fm_lock_log, which the
+# session-start bootstrap digest merges with stdout, so both outcomes surface.
+ff_maybe_clear_stale_index_lock() { # <dir> <label> <merge-output>
+  local dir=$1 label=$2 output=$3 err_lock lock age
+  age=$(ff_stale_index_lock_age_secs)
+  err_lock=$(ff_index_lock_error_path "$output") || return 1
+  lock=$(ff_index_lock_path "$dir") || return 1
+  [ "$err_lock" = "$lock" ] || return 1
+  [ -e "$lock" ] || return 1
+  if fm_lock_is_provably_stale "$lock" "$dir" "$age"; then
+    if ! rm -f -- "$lock"; then
+      fm_lock_log "failed to remove provably-stale git lock $lock for $label; leaving it in place"
+      return 1
+    fi
+    fm_lock_log "removed provably-stale git lock $lock (age >= ${age}s, no live holder) for $label; retrying fast-forward once"
+    return 0
+  fi
+  fm_lock_log "fast-forward for $label blocked by git lock $lock that is not provably stale (may belong to a live process); leaving it in place"
+  return 1
+}
+
 # Fast-forward one target to a base. Prints its status line. Sets globals for the
 # caller:
 #   FF_STATUS = updated|current|skipped
@@ -487,8 +558,16 @@ ff_target() {
   instr=$(changed_instr "$dir" "$base")
   before=$(git -C "$dir" rev-parse --short HEAD)
   if ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
-    echo "$label: skipped: fast-forward failed: $(first_line "$out")"
-    return 0
+    # A killed git process can orphan the target's index.lock, after which every
+    # fast-forward fails forever on "Unable to create ...index.lock: File exists".
+    # Recover once: clear the lock only when provably stale (fm-lock-lib.sh) and
+    # retry the fast-forward a single time; any other failure, or an unproven
+    # lock, keeps today's skip.
+    if ! ff_maybe_clear_stale_index_lock "$dir" "$label" "$out" \
+      || ! out=$(git -C "$dir" merge --ff-only "$base" 2>&1); then
+      echo "$label: skipped: fast-forward failed: $(first_line "$out")"
+      return 0
+    fi
   fi
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
