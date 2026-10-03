@@ -189,7 +189,7 @@ CAPTAIN="$TMP_ROOT/captain"
 CAPTAIN_FAKEBIN=$(fm_fakebin "$CAPTAIN")
 mkdir -p "$CAPTAIN/data" "$CAPTAIN/state" "$CAPTAIN/config"
 make_hanging_tasks_axi "$CAPTAIN_FAKEBIN"
-cp "$ROOT/.tasks.toml" "$CAPTAIN/.tasks.toml"
+cp "$ROOT/.tasks.toml.example" "$CAPTAIN/.tasks.toml"
 printf '# Backlog\n' > "$CAPTAIN/data/backlog.md"
 
 ADD_LOG="$CAPTAIN/add.log"
@@ -248,7 +248,7 @@ REQ="$TMP_ROOT/req"
 REQ_FAKEBIN=$(fm_fakebin "$REQ")
 mkdir -p "$REQ/data" "$REQ/state" "$REQ/config" "$REQ/state/decision-bindings"
 make_hanging_tasks_axi "$REQ_FAKEBIN"
-cp "$ROOT/.tasks.toml" "$REQ/.tasks.toml"
+cp "$ROOT/.tasks.toml.example" "$REQ/.tasks.toml"
 printf '# Backlog\n' > "$REQ/data/backlog.md"
 printf 'schema=fm-decision-binding.v1\norigin=wedged-origin\n' \
   > "$REQ/state/decision-bindings/probe.origin"

@@ -253,7 +253,7 @@ phase_teardown() {
   mv "$HOME_DIR/state/pending-replies" "$HOME_DIR/state/pending-replies.safe"
   ln -s "$TMP_ROOT/external-pending" "$HOME_DIR/state/pending-replies"
   if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    "$ROOT/bin/fm-teardown.sh" design --retire-secondmate design >/dev/null 2>&1; then
     fail "local retirement accepted a symlinked pending-replies directory"
   fi
   assert_present "$SUB" "unsafe pending-replies retirement removed the secondmate home"
@@ -270,7 +270,7 @@ phase_teardown() {
   printf 'task_id=design\nphase=resolved\ncorr_id=../../../../../escape/pwned\n' \
     > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
   if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    "$ROOT/bin/fm-teardown.sh" design --retire-secondmate design >/dev/null 2>&1; then
     fail "local retirement accepted a pending-reply with unsafe corr_id"
   fi
   assert_present "$SUB" "unsafe corr_id retirement removed the secondmate home"
@@ -288,7 +288,7 @@ phase_teardown() {
   printf 'task_id=design\nphase=resolved\ncorr_id=%s\n' "$other_corr" \
     > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
   if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    "$ROOT/bin/fm-teardown.sh" design --retire-secondmate design >/dev/null 2>&1; then
     fail "local retirement accepted a pending-reply with mismatched corr_id"
   fi
   assert_present "$SUB" "mismatched corr_id retirement removed the secondmate home"
@@ -307,7 +307,7 @@ phase_teardown() {
   printf '%s\tdead\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-bound-design"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design 2>&1) \
+    "$ROOT/bin/fm-teardown.sh" design --retire-secondmate design 2>&1) \
     || fail "teardown failed for the empty secondmate home: $teardown_out"
   printf '%s\n' "$teardown_out" | grep -F 'Backlog:' >/dev/null \
     && fail "secondmate teardown emitted a main-backlog completion reminder"
