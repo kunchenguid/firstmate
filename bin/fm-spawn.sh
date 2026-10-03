@@ -4302,6 +4302,12 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+opencode_spawn_fail() {  # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ] && [ "$BACKEND" = orca ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -5486,13 +5492,13 @@ if [ "$OPENCODE_V2" = 1 ]; then
     [ "$opencode_poll" -ge "$OPENCODE_READY_POLLS" ] || sleep "$OPENCODE_POLL_INTERVAL"
   done
   if [ "$OPENCODE_READY" != 1 ]; then
-    echo "error: opencode v2 did not show a verified empty composer; brief was not sent to $T" >&2
+    opencode_spawn_fail "opencode v2 did not show a verified empty composer; brief was not sent to $T"
     exit 1
   fi
   OPENCODE_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
   OPENCODE_SUBMIT=$(fm_backend_send_text_submit "$BACKEND" "$T" "$OPENCODE_POINTER" 3 0.5 0 "$W") || OPENCODE_SUBMIT=send-failed
   if [ "$OPENCODE_SUBMIT" != empty ]; then
-    echo "error: opencode v2 brief submission was not confirmed ($OPENCODE_SUBMIT); inspect $T" >&2
+    opencode_spawn_fail "opencode v2 brief submission was not confirmed ($OPENCODE_SUBMIT); inspect $T"
     exit 1
   fi
 fi
