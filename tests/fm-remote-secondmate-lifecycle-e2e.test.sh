@@ -1105,9 +1105,7 @@ wait "$config_second" || fail "bootstrap inheritance transaction failed after wa
 pass "config push and bootstrap serialize remote inheritance convergence"
 
 printf 'codex\n' > "$PARENT/config/crew-harness"
-# A failed reread nudge now means the durable remote inbox RECORD could not be
-# written (a swallowed doorbell alone no longer fails a recorded steer), so
-# the failure is induced by making the remote steering inbox unwritable.
+# Induce a failed reread nudge by making the durable remote inbox unwritable.
 chmod 555 "$PARENT_ROUTE_INBOX"
 if remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-fail.out" 2>&1; then
   chmod 755 "$PARENT_ROUTE_INBOX"

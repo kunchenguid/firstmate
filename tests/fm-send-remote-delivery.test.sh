@@ -10,8 +10,7 @@
 # FM_SSH_BIN seam tests/fm-on.test.sh proves preserves exit status), and pin:
 #   1. A remote text steer lands as a durable record in the remote home's
 #      steering inbox, marker and corr token in the body, exits 0, and marks
-#      the pending-reply expectation delivered at enqueue; a failed doorbell
-#      never fails the send.
+#      the pending-reply expectation delivered after notification.
 #   2. Re-running the identical leg is idempotent: an ambiguous transport
 #      (executed remotely, then ssh exit 255) makes fm-send retry the same
 #      leg once, and the remote inbox holds exactly ONE record afterwards.
@@ -29,9 +28,9 @@
 #      slash) keeps its exit-3 delivered-unconfirmed contract, never closes a
 #      --resolve-key decision unconfirmed, and keeps a marked expectation
 #      armed.
-#   9. A post-enqueue notification stalled past the parent's transport budget
-#      cannot turn durable acceptance into unconfirmed delivery; retrying the
-#      same correlated body still produces one record, with no invented ack.
+#   9. Skipped or stalled notifications preserve safe resend identity;
+#      retries produce one record, with no invented acknowledgement.
+#  10. A remote wall clock ahead of the sender does not skip notification.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -45,6 +44,8 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 
 TMP_ROOT=$(fm_test_tmproot fm-send-remote-delivery)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
@@ -135,6 +136,8 @@ cmd=${rargs[0]}
 rc=0
 /bin/sleep "${FM_FAKE_SSH_DELAY:-0}"
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
+  FM_FAKE_REMOTE_CLOCK_AHEAD="${FM_FAKE_CLOCK_AHEAD:-0}" \
+  FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="${0%/*}/herdr" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
 if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ] \
   || { [ "${FM_FAKE_SSH_AFTER_AMBIGUOUS_RC:-0}" -ne 0 ] && [ "$count" -eq 1 ]; }; then
@@ -143,6 +146,38 @@ fi
 exit "$rc"
 SH
   chmod +x "$fb/fake-ssh"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_FAKE_RING_DELAY:-}" ]; then
+  rec=$(find "$FM_FAKE_RING_HOME/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | head -1)
+  [ -n "$rec" ] || exit 91
+  printf 'notification-start record=%s\n' "$rec" >> "$FM_FAKE_RING_LOG"
+  /bin/sleep "$FM_FAKE_RING_DELAY"
+fi
+case "${1:-} ${2:-}" in
+  'status --json') printf '{"server":{"running":true}}\n' ;;
+  'pane send-text'|'pane send-keys')
+    printf '%s\n' "$*" >> "${FM_FAKE_RING_LOG:-$FM_SSH_LOG.ring}" ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+  cat > "$fb/date" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_REMOTE_CLOCK_AHEAD:-0}" = 1 ]; then
+  printf 'ahead\n' >> "$FM_FAKE_CLOCK_LOG"
+  if [ "${1:-}" = +%s ]; then
+    printf '%s\n' "$(( $(/bin/date +%s) + 3600 ))"
+    exit 0
+  elif [ "${1:-}" = -u ] && [ "${2:-}" = +%Y-%m-%dT%H:%M:%SZ ]; then
+    perl -MPOSIX=strftime -e 'print strftime("%Y-%m-%dT%H:%M:%SZ", gmtime(time + 3600)), "\n"'
+    exit 0
+  fi
+fi
+exec /bin/date "$@"
+SH
+  chmod +x "$fb/date"
   printf '%s\n' "$fb"
 }
 
@@ -248,10 +283,8 @@ test_remote_steer_lands_in_remote_inbox() {
     *"$FM_FROMFIRST_MARK"*) : ;;
     *) fail "the remote record must carry the from-firstmate marker: $body" ;;
   esac
-  # The doorbell could not reach the fixture pane (no herdr CLI here); that
-  # never fails the send, and the notice still names the durable record.
-  assert_contains "$err" "durably recorded" \
-    "a failed doorbell must be reported as a notice on a durably sent steer"
+  assert_grep 'pane send-text' "$ssh_log.ring" "notification must type the doorbell"
+  assert_grep 'pane send-keys' "$ssh_log.ring" "notification must submit the doorbell"
   assert_not_contains "$err" "error:" "a durably recorded steer must not carry an error report"
   pend=$(pending_record "$home")
   [ -n "$pend" ] || fail "the marked remote steer must keep its pending-reply expectation"
@@ -711,113 +744,128 @@ test_remote_send_budget_bounds_busy_lane() {
   pass "fm-send remote: the remote leg is budget-bounded and stays idempotent across the bound"
 }
 
-test_remote_slow_notification_confirms_acceptance() {
-  local mechanism dir fb ssh_log home rhome rc began elapsed pend rec body
+test_remote_slow_notification_preserves_retry() {
+  local mechanism budget dir fb ssh_log home rhome rc pend rec corr
   for mechanism in default bash; do
+    budget=12
+    [ "$mechanism" != default ] || budget=5
     dir="$TMP_ROOT/remote-slow-ring-$mechanism"; mkdir -p "$dir"
     fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
-    # The dependency-free timeout watchdog needs a real sleep too, rather
-    # than the fast submit-settle shim used by the other cases in this suite.
     ln -sf /bin/sleep "$fb/sleep"
     rhome=$(setup_remote_secondmate_home "remote-slow-ring-$mechanism")
     home=$(setup_remote_parent_home "remote-slow-ring-$mechanism" "$rhome")
-    cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-# The first backend read happens inside notification, after durable enqueue.
-# Record that ordering before stalling longer than the parent's whole budget.
-rec=$(find "$FM_FAKE_RING_HOME/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | head -1)
-[ -n "$rec" ] || exit 91
-printf 'notification-start %s record=%s\n' "$(date +%s)" "$rec" >> "$FM_FAKE_RING_LOG"
-/bin/sleep "$FM_FAKE_RING_DELAY"
-printf 'notification-end %s\n' "$(date +%s)" >> "$FM_FAKE_RING_LOG"
-exit 1
-SH
-    chmod +x "$fb/herdr"
-    began=$(date +%s)
     rc=0
     send_env "$fb" "$home" "$ssh_log" \
-      FM_TIMEOUT_MECHANISM_OVERRIDE="$mechanism" FM_SEND_REMOTE_BUDGET=12 \
-      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
+      FM_TIMEOUT_MECHANISM_OVERRIDE="$mechanism" FM_SEND_REMOTE_BUDGET="$budget" \
       FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" FM_FAKE_RING_DELAY=30 \
       "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
-    elapsed=$(( $(date +%s) - began ))
-    expect_code 0 "$rc" "slow post-enqueue notification must confirm acceptance ($mechanism): $(cat "$dir/err")"
-    [ "$elapsed" -lt 12 ] || fail "notification consumed the enclosing transport budget ($mechanism): ${elapsed}s"
-    assert_grep 'notification-start' "$dir/ring.log" "the delayed backend read must actually start after enqueue"
-    assert_not_contains "$(cat "$dir/ring.log")" 'notification-end' \
-      "the stalled notification must be terminated before it completes"
-    assert_contains "$(cat "$dir/err")" 'doorbell attempt exceeded its 5s budget' \
-      "acceptance must distinguish the expired best-effort notification"
+    expect_code 1 "$rc" "stalled notification must preserve resend ($mechanism)"
+    assert_grep 'notification-start' "$dir/ring.log" "notification must start after enqueue"
+    assert_contains "$(cat "$dir/err")" 'doorbell attempt exceeded its' \
+      "the stalled notification must be bounded"
     pend=$(pending_record "$home")
-    [ -n "$pend" ] || fail "durable acceptance lost its pending reply"
-    [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
-      || fail "slow notification left durable acceptance unconfirmed"
-    [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
-      || fail "acceptance must await the worker's separate reply"
+    [ -n "$pend" ] || fail "notification timeout discarded its correlation"
+    [ "$(fm_pending_reply_get "$pend" phase)" = delivery_unknown ] \
+      || fail "notification timeout claimed confirmed delivery"
+    [ -z "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+      || fail "notification timeout marked delivery confirmed"
     rec=$(remote_inbox_records "$rhome")
-    [ -f "$rec" ] || fail "acceptance must create exactly one durable record"
-    body=$(fm_task_inbox_body "$rec")
-    # Retry the same remote control leg, as a lost transport would do, with
-    # notification no longer stalled. The original correlation is unchanged.
-    send_env "$fb" "$home" "$ssh_log" \
-      FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" FM_FAKE_RING_DELAY=0 \
-      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
-      "$ROOT/bin/fm-on.sh" rsm fm-remote-secondmate-control.sh send rsm "$body" \
-      >"$dir/retry.out" 2>"$dir/retry.err" || fail "the identical remote retry failed"
-    [ "$(remote_inbox_records "$rhome")" = "$rec" ] \
-      || fail "the identical retry duplicated the accepted record"
-    [ "$(fm_task_inbox_body "$rec")" = "$body" ] \
-      || fail "the identical retry changed the correlated request"
-    [ "$(find "$rhome/state/parent-route/rsm.inbox/handled" -name '*.msg' | wc -l | tr -d ' ')" = 0 ] \
-      || fail "notification expiry invented worker acknowledgement"
-    pass "fm-send remote: slow notification confirms durable acceptance and preserves idempotence ($mechanism)"
+    [ -f "$rec" ] || fail "notification timeout lost the durable record"
+    corr=$(fm_pending_reply_get "$pend" corr_id)
+    send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+      "$SEND" rsm "please rename the metric" >"$dir/retry.out" 2>"$dir/retry.err" \
+      || fail "same-correlation retry failed"
+    [ "$(remote_inbox_records "$rhome")" = "$rec" ] || fail "retry duplicated the record"
+    [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+      || fail "successful retry failed to confirm delivery"
+    pass "fm-send remote: bounded notification retains same-correlation retry ($mechanism)"
   done
 }
 
-test_remote_tiny_budget_preserves_confirmation() {
-  local delay dir fb ssh_log home rhome rc pend rec
-  for delay in 1 3; do
-    dir="$TMP_ROOT/remote-tiny-budget-$delay"; mkdir -p "$dir"
+test_remote_skipped_notification_preserves_retry() {
+  local mode dir fb ssh_log home rhome rc pend rec corr body
+  for mode in reply fire-and-forget; do
+    dir="$TMP_ROOT/remote-skipped-ring-$mode"; mkdir -p "$dir"
     fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
-    ln -sf /bin/sleep "$fb/sleep"
-    rhome=$(setup_remote_secondmate_home "remote-tiny-budget-$delay")
-    home=$(setup_remote_parent_home "remote-tiny-budget-$delay" "$rhome")
-    cat > "$fb/herdr" <<'SH'
-#!/usr/bin/env bash
-set -u
-rec=$(find "$FM_FAKE_RING_HOME/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | head -1)
-[ -n "$rec" ] || exit 91
-printf 'notification-start\n' >> "$FM_FAKE_RING_LOG"
-/bin/sleep 30
-exit 1
-SH
-    chmod +x "$fb/herdr"
+    rhome=$(setup_remote_secondmate_home "remote-skipped-ring-$mode")
+    home=$(setup_remote_parent_home "remote-skipped-ring-$mode" "$rhome")
     rc=0
-    send_env "$fb" "$home" "$ssh_log" \
-      FM_SEND_REMOTE_BUDGET=5 FM_FAKE_SSH_DELAY="$delay" \
-      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
-      FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" \
-      "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
-    expect_code 0 "$rc" "tiny remaining budget must still confirm durable acceptance: $(cat "$dir/err")"
-    if [ "$delay" -eq 1 ]; then
-      assert_grep 'notification-start' "$dir/ring.log" "the bounded notification must start after enqueue"
-      assert_contains "$(cat "$dir/err")" 'doorbell attempt exceeded its' \
-        "the stalled notification must time out within the remaining budget"
+    if [ "$mode" = reply ]; then
+      send_env "$fb" "$home" "$ssh_log" FM_SEND_REMOTE_BUDGET=2 \
+        "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+      expect_code 1 "$rc" "skipped reply notification must be unconfirmed"
+      pend=$(pending_record "$home")
+      [ -n "$pend" ] || fail "skip discarded the correlation"
+      corr=$(fm_pending_reply_get "$pend" corr_id)
+      [ "$(fm_pending_reply_get "$pend" phase)" = delivery_unknown ] \
+        || fail "skip confirmed delivery"
+      [ -z "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+        || fail "skip stamped confirmed delivery"
     else
-      [ ! -f "$dir/ring.log" ] || fail "notification started without a confirmation reserve"
-      assert_contains "$(cat "$dir/err")" 'send budget reserved for confirmation' \
-        "the depleted budget must skip notification"
+      send_env "$fb" "$home" "$ssh_log" FM_SEND_REMOTE_BUDGET=2 \
+        "$SEND" rsm --fire-and-forget aaaabbbbccccdddd "please rename the metric" \
+        >"$dir/out" 2>"$dir/err" || rc=$?
+      expect_code 3 "$rc" "skipped fire-and-forget notification must be unconfirmed"
+      assert_contains "$(cat "$dir/err")" 'delivery-id=aaaabbbbccccdddd' "skip must retain delivery id"
+      [ -z "$(pending_record "$home")" ] || fail "fire-and-forget armed a reply expectation"
     fi
+    assert_contains "$(cat "$dir/err")" 'send budget reserved for confirmation' "skip must explain its budget"
+    [ ! -f "$ssh_log.ring" ] || fail "skip attempted a notification"
+    [ "$(cat "$ssh_log.count")" = 2 ] || fail "retryable notification did not retry once"
     rec=$(remote_inbox_records "$rhome")
-    [ -f "$rec" ] || fail "tiny-budget acceptance must retain exactly one durable record"
-    pend=$(pending_record "$home")
-    [ -n "$pend" ] && [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
-      || fail "tiny-budget acceptance left delivery unconfirmed"
-    [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
-      || fail "tiny-budget acceptance must await the worker's separate reply"
+    [ -f "$rec" ] || fail "skip lost or duplicated the durable record"
+    body=$(fm_task_inbox_body "$rec")
+    # The executable remote interface distinguishes durable enqueue from a
+    # skipped notification, even on an idempotent repeat of the same record.
+    rc=0
+    send_env "$fb" "$home" "$ssh_log" "$ROOT/bin/fm-on.sh" rsm \
+      fm-remote-secondmate-control.sh send rsm "$body" "${mode/reply/}" 2 \
+      >"$dir/direct.out" 2>"$dir/direct.err" || rc=$?
+    expect_code 75 "$rc" "remote skip must expose the retryable status"
+    if [ "$mode" = reply ]; then
+      send_env "$fb" "$home" "$ssh_log" FM_PENDING_REPLY_EXISTING_CORR="$corr" \
+        "$SEND" rsm "please rename the metric" >"$dir/retry.out" 2>"$dir/retry.err" \
+        || fail "same-correlation retry failed"
+      [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+        || fail "retry failed to confirm notification"
+    else
+      send_env "$fb" "$home" "$ssh_log" \
+        "$SEND" rsm --fire-and-forget aaaabbbbccccdddd "please rename the metric" \
+        >"$dir/retry.out" 2>"$dir/retry.err" || fail "same-delivery-id retry failed"
+      [ -z "$(pending_record "$home")" ] || fail "retry armed a fire-and-forget expectation"
+    fi
+    [ "$(remote_inbox_records "$rhome")" = "$rec" ] || fail "retry duplicated the request"
+    [ "$(fm_task_inbox_body "$rec")" = "$body" ] || fail "retry changed the request"
+    assert_grep 'pane send-keys' "$ssh_log.ring" "retry must submit notification"
+    mkdir -p "${rec%/*}/handled"
+    mv "$rec" "${rec%/*}/handled/"
+    cp "$ssh_log.ring" "$dir/ring-before-handled"
+    send_env "$fb" "$home" "$ssh_log" "$ROOT/bin/fm-on.sh" rsm \
+      fm-remote-secondmate-control.sh send rsm "$body" "${mode/reply/}" 2 \
+      >"$dir/handled.out" 2>"$dir/handled.err" || fail "handled retry must succeed without ringing"
+    cmp -s "$ssh_log.ring" "$dir/ring-before-handled" || fail "handled request was rung again"
+    pass "fm-send remote: skipped notification remains retryable and deduplicated ($mode)"
   done
-  pass "fm-send remote: tiny remaining budgets bound or skip notification and confirm acceptance"
+}
+
+test_remote_clock_ahead_notifies() {
+  local dir fb ssh_log home rhome rc pend
+  dir="$TMP_ROOT/remote-clock-ahead"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+  rhome=$(setup_remote_secondmate_home remote-clock-ahead)
+  home=$(setup_remote_parent_home remote-clock-ahead "$rhome")
+  rc=0
+  send_env "$fb" "$home" "$ssh_log" FM_FAKE_CLOCK_AHEAD=1 \
+    FM_FAKE_CLOCK_LOG="$dir/clock.log" FM_SEND_REMOTE_BUDGET=012 FM_FAKE_SSH_DELAY=1 \
+    "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+  expect_code 0 "$rc" "a remote clock ahead must not skip notification"
+  assert_grep 'ahead' "$dir/clock.log" "the remote fixture must actually use its advanced clock"
+  assert_grep 'pane send-keys' "$ssh_log.ring" "clock-ahead send must submit its notification"
+  pend=$(pending_record "$home")
+  [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+    || fail "clock-ahead notification failed to confirm delivery"
+  [ -f "$(remote_inbox_records "$rhome")" ] || fail "clock-ahead send did not enqueue one record"
+  pass "fm-send remote: a remote clock ahead does not affect notification budget"
 }
 
 test_remote_enqueue_failure_never_confirms_acceptance() {
@@ -931,8 +979,9 @@ test_remote_real_failure_still_fails
 test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
-test_remote_slow_notification_confirms_acceptance
-test_remote_tiny_budget_preserves_confirmation
+test_remote_slow_notification_preserves_retry
+test_remote_skipped_notification_preserves_retry
+test_remote_clock_ahead_notifies
 test_remote_enqueue_failure_never_confirms_acceptance
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key

@@ -6,7 +6,7 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget|""] [deadline-epoch]
+#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget|""] [budget-seconds]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -53,10 +53,11 @@
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
 # A send's post-enqueue doorbell attempt is bounded to five seconds, capped by
-# the parent's remaining deadline-epoch budget minus two seconds for timeout
-# cleanup and result relay (the hosts' epoch clocks must agree). With at most
-# two seconds remaining, no doorbell is attempted; the inbox watcher re-rings.
-# Expiry still confirms durable acceptance, not worker acknowledgement or a reply.
+# its receiver-local elapsed budget minus two seconds for timeout cleanup and
+# result relay. The parent independently bounds the entire transport attempt.
+# No cross-host wall-clock comparison is used. Exit 75 means the durable record
+# exists but notification is still owed; retry only the same correlation or
+# fire-and-forget delivery id. Exit 0 means notified or already handled.
 # Enqueue and synchronous lifecycle commands retain their existing bounds.
 set -eu
 
@@ -278,12 +279,13 @@ cmd_relaunch() {
 
 cmd_send() {
   local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
-  local deadline=${4:-} remaining ring_budget=5
+  local budget=${4:-} started=$SECONDS remaining ring_budget=5
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
-  case "$deadline" in
+  case "$budget" in
     '') ;;
-    *[!0-9]*|0*) die "send deadline must be a positive epoch second" ;;
+    *[!0-9]*) die "send budget must be a positive integer" ;;
+    *) [ "$((10#$budget))" -gt 0 ] || die "send budget must be a positive integer" ;;
   esac
   validate_home "$id"
   meta=$(meta_path "$id")
@@ -300,9 +302,8 @@ cmd_send() {
   # best-effort (bin/fm-task-inbox-lib.sh owns the record and doorbell). The
   # write is idempotent - re-running the same request after an ambiguous
   # transport failure lands on the existing record instead of a duplicate - so
-  # the parent may safely repeat this leg. Exit 0 once the record durably
-  # exists; no ring outcome changes it, because the parent transport owns any
-  # retry or reply-tracking policy from here.
+  # the parent may safely repeat this leg. Notification failure returns 75
+  # without removing that record; the parent retains its safe resend identity.
   if ! rec=$(fm_task_inbox_write_idempotent "$CONTROL_STATE" "$id" "$message" "$delivery_mode"); then
     fm_lock_release "$meta_lock"
     die "steering-inbox record could not be written under $CONTROL_STATE/$id.inbox"
@@ -316,15 +317,15 @@ cmd_send() {
       return 0
       ;;
   esac
-  # A slow backend read or submit must not spend the parent's entire transport
-  # budget after acceptance. Bound the whole best-effort ring, including its
+  # Bound the receiver's notification work after enqueue, including its
   # liveness and foreign-composer checks, in a child process group; the timeout
-  # owner also reaps stalled descendants. The durable inbox remains recoverable.
-  if [ -n "$deadline" ]; then
-    remaining=$(( deadline - $(date +%s) ))
+  # owner also reaps stalled descendants. Transport delay is bounded only by
+  # the parent's timeout, whose unconfirmed result preserves safe resend.
+  if [ -n "$budget" ]; then
+    remaining=$(( 10#$budget - (SECONDS - started) ))
     if [ "$remaining" -le 2 ]; then
       printf 'notice: doorbell skipped (send budget reserved for confirmation); the steer is durably recorded at %s\n' "$rec" >&2
-      return 0
+      return 75
     fi
     [ "$remaining" -ge 7 ] || ring_budget=$(( remaining - 2 ))
   fi
@@ -340,6 +341,7 @@ cmd_send() {
     3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
     124) printf 'notice: doorbell attempt exceeded its %ss budget; the steer is durably recorded at %s for recovery\n' "$ring_budget" "$rec" >&2 ;;
   esac
+  [ "$ring_rc" -eq 0 ] || return 75
 }
 
 cmd_key() {
