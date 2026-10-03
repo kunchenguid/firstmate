@@ -645,6 +645,14 @@ github_read_required_contexts() {
         error("branch payload is unreadable")
       elif .protected == false then
         empty
+      elif (.protection | type) != "object"
+           or ((.protection | has("required_status_checks")) | not) then
+        error("branch protection summary is unreadable")
+      elif .protection.required_status_checks == null then
+        # An explicit null inside a readable protection object means the branch
+        # is protected by review or other rules with no classic required checks:
+        # readable emptiness. Missing structure above stays unreadable.
+        empty
       elif (.protection.required_status_checks | type) != "object" then
         error("branch protection summary is unreadable")
       else
