@@ -1147,12 +1147,18 @@ EOF
 # shared fold rule retires removes one.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
-# kind, as `<n>:<kind>`, with effective verbs appended for non-default
-# configurations), `offset`, `ident`, then the folded open set.
+# kind, as `<n>:<kind>`, with effective resolution/captain-held verbs and
+# reserved-key prefixes appended only when they differ from their defaults;
+# _fm_open_decisions_fold_version owns the encoding), `offset`, `ident`, then
+# the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
 # interpretation is discarded and rebuilt from byte 0; the kind suffix does the
 # same when a task kind changes, because kind changes the fold below.
+# Effective verb or reserved-prefix changes likewise invalidate the cursor;
+# default-configuration cursors retain their existing version string.
+# tests/fm-home-summary-refresh.test.sh and
+# tests/fm-open-decisions-prefix-cursor.test.sh cover configuration compatibility.
 #
 # Cursor invalidation is deliberately minimal, matching how status files are
 # ACTUALLY used in this repo: every one is created once (`>`) and only ever
