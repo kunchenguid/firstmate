@@ -27,8 +27,9 @@
 #   quota rows from ONE quota-axi --json snapshot (schema 5 or 6; each
 #   candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
-#   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
+#   reads its own account's row, native claude reads its best viable account
+#   row, and an expanded provider with no row for the candidate is unmeasured,
+#   never blocked), and the spendPriority argmax over
 #   the eligible candidates. The model never sees quota, catalogs, approvals,
 #   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
 #   result so firstmate keeps using the existing intake.

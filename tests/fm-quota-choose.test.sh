@@ -729,6 +729,65 @@ out=$(call_choose --snapshot "$SCHEMA6_TOON" --candidate claude:default --candid
 [ "$out" = "cursor default" ] || fail "schema 6 TOON snapshot returned: $out"
 ok "schema 6 TOON with the accountKey column is accepted"
 
+# Schema 6 native Claude: quota-axi keys claude rows by account (cabeza, claude)
+# with no default row, while a native claude launch goes through the
+# claude-pool proxy that fails over between them. Shaped like a real snapshot:
+# one account with headroom, one exhausted, no default claude row.
+SCHEMA6_CLAUDE="$LAB/schema6-claude.json"
+cat > "$SCHEMA6_CLAUDE" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "cabeza", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" } },
+      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "projected_exhaustion" } } ] } },
+    { "provider": "claude", "accountKey": "claude", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } },
+      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } } ] } },
+    { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" } } ] } }
+  ]
+}
+JSON
+out=$(call_choose --snapshot "$SCHEMA6_CLAUDE" --candidate claude:default --candidate cursor:default)
+[ "$out" = "claude default" ] || fail "native claude with per-account rows returned: $out"
+jq '.providers |= reverse' "$SCHEMA6_CLAUDE" > "$LAB/schema6-claude-reversed.json"
+out=$(call_choose --snapshot "$LAB/schema6-claude-reversed.json" --candidate claude:default --candidate cursor:default)
+[ "$out" = "claude default" ] || fail "native claude account binding depended on row order: $out"
+ok "native claude binds to the viable account row when no default row exists"
+
+jq '(.providers[] | select(.accountKey == "cabeza").quotaSemantics.effectiveAvailability) |=
+  map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$SCHEMA6_CLAUDE" > "$LAB/schema6-claude-exhausted.json"
+out=$(call_choose --snapshot "$LAB/schema6-claude-exhausted.json" --candidate claude:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "native claude with every account exhausted returned: $out"
+ok "native claude is vetoed when every account is exhausted, never rescued by a sum"
+
+# Both accounts viable: the one with more provider-wide headroom is the bound
+# row, observable through a model scope that only that account still has.
+jq '(.providers[] | select(.accountKey == "claude").quotaSemantics.effectiveAvailability) |=
+  map(if .scope == "all_models" then .effectivePercentRemaining = 40 | .runway.status = "through_reset"
+      else . end) |
+  (.providers[] | select(.accountKey == "cabeza").quotaSemantics.effectiveAvailability) |=
+  map(if .scope == "model:fable" then .effectivePercentRemaining = 0 | .runway.status = "exhausted_now"
+      else . end) |
+  (.providers[] | select(.accountKey == "claude").quotaSemantics.effectiveAvailability) |=
+  map(if .scope == "model:fable" then .effectivePercentRemaining = 30 | .runway.status = "through_reset"
+      else . end)' "$SCHEMA6_CLAUDE" > "$LAB/schema6-claude-both.json"
+for snapshot in "$LAB/schema6-claude-both.json" "$LAB/schema6-claude-both-reversed.json"; do
+  [ -e "$snapshot" ] || jq '.providers |= reverse' "$LAB/schema6-claude-both.json" > "$snapshot"
+  out=$(call_choose --snapshot "$snapshot" --candidate claude:fable --candidate cursor:default)
+  [ "$out" = "claude fable" ] || fail "native claude did not bind the account with the most headroom: $out"
+done
+ok "native claude binds the account with the most provider-wide headroom"
+
+jq '.providers += [{ "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+  { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" } } ] } }]' \
+  "$SCHEMA6_CLAUDE" > "$LAB/schema6-claude-default.json"
+out=$(call_choose --snapshot "$LAB/schema6-claude-default.json" --candidate claude:default --candidate cursor:default)
+[ "$out" = "cursor default" ] || fail "native claude did not keep binding a present default row: $out"
+ok "a present default claude row still binds before any account row"
+
 [ "$(wc -l < "$CALLS" | tr -d '[:space:]')" = 1 ] || fail "helper took an additional quota snapshot"
 ok "helper reuses the captured quota snapshot"
 
