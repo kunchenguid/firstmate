@@ -1236,11 +1236,118 @@ test_create_task_refuses_duplicate_label() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-dup1","workspace_id":"w1"}]}}\n' > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj "" dup1' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should refuse an existing tab label (herdr itself does not enforce uniqueness)"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label"
   pass "fm_backend_herdr_create_task: refuses a duplicate tab label (herdr's own tab create has no uniqueness check)"
+}
+
+# --- task label duplicate guard ----------------------------------------------
+
+test_create_task_refuses_exact_task_labels_when_live() {
+  local dir case_dir log resp fb out status kind duplicate_label current_label history_file
+  dir="$TMP_ROOT/dup-exact-live"; current_label='NeoMD I/F/A instant (fm-css)'
+  for kind in legacy current history; do
+    case_dir="$dir/$kind"; log="$case_dir/log"; resp="$case_dir/responses"
+    mkdir -p "$resp"; : > "$log"
+    if [ "$kind" = legacy ]; then
+      duplicate_label='fm-fm-css'
+    elif [ "$kind" = history ]; then
+      duplicate_label='Old title (fm-css)'
+    else
+      duplicate_label="$current_label"
+    fi
+    history_file=
+    if [ "$kind" = history ]; then
+      history_file="$case_dir/labels"
+      printf '%s\n' "$duplicate_label" > "$history_file"
+    fi
+    printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"%s","workspace_id":"w1"}]}}\n' \
+      "$duplicate_label" > "$resp/1.out"
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+    printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2"}}}' > "$resp/3.out"
+    printf '%s\n' '{"result":{"agent":{"agent_status":"idle"}}}' > "$resp/4.out"
+    fb=$(make_herdr_fakebin "$case_dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css "$2"' \
+      "$ROOT" "$current_label" "$history_file" 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "$kind exact task label with a live agent must refuse a duplicate launch"
+    assert_contains "$out" "already exists" "$kind exact task label live duplicate refusal was not reported"
+    assert_contains "$out" "'$duplicate_label'" \
+      "$kind exact task label refusal should name the tab that already exists ('$duplicate_label'), not the label being created"
+    assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create' \
+      "$kind exact task label live duplicate triggered a second tab"
+  done
+  pass "fm_backend_herdr_create_task: refuses live current and legacy task labels"
+}
+
+test_create_task_replaces_legacy_task_label_husk() {
+  local dir log resp fb out current_label
+  dir="$TMP_ROOT/dup-legacy-husk"; log="$dir/log"; resp="$dir/responses"
+  current_label='NeoMD I/F/A instant (fm-css)'
+  mkdir -p "$resp"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"%s","workspace_id":"w1"}]}}\n' \
+    "$current_label" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
+    "$ROOT" "$current_label" ) \
+    || fail "an agent-free legacy task label should be replaced by the current human-readable label"
+  [ "$out" = 'w1:t3 w1:p3' ] || fail "the legacy task-label husk returned the wrong replacement ids: $out"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close'$'\x1f''w1:t2' \
+    "the legacy task-label husk was not closed"
+  pass "fm_backend_herdr_create_task: replaces only a proven legacy task-label husk"
+}
+
+test_create_task_ignores_unrelated_human_label_with_same_id() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/dup-unrelated-human"; log="$dir/log"; resp="$dir/responses"
+  mkdir -p "$resp"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","label":"Meeting (draft)","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" draft' \
+    "$ROOT" 'Neo (draft)' ) \
+    || fail "an unrelated human label with the same id should not block task creation"
+  [ "$out" = 'w1:t2 w1:p2' ] || fail "unrelated human label caused the wrong task ids: $out"
+  assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''Neo (draft)' \
+    "the current human-readable task tab was not created"
+  assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''close' \
+    "an unrelated human label was treated as a husk and closed"
+  assert_not_contains "$(cat "$log")" $'\x1f''pane' \
+    "an unrelated human label was inspected as a duplicate"
+  pass "fm_backend_herdr_create_task: ignores an unrelated human label with the same task id"
+}
+
+test_create_task_refuses_when_legacy_husk_remains() {
+  local dir log resp fb out status current_label
+  dir="$TMP_ROOT/dup-legacy-remains"; log="$dir/log"; resp="$dir/responses"
+  current_label='NeoMD I/F/A instant (fm-css)'
+  mkdir -p "$resp"; : > "$log"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"}]}}' > "$resp/1.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p2","tab_id":"w1:t2"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w1:t3"},"root_pane":{"pane_id":"w1:p3"}}}' > "$resp/4.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-fm-css","workspace_id":"w1"},{"tab_id":"w1:t3","label":"%s","workspace_id":"w1"}]}}\n' \
+    "$current_label" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 "$1" /tmp/proj "" fm-css' \
+    "$ROOT" "$current_label" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "a legacy task-label husk left after replacement must refuse success"
+  assert_contains "$out" "failed to remove preexisting herdr tab" \
+    "a remaining legacy task-label husk was not reported"
+  assert_contains "$out" "'fm-fm-css' (w1:t2)" \
+    "the remaining-husk refusal should name the surviving tab's own label"
+  pass "fm_backend_herdr_create_task: verifies legacy task-label husks are gone after replacement"
 }
 
 # --- restored-layout husk close-and-replace (herdr session.json restore) -----
@@ -1272,7 +1379,7 @@ test_create_task_refuses_duplicate_label_when_agent_live() {
   printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-dup1 /tmp/proj "" dup1' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task should still refuse when the duplicate's pane hosts a live (even idle) registered agent"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label for a live agent"
@@ -1295,7 +1402,7 @@ test_create_task_refuses_when_any_duplicate_label_is_live() {
   printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi"}]}}}' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-mixed1 /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-mixed1 /tmp/proj "" mixed1' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must refuse when any same-labeled tab hosts a live registered agent"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label when one duplicate was live"
@@ -1316,7 +1423,7 @@ test_create_task_closes_and_replaces_dead_pane_husk() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk1 /tmp/proj "" husk1' "$ROOT" ) \
     || fail "create_task should close-and-replace a dead-pane husk instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -1344,7 +1451,7 @@ test_create_task_closes_and_replaces_no_agent_husk() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-husk2","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk2 /tmp/proj "" husk2' "$ROOT" ) \
     || fail "create_task should close-and-replace a no-agent husk (restored plain shell) instead of refusing"
   read -r tab pane <<EOF
 $out
@@ -1372,7 +1479,7 @@ test_create_task_closes_all_duplicate_husks_after_replacement() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t4","label":"fm-husk-many","workspace_id":"w1"}]}}\n' > "$resp/11.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-husk-many /tmp/proj "" husk-many' "$ROOT" ) \
     || fail "create_task should close-and-replace all same-labeled husks after creating a replacement"
   read -r tab pane <<EOF
 $out
@@ -1404,7 +1511,7 @@ test_create_task_refuses_when_preexisting_husk_tab_remains() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t2","label":"fm-stale-husk","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-stale-husk","workspace_id":"w1"}]}}\n' > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-stale-husk /tmp/proj "" stale-husk' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must fail when a preexisting same-labeled husk remains after close-and-replace"
   assert_contains "$out" "failed to remove preexisting herdr tab" "create_task did not report the stale preexisting husk tab"
@@ -1426,7 +1533,7 @@ test_create_task_refuses_when_agent_state_ambiguous() {
   printf '{"error":{"code":"internal_error","message":"transient failure"}}\n' > "$resp/4.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-ambig1 /tmp/proj' "$ROOT" 2>&1 )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-ambig1 /tmp/proj "" ambig1' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "create_task must refuse (fail-safe) when the agent state cannot be classified confidently, not treat it as a husk"
   assert_contains "$out" "already exists" "create_task did not report the duplicate label for an ambiguous state"
@@ -1452,7 +1559,7 @@ test_create_task_husk_replacement_creates_before_closing() {
   printf '{"result":{"tabs":[{"tab_id":"w1:t3","label":"fm-order1","workspace_id":"w1"}]}}\n' > "$resp/6.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj' "$ROOT" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-order1 /tmp/proj "" order1' "$ROOT" ) \
     || fail "create_task should close-and-replace the dead-pane husk"
   create_line=$(grep -n $'\x1f''tab'$'\x1f''create' "$log" | head -1 | cut -d: -f1)
   close_line=$(grep -n $'\x1f''tab'$'\x1f''close' "$log" | head -1 | cut -d: -f1)
@@ -1469,7 +1576,7 @@ test_create_task_creates_and_parses_ids() {
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj "" newtask' "$ROOT" )
   [ "$out" = "w1:t2 w1:p2" ] || fail "create_task should echo '<tab_id> <pane_id>', got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-newtask' \
     "create_task did not call tab create with workspace/cwd/label"
@@ -1520,7 +1627,7 @@ test_create_task_creates_with_no_focus_flag() {
   printf '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}\n' > "$resp/2.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj' "$ROOT" )
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task fmtest:w1 fm-newtask /tmp/proj "" newtask' "$ROOT" )
   [ "$out" = "w1:t2 w1:p2" ] || fail "create_task should still echo '<tab_id> <pane_id>', got '$out'"
   assert_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''create'$'\x1f''--workspace'$'\x1f''w1'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--label'$'\x1f''fm-newtask'$'\x1f''--no-focus' \
     "create_task's tab create did not pass --no-focus"
@@ -1874,6 +1981,28 @@ test_presentation_preference_reports_three_distinct_states() {
   pass "herdr presentation: config parsing separates a deliberate choice from an unconfigured default"
 }
 
+test_task_titles_preference_defaults_off_and_opts_in() {
+  local dir config got
+  dir="$TMP_ROOT/task-titles-preference"; config="$dir/config"; mkdir -p "$config"
+  preference() {
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_titles_preference "$1"' "$ROOT" "$1" 2>/dev/null
+  }
+  got=$(preference "$config")
+  [ "$got" = off ] || fail "an absent file must keep the historical fm-<id> default, got '$got'"
+  got=$(preference "")
+  [ "$got" = off ] || fail "a missing config directory must keep the fm-<id> default, got '$got'"
+  printf '' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = on ] || fail "an empty presence file is the plain opt-in form, got '$got'"
+  printf 'ON\n' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = on ] || fail "an explicit on (any case) must report on, got '$got'"
+  printf 'off\n' > "$config/herdr-task-titles"
+  got=$(preference "$config")
+  [ "$got" = off ] || fail "an explicit off must let a home stand down, got '$got'"
+  pass "herdr task titles: config parsing keeps the unconfigured default off and honors a deliberate opt-in"
+}
+
 test_projection_journal_is_atomic_and_uses_128_bit_token() {
   local dir state out token parsed status
   dir="$TMP_ROOT/projection-journal"; state="$dir/state"; mkdir -p "$state"
@@ -1897,10 +2026,11 @@ test_projection_journal_is_atomic_and_uses_128_bit_token() {
 }
 
 test_projection_journal_v2_binds_and_advances_exact_endpoint() {
-  local dir state home home_real out token
+  local dir state home home_real out token task_label
   dir="$TMP_ROOT/projection-journal-v2"; state="$dir/state"; home="$dir/home"
   mkdir -p "$state" "$home"
   home_real=$(cd "$home" && pwd -P)
+  task_label='NeoMD I/F/A instant (fm-hibit-r1)'
   out=$(bash -c '
     . "$0/bin/backends/herdr.sh"
     token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-r1) || exit 1
@@ -1908,23 +2038,24 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     home=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
     label=$(fm_backend_herdr_projection_workspace_label fm-hibit-r1 "$token")
     fm_backend_herdr_projection_journal_bind \
-      "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-r1 || exit 1
+      "$journal" fm-hibit-r1 "$home" lab-session w2 w2:t2 w2:p2 w1 firstmate "$label" "$3" || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
-    printf "%s|%s|%s|%s|%s|%s|%s\n" \
+    printf "%s|%s|%s|%s|%s|%s|%s|%s\n" \
       "$FM_BACKEND_HERDR_JOURNAL_VERSION" \
       "$FM_BACKEND_HERDR_JOURNAL_HOME" \
       "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
       "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
-      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL"
+      "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" \
+      "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
     fm_backend_herdr_projection_journal_replace_endpoint \
       "$journal" fm-hibit-r1 w2:t2 w2:p2 w2:t3 w2:p3 || exit 1
     fm_backend_herdr_projection_journal_snapshot "$journal" fm-hibit-r1 || exit 1
     printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
-  ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
+  ' "$ROOT" "$state" "$home" "$task_label") || fail "version 2 projection journal binding failed"
   token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
-  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token|$task_label" ] \
     || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
   [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
@@ -3660,6 +3791,114 @@ test_workspace_find_matches_only_this_homes_own_label() {
 
 # --- list_live: scoped to this home's own workspace only ---------------------
 
+test_task_label_is_human_readable_and_id_bound() {
+  local out
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label "NeoMD I/F/A instant" fm-css' "$ROOT")
+  [ "$out" = 'NeoMD I/F/A instant (fm-css)' ] \
+    || fail "new task labels should contain the short title and id in parentheses, got '$out'"
+  pass "fm_backend_herdr_task_label: formats a human-readable title with the task id"
+}
+
+# A brief scaffolded by bin/fm-brief.sh opens with the fixed crewmate role
+# sentence every worker shares and leaves `# Task` on its placeholder, so a
+# title derived from the brief body would label every worker of that shape the
+# same. With no backlog row title the label must stay the bare fm-<id>.
+test_task_label_without_a_row_title_stays_the_bare_task_id() {
+  local dir home brief out
+  dir="$TMP_ROOT/task-label-fallback"; home="$dir/home"; mkdir -p "$home"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" nolabel some-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "could not scaffold the real brief fixture"
+  brief="$home/data/nolabel/brief.md"
+  assert_present "$brief" "the brief fixture was not scaffolded"
+  grep -Fq 'You are a crewmate: an autonomous worker agent managed by firstmate' "$brief" \
+    || fail "the scaffolded fixture brief does not carry the real crewmate opener"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label "" nolabel' "$ROOT")
+  [ "$out" = 'fm-nolabel' ] \
+    || fail "a real-scaffold brief with no backlog row title should keep the bare fm-<id>, got '$out'"
+  pass "fm_backend_herdr_task_label: a real scaffold brief with no row title keeps fm-<id>"
+}
+
+# The backlog row probe's title global is the only title source a new worker's
+# tab label has, so the label must carry exactly what the probe read from the
+# row tasks-axi serves.
+test_task_label_follows_the_backlog_row_title() {
+  local dir data out
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (fm_backlog_row_probe reads the row title that names the tab)"; return 0; }
+  dir="$TMP_ROOT/task-label-row-title"; data="$dir/data"; mkdir -p "$data"
+  printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$data/backlog.md"
+  tasks-axi add rowtitle "Refit the lazarette" --file="$data/backlog.md" >/dev/null \
+    || fail "fixture: could not seed the backlog row"
+  out=$(bash -c '
+    . "$0/bin/fm-tasks-axi-lib.sh"
+    . "$0/bin/fm-backlog-transition-lib.sh"
+    . "$0/bin/backends/herdr.sh"
+    fm_backlog_row_probe "$1" rowtitle || exit 1
+    fm_backend_herdr_task_label "$FM_BACKLOG_ROW_TITLE" rowtitle
+  ' "$ROOT" "$data") || fail "could not derive the tab label from the probed row"
+  [ "$out" = 'Refit the lazarette (rowtitle)' ] \
+    || fail "the probed backlog row title should name the tab, got '$out'"
+  pass "fm_backend_herdr_task_label: the backlog row title names the tab"
+
+  tasks-axi add tabby $'has\ttab' --file="$data/backlog.md" >/dev/null \
+    || fail "fixture: could not seed the tab-bearing row"
+  out=$(bash -c '
+    . "$0/bin/fm-tasks-axi-lib.sh"
+    . "$0/bin/fm-backlog-transition-lib.sh"
+    . "$0/bin/backends/herdr.sh"
+    fm_backlog_row_probe "$1" tabby || exit 1
+    fm_backend_herdr_task_label "$FM_BACKLOG_ROW_TITLE" tabby
+  ' "$ROOT" "$data") || fail "could not derive the tab label from the tab-bearing row"
+  [ "$out" = 'has tab (tabby)' ] \
+    || fail "a decoded tab-bearing title should mint 'has tab (tabby)', got '$out'"
+  pass "fm_backend_herdr_task_label: a tab-bearing row title mints its decoded text"
+}
+
+# The history feeds create_task's attempted-label set, which closes matching
+# husk tabs, so a symlink planted at the state path must never be read - by the
+# appender that merges it, nor by the json reader that feeds jq.
+test_task_label_history_refuses_a_symlink() {
+  local dir out rc
+  dir="$TMP_ROOT/task-label-history-symlink"; mkdir -p "$dir"
+  printf 'Someone elses tab (other)\n' > "$dir/outside"
+  ln -s "$dir/outside" "$dir/history"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label_history_append "$1" "Mine (mine)"' \
+    "$ROOT" "$dir/history" 2>&1); rc=$?
+  expect_code 1 "$rc" "appending through a symlinked history should refuse"
+  assert_contains "$out" "not a regular file" "the refusal should name the non-regular-file rule"
+  [ "$(cat "$dir/outside")" = 'Someone elses tab (other)' ] \
+    || fail "the refused append still changed the symlink's target"
+  [ ! -e "$dir/history" ] || [ -L "$dir/history" ] \
+    || fail "the refused append replaced the symlink with a regular file"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label_history_json "$1"' \
+    "$ROOT" "$dir/history" 2>&1); rc=$?
+  expect_code 1 "$rc" "reading a symlinked history should refuse"
+  assert_contains "$out" "not a regular file" "the json refusal should name the non-regular-file rule"
+  mkdir "$dir/outside-dir"
+  rm "$dir/history"
+  ln -s "$dir/outside-dir" "$dir/history"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label_history_compact "$1" "Mine (mine)"' \
+    "$ROOT" "$dir/history" 2>&1); rc=$?
+  expect_code 1 "$rc" "compacting through a symlinked history should refuse"
+  assert_contains "$out" "not a regular file" "the compact refusal should name the non-regular-file rule"
+  [ -z "$(ls -A "$dir/outside-dir")" ] \
+    || fail "the refused compact still moved the label file outside state"
+  pass "fm_backend_herdr_task_label_history: refuses a symlinked history path"
+}
+
+# A non-regular history path must be refused loudly by every reader: if a
+# directory at the path read as "no history", an interrupted earlier attempt's
+# labels would drop out of the duplicate guard instead of refusing the spawn.
+test_task_label_history_json_refuses_a_directory() {
+  local dir out rc
+  dir="$TMP_ROOT/task-label-history-directory"; mkdir -p "$dir/history"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label_history_json "$1"' \
+    "$ROOT" "$dir/history" 2>&1); rc=$?
+  expect_code 1 "$rc" "reading a directory as the task-label history should refuse"
+  assert_contains "$out" "not a regular file" "the refusal should name the non-regular-file rule"
+  pass "fm_backend_herdr_task_label_history_json: refuses a non-regular history path"
+}
+
 test_list_live_scoped_to_this_homes_workspace_only() {
   local dir log resp fb out home
   dir="$TMP_ROOT/list-live-scoped"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -3679,6 +3918,26 @@ test_list_live_scoped_to_this_homes_workspace_only() {
   assert_not_contains "$(cat "$log")" $'\x1f''tab'$'\x1f''list'$'\x1f''--workspace'$'\x1f''w1' \
     "list_live must never query the primary's (or a sibling secondmate's) workspace"
   pass "fm_backend_herdr_list_live: scoped to this home's own workspace, never a sibling home's"
+}
+
+test_list_live_discovers_supported_task_labels() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/list-live-human-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"firstmate"}]}}\n' > "$resp/1.out"
+  printf '{"result":{"tabs":[{"tab_id":"w1:t1","label":"NeoMD I/F/A instant (fm-css)","workspace_id":"w1"},{"tab_id":"w1:t2","label":"Captain notes","workspace_id":"w1"},{"tab_id":"w1:t3","label":"fm-legacy","workspace_id":"w1"},{"tab_id":"w1:t4","label":"fm-followup (draft)","workspace_id":"w1"},{"tab_id":"w1:t5","label":"fm-followup note","workspace_id":"w1"}]}}\n' > "$resp/2.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p3","tab_id":"w1:t3"}]}}\n' > "$resp/4.out"
+  printf '{"result":{"panes":[{"pane_id":"w1:p4","tab_id":"w1:t4"}]}}\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_list_live fmtest' "$ROOT" )
+  [ "$out" = $'fmtest:w1:p1\tNeoMD I/F/A instant (fm-css)\nfmtest:w1:p3\tfm-legacy\nfmtest:w1:p4\tfm-followup (draft)' ] \
+    || fail "list_live should report supported legacy and human task labels, got '$out'"
+  assert_not_contains "$out" "Captain notes" \
+    "list_live treated an unrelated tab as a task"
+  assert_not_contains "$out" $'fmtest:w1:p5\tfm-followup note' \
+    "list_live treated a prefix-only fm- label as a task"
+  pass "fm_backend_herdr_list_live: discovers legacy and human-readable task labels"
 }
 
 # --- target parsing, key normalization ---------------------------------------
@@ -5277,7 +5536,7 @@ test_workspace_ensure_prunes_default_tab() {
   tabcount=$(jq -r --arg w "$wsid" '[.tabs[]|select(.workspace_id==$w)]|length' "$state")
   [ "$tabcount" = 1 ] || fail "expected the untouched default tab to remain after container_ensure alone, got $tabcount tab(s): $(jq -c '.tabs' "$state")"
   ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-prunetest" "$seeded" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3" "${2#fm-}"' "$ROOT" "$container" "fm-prunetest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
 $ids
@@ -5313,7 +5572,7 @@ test_repeated_cycles_reuse_one_workspace_no_orphans() {
       [ -z "$seeded" ] || fail "cycle $i: a REUSED (adopted) workspace must never report a seeded default tab id, got '$seeded'"
     fi
     ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-cycle$i" "$seeded" ) \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3" "${2#fm-}"' "$ROOT" "$container" "fm-cycle$i" "$seeded" ) \
       || fail "cycle $i: create_task failed"
     read -r _ pane <<EOF
 $ids
@@ -5381,7 +5640,7 @@ test_adopted_workspace_never_prunes_default_tab() {
   assert_not_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''create' "container_ensure must not create a new workspace when one already exists to adopt"
 
   ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-adopttest" "$seeded" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3" "${2#fm-}"' "$ROOT" "$container" "fm-adopttest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
 $ids
@@ -5422,7 +5681,7 @@ test_label_collision_startup_workspace_leaves_live_tab_alone() {
   [ -z "$seeded" ] || fail "the coincidentally-labeled workspace was ADOPTED, not created, so seeded default tab id must be empty, got '$seeded'"
 
   ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-collisiontest" "$seeded" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3" "${2#fm-}"' "$ROOT" "$container" "fm-collisiontest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
 $ids
@@ -5457,7 +5716,7 @@ test_prune_refuses_a_working_agent_pane_defense_in_depth() {
   fake_herdr_set_agent_status "$state" "$seeded_pane" working
 
   ids=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_FAKE_HERDR_STATE="$state" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3"' "$ROOT" "$container" "fm-busytest" "$seeded" ) \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_create_task "$1" "$2" /proj "$3" "${2#fm-}"' "$ROOT" "$container" "fm-busytest" "$seeded" ) \
     || fail "create_task failed against the stateful fake"
   read -r _ pane <<EOF
 $ids
@@ -5834,6 +6093,10 @@ test_adopted_workspace_never_prunes_default_tab
 test_label_collision_startup_workspace_leaves_live_tab_alone
 test_prune_refuses_a_working_agent_pane_defense_in_depth
 test_create_task_refuses_duplicate_label
+test_create_task_refuses_exact_task_labels_when_live
+test_create_task_replaces_legacy_task_label_husk
+test_create_task_ignores_unrelated_human_label_with_same_id
+test_create_task_refuses_when_legacy_husk_remains
 test_create_task_refuses_duplicate_label_when_agent_live
 test_create_task_refuses_when_any_duplicate_label_is_live
 test_create_task_closes_and_replaces_dead_pane_husk
@@ -5856,6 +6119,7 @@ test_presentation_running_server_release_is_load_bearing
 test_release_floor_verdict_matches_the_measured_releases
 test_release_floor_verdict_survives_losing_either_signal
 test_presentation_preference_reports_three_distinct_states
+test_task_titles_preference_defaults_off_and_opts_in
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
@@ -5908,7 +6172,13 @@ test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
+test_task_label_is_human_readable_and_id_bound
+test_task_label_without_a_row_title_stays_the_bare_task_id
+test_task_label_follows_the_backlog_row_title
+test_task_label_history_refuses_a_symlink
+test_task_label_history_json_refuses_a_directory
 test_list_live_scoped_to_this_homes_workspace_only
+test_list_live_discovers_supported_task_labels
 test_parse_target
 test_normalize_key
 test_capture_calls_pane_read

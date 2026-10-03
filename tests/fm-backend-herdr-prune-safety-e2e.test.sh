@@ -121,7 +121,7 @@ SEEDED_TAB_ID=${RAW#*$'\t'}
 [ -z "$SEEDED_TAB_ID" ] || fail "an ADOPTED workspace must report an EMPTY seeded default tab id (the created-vs-adopted gate), got '$SEEDED_TAB_ID' - this is exactly what would reproduce the 2026-07-02 self-kill"
 pass "fixed: container_ensure adopts the label-colliding startup workspace and reports NO seeded default tab (never a prune candidate)"
 
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_CWD" "$SEEDED_TAB_ID") \
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" fm-prunesafety-e2e "$LIVE_CWD" "$SEEDED_TAB_ID" prunesafety-e2e) \
   || fail "create_task failed"
 read -r NEW_TAB_ID NEW_PANE_ID <<EOF
 $TASK_IDS
@@ -159,7 +159,7 @@ HAPPY_CONTAINER=${HAPPY_RAW%%$'\t'*}
 HAPPY_SEEDED=${HAPPY_RAW#*$'\t'}
 [ -n "$HAPPY_SEEDED" ] || fail "happy path: expected a genuinely fresh workspace with a non-empty seeded default tab id"
 
-HAPPY_TASK_IDS=$(fm_backend_herdr_create_task "$HAPPY_CONTAINER" fm-prunesafety-happy "$HAPPY_CWD" "$HAPPY_SEEDED") \
+HAPPY_TASK_IDS=$(fm_backend_herdr_create_task "$HAPPY_CONTAINER" fm-prunesafety-happy "$HAPPY_CWD" "$HAPPY_SEEDED" prunesafety-happy) \
   || fail "happy-path create_task failed"
 read -r _HAPPY_TAB HAPPY_PANE <<EOF
 $HAPPY_TASK_IDS

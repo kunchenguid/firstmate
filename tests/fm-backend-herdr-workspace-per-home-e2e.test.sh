@@ -50,6 +50,18 @@ assert_not_contains_local() {  # <haystack> <needle> <msg>
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
 command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (required by fm-spawn.sh)"; exit 0; }
+command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found (each fixture home's backlog row names its opted-in task tab)"; exit 0; }
+# A fixture backlog is addressed only through its own home's data/backlog.md,
+# never through an operator's ambient tasks-axi configuration.
+unset TASKS_AXI_FILE TASKS_AXI_BACKEND
+
+# The opted-in fixtures below name a worker's tab after its backlog row title,
+# so each home that spawns an opted-in worker keeps a real markdown backlog
+# with that worker's row filed Queued - exactly the state dispatch requires.
+seed_backlog_row() {  # <home> <id> <title>
+  tasks-axi add "$2" "$3" --file="$1/data/backlog.md" >/dev/null \
+    || fail "fixture: could not seed backlog row $2 in $1"
+}
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -88,9 +100,15 @@ fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 # This test asserts the per-home FLAT workspace shape, so both homes opt out of
 # the default-on presentation projection rather than depending on that default.
+# The primary home opts in to human-readable task-tab labels, so its own
+# crewmate (cm1) gets a "<short title> (<id>)" label built from cm1's backlog
+# row title and the flag inherits into the secondmate home at spawn
+# convergence (primary-authoritative, so a local secondmate-home copy is not
+# the way to opt a secondmate in).
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME/state" "$PRIMARY_HOME/data/cm1" "$PRIMARY_HOME/config"
 printf 'off\n' > "$PRIMARY_HOME/config/herdr-presentation-spaces"
+printf '' > "$PRIMARY_HOME/config/herdr-task-titles"
 cat > "$PRIMARY_HOME/data/cm1/brief.md" <<'EOF'
 # Task
 ## Captain's intent
@@ -99,6 +117,7 @@ Exercise primary-home Herdr placement.
 ## Firstmate spec
 Verify the crewmate uses its primary home's workspace.
 EOF
+seed_backlog_row "$PRIMARY_HOME" cm1 'Primary workspace placement fixture.'
 
 SM_HOME="$TMP_ROOT/secondmate-home"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
@@ -116,6 +135,7 @@ Exercise secondmate-owned Herdr placement.
 ## Firstmate spec
 Verify the crewmate uses its secondmate home's workspace.
 EOF
+seed_backlog_row "$SM_HOME" cm2 'Secondmate crewmate placement fixture.'
 
 make_scratch_project() {  # <dir>
   local dir=$1
@@ -154,6 +174,8 @@ assert_contains_local "$CM1_CAPTURE" "primary-crew-ok" "cm1's raw launch command
 
 CM1_WSID=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
 [ -n "$CM1_WSID" ] || fail "could not read cm1's pane workspace_id"
+CM1_TAB=$(grep '^herdr_tab_id=' "$CM1_META" | cut -d= -f2-)
+[ -n "$CM1_TAB" ] || fail "cm1 meta missing herdr_tab_id"
 CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$CM1_WSID" '.result.workspaces[]? | select(.workspace_id == $id) | .label')
 [ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
 pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
@@ -176,6 +198,8 @@ assert_contains_local "$(cat "$SM_META")" "backend=herdr" "e2esm1 meta missing b
 assert_contains_local "$(cat "$SM_META")" "home=$SM_HOME" "e2esm1 meta does not record its own home"
 SM_PANE=$(grep '^herdr_pane_id=' "$SM_META" | cut -d= -f2-)
 [ -n "$SM_PANE" ] || fail "e2esm1 meta missing herdr_pane_id"
+SM_TAB=$(grep '^herdr_tab_id=' "$SM_META" | cut -d= -f2-)
+[ -n "$SM_TAB" ] || fail "e2esm1 meta missing herdr_tab_id"
 pass "real herdr E2E: the primary spawns a --secondmate task on the herdr backend"
 
 SM_WSID=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
@@ -199,6 +223,8 @@ CM2_META="$SM_HOME/state/cm2.meta"
 [ -f "$CM2_META" ] || fail "no meta written for cm2 (recorded in the SECONDMATE's own state dir - it did its own spawning)"
 assert_contains_local "$(cat "$CM2_META")" "backend=herdr" "cm2 meta missing backend=herdr"
 WT2=$(grep '^worktree=' "$CM2_META" | cut -d= -f2-)
+CM2_TAB=$(grep '^herdr_tab_id=' "$CM2_META" | cut -d= -f2-)
+[ -n "$CM2_TAB" ] || fail "cm2 meta missing herdr_tab_id"
 CM2_PANE=$(grep '^herdr_pane_id=' "$CM2_META" | cut -d= -f2-)
 [ -n "$CM2_PANE" ] || fail "cm2 meta missing herdr_pane_id"
 pass "real herdr E2E: a crewmate spawns successfully FROM a secondmate-shaped home's own fm-spawn.sh process"
@@ -212,18 +238,93 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
 
+# Labels follow the home that owns each endpoint: the opted-in primary names
+# its own crewmate from cm1's backlog row title, the secondmate spawn inherits
+# that opt-in into its own home so its crewmate is named from cm2's backlog row
+# title, while a secondmate task is never a backlog item and therefore keeps
+# fm-<id>, and standing the primary back down returns new workers to the
+# historical fm-<id> default. Verify the real labels before adding explicit
+# legacy-label fixtures for the compatibility checks below.
+CM1_LABEL=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+SM_LABEL=$(herdr tab list --workspace "$SM_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$SM_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+CM2_LABEL=$(herdr tab list --workspace "$CM2_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM2_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM1_LABEL" = "Primary workspace placement fixture. (cm1)" ] \
+  || fail "the opted-in primary home did not name its own worker after cm1's backlog row title, got '$CM1_LABEL'"
+[ -f "$SM_HOME/config/herdr-task-titles" ] \
+  || fail "the secondmate spawn did not inherit the primary's task-title opt-in before creating its endpoint"
+[ "$SM_LABEL" = "fm-e2esm1" ] \
+  || fail "a secondmate task has no backlog row to name it, so its label must stay fm-e2esm1, got '$SM_LABEL'"
+[ "$CM2_LABEL" = "Secondmate crewmate placement fixture. (cm2)" ] \
+  || fail "the secondmate-owned crewmate was not named after cm2's backlog row title, got '$CM2_LABEL'"
+pass "real herdr E2E: opted-in workers are named from their backlog row titles, a rowless secondmate task keeps fm-<id>, and the opt-in inherits through the spawn"
+
+# Standing the opt-in down returns new workers to the historical fm-<id>
+# default without touching any live tab.
+rm -f "$PRIMARY_HOME/config/herdr-task-titles"
+mkdir -p "$PRIMARY_HOME/data/cm3"
+cat > "$PRIMARY_HOME/data/cm3/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the stood-down label default.
+
+## Firstmate spec
+Verify the crewmate keeps the historical fm-<id> label.
+EOF
+seed_backlog_row "$PRIMARY_HOME" cm3 'Stood-down label default fixture.'
+CM3_OUT="$TMP_ROOT/cm3.out"; CM3_ERR="$TMP_ROOT/cm3.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm3 "$PROJ1" "sh -c 'echo primary-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
+  >"$CM3_OUT" 2>"$CM3_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the stood-down default crewmate cm3 failed to spawn"$'\n'"--- stdout ---"$'\n'"$(cat "$CM3_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM3_ERR")"
+CM3_META="$PRIMARY_HOME/state/cm3.meta"
+[ -f "$CM3_META" ] || fail "no meta written for cm3"
+CM3_PANE=$(grep '^herdr_pane_id=' "$CM3_META" | cut -d= -f2-)
+[ -n "$CM3_PANE" ] || fail "cm3 meta missing herdr_pane_id"
+CM3_TAB=$(grep '^herdr_tab_id=' "$CM3_META" | cut -d= -f2-)
+[ -n "$CM3_TAB" ] || fail "cm3 meta missing herdr_tab_id"
+CM3_WSID=$(herdr pane get "$CM3_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ "$CM3_WSID" = "$CM1_WSID" ] || fail "cm3 did not land in the primary's own workspace"
+CM3_LABEL=$(herdr tab list --workspace "$CM3_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM3_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM3_LABEL" = "fm-cm3" ] \
+  || fail "a stood-down home's new worker kept the historical fm-<id> default, got '$CM3_LABEL'"
+CM1_LABEL_AFTER=$(herdr tab list --workspace "$CM1_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM1_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM1_LABEL_AFTER" = "$CM1_LABEL" ] \
+  || fail "standing the opt-in down rewrote a live worker's task label"
+pass "real herdr E2E: standing the task-title opt-in down restores the fm-<id> default for new workers and never renames live tabs"
+
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
+# The primary's cm3 tab already wears the legacy fm-<id> label (its home stood
+# the opt-in down), and these historical fixtures add one more legacy label to
+# each home's workspace without renaming any newly-created worker pane.
+herdr tab create --workspace "$CM1_WSID" --cwd "$TMP_ROOT" --label fm-cm1 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the primary home's legacy list_live fixture"
+herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-e2esm1 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the secondmate home's first legacy list_live fixture"
+herdr tab create --workspace "$SM_WSID" --cwd "$TMP_ROOT" --label fm-cm2 --no-focus --session "$SESSION" >/dev/null \
+  || fail "could not create the secondmate home's second legacy list_live fixture"
+
 PRIMARY_LIVE=$(FM_HOME="$PRIMARY_HOME" fm_backend_herdr_list_live "$SESSION")
-assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its own task"
+assert_contains_local "$PRIMARY_LIVE" "$CM1_LABEL" "the primary home's list_live did not see its human-labeled task"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm3" "the primary home's list_live did not see its stood-down legacy task"
+assert_contains_local "$PRIMARY_LIVE" "fm-cm1" "the primary home's list_live did not see its legacy fixture"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-e2esm1" "the primary home's list_live must not see the secondmate's own task"
 assert_not_contains_local "$PRIMARY_LIVE" "fm-cm2" "the primary home's list_live must not see the secondmate-owned crewmate's task"
 pass "real herdr E2E: list_live from the primary's own context sees only the primary's own task"
 
 SM_LIVE=$(FM_HOME="$SM_HOME" fm_backend_herdr_list_live "$SESSION")
+assert_contains_local "$SM_LIVE" "$SM_LABEL" "the secondmate home's list_live did not see its human-readable task"
+assert_contains_local "$SM_LIVE" "$CM2_LABEL" "the secondmate home's list_live did not see its human-readable child task"
 assert_contains_local "$SM_LIVE" "fm-e2esm1" "the secondmate home's list_live did not see its own task"
 assert_contains_local "$SM_LIVE" "fm-cm2" "the secondmate home's list_live did not see the crewmate spawned from it"
 assert_not_contains_local "$SM_LIVE" "fm-cm1" "the secondmate home's list_live must not see the primary's task"
+assert_not_contains_local "$SM_LIVE" "fm-cm3" "the secondmate home's list_live must not see the primary's stood-down task"
 pass "real herdr E2E: list_live from the secondmate's own context sees only tasks in the secondmate's own workspace (both its own tab and its crewmate's)"
 
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
@@ -263,6 +364,146 @@ fi
 WT2=
 pass "real herdr E2E: tearing down cm2 closes only its own tab - the secondmate's own tab (same workspace) survives untouched"
 
+TD3_OUT="$TMP_ROOT/td3.out"
+FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+  FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" cm3 >"$TD3_OUT" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the stood-down crewmate cm3"$'\n'"$(cat "$TD3_OUT")"
+[ -f "$CM3_META" ] && fail "fm-teardown.sh did not remove cm3's meta"
+if herdr pane get "$CM3_PANE" --session "$SESSION" >/dev/null 2>&1; then
+  fail "fm-teardown.sh did not close cm3's pane"
+fi
+WT1=
+pass "real herdr E2E: tearing down cm3 closes its own fm-<id> labeled tab"
+
+# --- 6. manual-backlog homes: the opt-in label reads the row title directly ---
+
+# config/backlog-backend=manual exempts the home from the dispatch preflight -
+# and therefore from the probe that preflight owns - but the row title is still
+# readable, and the opted-in label must follow the data exactly as an ordinary
+# home's spawn does (cm1 above); a home whose row is missing keeps fm-<id>.
+MANUAL_HOME="$TMP_ROOT/manual-home"
+mkdir -p "$MANUAL_HOME/state" "$MANUAL_HOME/config" "$MANUAL_HOME/data"
+printf 'off\n' > "$MANUAL_HOME/config/herdr-presentation-spaces"
+printf 'manual\n' > "$MANUAL_HOME/config/backlog-backend"
+printf '' > "$MANUAL_HOME/config/herdr-task-titles"
+mkdir -p "$MANUAL_HOME/data/cm4"
+cat > "$MANUAL_HOME/data/cm4/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the manual-backend label path.
+
+## Firstmate spec
+Verify the row title names the tab without a dispatch preflight.
+EOF
+seed_backlog_row "$MANUAL_HOME" cm4 'Manual backlog label fixture.'
+mkdir -p "$MANUAL_HOME/data/cm5"
+cat > "$MANUAL_HOME/data/cm5/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise the manual-backend no-row fallback.
+
+## Firstmate spec
+Verify a missing row keeps the fm-<id> label.
+EOF
+
+CM4_OUT="$TMP_ROOT/cm4.out"; CM4_ERR="$TMP_ROOT/cm4.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$MANUAL_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm4 "$PROJ1" "sh -c 'echo manual-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
+  >"$CM4_OUT" 2>"$CM4_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the manual-backend home's crewmate cm4 failed to spawn"$'\n'"--- stdout ---"$'\n'"$(cat "$CM4_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM4_ERR")"
+CM4_META="$MANUAL_HOME/state/cm4.meta"
+[ -f "$CM4_META" ] || fail "no meta written for cm4"
+CM4_PANE=$(grep '^herdr_pane_id=' "$CM4_META" | cut -d= -f2-)
+CM4_TAB=$(grep '^herdr_tab_id=' "$CM4_META" | cut -d= -f2-)
+[ -n "$CM4_TAB" ] || fail "cm4 meta missing herdr_tab_id"
+CM4_WSID=$(herdr pane get "$CM4_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ -n "$CM4_WSID" ] || fail "could not read cm4's pane workspace_id"
+CM4_LABEL=$(herdr tab list --workspace "$CM4_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM4_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM4_LABEL" = "Manual backlog label fixture. (cm4)" ] \
+  || fail "a manual-backend home's titled row did not name its opted-in tab, got '$CM4_LABEL'"
+pass "real herdr E2E: a manual-backend home's opted-in label reads its backlog row title"
+
+TD4_OUT="$TMP_ROOT/td4.out"
+FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$MANUAL_HOME/state" FM_DATA_OVERRIDE="$MANUAL_HOME/data" \
+  FM_CONFIG_OVERRIDE="$MANUAL_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" cm4 >"$TD4_OUT" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the manual-backend crewmate cm4"$'\n'"$(cat "$TD4_OUT")"
+[ -f "$CM4_META" ] && fail "fm-teardown.sh did not remove cm4's meta"
+
+CM5_OUT="$TMP_ROOT/cm5.out"; CM5_ERR="$TMP_ROOT/cm5.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$MANUAL_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" cm5 "$PROJ1" "sh -c 'echo manual-crew-ok'" --mode no-mistakes --yolo off --backend herdr \
+  >"$CM5_OUT" 2>"$CM5_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the manual-backend home's rowless crewmate cm5 failed to spawn"$'\n'"--- stdout ---"$'\n'"$(cat "$CM5_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$CM5_ERR")"
+CM5_META="$MANUAL_HOME/state/cm5.meta"
+[ -f "$CM5_META" ] || fail "no meta written for cm5"
+CM5_PANE=$(grep '^herdr_pane_id=' "$CM5_META" | cut -d= -f2-)
+CM5_TAB=$(grep '^herdr_tab_id=' "$CM5_META" | cut -d= -f2-)
+[ -n "$CM5_TAB" ] || fail "cm5 meta missing herdr_tab_id"
+CM5_WSID=$(herdr pane get "$CM5_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ -n "$CM5_WSID" ] || fail "could not read cm5's pane workspace_id"
+CM5_LABEL=$(herdr tab list --workspace "$CM5_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$CM5_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$CM5_LABEL" = "fm-cm5" ] \
+  || fail "a manual-backend home with no row must keep the fm-<id> label, got '$CM5_LABEL'"
+pass "real herdr E2E: a manual-backend home with no row keeps the fm-<id> label"
+
+TD5_OUT="$TMP_ROOT/td5.out"
+FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$MANUAL_HOME/state" FM_DATA_OVERRIDE="$MANUAL_HOME/data" \
+  FM_CONFIG_OVERRIDE="$MANUAL_HOME/config" \
+  "$ROOT/bin/fm-teardown.sh" cm5 >"$TD5_OUT" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || fail "fm-teardown.sh failed for the manual-backend crewmate cm5"$'\n'"$(cat "$TD5_OUT")"
+[ -f "$CM5_META" ] && fail "fm-teardown.sh did not remove cm5's meta"
+pass "real herdr E2E: manual-backlog homes spawn and tear down without dispatch transitions"
+
+# --- 7. a --secondmate tab is named from the secondmate home's own row -----
+
+# The label authority for a --secondmate spawn is the secondmate home (the same
+# home whose config supplies the preference), so a row with the same id in the
+# PRIMARY's backlog must not name the secondmate's tab; e2esm1 above stays
+# rowless in its own home and keeps fm-<id>.
+# The cm3 section above stood the primary's opt-in down; this case needs it
+# armed again so the secondmate spawn can inherit it into its own home.
+printf '' > "$PRIMARY_HOME/config/herdr-task-titles"
+seed_backlog_row "$PRIMARY_HOME" e2esm2 'Primary backlog decoy title.'
+SM2_HOME="$TMP_ROOT/secondmate-home-2"
+mkdir -p "$SM2_HOME/state" "$SM2_HOME/data" "$SM2_HOME/config" "$SM2_HOME/projects" "$SM2_HOME/bin"
+printf 'off\n' > "$SM2_HOME/config/herdr-presentation-spaces"
+printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
+printf 'e2esm2\n' > "$SM2_HOME/.fm-secondmate-home"
+printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
+printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$SM2_HOME/.gitignore"
+git -C "$SM2_HOME" init -q -b main
+seed_backlog_row "$SM2_HOME" e2esm2 'Secondmate backlog row title.'
+
+SM2_OUT="$TMP_ROOT/sm2.out"; SM2_ERR="$TMP_ROOT/sm2.err"
+FM_SPAWN_NO_GUARD=1 FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-spawn.sh" e2esm2 "$SM2_HOME" "sh -c 'echo secondmate-launch-ok'" --secondmate --backend herdr \
+  >"$SM2_OUT" 2>"$SM2_ERR"
+rc=$?
+[ "$rc" -eq 0 ] || fail "the opted-in secondmate spawn e2esm2 failed"$'\n'"--- stdout ---"$'\n'"$(cat "$SM2_OUT")"$'\n'"--- stderr ---"$'\n'"$(cat "$SM2_ERR")"
+SM2_META="$PRIMARY_HOME/state/e2esm2.meta"
+[ -f "$SM2_META" ] || fail "no meta written for e2esm2 (recorded in the primary's own state dir)"
+assert_contains_local "$(cat "$SM2_META")" "home=$SM2_HOME" "e2esm2 meta does not record its own home"
+SM2_PANE=$(grep '^herdr_pane_id=' "$SM2_META" | cut -d= -f2-)
+SM2_TAB=$(grep '^herdr_tab_id=' "$SM2_META" | cut -d= -f2-)
+[ -n "$SM2_TAB" ] || fail "e2esm2 meta missing herdr_tab_id"
+SM2_WSID=$(herdr pane get "$SM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.workspace_id // empty')
+[ -n "$SM2_WSID" ] || fail "could not read e2esm2's pane workspace_id"
+SM2_LABEL=$(herdr tab list --workspace "$SM2_WSID" --session "$SESSION" 2>/dev/null \
+  | jq -r --arg tab "$SM2_TAB" '.result.tabs[]? | select(.tab_id == $tab) | .label')
+[ "$SM2_LABEL" = "Secondmate backlog row title. (e2esm2)" ] \
+  || fail "a --secondmate tab must be named from its OWN home's backlog row, not the primary's, got '$SM2_LABEL'"
+pass "real herdr E2E: a --secondmate spawn names its tab from the secondmate home's own backlog row"
+
+fm_backend_herdr_kill "$SESSION:$SM2_PANE"
 fm_backend_herdr_kill "$SESSION:$SM_PANE"
 
 cleanup_all

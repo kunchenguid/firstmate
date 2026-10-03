@@ -94,7 +94,7 @@ pass "real herdr: container_ensure is idempotent (reuses/adopts the existing fir
 # --- create_task + duplicate refusal + default-tab prune ---------------------
 
 LABEL="fm-smoke1"
-TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp "$SEEDED_TAB_ID") || fail "create_task failed"
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL" /tmp "$SEEDED_TAB_ID" "${LABEL#fm-}") || fail "create_task failed"
 read -r TAB_ID PANE_ID <<EOF
 $TASK_IDS
 EOF
@@ -134,7 +134,7 @@ pass "real herdr: create_task prunes the freshly-created workspace's seeded defa
 # 1. A genuinely LIVE duplicate (a real registered agent, via herdr's own
 #    `pane report-agent`) must still refuse exactly as before.
 LIVE_DUP_LABEL="fm-smoke-livedup"
-LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp) || fail "could not create the live-duplicate scenario's tab"
+LIVE_DUP_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp "" "${LIVE_DUP_LABEL#fm-}") || fail "could not create the live-duplicate scenario's tab"
 read -r LIVE_DUP_TAB_ID LIVE_DUP_PANE_ID <<EOF
 $LIVE_DUP_IDS
 EOF
@@ -143,7 +143,7 @@ if [ -z "$LIVE_DUP_TAB_ID" ] || [ -z "$LIVE_DUP_PANE_ID" ]; then
 fi
 herdr pane report-agent "$LIVE_DUP_PANE_ID" --source fm-smoke-test --agent fm-smoke-live-agent --state idle --session "$SESSION" >/dev/null 2>&1 \
   || fail "could not register a live agent on the live-duplicate scenario's pane"
-if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp >/dev/null 2>&1; then
+if fm_backend_herdr_create_task "$CONTAINER" "$LIVE_DUP_LABEL" /tmp "" "${LIVE_DUP_LABEL#fm-}" >/dev/null 2>&1; then
   fail "REGRESSION: create_task should refuse a duplicate label whose pane hosts a genuinely live registered agent (idle counts as live)"
 fi
 herdr pane get "$LIVE_DUP_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
@@ -154,7 +154,7 @@ fm_backend_herdr_kill "$SESSION:$LIVE_DUP_PANE_ID"
 # 2. A husk (no registered agent at all - the restored-plain-shell shape)
 #    must be CLOSED AND REPLACED instead of refused.
 HUSK_LABEL="fm-smoke-husk1"
-HUSK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) || fail "could not create the husk-simulation tab"
+HUSK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp "" "${HUSK_LABEL#fm-}") || fail "could not create the husk-simulation tab"
 read -r HUSK_TAB_ID HUSK_PANE_ID <<EOF
 $HUSK_IDS
 EOF
@@ -163,7 +163,7 @@ if [ -z "$HUSK_TAB_ID" ] || [ -z "$HUSK_PANE_ID" ]; then
 fi
 herdr agent get "$HUSK_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
   && fail "husk-simulation setup is wrong: this pane should have NO registered agent yet"
-REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp) \
+REPLACED_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "$HUSK_LABEL" /tmp "" "${HUSK_LABEL#fm-}") \
   || fail "REGRESSION: create_task should close-and-replace a same-labeled tab whose pane hosts no registered agent, not refuse it"
 read -r NEW_HUSK_TAB_ID NEW_HUSK_PANE_ID <<EOF
 $REPLACED_IDS
@@ -211,7 +211,7 @@ SM_LABEL_REAL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id 
 pass "real herdr: the secondmate-shaped home's workspace is labeled 2ndmate-<secondmate-id> in herdr itself"
 
 SM_TASK_LABEL="fm-smtask1"
-SM_TASK_IDS=$(FM_HOME="$SM_HOME" fm_backend_herdr_create_task "$SM_CONTAINER" "$SM_TASK_LABEL" /tmp "$SM_SEEDED_TAB_ID") || fail "secondmate create_task failed"
+SM_TASK_IDS=$(FM_HOME="$SM_HOME" fm_backend_herdr_create_task "$SM_CONTAINER" "$SM_TASK_LABEL" /tmp "$SM_SEEDED_TAB_ID" "${SM_TASK_LABEL#fm-}") || fail "secondmate create_task failed"
 read -r SM_TAB_ID SM_PANE_ID <<EOF
 $SM_TASK_IDS
 EOF
@@ -352,7 +352,7 @@ CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
 [ -n "$SEEDED_TAB_ID" ] || fail "the workspace was deleted when its last tab was killed, so this container_ensure must CREATE a fresh one and report its seeded default tab id"
 LABEL2="fm-smoke2"
-TASK_IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL2" /tmp "$SEEDED_TAB_ID") || fail "second create_task failed"
+TASK_IDS2=$(fm_backend_herdr_create_task "$CONTAINER" "$LABEL2" /tmp "$SEEDED_TAB_ID" "${LABEL2#fm-}") || fail "second create_task failed"
 read -r _TAB_ID2 PANE_ID2 <<EOF
 $TASK_IDS2
 EOF

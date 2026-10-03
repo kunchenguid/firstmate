@@ -63,7 +63,7 @@ pass "real herdr ($HERDR_VERSION): events.subscribe capability gate passes (prot
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}
 SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
-IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait1" /tmp "$SEEDED_TAB_ID") || fail "create_task failed"
+IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-evwait1" /tmp "$SEEDED_TAB_ID" evwait1) || fail "create_task failed"
 read -r _TAB_ID PANE_ID <<EOF
 $IDS
 EOF
