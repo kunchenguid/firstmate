@@ -3078,6 +3078,8 @@ printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[0]
 silent_says no "a declared-empty content block is still present"
 printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[many]{tag,text}:\n' > "$SIL"
 silent_says no "a malformed top-level content header is indeterminate"
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]:\n  - uid: "1"\n    tag: p\n' > "$SIL"
+silent_says no "an ended session carrying list-form content is never assumed empty"
 printf 'session:\n  file: /a.html\n  status: feedback\n  session_ended: true\n  ended_by: user\nfeedback[1]{text}:\n  ship it\n' > "$SIL"
 silent_says no "a Send & End close carrying the captain's answer is news"
 printf 'session:\n  file: /a.html\n  status: feedback\nprompts[1]{tag,text}:\n  "message","some prose"\n' > "$SIL"
@@ -3191,6 +3193,8 @@ assert_contains "$out" "malformed_items: 1" "a malformed row was not reported"
 assert_contains "$out" "complete: no" "a malformed row was certified as complete"
 assert_contains "$out" "| Complete annotation" \
   "a valid annotation beside a malformed row was not presented"
+assert_contains "$out" $'MALFORMED ITEM 1 of 1 (raw capture lines)\n|   "el-b","","section#other",note' \
+  "a malformed row's raw capture was not shown"
 pass "read never certifies rows missing declared fields as complete"
 
 cat > "$READ" <<'EOF'
@@ -3359,6 +3363,309 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
   "an empty board close invented a session-ending message"
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
+
+# lavish-axi's TOON encoder picks one shape per response: tabular only when every
+# prompt is flat, and the list form as soon as any prompt carries a nested value
+# such as a table cell's `target` or an `attachments` array. These captures are
+# that encoder's own output for the same four prompts, so both shapes must
+# present identically. The list form once read as 0 of 0 and complete.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[4]:
+  - uid: "1"
+    prompt: "Label this validation needed, then offer two paths: regulated, or not."
+    selector: "div > table > tbody > tr:nth-of-type(1) > td:nth-of-type(5)"
+    tag: td
+    text: "Researcher. A \"wrong\" claim, here, is costly."
+    target:
+      type: table-cell
+      selector: "div > table > tbody > tr:nth-of-type(1) > td:nth-of-type(5)"
+      rowLabel: N1
+      columnLabel: Recommendation
+      text: Researcher.
+  - uid: "3"
+    prompt: "Line one\nline two, with comma\n- dash: colon"
+    selector: main > p
+    tag: p
+    text: Plain text
+    attachments[1]{id,path,mime,width,height}:
+      a1,/tmp/fixture/shot.png,image/png,10,20
+  - uid: "4"
+    prompt: "Pick one.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}"
+    selector: #q1
+    tag: choice
+    text: Approve
+  - uid: ""
+    prompt: "Overall: simplify, please.\nSecond line \\ backslash."
+    selector: ""
+    tag: message
+    text: Freeform message
+next_step: Apply the requested changes.
+dom_snapshot: "uid=5 body \"x\"\n  uid=6 main"
+EOF
+list_out=$(read_out) || fail "read failed on a list-form capture"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[4]{uid,prompt,selector,tag,text}:
+  "1","Label this validation needed, then offer two paths: regulated, or not.","div > table > tbody > tr:nth-of-type(1) > td:nth-of-type(5)",td,"Researcher. A \"wrong\" claim, here, is costly."
+  "3","Line one\nline two, with comma\n- dash: colon",main > p,p,Plain text
+  "4","Pick one.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}",#q1,choice,Approve
+  "","Overall: simplify, please.\nSecond line \\ backslash.","",message,Freeform message
+next_step: x
+dom_snapshot: ""
+EOF
+table_out=$(read_out) || fail "read failed on a tabular capture"
+for shape in list table; do
+  if [ "$shape" = list ]; then out=$list_out; else out=$table_out; fi
+  assert_contains "$out" "declared_items: 4" "the $shape form lost its declared count"
+  assert_contains "$out" "presented_items: 4" "the $shape form dropped queued items"
+  assert_contains "$out" "malformed_items: 0" "the $shape form reported a well-formed item as malformed"
+  assert_contains "$out" "complete: yes" "a complete $shape capture was not marked complete"
+  assert_contains "$out" "annotation_count: 3" "the $shape form miscounted its annotations"
+  assert_contains "$out" $'CAPTAIN MESSAGE\n| Overall: simplify, please.\n| Second line \\ backslash.\nEND CAPTAIN MESSAGE' \
+    "the $shape form did not surface the freeform message as its own field"
+  assert_contains "$out" $'ANNOTATION 1 of 3\nelement_uid: 1\nelement_selector: div > table > tbody > tr:nth-of-type(1) > td:nth-of-type(5)\ntag: td\ntext:\n| Researcher. A "wrong" claim, here, is costly.\nprompt:\n| Label this validation needed, then offer two paths: regulated, or not.' \
+    "the $shape form did not present a quoted comment with commas and escaped quotes"
+  assert_contains "$out" $'element_uid: 3\nelement_selector: main > p\ntag: p\ntext:\n| Plain text\nprompt:\n| Line one\n| line two, with comma\n| - dash: colon' \
+    "the $shape form did not present an unquoted selector or a multi-line comment"
+  assert_contains "$out" $'element_uid: 4\nelement_selector: #q1\ntag: choice\ntext:\n| Approve' \
+    "the $shape form did not present a choice row"
+  assert_not_contains "$out" "Context data:" "the $shape form presented choice context as a comment"
+  assert_not_contains "$out" "tag: message" "the $shape form presented the message as an annotation"
+done
+out=$list_out
+assert_contains "$out" $'| Label this validation needed, then offer two paths: regulated, or not.\ndetail:\n| target.type: table-cell\n| target.selector: div > table > tbody > tr:nth-of-type(1) > td:nth-of-type(5)\n| target.rowLabel: N1\n| target.columnLabel: Recommendation\n| target.text: Researcher.' \
+  "a table cell's target labels were not presented"
+assert_contains "$out" $'| - dash: colon\ndetail:\n| attachments[1].id: a1\n| attachments[1].path: /tmp/fixture/shot.png\n| attachments[1].mime: image/png' \
+  "an attached image's path was not presented"
+assert_not_contains "$table_out" "detail:" "a flat tabular capture invented nested detail"
+pass "read presents both TOON prompt shapes lavish-axi emits, field for field"
+
+# Every nested shape the encoder can emit inside a list item is flattened into
+# detail lines rather than dropped: nested objects, tabular and list arrays,
+# inline primitive arrays, mixed arrays, empty containers, null, and an array
+# as an item's first field on its hyphen line.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - attachments[1]{id,path}:
+      a1,"/p,1.png"
+    uid: "1"
+    prompt: first
+    tag: p
+  - uid: "2"
+    prompt: second
+    tag: p
+    target:
+      type: x
+      deep:
+        k: v
+      arr[2]: 1,2
+    attachments[2]:
+      - id: a
+        n:
+          z: 1
+      - id: b
+    mixed[3]:
+      - 1
+      - a: 2
+      - s
+    empty: []
+    eo:
+    gone: null
+  - tags[2]: a,"b, c"
+    uid: "3"
+    prompt: third
+    tag: p
+next_step: x
+EOF
+out=$(read_out) || fail "read failed on a deeply nested list-form capture"
+assert_contains "$out" "presented_items: 3" "a deeply nested list capture dropped items"
+assert_contains "$out" "complete: yes" "a deeply nested list capture was not marked complete"
+assert_contains "$out" $'| first\ndetail:\n| attachments[1].id: a1\n| attachments[1].path: /p,1.png\nANNOTATION 2 of 3' \
+  "an array on an item's hyphen line was not presented"
+assert_contains "$out" $'detail:\n| target.type: x\n| target.deep.k: v\n| target.arr[1]: 1\n| target.arr[2]: 2\n| attachments[1].id: a\n| attachments[1].n.z: 1\n| attachments[2].id: b\n| mixed[1]: 1\n| mixed[2].a: 2\n| mixed[3]: s\n| empty: []\n| eo: {}\n| gone: null\nANNOTATION 3 of 3' \
+  "a nested list-item field was dropped"
+assert_contains "$out" $'| tags[1]: a\n| tags[2]: b, c' "an inline primitive array was not presented"
+pass "read flattens every nested list-item field into detail lines"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - uid: "1"
+    prompt: kept
+    tag: p
+  - just a bare value
+  - uid: "3"
+    prompt: "unterminated
+next_step: x
+EOF
+out=$(read_out) || fail "read failed on a list-form capture with malformed items"
+assert_contains "$out" "declared_items: 3" "a malformed list capture lost its declared count"
+assert_contains "$out" "presented_items: 1" "a malformed list item was certified as presented"
+assert_contains "$out" "malformed_items: 2" "malformed list items were not reported"
+assert_contains "$out" "complete: no" "a malformed list capture was certified as complete"
+assert_contains "$out" "| kept" "a valid list item beside malformed ones was not presented"
+assert_contains "$out" $'MALFORMED ITEMS\nMALFORMED ITEM 1 of 2 (raw capture lines)\n|   - just a bare value\nMALFORMED ITEM 2 of 2 (raw capture lines)\n|   - uid: "3"\n|     prompt: "unterminated\nEND MALFORMED ITEMS' \
+  "a malformed list item's raw lines were not shown"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: "1"
+    prompt: only one arrived
+next_step: x
+EOF
+out=$(read_out) || fail "read failed on a short list-form capture"
+assert_contains "$out" "presented_items: 1" "a short list capture miscounted its items"
+assert_contains "$out" "complete: no" "a list capture missing declared items was certified as complete"
+
+# Items beyond the declared count are reviewer input too: they surface as
+# malformed raw lines, never vanish, and never feed the keyed-answer intake.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]:
+  - uid: c1
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}"
+    tag: choice
+    text: Approve
+  - uid: c2
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"surplus\"}"
+    tag: choice
+    text: Reconcile
+next_step: x
+EOF
+list_out=$(read_out) || fail "read failed on a list-form capture with surplus items"
+list_answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "answers failed on a list-form capture with surplus items"
+list_reconciles=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "reconciles failed on a list-form capture with surplus items"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[1]{uid,prompt,tag,text}:
+  c1,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}",choice,Approve
+  c2,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"surplus\"}",choice,Reconcile
+next_step: x
+EOF
+table_out=$(read_out) || fail "read failed on a tabular capture with surplus rows"
+table_answers=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "answers failed on a tabular capture with surplus rows"
+table_reconciles=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "reconciles failed on a tabular capture with surplus rows"
+assert_contains "$list_out" $'MALFORMED ITEM 1 of 1 (raw capture lines)\n|   - uid: c2\n|     prompt: "Pick.' \
+  "a surplus list item's raw lines were not shown"
+assert_contains "$table_out" $'MALFORMED ITEM 1 of 1 (raw capture lines)\n|   c2,"Pick.' \
+  "a surplus tabular row's raw line was not shown"
+for shape in list table; do
+  if [ "$shape" = list ]; then
+    out=$list_out answers=$list_answers reconciles=$list_reconciles
+  else
+    out=$table_out answers=$table_answers reconciles=$table_reconciles
+  fi
+  assert_contains "$out" "declared_items: 1" "the $shape surplus capture lost its declared count"
+  assert_contains "$out" "presented_items: 1" "the $shape surplus capture miscounted its items"
+  assert_contains "$out" "malformed_items: 1" "the $shape surplus item was not reported as malformed"
+  assert_contains "$out" "complete: no" "a $shape capture with surplus items was certified as complete"
+  [ "$answers" = $'task-a\tapprove\tApprove' ] \
+    || fail "answers read a $shape surplus item as a keyed answer: $answers"
+  [ -z "$reconciles" ] \
+    || fail "reconciles read a $shape surplus item as a reconcile selection: $reconciles"
+done
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2|]{uid|prompt}:
+  "1"|first
+  "2"|second
+extra:
+  secret: z
+next_step: x
+EOF
+out=$(read_out) || fail "read failed on an unrecognized prompts block"
+assert_contains "$out" "declared_items: 2" "an unrecognized prompts block hid its declared count"
+assert_contains "$out" "complete: no" "an unrecognized prompts block was certified as complete"
+assert_contains "$out" $'|   "1"|first\n|   "2"|second' "an unrecognized prompts block's raw lines were not shown"
+case "$out" in
+  *"secret: z"*) fail "an unrecognized prompts block's raw lines swallowed a later block: $out" ;;
+esac
+pass "read never certifies a malformed, short, or unrecognized list capture as complete"
+
+# One table-cell annotation turns the whole response into the list form, so the
+# keyed-answer intake must read choices in that shape too.
+LIST_CHOICES="$TMP_ROOT/list-choices"
+cat > "$LIST_CHOICES" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - uid: c1
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}"
+    selector: #q1
+    tag: choice
+    text: Approve
+  - uid: c2
+    prompt: "Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"check the PR, again\"}"
+    selector: #q2
+    tag: choice
+    text: Reconcile
+  - uid: t1
+    prompt: cell note
+    selector: td
+    tag: td
+    text: cell
+    target:
+      type: table-cell
+      rowLabel: R1
+      columnLabel: C1
+next_step: x
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$LIST_CHOICES") \
+  || fail "answers failed on a list-form capture"
+[ "$out" = $'task-a\tapprove\tApprove' ] \
+  || fail "answers dropped or altered a list-form choice: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$LIST_CHOICES") \
+  || fail "reconciles failed on a list-form capture"
+[ "$out" = $'task-b\tcheck the PR, again' ] \
+  || fail "reconciles dropped or altered a list-form reconcile selection: $out"
+pass "answers and reconciles read choices from a list-form capture"
+
+# A Send & End result carries its choices in a `feedback` block; those are
+# reviewer input too, so the keyed-answer intake must read them.
+FEEDBACK_CHOICES="$TMP_ROOT/feedback-choices"
+cat > "$FEEDBACK_CHOICES" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+feedback[2]{uid,prompt,selector,tag,text}:
+  c1,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-a\",\"selection\":\"approve\",\"note\":\"\"}",#q1,choice,Approve
+  c2,"Pick.\n\nContext data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"task-b\",\"selection\":\"reconcile\",\"note\":\"check the PR, again\"}",#q2,choice,Reconcile
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$FEEDBACK_CHOICES") \
+  || fail "answers failed on a feedback-block capture"
+[ "$out" = $'task-a\tapprove\tApprove' ] \
+  || fail "answers dropped or altered a feedback-block choice: $out"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$FEEDBACK_CHOICES") \
+  || fail "reconciles failed on a feedback-block capture"
+[ "$out" = $'task-b\tcheck the PR, again' ] \
+  || fail "reconciles dropped or altered a feedback-block reconcile selection: $out"
+pass "answers and reconciles read choices from a Send & End feedback block"
 
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
