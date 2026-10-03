@@ -6751,3 +6751,40 @@ test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+
+# An opted-in home's watcher surfaces a large idle Claude worker once through
+# fm-session-cost.sh; the same home without config/session-cache stays quiet.
+test_session_cost_notice_is_opt_in() {
+  local dir state fakebin out pid wt tdir mode
+  for mode in off on; do
+    dir=$(make_case "session-cost-$mode"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; wt="$dir/wt"
+    mkdir -p "$dir/config" "$wt"
+    [ "$mode" = off ] || : > "$dir/config/session-cache"
+    fm_write_meta "$state/big.meta" "window=fm:fm-big" "worktree=$wt" "harness=claude" "kind=ship"
+    "$ROOT/bin/fm-busy-event.sh" arm "$state" big --state idle --source claude-hook --event stop >/dev/null \
+      || fail "could not arm the busy record"
+    tdir="$dir/claude/projects/$(printf '%s' "$wt" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$tdir"
+    printf '%s\n' '{"type":"assistant","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":400000}}}' \
+      > "$tdir/s.jsonl"
+    fm_touch_epoch $(( $(date +%s) - 900 )) "$tdir/s.jsonl"
+    FM_CONFIG_OVERRIDE="$dir/config" CLAUDE_CONFIG_DIR="$dir/claude" FM_SESSION_COST_SECS=0 \
+      FM_FAKE_CREW_STATE="state: working · source: pane · busy" watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    if [ "$mode" = off ]; then
+      wait_poll_cycle "$state" "$pid" || fail "the watcher exited without the opt-in: $(cat "$out")"
+      kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      grep -F "session-cost" "$out" "$state/.wake-queue" >/dev/null 2>&1 \
+        && fail "a home without config/session-cache surfaced a session-cost wake"
+    else
+      wait_for_exit "$pid" 100 || fail "the opted-in watcher never surfaced the large idle worker: $(cat "$out")"
+      grep -Fx "check: session-cost" "$out" >/dev/null || fail "unexpected wake: $(cat "$out")"
+      grep -F "check: session-cost: big context=400k" "$state/.wake-queue" >/dev/null \
+        || fail "the durable wake row did not name the worker"
+    fi
+  done
+  pass "the session-cost notice is opt-in and reaches the wake queue"
+}
+
+test_session_cost_notice_is_opt_in

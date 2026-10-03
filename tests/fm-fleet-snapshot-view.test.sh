@@ -807,7 +807,31 @@ test_view_renders_snapshot() {
     "view should show secondmate endpoint agent liveness"
   assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
+  assert_not_contains "$view" "## Session Cost" \
+    "view must not add a session cost section when config/session-cache is absent"
   pass "fleet view renders the snapshot without secondmate peek guidance"
+}
+
+test_view_renders_session_cost_when_configured() {
+  local home fakebin view claude_dir transcript_dir json
+  home=$(make_home session-cost)
+  write_fixture "$home"
+  mkdir -p "$home/projects/alpha-worktree"
+  : > "$home/config/session-cache"
+  claude_dir="$home/claude"
+  transcript_dir="$claude_dir/projects/$(printf '%s' "$home/projects/alpha-worktree" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$transcript_dir"
+  printf '%s\n' '{"type":"assistant","message":{"usage":{"input_tokens":2,"cache_creation_input_tokens":1000,"cache_read_input_tokens":320000}}}' \
+    > "$transcript_dir/s1.jsonl"
+  fakebin=$(make_fakebin "$home")
+  view=$(PATH="$fakebin:$PATH" FM_HOME="$home" CLAUDE_CONFIG_DIR="$claude_dir" "$VIEW")
+  assert_contains "$view" "## Session Cost" "configured view should add a session cost section"
+  assert_contains "$view" "| ship-task | 321k | 0m | warm | fresh (size) |" \
+    "configured view should render the worker's context size and advice"
+  json=$(PATH="$fakebin:$PATH" FM_HOME="$home" CLAUDE_CONFIG_DIR="$claude_dir" "$SNAPSHOT" --json)
+  assert_equals "null" "$(printf '%s' "$json" | jq -c '.tasks[] | select(.id == "secondmate-task") | .session_cost')" \
+    "a secondmate row carries no session cost"
+  pass "fleet view renders session cost only when configured"
 }
 
 test_view_renders_dead_secondmate_agent_status() {
@@ -1169,4 +1193,5 @@ test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
+test_view_renders_session_cost_when_configured
 test_view_renders_dead_secondmate_agent_status

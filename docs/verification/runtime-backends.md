@@ -2456,3 +2456,19 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Worker session cost transcript
+
+`bin/fm-session-cost.sh` reads a Claude worker's context size from the newest main-chain assistant `usage` entry of its transcript under the Claude config directory, found through the worktree path with every character outside `[A-Za-z0-9]` replaced by `-`.
+That location and those fields are written by Claude Code itself, so `tests/fm-session-cost-claude-live-e2e.test.sh` submits one real Haiku turn in an isolated folder and requires a measured context; run it after every Claude Code upgrade to refresh this record.
+Other harnesses are reported as unsupported rather than measured.
+
+Verified 2026-10-02 on Claude Code 2.1.287, Darwin 25.6.0.
+
+```sh
+FM_SESSION_COST_LIVE_E2E=1 bash tests/fm-session-cost-claude-live-e2e.test.sh
+```
+
+```
+ok - fm-session-cost measures a real Claude 2.1.287 (Claude Code) transcript (22798 tokens)
+```

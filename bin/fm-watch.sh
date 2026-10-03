@@ -2732,6 +2732,20 @@ while :; do
     triage_log "inactive-outcome reconciliation unavailable"
   fi
 
+  # Opt-in session-cost notice (config/session-cache): fm-session-cost.sh owns
+  # its own cadence, durable wake row, and once-per-crossing marker.
+  if [ -e "$CONFIG/session-cache" ]; then
+    session_cost_out=
+    if session_cost_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-session-cost.sh" scan 2>/dev/null); then
+      if [ -n "$session_cost_out" ]; then
+        wake "check: session-cost"
+      fi
+    else
+      triage_log "session-cost scan unavailable"
+    fi
+  fi
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed

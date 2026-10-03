@@ -64,6 +64,10 @@
 #     fm-classify-lib.sh's authoritative status_open_decisions fold and reconciled
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
+#     session_cost is null unless config/session-cache exists; then a local ship
+#     or scout row carries its bin/fm-session-cost.sh `show --json` object
+#     (context size, idle time, cache warmth, and fresh-start advice), measured
+#     for the whole fleet by one `show --json --all` call per snapshot.
 #     endpoint.exists is the cheap local backend endpoint-presence read.
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
@@ -747,7 +751,13 @@ task_json_lines() {
   local remote_host remote_root current_file endpoint_file observation_line index=0
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
-  local open_decisions_tsv open_decisions_json
+  local open_decisions_tsv open_decisions_json session_cost_json session_costs_json=null
+
+  if [ -e "$CONFIG/session-cache" ]; then
+    session_costs_json=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-session-cost.sh" show --json --all 2>/dev/null) \
+      || session_costs_json='"config-invalid"'
+  fi
 
   while [ "$index" -lt "$SNAPSHOT_TASK_META_COUNT" ]; do
     meta=${SNAPSHOT_TASK_METAS[index]}
@@ -854,6 +864,12 @@ task_json_lines() {
     else
       home_json=$(jq -n '{path:null,present:false}')
     fi
+    session_cost_json=null
+    if [ "$session_costs_json" != null ] && [ -z "$remote_host" ] && [ "$kind" != secondmate ]; then
+      session_cost_json=$(jq -c --arg id "$id" '
+        if type == "object" then .[$id] // {status:"unknown",detail:"not-measured"}
+        else {status:"unknown",detail:.} end' <<<"$session_costs_json")
+    fi
 
     jq -n \
       --arg id "$id" \
@@ -885,6 +901,7 @@ task_json_lines() {
       --argjson home_path "$home_json" \
       --argjson endpoint_exists "$endpoint_exists" \
       --argjson open_decisions "$open_decisions_json" \
+      --argjson session_cost "$session_cost_json" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
@@ -914,6 +931,7 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
+        session_cost:$session_cost,
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

@@ -52,6 +52,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     else $t.actions.watch end;
   def task_row($t):
     "| \($t.id) | \($t.current_state.state) / \($t.current_state.source) | \($t.kind) | \(dash($t.backlog.repo // $t.project)) | \($t.backend) | \(endpoint_of($t)) | \(artifact($t)) | \(path_of($t)) | \(action_of($t)) |";
+  def session_cost_row($t):
+    $t.session_cost as $c
+    | if $c.status == "ok" then
+        "| \($t.id) | \($c.context_tokens / 1000 | floor)k | \($c.idle_seconds / 60 | floor)m | \($c.cache) | \($c.advice)\(if $c.reason then " (" + $c.reason + ")" else "" end) |"
+      else
+        "| \($t.id) | - | - | - | \($c.status): \(dash($c.detail)) |"
+      end;
   def blocker($r):
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
@@ -71,6 +78,14 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| ID | Current | Kind | Repo/Project | Backend | Endpoint | Artifact | Path | Watch / return channel |",
     "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     (.tasks[] | task_row(.))
+   end),
+  (if ([.tasks[]? | select(.session_cost != null)] | length) == 0 then empty else
+    "",
+    "## Session Cost",
+    "",
+    "| ID | Context | Idle | Cache | Advice |",
+    "| --- | --- | --- | --- | --- |",
+    (.tasks[] | select(.session_cost != null) | session_cost_row(.))
    end),
   "",
   "## Queued",

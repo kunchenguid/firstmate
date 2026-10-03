@@ -573,6 +573,18 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
+## Worker session cost (config/session-cache)
+
+The optional local, gitignored `config/session-cache` file opts this home into watching each Claude ship or scout session's context size and idle time.
+With it absent nothing is measured, the watcher wakes for nothing new, and the fleet view is unchanged.
+With it present, the fleet view adds a Session Cost section, and the watcher wakes firstmate once with `check: session-cost` when a worker's context passes a size threshold, or a smaller one after its prompt cache went cold.
+Firstmate then follows the `session-cache` skill: at a phase boundary it gets a short handoff note and replaces the worker through `bin/fm-control.sh relaunch`, so the work continues in a fresh, small session.
+
+The file holds optional `key=value` lines, and an empty file enables every default: `fresh_tokens` (300000), `cold_fresh_tokens` (150000), `cache_ttl_minutes` (60), and `min_idle_minutes` (5).
+`bin/fm-session-cost.sh`'s header owns their meaning, the transcript discovery, and the once-per-crossing rule; an invalid file makes the scan stop and leave a watcher log line rather than guess.
+Other harnesses report as unsupported.
+The file is a home-local cost preference and is not inherited by secondmate homes.
+
 ## Waiting worker spends no turns (config/wait-no-turns)
 
 The optional local, gitignored `config/wait-no-turns` presence flag opts this home into keeping a waiting worker from spending turns until it is answered.
