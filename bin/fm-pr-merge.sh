@@ -104,7 +104,7 @@
 # merges stay attended: bin/fm-afk-contract.sh mode) this script permits a
 # green merge mechanically, but the record grants no merge authority:
 # the record's presence is the whole mechanical fact, and whether the
-# captain's away words or the project's approved yolo posture cover a merge
+# captain's away words or the task's own resolved yolo posture cover a merge
 # is the supervision session's reading (bin/fm-branch-prompt.sh "Postures").
 # An unreadable record refuses rather than being skipped, neither posture
 # releases a captain hold, and the away words lapse when the record is

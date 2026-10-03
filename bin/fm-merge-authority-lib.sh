@@ -15,7 +15,7 @@
 # the merge is tagged away; without one, or while the record is quiet mode's
 # (bin/fm-afk-contract.sh mode: the captain is present), it is tagged attended.
 # The away record grants no merge authority: a merge needs the captain's
-# explicit words or the project's approved yolo posture, and whether either
+# explicit words or the task's own resolved yolo posture, and whether either
 # covers a given merge is the supervision session's reading. The retired
 # values yolo and away-grant are still accepted when an existing record is
 # read, so a merge persisted before the words model landed is still consumed,
