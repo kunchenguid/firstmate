@@ -84,6 +84,10 @@ cat > "$tmp/bin/gh-axi" <<'EOF'
 [ "${FM_TEST_FAIL:-0}" = 1 ] && exit 1
 case "$3" in
   */pulls/*)
+    if [ -n "${FM_TEST_KILL:-}" ]; then
+      kill "$FM_TEST_KILL"
+      while kill -0 "$FM_TEST_KILL" 2> /dev/null; do sleep 0.05; done
+    fi
     state=${FM_TEST_STATE:-closed} merged=$FM_TEST_MERGED
     if [ -n "${FM_TEST_FLIP:-}" ]; then
       [ -e "$FM_TEST_FLIP" ] && state=closed merged=true
@@ -190,8 +194,9 @@ still_unknown() {
 not_landed() {
   PATH="$tmp/bin:$PATH" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$(printf '{"request_id":"%s","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$1" "$slot" "$head_a")"
 }
-sleep 600 &
-wrapper=$!
+(sleep 600 & echo $! > "$tmp/wrapper-a"; wait) &
+while [ ! -s "$tmp/wrapper-a" ]; do sleep 0.05; done
+wrapper=$(cat "$tmp/wrapper-a")
 attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 1 "$wrapper"
 for pending in 'true|none' 'false|armed'; do
   if FM_TEST_PENDING="$pending" FM_COORD_QUIET_SECONDS=0 not_landed "reconcile-pending-${pending%%|*}${pending##*|}" > "$tmp/unexpected" 2> "$tmp/error"; then
@@ -205,8 +210,11 @@ if FM_COORD_QUIET_SECONDS=0 not_landed reconcile-live-wrapper > "$tmp/unexpected
 fi
 still_unknown 'a live merge wrapper must keep the slot outcome-unknown'
 pass 'live merge wrapper keeps the slot outcome-unknown'
-kill "$wrapper"
-wait "$wrapper" 2> /dev/null || true
+if FM_TEST_KILL="$wrapper" FM_COORD_QUIET_SECONDS=0 not_landed reconcile-wrapper-exits-mid-read > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a wrapper alive when the forge reads start must not release the unknown slot'
+fi
+still_unknown 'a wrapper alive when the forge reads start must keep the slot outcome-unknown'
+pass 'wrapper exiting during the forge reads keeps the slot outcome-unknown'
 if not_landed reconcile-too-soon > "$tmp/unexpected" 2> "$tmp/error"; then
   fail 'the default quiet period must not release a fresh attempt'
 fi

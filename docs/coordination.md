@@ -92,7 +92,7 @@ A timeout or lost reply goes to `outcome-unknown`, retaining the slot across pro
 A merged PR at the recorded head releases an unknown slot as `merged`.
 An open or closed-unmerged PR that is neither in the merge queue nor armed for auto-merge releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
 The PR is read again after the compare, and a changed state, merge flag, head, or base keeps the slot unknown.
-A not-merged release also requires the recorded wrapper process to be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
+Before any forge read toward a not-merged release, the recorded wrapper process must be proven gone, by a changed boot, an absent PID, or a changed process start time, and at least 10 minutes since the attempt; `FM_COORD_QUIET_SECONDS` changes that period for deterministic testing.
 An attempt without a recorded wrapper identity, or whose identity cannot be checked, never leaves `outcome-unknown` as not merged.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 `queue-operator-abort` is the only other way out of `outcome-unknown`: it records the named operator and reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.

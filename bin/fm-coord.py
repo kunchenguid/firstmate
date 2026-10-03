@@ -259,9 +259,7 @@ def terminal_outcome(db, item, request_id, outcome, p):
         require(observed_base != item["base_oid"], "merged base must advance")
     elif forge == "refused":
         require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
-        require(item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"]), "merge wrapper is not proven to have exited")
-        quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
-        require(quiet >= 0 and int(time.time()) - item["attempt_epoch"] >= quiet, "quiet period since the merge attempt has not elapsed")
+        require(p.get("_settled_attempt") == item["attempt_event_id"], "merge wrapper was not proven gone before the forge reads")
     else:
         require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
@@ -425,6 +423,13 @@ def queue_operation(db, op, p):
     raise Refusal("unknown queue operation")
 
 
+def wrapper_settled(item):
+    quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
+    require(quiet >= 0, "quiet period must be nonnegative")
+    gone = item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"])
+    return gone and int(time.time()) - item["attempt_epoch"] >= quiet
+
+
 def forge_landing(p):
     """Read only, before entering the state transition transaction."""
     match = PR_URL.fullmatch(token(p.get("pr_url"), "pr_url"))
@@ -451,6 +456,7 @@ def forge_landing(p):
         p["merge_oid"] = oid(fields[5], "forge merge commit")
         return
     require(fields[1] in {"open", "closed"} and fields[2] == "false", "forge does not prove whether this PR landed")
+    require(p.get("_settled_attempt") is not None, "merge wrapper is not proven to have exited after the quiet period")
     owner, name = repo.split("/")
     pending = read("graphql", "{{with .data.repository.pullRequest}}{{.isInMergeQueue}}|{{if .autoMergeRequest}}armed{{else}}none{{end}}{{end}}", "POST", "--field", f'query=query{{repository(owner:"{owner}",name:"{name}"){{pullRequest(number:{number}){{isInMergeQueue autoMergeRequest{{enabledAt}}}}}}}}')
     require(pending == "false|none", "PR merge is still pending in the merge queue or auto-merge")
@@ -695,6 +701,9 @@ def main():
                 require(prior["digest"] == digest, "idempotency key reused with different request")
                 print(prior["result_json"])
                 return
+            item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (payload.get("intent_id"),)).fetchone()
+            if item is not None and item["state"] == "outcome-unknown" and wrapper_settled(item):
+                payload["_settled_attempt"] = item["attempt_event_id"]
             forge_landing(payload)
         db.execute("BEGIN IMMEDIATE")
         try:
