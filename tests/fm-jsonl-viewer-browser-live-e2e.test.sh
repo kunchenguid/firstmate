@@ -54,6 +54,16 @@ cat > "$HOME_FIXTURE/data/backlog.md" <<MARKDOWN
 ## In flight
 - [ ] $REPORT_ID - Dashboard processing task (repo: viewer) (kind: ship)
 - [ ] $FIRST_REPORT_ID - Delayed report task (repo: viewer) (kind: scout)
+- [ ] tall-task-01 - Tall dashboard task 01 (repo: viewer) (kind: ship)
+- [ ] tall-task-02 - Tall dashboard task 02 (repo: viewer) (kind: ship)
+- [ ] tall-task-03 - Tall dashboard task 03 (repo: viewer) (kind: ship)
+- [ ] tall-task-04 - Tall dashboard task 04 (repo: viewer) (kind: ship)
+- [ ] tall-task-05 - Tall dashboard task 05 (repo: viewer) (kind: ship)
+- [ ] tall-task-06 - Tall dashboard task 06 (repo: viewer) (kind: ship)
+- [ ] tall-task-07 - Tall dashboard task 07 (repo: viewer) (kind: ship)
+- [ ] tall-task-08 - Tall dashboard task 08 (repo: viewer) (kind: ship)
+- [ ] tall-task-09 - Tall dashboard task 09 (repo: viewer) (kind: ship)
+- [ ] tall-task-10 - Tall dashboard task 10 (repo: viewer) (kind: ship)
 
 ## Queued
 - [ ] $BRIEF_ID - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)
@@ -201,8 +211,18 @@ let releaseDelayedReport = () => {};
 let markFirstReportRequestStarted;
 const firstReportRequestStarted = new Promise(resolve => { markFirstReportRequestStarted = resolve; });
 const delayedReportRelease = new Promise(resolve => { releaseDelayedReport = resolve; });
+let delayUserScrollReport = false;
+let releaseUserScrollReport = () => {};
+let markUserScrollReportStarted;
+const userScrollReportStarted = new Promise(resolve => { markUserScrollReportStarted = resolve; });
+const userScrollReportRelease = new Promise(resolve => { releaseUserScrollReport = resolve; });
 await page.route("**/api/task-document?*", async route => {
   const url = new URL(route.request().url());
+  if (delayUserScrollReport && url.searchParams.get("id") === process.env.VIEWER_REPORT_ID) {
+    delayUserScrollReport = false;
+    markUserScrollReportStarted();
+    await userScrollReportRelease;
+  }
   if (delayFirstReport && url.searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID) {
     delayFirstReport = false;
     markFirstReportRequestStarted();
@@ -244,7 +264,7 @@ try {
   await page.locator("#source").selectOption("tasks");
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
-  if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
+  if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 12) throw new Error("processing task category was not rendered");
   if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task dashboard section was rendered");
   if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
   if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
@@ -257,11 +277,19 @@ try {
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "2,2,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "12,2,1") throw new Error("background task refresh did not preserve loaded counts");
+  const dashboardReportCard = page.locator('#task-groups .task-card[data-category="processing"]').filter({ hasText: "Dashboard processing task" });
+  if (!await page.locator("#task-groups").evaluate(element => element.getBoundingClientRect().bottom > window.innerHeight)) throw new Error("dashboard fixture was not tall enough to reproduce the off-screen detail");
+  await dashboardReportCard.click();
+  await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!await page.locator("#task-detail").evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return bounds.top >= 0 && bounds.top < window.innerHeight;
+  })) throw new Error("dashboard task click left the rendered report outside the viewport");
   refreshTaskDelay.release();
   await page.locator("#task-status").filter({ hasText: "UTC+8" }).waitFor({ state: "visible", timeout: 5000 });
-  await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!await page.getByRole("heading", { name: "Rendered report" }).isVisible()) throw new Error("task refresh replaced the selected report display");
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
   if (await page.locator("#task-document-brief").isDisabled() || await page.locator("#task-document-report").isDisabled()) throw new Error("both-document task did not expose both document selectors");
   await page.locator("#task-document-brief").click();
@@ -269,6 +297,22 @@ try {
   await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
+  delayUserScrollReport = true;
+  await dashboardReportCard.click();
+  await userScrollReportStarted;
+  await page.mouse.move(1430, 500);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.mouse.wheel(0, -600);
+  const deliberateScrollY = await page.evaluate(() => window.scrollY);
+  releaseUserScrollReport();
+  await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.waitForTimeout(100);
+  const completedScrollY = await page.evaluate(() => window.scrollY);
+  if (Math.abs(completedScrollY - deliberateScrollY) > 2) throw new Error(`completed task document request overrode deliberate user scrolling: ${deliberateScrollY} -> ${completedScrollY}`);
+  await dashboardReportCard.click();
+  if (!await page.locator("#task-detail").evaluate(element => element.getBoundingClientRect().top >= -1 && element.getBoundingClientRect().top < window.innerHeight)) throw new Error("repeated dashboard click did not restore the task detail to the viewport");
   await captureEvidence("viewer-task-detail-canonical-report");
   await page.locator("#open-task-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
@@ -290,9 +334,11 @@ try {
   await page.getByText("No canonical task document is available for this task.", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
 
   delayFirstReport = true;
-  await page.getByRole("button", { name: /Delayed report task/ }).first().click();
+  await page.locator('#task-groups .task-card[data-category="processing"]').filter({ hasText: "Delayed report task" }).click();
   await firstReportRequestStarted;
-  await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
+  await dashboardReportCard.click();
+  await page.locator('#task-groups .task-card[data-category="held"]').filter({ hasText: "Held with task instructions" }).click();
+  await dashboardReportCard.click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   const staleTaskDocumentResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("id") === process.env.VIEWER_FIRST_REPORT_ID);
   releaseDelayedReport();

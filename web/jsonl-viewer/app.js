@@ -684,7 +684,7 @@ function taskDocumentRequestIsCurrent(taskId, documentType, selectionGeneration)
     && elements.source.value === "tasks";
 }
 
-async function loadTaskDocument({ resetDisplay = false } = {}) {
+async function loadTaskDocument({ resetDisplay = false, preserveViewport = null } = {}) {
   const task = state.tasks.find(item => item.id === state.selectedTaskId);
   if (!task) return;
   if (!task.hasDocument) {
@@ -705,9 +705,11 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
     const body = await api(`/api/task-document?${new URLSearchParams({ id: taskId, type: documentType })}`);
     if (!taskDocumentRequestIsCurrent(taskId, documentType, selectionGeneration)) return;
     if (resetDisplay || body.content !== state.taskDocumentContent) {
+      const preservedScrollY = preserveViewport?.() ? window.scrollY : null;
       renderMarkdown(elements.taskDocumentRendered, body.content);
       elements.taskDocumentSource.querySelector("pre").textContent = body.content;
       state.taskDocumentContent = body.content;
+      if (preservedScrollY !== null) window.requestAnimationFrame(() => window.scrollTo({ top: preservedScrollY }));
     }
     elements.taskDocumentType.textContent = body.source === "report" ? "Task report" : "Task brief";
     elements.taskDocumentType.hidden = false;
@@ -724,12 +726,24 @@ async function loadTaskDocument({ resetDisplay = false } = {}) {
 
 async function selectTask(id) {
   state.taskSelectionGeneration += 1;
+  const selectionGeneration = state.taskSelectionGeneration;
+  let revealCancelled = false;
+  const cancelReveal = () => { revealCancelled = true; };
   state.selectedTaskId = id;
   const task = state.tasks.find(item => item.id === id);
   const documentTypes = task?.documentTypes || (task?.documentType ? [task.documentType] : []);
   state.selectedTaskDocumentType = documentTypes.includes("report") ? "report" : documentTypes[0] || null;
   renderSessions();
-  await loadTaskDocument({ resetDisplay: true });
+  elements.taskDetail.scrollIntoView({ block: "start" });
+  for (const event of ["keydown", "pointerdown", "touchstart", "wheel"]) window.addEventListener(event, cancelReveal, { passive: true });
+  try {
+    await loadTaskDocument({ resetDisplay: true, preserveViewport: () => revealCancelled });
+    if (state.taskSelectionGeneration === selectionGeneration && state.selectedTaskId === id) {
+      if (!revealCancelled) elements.taskDetail.scrollIntoView({ block: "start" });
+    }
+  } finally {
+    for (const event of ["keydown", "pointerdown", "touchstart", "wheel"]) window.removeEventListener(event, cancelReveal);
+  }
 }
 
 async function selectTaskDocument(type) {
