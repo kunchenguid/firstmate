@@ -76,8 +76,8 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
-FM_PR_POLL_REARM_DATA_IDENTITY=
-FM_PR_POLL_REARM_CHECK_IDENTITY=
+FM_PR_POLL_REJECTION=
+FM_PR_META_REJECTION=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -310,15 +310,28 @@ fm_pr_file_inode() {
 
 # device:inode names one file object, since an inode number is unique only
 # within its filesystem. The device part is not stable across a volume remount:
-# APFS can renumber st_dev on reboot while every inode and byte is unchanged, so
-# an identity persisted before the remount no longer matches the live file
-# (fm_pr_poll_registration_rerecord_device).
+# APFS renumbers st_dev on reboot while every inode and byte is unchanged, so a
+# recorded identity is compared only through fm_pr_recorded_identity_matches.
 fm_pr_file_identity() {
   local device inode
   device=$(fm_pr_file_device "$1") || return 1
   inode=$(fm_pr_file_inode "$1") || return 1
   [ -n "$device" ] && [ -n "$inode" ] || return 1
   printf '%s:%s\n' "$device" "$inode"
+}
+
+# A recorded identity names its file by inode alone and ignores the recorded
+# device, so a volume remount that renumbers st_dev leaves an unchanged file
+# authenticated while a replaced file, which has another inode, stays refused.
+# The device still matters, and every caller proves it live first: the file
+# must pass fm_pr_private_file_valid against its state directory's current
+# device, which keeps it on that directory's own filesystem, where an inode
+# names one file.
+fm_pr_recorded_identity_matches() {  # <recorded-identity> <path>
+  local recorded=$1 inode
+  [[ "$recorded" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  inode=$(fm_pr_file_inode "$2") || return 1
+  [ -n "$inode" ] && [ "${recorded#*:}" = "$inode" ]
 }
 
 fm_pr_sha256() {
@@ -358,13 +371,18 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The pr= block is the task record's tail: pr=, then an optional pr_head=, with
+# only the x_* Relay keys allowed after it. bin/fm-pr-check.sh appends the block
+# last, and a writer that republishes a task record ends it with
+# fm_pr_metadata_block_print. On failure FM_PR_META_REJECTION names the cause.
 fm_pr_metadata_identity_parse() {
-  local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
+  local file=$1 line value key pr_count=0 seen_pr=0 post_pr_invalid=
   FM_PR_META_PROVIDER=
   FM_PR_META_URL=
   FM_PR_META_HOST=
   FM_PR_META_PATH=
   FM_PR_META_NUMBER=
+  FM_PR_META_REJECTION='is missing or not a single-link regular file'
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(fm_pr_file_link_count "$file")" = 1 ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -385,19 +403,59 @@ fm_pr_metadata_identity_parse() {
       pr_head=*)
         if [ "$seen_pr" -eq 1 ]; then
           value=${line#pr_head=}
-          fm_pr_head_valid "$value" || post_pr_invalid=1
+          fm_pr_head_valid "$value" || post_pr_invalid=${post_pr_invalid:-'has an invalid pr_head= line'}
         fi
         ;;
       x_request=*|x_request_ts=*|x_followups=*|x_platform=*|x_reply_max_chars=*)
         ;;
       *)
-        [ "$seen_pr" -eq 0 ] || post_pr_invalid=1
+        if [ "$seen_pr" -eq 1 ] && [ -z "$post_pr_invalid" ]; then
+          key=${line%%=*}
+          if [[ "$key" =~ ^[A-Za-z0-9_]{1,64}$ ]] && [ "$key" != "$line" ]; then
+            post_pr_invalid="has key $key after its pr= block"
+          else
+            post_pr_invalid='has an unexpected line after its pr= block'
+          fi
+        fi
         ;;
     esac
   done < "$file"
-  [ "$pr_count" -eq 1 ] || return 1
-  [ "$post_pr_invalid" -eq 0 ] || return 1
-  [ -n "$FM_PR_META_URL" ]
+  if [ "$pr_count" -eq 0 ]; then
+    FM_PR_META_REJECTION='has no pr= line'
+    return 1
+  fi
+  if [ "$pr_count" -ne 1 ]; then
+    FM_PR_META_REJECTION='has more than one pr= line'
+    return 1
+  fi
+  if [ -n "$post_pr_invalid" ]; then
+    FM_PR_META_REJECTION=$post_pr_invalid
+    return 1
+  fi
+  if [ -z "$FM_PR_META_URL" ]; then
+    FM_PR_META_REJECTION='has a pr= line that is not a supported PR URL'
+    return 1
+  fi
+  FM_PR_META_REJECTION=
+}
+
+# Print a task record's pr= block (fm_pr_metadata_identity_parse) in its
+# recorded order, for a writer that republishes the record and must end it with
+# this block.
+fm_pr_metadata_block_print() {  # <meta>
+  LC_ALL=C awk '/^pr=/ || /^pr_head=/' "$1"
+}
+
+# Print a task record with each given key=value line replacing that key's
+# earlier lines, ahead of the record's pr= block, so a writer that sets keys on
+# a task record keeps that block the tail.
+fm_pr_metadata_print_with() {  # <meta> <key=value>...
+  local meta=$1 line keys=' pr pr_head '
+  shift
+  for line in "$@"; do keys="$keys${line%%=*} "; done
+  LC_ALL=C awk -F= -v keys="$keys" 'index(keys, " " $1 " ") == 0' "$meta" || return 1
+  [ "$#" -eq 0 ] || printf '%s\n' "$@" || return 1
+  fm_pr_metadata_block_print "$meta"
 }
 
 # Sidecar layout: provider, url, host, path, number, one per line. A sidecar
@@ -653,148 +711,86 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 data_identity check_identity
+  local state=$1 id=$2 template=$3
   fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
-  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
-  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
   # The recorded identities bind the registration to the exact sidecar and
   # check file objects published in its own transaction, so a byte-identical
   # replacement or a torn re-arm pairing one generation's check with another's
   # registration is refused.
-  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
-  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
+  if ! fm_pr_recorded_identity_matches "$FM_PR_REG_DATA_IDENTITY" "$state/$id.pr-poll" \
+    || ! fm_pr_recorded_identity_matches "$FM_PR_REG_CHECK_IDENTITY" "$state/$id.check.sh"; then
+    _fm_pr_poll_reject 'the sidecar or check is not the file its registration was armed with'
+  fi
+}
+
+_fm_pr_poll_reject() {  # <cause>
+  FM_PR_POLL_REJECTION=$1
+  return 1
+}
+
+_fm_pr_poll_private_or_reject() {  # <label> <path> <device>
+  fm_pr_private_file_valid "$2" 600 "$3" && return 0
+  if [ ! -e "$2" ] && [ ! -L "$2" ]; then
+    _fm_pr_poll_reject "the $1 is missing"
+  else
+    _fm_pr_poll_reject "the $1 is not a private single-link file on the state volume"
+  fi
 }
 
 # Everything fm_pr_poll_artifacts_valid proves except that the registration's
 # recorded file identities name the live sidecar and check. Success alone is
 # never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
-# hold the parsed records.
+# hold the parsed records. On failure, and on fm_pr_poll_artifacts_valid's,
+# FM_PR_POLL_REJECTION names the first cause found, for the watcher's rejection
+# wake.
 fm_pr_poll_artifacts_content_valid() {
   local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
-  fm_pr_task_id_valid "$id" || return 1
-  [ -d "$state" ] && [ ! -L "$state" ] || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
+  FM_PR_POLL_REJECTION=
+  fm_pr_task_id_valid "$id" || _fm_pr_poll_reject 'the task id is invalid' || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || _fm_pr_poll_reject 'the state directory is unavailable' || return 1
+  state_device=$(fm_pr_file_device "$state") || _fm_pr_poll_reject 'the state directory is unavailable' || return 1
   check="$state/$id.check.sh"
   data="$state/$id.pr-poll"
   registration="$state/$id.pr-poll-registration"
   meta="$state/$id.meta"
-  fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
-  fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
-  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
-  [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
-  cmp -s "$template" "$check" || return 1
-  fm_pr_poll_data_parse "$data" || return 1
-  data_hash=$(fm_pr_sha256 "$data") || return 1
-  template_hash=$(fm_pr_sha256 "$check") || return 1
-  fm_pr_poll_registration_parse "$registration" || return 1
-  [ "$FM_PR_REG_ID" = "$id" ] || return 1
-  [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
-  [ "$FM_PR_REG_URL" = "$FM_PR_DATA_URL" ] || return 1
-  [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] || return 1
-  [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] || return 1
-  [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
-  [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
-  [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
-  fm_pr_metadata_identity_parse "$meta" || return 1
-  [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
-  [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
-  [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
-  [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
-  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
-}
-
-# A registration armed before a volume remount can name a device number the
-# kernel has since reassigned (fm_pr_file_identity). This proves that is the
-# only difference: every artifact passes fm_pr_poll_artifacts_content_valid, so
-# the check is byte-identical to the template, both hashes match, and the three
-# poll artifacts are private, single-link, and on the state directory's live
-# device; both recorded identities name one device; each recorded inode equals
-# its live inode; and that recorded device differs from the live one. A
-# replaced, altered, re-moded, relinked, or foreign-device artifact fails a proof
-# here and stays refused. A pending retirement receipt owns its artifacts, so
-# none is re-recorded while one exists. On success
-# FM_PR_POLL_REARM_DATA_IDENTITY and FM_PR_POLL_REARM_CHECK_IDENTITY hold the
-# live identities.
-fm_pr_poll_registration_device_shifted() {  # <state> <id> <template>
-  local state=$1 id=$2 template=$3 state_device recorded_device receipt data_identity check_identity
-  FM_PR_POLL_REARM_DATA_IDENTITY=
-  FM_PR_POLL_REARM_CHECK_IDENTITY=
-  fm_pr_task_id_valid "$id" || return 1
-  [ -f "$state/$id.pr-poll-registration" ] || return 1
-  receipt="$state/$id.pr-poll-retirement"
-  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
-  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
-  state_device=$(fm_pr_file_device "$state") || return 1
-  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
-  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
-  recorded_device=${FM_PR_REG_DATA_IDENTITY%%:*}
-  [ "${FM_PR_REG_CHECK_IDENTITY%%:*}" = "$recorded_device" ] || return 1
-  [ "$recorded_device" != "$state_device" ] || return 1
-  [ "$data_identity" = "$state_device:${FM_PR_REG_DATA_IDENTITY#*:}" ] || return 1
-  [ "$check_identity" = "$state_device:${FM_PR_REG_CHECK_IDENTITY#*:}" ] || return 1
-  FM_PR_POLL_REARM_DATA_IDENTITY=$data_identity
-  FM_PR_POLL_REARM_CHECK_IDENTITY=$check_identity
-}
-
-# Rewrite a device-shifted registration (fm_pr_poll_registration_device_shifted)
-# so it names the live device, changing no other line. The caller holds the
-# task's control lock and poll publication lock, which serialize this with the
-# watcher's validated check and retirement, teardown, bin/fm-pr-merge.sh, and
-# direct bin/fm-pr-check.sh publication. The proof is repeated just before the
-# rename, which proceeds only while the registration is still the exact file
-# object and bytes first proven.
-# Success means the strict fm_pr_poll_artifacts_valid accepts the result.
-fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
-  local state=$1 id=$2 template=$3 state_device registration tmp reg_hash reg_identity
-  local id_line provider url host path number data_hash template_hash data_identity check_identity
-  fm_pr_poll_registration_device_shifted "$state" "$id" "$template" || return 1
-  registration="$state/$id.pr-poll-registration"
-  id_line=$FM_PR_REG_ID
-  provider=$FM_PR_REG_PROVIDER
-  url=$FM_PR_REG_URL
-  host=$FM_PR_REG_HOST
-  path=$FM_PR_REG_PATH
-  number=$FM_PR_REG_NUMBER
-  data_hash=$FM_PR_REG_DATA_HASH
-  template_hash=$FM_PR_REG_TEMPLATE_HASH
-  data_identity=$FM_PR_POLL_REARM_DATA_IDENTITY
-  check_identity=$FM_PR_POLL_REARM_CHECK_IDENTITY
-  state_device=$(fm_pr_file_device "$state") || return 1
-  reg_hash=$(fm_pr_sha256 "$registration") || return 1
-  reg_identity=$(fm_pr_file_identity "$registration") || return 1
-  tmp=$(mktemp "$state/.fm-pr-poll-registration.XXXXXX") || return 1
-  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-      fm-pr-poll-registration-v2 "$id_line" "$provider" "$url" "$host" "$path" "$number" \
-      "$data_hash" "$template_hash" "$data_identity" "$check_identity" > "$tmp" \
-    || ! chmod 0600 "$tmp" \
-    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
-    || ! fm_pr_poll_registration_parse "$tmp" \
-    || [ "$FM_PR_REG_ID" != "$id" ] \
-    || [ "$FM_PR_REG_URL" != "$url" ] \
-    || [ "$FM_PR_REG_DATA_HASH" != "$data_hash" ] \
-    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$template_hash" ] \
-    || [ "$FM_PR_REG_DATA_IDENTITY" != "$data_identity" ] \
-    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$check_identity" ] \
-    || ! fm_pr_poll_registration_device_shifted "$state" "$id" "$template" \
-    || [ "$FM_PR_POLL_REARM_DATA_IDENTITY" != "$data_identity" ] \
-    || [ "$FM_PR_POLL_REARM_CHECK_IDENTITY" != "$check_identity" ] \
-    || [ "$(fm_pr_sha256 "$registration")" != "$reg_hash" ] \
-    || [ "$(fm_pr_file_identity "$registration")" != "$reg_identity" ] \
-    || ! fm_pr_regular_destination_on_device_or_absent "$registration" "$state_device" \
-    || ! mv -f -- "$tmp" "$registration"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
-  fm_pr_poll_artifacts_valid "$state" "$id" "$template"
+  _fm_pr_poll_private_or_reject check "$check" "$state_device" || return 1
+  _fm_pr_poll_private_or_reject sidecar "$data" "$state_device" || return 1
+  _fm_pr_poll_private_or_reject registration "$registration" "$state_device" || return 1
+  cmp -s "$template" "$check" || _fm_pr_poll_reject 'the check differs from the poll template' || return 1
+  fm_pr_poll_data_parse "$data" || _fm_pr_poll_reject 'the sidecar is malformed' || return 1
+  data_hash=$(fm_pr_sha256 "$data") || _fm_pr_poll_reject 'the sidecar could not be hashed' || return 1
+  template_hash=$(fm_pr_sha256 "$check") || _fm_pr_poll_reject 'the check could not be hashed' || return 1
+  fm_pr_poll_registration_parse "$registration" \
+    || _fm_pr_poll_reject 'the registration is malformed or from an older release' || return 1
+  [ "$FM_PR_REG_ID" = "$id" ] || _fm_pr_poll_reject 'the registration names another task' || return 1
+  [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] \
+    && [ "$FM_PR_REG_URL" = "$FM_PR_DATA_URL" ] \
+    && [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] \
+    && [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] \
+    && [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] \
+    || _fm_pr_poll_reject 'the registration names another PR than its sidecar' || return 1
+  [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] \
+    || _fm_pr_poll_reject 'the sidecar content differs from its registration' || return 1
+  [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] \
+    || _fm_pr_poll_reject 'the check content differs from its registration' || return 1
+  fm_pr_metadata_identity_parse "$meta" \
+    || _fm_pr_poll_reject "the task record $FM_PR_META_REJECTION" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] \
+    && [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] \
+    && [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] \
+    && [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] \
+    && [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ] \
+    || _fm_pr_poll_reject 'the task record pr= names another PR than the poll'
 }
 
 fm_pr_poll_snapshot_capture() {
   local state=$1 id=$2 template=$3 registration
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
-  FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") || return 1
-  FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") || return 1
+  FM_PR_POLL_SNAPSHOT_REG_HASH=$(fm_pr_sha256 "$registration") \
+    || _fm_pr_poll_reject 'the registration could not be read' || return 1
+  FM_PR_POLL_SNAPSHOT_REG_IDENTITY=$(fm_pr_file_identity "$registration") \
+    || _fm_pr_poll_reject 'the registration could not be read' || return 1
   FM_PR_POLL_SNAPSHOT_ID=$id
   FM_PR_POLL_SNAPSHOT_PROVIDER=$FM_PR_DATA_PROVIDER
   FM_PR_POLL_SNAPSHOT_URL=$FM_PR_DATA_URL
@@ -1123,30 +1119,28 @@ fm_pr_gerrit_read_revision() {  # <host> <number>
 }
 
 fm_pr_poll_retirement_data_valid() {
-  local state=$1 id=$2 state_device data data_hash data_identity
+  local state=$1 id=$2 state_device data data_hash
   state_device=$(fm_pr_file_device "$state") || return 1
   data="$state/$id.pr-poll"
   fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
-  data_identity=$(fm_pr_file_identity "$data") || return 1
   [ "$FM_PR_DATA_PROVIDER" = "$FM_PR_RETIRE_PROVIDER" ] || return 1
   [ "$FM_PR_DATA_URL" = "$FM_PR_RETIRE_URL" ] || return 1
   [ "$FM_PR_DATA_HOST" = "$FM_PR_RETIRE_HOST" ] || return 1
   [ "$FM_PR_DATA_PATH" = "$FM_PR_RETIRE_PATH" ] || return 1
   [ "$FM_PR_DATA_NUMBER" = "$FM_PR_RETIRE_NUMBER" ] || return 1
   [ "$data_hash" = "$FM_PR_RETIRE_DATA_HASH" ] || return 1
-  [ "$data_identity" = "$FM_PR_RETIRE_DATA_IDENTITY" ]
+  fm_pr_recorded_identity_matches "$FM_PR_RETIRE_DATA_IDENTITY" "$data"
 }
 
 fm_pr_poll_retirement_registration_valid() {
-  local state=$1 id=$2 state_device registration reg_hash reg_identity
+  local state=$1 id=$2 state_device registration reg_hash
   state_device=$(fm_pr_file_device "$state") || return 1
   registration="$state/$id.pr-poll-registration"
   fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
   fm_pr_poll_registration_parse "$registration" || return 1
   reg_hash=$(fm_pr_sha256 "$registration") || return 1
-  reg_identity=$(fm_pr_file_identity "$registration") || return 1
   [ "$FM_PR_REG_ID" = "$id" ] || return 1
   [ "$FM_PR_REG_PROVIDER" = "$FM_PR_RETIRE_PROVIDER" ] || return 1
   [ "$FM_PR_REG_URL" = "$FM_PR_RETIRE_URL" ] || return 1
@@ -1158,18 +1152,17 @@ fm_pr_poll_retirement_registration_valid() {
   [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_RETIRE_DATA_IDENTITY" ] || return 1
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_RETIRE_CHECK_IDENTITY" ] || return 1
   [ "$reg_hash" = "$FM_PR_RETIRE_REG_HASH" ] || return 1
-  [ "$reg_identity" = "$FM_PR_RETIRE_REG_IDENTITY" ]
+  fm_pr_recorded_identity_matches "$FM_PR_RETIRE_REG_IDENTITY" "$registration"
 }
 
 fm_pr_poll_retirement_check_valid() {
-  local state=$1 id=$2 state_device check check_hash check_identity
+  local state=$1 id=$2 state_device check check_hash
   state_device=$(fm_pr_file_device "$state") || return 1
   check="$state/$id.check.sh"
   fm_pr_private_file_valid "$check" 600 "$state_device" || return 1
   check_hash=$(fm_pr_sha256 "$check") || return 1
-  check_identity=$(fm_pr_file_identity "$check") || return 1
   [ "$check_hash" = "$FM_PR_RETIRE_TEMPLATE_HASH" ] || return 1
-  [ "$check_identity" = "$FM_PR_RETIRE_CHECK_IDENTITY" ]
+  fm_pr_recorded_identity_matches "$FM_PR_RETIRE_CHECK_IDENTITY" "$check"
 }
 
 fm_pr_poll_retirement_state_valid() {
@@ -1200,7 +1193,7 @@ fm_pr_poll_retirement_state_valid() {
 fm_pr_poll_retirement_remove_exact() {
   local path=$1 state_device=$2 expected_identity=$3 expected_hash=$4
   fm_pr_private_file_valid "$path" 600 "$state_device" || return 1
-  [ "$(fm_pr_file_identity "$path")" = "$expected_identity" ] || return 1
+  fm_pr_recorded_identity_matches "$expected_identity" "$path" || return 1
   [ "$(fm_pr_sha256 "$path")" = "$expected_hash" ] || return 1
   rm -f -- "$path" || return 1
   [ ! -e "$path" ] && [ ! -L "$path" ]
@@ -1208,7 +1201,7 @@ fm_pr_poll_retirement_remove_exact() {
 
 fm_pr_poll_retirement_discard_obsolete() {
   local state=$1 id=$2 template=$3 receipt registration state_device
-  local receipt_hash receipt_identity current_reg_hash current_reg_identity
+  local receipt_hash receipt_identity current_reg_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -1221,9 +1214,8 @@ fm_pr_poll_retirement_discard_obsolete() {
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" || return 1
   registration="$state/$id.pr-poll-registration"
   current_reg_hash=$(fm_pr_sha256 "$registration") || return 1
-  current_reg_identity=$(fm_pr_file_identity "$registration") || return 1
   if [ "$current_reg_hash" = "$FM_PR_RETIRE_REG_HASH" ] \
-    && [ "$current_reg_identity" = "$FM_PR_RETIRE_REG_IDENTITY" ] \
+    && fm_pr_recorded_identity_matches "$FM_PR_RETIRE_REG_IDENTITY" "$registration" \
     && [ "$FM_PR_REG_DATA_IDENTITY" = "$FM_PR_RETIRE_DATA_IDENTITY" ] \
     && [ "$FM_PR_REG_CHECK_IDENTITY" = "$FM_PR_RETIRE_CHECK_IDENTITY" ]; then
     return 1

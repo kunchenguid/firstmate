@@ -1138,7 +1138,7 @@ EOF
 # appended to (`>>`) - never replaced, renamed, or rewritten in place. So the
 # ways a cursor can go stale are a fold-version mismatch, a shrink (truncated),
 # or the file at this path being a different file than before
-# (replaced/rotated/recreated), which a changed device+inode makes an O(1) check
+# (replaced/rotated/recreated), which a changed inode or birth time makes an O(1) check
 # via a single `stat` call - no content hashing, no re-reading the consumed
 # prefix. Any signal falls back to a full re-fold of the whole current file from
 # byte 0 - byte for byte what status_open_decisions itself would compute - and
@@ -1191,7 +1191,8 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=9
 
-# Portable device:inode identity for the rotation/recreation check below.
+# Portable device:inode:birth identity for the rotation/recreation check below;
+# _fm_status_ident_same owns how two of them compare.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   local f=$1 epoch birth ident
   if [ -n "${FM_STATUS_IDENTITY_READER:-}" ]; then
@@ -1209,6 +1210,33 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   fi
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
+}
+
+# Compare two status file identities without their device field, and compare
+# them only through this. APFS renumbers a volume's st_dev at every remount
+# while each file keeps its inode and birth time, so a recorded identity that
+# still named the device would reset every cursor and replay every task's whole
+# history after a reboot. Every status file lives in the one state directory,
+# so inode plus birth time still tells a replaced file from the same one.
+_fm_status_ident_without_device() {  # <out-var> <identity>
+  local _ident=$2 _rest
+  case "$_ident" in
+    strong:*:*|weak:*:*)
+      _rest=${_ident#*:}
+      case "${_rest%%:*}" in
+        ''|*[!0-9]*) ;;
+        *) _ident="${_ident%%:*}:${_rest#*:}" ;;
+      esac
+      ;;
+  esac
+  printf -v "$1" '%s' "$_ident"
+}
+
+_fm_status_ident_same() {  # <identity> <identity>
+  local _left _right
+  _fm_status_ident_without_device _left "$1"
+  _fm_status_ident_without_device _right "$2"
+  [ "$_left" = "$_right" ]
 }
 
 _fm_status_file_size() {  # <status-file>
@@ -1331,7 +1359,7 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     size=$actual_size
   fi
 
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || ! _fm_status_ident_same "$ident" "$cur_ident" || [ "$offset" -gt "$actual_size" ]; then
     offset=0
     open=''
     trusted_open=''
@@ -1443,7 +1471,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   before_size=${before_size//[[:space:]]/}
   before_ident=$(_fm_open_decisions_file_ident "$f") || return 1
   case "$before_mtime:$before_size" in *[!0-9:]*) return 1 ;; esac
-  [ "$before_size" -eq "$endpoint" ] && [ "$before_ident" = "$expected_ident" ] || return 1
+  [ "$before_size" -eq "$endpoint" ] && _fm_status_ident_same "$before_ident" "$expected_ident" || return 1
 
   if [ "$endpoint" -gt "$limit" ]; then
     start=$((endpoint - limit))
@@ -1482,7 +1510,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
   case "$after_mtime:$after_size" in *[!0-9:]*) return 1 ;; esac
   [ "$after_mtime" = "$before_mtime" ] \
     && [ "$after_size" -eq "$endpoint" ] \
-    && [ "$after_ident" = "$expected_ident" ] \
+    && _fm_status_ident_same "$after_ident" "$expected_ident" \
     || return 1
 
   FM_STATUS_SNAPSHOT_EVENT_LINE=$line
@@ -1531,7 +1559,7 @@ EOF
   size=$(_fm_status_file_size "$f") || return 1
   size=${size//[[:space:]]/}
   case "$size:$offset" in *[!0-9:]*) return 1 ;; esac
-  if [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then offset=0; fi
+  if ! _fm_status_ident_same "$ident" "$cur_ident" || [ "$offset" -gt "$size" ]; then offset=0; fi
   printf '%s' "$offset"
 }
 
@@ -1555,7 +1583,7 @@ status_outcome_backstop_cursor_offset() {  # <status-file>
       size=$(_fm_status_file_size "$f") || return 1
       size=${size//[[:space:]]/}
       case "$size" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$ident" = "$current" ] || { printf '0'; return 0; }
+      _fm_status_ident_same "$ident" "$current" || { printf '0'; return 0; }
       backstop=${row_backstop:-0}
       [ "$backstop" -le "$size" ] || backstop=0
       printf '%s' "$backstop"
@@ -1676,7 +1704,7 @@ status_presentation_marker_offset() {
   [ "$classified" != - ] || { printf '0'; return 0; }
   offset=${classified%%@*}; ident=${classified#*@}
   current=$(_fm_open_decisions_file_ident "$2") || { printf '0'; return 0; }
-  [ "$ident" = "$current" ] || { printf '0'; return 0; }
+  _fm_status_ident_same "$ident" "$current" || { printf '0'; return 0; }
   printf '%s' "$offset"
 }
 
@@ -1693,7 +1721,7 @@ status_presentation_marker_commit() {
   local marker=$1 file=$2 endpoint=$3 ident=$4 current reported classified
   case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
   current=$(_fm_open_decisions_file_ident "$file") || return 1
-  [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
+  [ -n "$ident" ] && _fm_status_ident_same "$ident" "$current" || return 1
   reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
   classified="${endpoint}@${ident}"
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
@@ -1825,7 +1853,7 @@ status_commit_presentation_snapshot() {  # <state> <snapshot>
     size=$(_fm_status_file_size "$f") || { rm -f "$tmp"; return 1; }
     size=${size//[[:space:]]/}
     case "$size" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
-    [ "$cur_ident" = "$ident" ] && [ "$endpoint" -le "$size" ] \
+    _fm_status_ident_same "$cur_ident" "$ident" && [ "$endpoint" -le "$size" ] \
       || { rm -f "$tmp"; return 1; }
     backstop=$(status_outcome_backstop_cursor_offset "$f") || { rm -f "$tmp"; return 1; }
     while IFS=$(printf '\t') read -r acknowledged_task acknowledged_endpoint; do
@@ -1936,7 +1964,7 @@ status_open_decisions_cursor_offset() {  # <status-file>
   size=$(_fm_status_file_size "$f") || return 1
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$size" ]; then
+  if [ -z "$version" ] || [ -z "$ident" ] || ! _fm_status_ident_same "$ident" "$cur_ident" || [ "$offset" -gt "$size" ]; then
     offset=0
     open=''
   fi
@@ -2209,7 +2237,7 @@ status_home_appends_ranges() {  # <status-file> -> start<TAB>end lines
   [ "$rest" != "$data" ] || return 0
   line=${rest%%$'\n'*}
   case "$line" in ident=*) ;; *) return 0 ;; esac
-  [ "${line#ident=}" = "$ident" ] || return 0
+  _fm_status_ident_same "${line#ident=}" "$ident" || return 0
   case "$rest" in
     *$'\n'*) rest=${rest#*$'\n'} ;;
     *) return 0 ;;
@@ -2382,7 +2410,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
   cur_ident=$(_fm_open_decisions_file_ident "$f") || {
     rm -f "$chunk_file"; return 2;
   }
-  [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file"; return 2; }
+  _fm_status_ident_same "$cur_ident" "$ident" || { rm -f "$chunk_file"; return 2; }
   # shellcheck disable=SC2094 # The loop and the origin fold below only read the span scratch.
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))

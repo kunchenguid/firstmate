@@ -4959,7 +4959,7 @@ test_branch_dispatch_routes_secondmate_signal_by_new_span() {
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const { branchOfferForWake, scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
 const state = `${process.env.FM_HOME}/state`;
@@ -5019,6 +5019,16 @@ stage("mate", hold, "done: sample-c PR merged\n");
 if (!branchOfferForWake(state, `signal: ${state}/mate.status`, false, true).eligible) {
   throw new Error("the attended-host offer kept a routine second-mate close on main behind an unrelated hold");
 }
+
+// A volume remount renumbers only the device field of the cursor's recorded
+// identity, so the presented span still bounds the verdict.
+stage("mate", hold, "done: sample-f PR merged\n");
+const cursorPath = `${state}/.status-presentation-cursor`;
+const cursorRows = readFileSync(cursorPath, "utf8");
+const renumbered = cursorRows.replace(/^(mate\t(?:strong|weak):)([0-9]+):/m, (_, head, device) => `${head}${Number(device) + 3}:`);
+if (renumbered === cursorRows) throw new Error(`the cursor row carried no device field to renumber: ${cursorRows}`);
+writeFileSync(cursorPath, renumbered);
+if (!verdicts().every(Boolean)) throw new Error("a renumbered volume device discarded the presented span");
 
 // Without a readable cursor the whole log is the span, so routing falls back
 // toward main rather than guessing.

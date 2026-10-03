@@ -380,7 +380,7 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
       break
     fi
     if [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
-      && [ "$BRANCH_OUTCOME_INDEX_IDENT" = "$ident" ] \
+      && _fm_status_ident_same "$BRANCH_OUTCOME_INDEX_IDENT" "$ident" \
       && [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge "$event_endpoint" ]; then
       continue
     fi

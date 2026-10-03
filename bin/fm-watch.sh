@@ -105,8 +105,9 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
-#   check: rejected unauthenticated state checks: <paths>
-#                          unsafe state checks were refused without execution
+#   check: rejected unauthenticated state checks: <path> (<cause>)...
+#                          unsafe state checks were refused without execution;
+#                          each path carries the first validation cause found
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
@@ -2587,29 +2588,6 @@ retire_merged_pr_poll() {  # <id>
   fi
 }
 
-# A poll armed before a state volume remount can fail capture only because its
-# registration names the old device number; bin/fm-pr-lib.sh
-# fm_pr_poll_registration_rerecord_device owns the proof and the rewrite.
-# Returns 0 when a re-record was attempted under the control lock, so the caller
-# captures again whatever the outcome: a concurrent re-arm may have published a
-# valid poll instead, and the strict capture decides either way.
-rerecord_device_shifted_pr_poll() {  # <id>
-  local id=$1
-  fm_pr_poll_registration_device_shifted "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
-  fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
-  PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
-  fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
-  if fm_pr_poll_registration_rerecord_device "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
-    triage_log "re-recorded PR poll identity for $id after its state volume device number changed"
-  else
-    triage_log "PR poll identity for $id was not re-recorded; the locked proof or rewrite did not hold"
-  fi
-  pr_poll_publish_release || exit 1
-  pr_poll_control_release || exit 1
-  return 0
-}
-
 resurface_after_downtime() {
   # Handling successors already have a predecessor-delivered wake on the way.
   # Re-announcing from this cycle is what turned a lost handshake into an
@@ -2751,14 +2729,12 @@ while :; do
           FM_HOME="$FM_HOME" run_check_capture "$FM_ROOT/bin/fm-x-poll.sh" || exit 1
           out=$FM_CHECK_RESULT
         else
-          rejected_checks="$rejected_checks $c"
+          rejected_checks="$rejected_checks $c (the Relay poll shim failed validation)"
           continue
         fi
       else
         id=$(basename "$c" .check.sh)
-        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
-          || { rerecord_device_shifted_pr_poll "$id" \
-            && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
+        if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
           is_pr_poll=1
           provider=$FM_PR_POLL_SNAPSHOT_PROVIDER
           url=$FM_PR_POLL_SNAPSHOT_URL
@@ -2782,7 +2758,13 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
-          rejected_checks="$rejected_checks $c"
+          # Name the cause from whichever kind of check this file claims to be:
+          # any merge poll artifact beside it makes it a merge poll.
+          if [ -e "$STATE/$id.pr-poll-registration" ] || [ -e "$STATE/$id.pr-poll" ]; then
+            rejected_checks="$rejected_checks $c (merge poll: ${FM_PR_POLL_REJECTION:-it failed validation})"
+          else
+            rejected_checks="$rejected_checks $c (custom check: ${FM_CUSTOM_CHECK_REJECTION:-it failed validation})"
+          fi
           continue
         fi
       fi

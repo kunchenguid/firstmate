@@ -791,6 +791,45 @@ test_dispatch_moves_the_item_in_flight_in_the_same_run() {
   pass "dispatch publishes the record and moves the backlog item In flight in one run"
 }
 
+# Re-spawning a worker on a task whose merge poll is armed republishes the task
+# record. The poll authenticates only while that record's pr= block names its
+# PR, so the block must survive the republication as the record's tail.
+test_respawn_keeps_an_armed_merge_poll_verifiable() {
+  local case_dir id out state url head arm
+  id=atomic-respawn-armed-poll-b1
+  case_dir=$(make_home respawn-armed-poll "$id")
+  state="$(home_of "$case_dir")/state"
+  url=https://github.com/o/r/pull/7
+  head=0123456789abcdef0123456789abcdef01234567
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes "spawn_gen=spawn-before-respawn" \
+    "pr=$url" "pr_head=$head"
+  # shellcheck disable=SC2016 # $1..$4 expand inside the probe's own shell.
+  arm='. "$1/bin/fm-pr-lib.sh"; fm_pr_url_parse "$3" || exit 1
+    fm_pr_poll_prepare "$2" "$4" "$FM_PR_PROVIDER" "$3" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" \
+      "$1/bin/fm-pr-poll.sh" && fm_pr_poll_publish_prepared'
+  bash -c "$arm" _ "$ROOT" "$state" "$url" "$id" || fail "could not arm the merge poll fixture"
+  pr_poll_valid "$state" "$id" || fail "the armed merge poll fixture did not authenticate before the respawn"
+
+  out=$(run_ship_spawn "$case_dir" "$id") || fail "respawn over the armed task failed: $out"
+  assert_contains "$out" "spawned $id" "respawn did not report success"
+  ! grep -qx 'spawn_gen=spawn-before-respawn' "$state/$id.meta" \
+    || fail "the respawn did not republish the task record"
+  [ "$(sed -n '$p' "$state/$id.meta")" = "pr_head=$head" ] \
+    && [ "$(tail -n 2 "$state/$id.meta" | head -n 1)" = "pr=$url" ] \
+    || fail "the respawned record does not end with its pr= block: $(cat "$state/$id.meta")"
+  pr_poll_valid "$state" "$id" \
+    || fail "the respawn left an armed merge poll that no longer authenticates: $(cat "$state/$id.meta")"
+  pass "a respawn keeps the task's pr= block, so its armed merge poll still authenticates"
+}
+
+pr_poll_valid() {  # <state> <id>
+  # shellcheck disable=SC2016 # $1..$3 expand inside the probe's own shell.
+  bash -c '. "$1/bin/fm-pr-lib.sh"; fm_pr_poll_artifacts_valid "$2" "$3" "$1/bin/fm-pr-poll.sh"' \
+    _ "$ROOT" "$1" "$2"
+}
+
 test_dispatch_omits_the_file_for_a_beads_show() {
   local case_dir home id out
   id=atomic-dispatch-beads-b1
@@ -3040,6 +3079,7 @@ test_backend_resolution_preserves_precedence_and_defaults
 test_backlog_callers_refuse_unreadable_backend_config
 test_captain_hold_preserves_relocated_backlog_on_backend_error
 test_dispatch_moves_the_item_in_flight_in_the_same_run
+test_respawn_keeps_an_armed_merge_poll_verifiable
 test_dispatch_omits_the_file_for_a_beads_show
 test_a_leftover_markdown_symlink_does_not_brick_a_beads_home
 test_completion_omits_the_file_for_a_beads_done
