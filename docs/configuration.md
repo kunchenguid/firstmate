@@ -99,7 +99,7 @@ It is a JSON object with `mode` (`shadow` or `advisory`), a nonempty stable `hom
 Optional `enforce_repos` is the single opt-in switch: a list of repository IDs from `repos`, empty by default, whose lifecycle checkpoints fail closed when the central authority is unavailable or refuses a claim.
 For same-host participants, `db` is the absolute path to the one central SQLite database.
 For another host, `remote` is an object with `host` (SSH destination), `command` (absolute path to that host's `fm-coord.sh`), and `db` (absolute central database path on that host).
-Optional `base` names the branch used for an intent's initial base OID and defaults to `main`.
+Optional `base` names the branch whose `origin/<base>` ref supplies an intent's initial base OID and scope diff; it defaults to `main`.
 Optional `project_repos` maps absolute project checkout paths to `owner/repo` identities when an origin URL does not carry a GitHub identity.
 The participant's generated `state/fm-coord-adapter.json` is its private request journal; `state/fm-coord-adapter.lock` serializes updates within the home.
 The protocol and lifecycle commands are owned by [coordination](coordination.md).

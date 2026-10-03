@@ -15,6 +15,7 @@ git -C "$repo" remote add origin git@github.com:owner/repo.git
 printf 'base\n' > "$repo/src/base.py"
 git -C "$repo" add .
 git -C "$repo" commit -qm base
+git -C "$repo" update-ref refs/remotes/origin/main HEAD
 coord() { "$ROOT/bin/fm-coord.sh" --db "$db" "$@"; }
 field() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' "$1" "$2"; }
 outbox_ids() { coord outbox '{"limit":1000}' | python3 -c 'import json,sys; print(" ".join(e["event_id"] for e in json.load(sys.stdin)["events"]))'; }
@@ -26,13 +27,13 @@ home() {
 }
 home a a
 home b b
-if adapter "$tmp/a" dispatch a "$repo" "$tmp/a.brief" branch/a codex > "$tmp/out" 2> "$tmp/err"; then
+if adapter "$tmp/a" dispatch a "$repo" "$repo" "$tmp/a.brief" branch/a codex > "$tmp/out" 2> "$tmp/err"; then
   fail 'enforced dispatch must pause while the coordinator is offline'
 fi
 case "$(cat "$tmp/err")" in *'enforcement paused'*) ;; *) fail 'outage refusal must be visible' ;; esac
 coord init > /dev/null
 adapter "$tmp/a" readmit a "$repo" > /dev/null 2> "$tmp/err" || fail 'explicit re-admission must recover a pending dispatch'
-adapter "$tmp/b" dispatch b "$repo" "$tmp/b.brief" branch/b codex > /dev/null || fail 'independent scope must be admitted'
+adapter "$tmp/b" dispatch b "$repo" "$repo" "$tmp/b.brief" branch/b codex > /dev/null || fail 'independent scope must be admitted'
 printf 'change\n' > "$repo/src/b.py"
 git -C "$repo" add .
 git -C "$repo" commit -qm change
@@ -225,7 +226,7 @@ adapter "$tmp/a" pre-ci a batch-two > /dev/null 2> "$tmp/err" || fail "readmitte
 python3 - "$tmp/a/state/fm-coord-adapter.json" "$(adapter "$tmp/a" view)" <<'PY' || fail 'readmit must drop unanswered requests that carry the revoked claim'
 import json,sys
 state=json.load(open(sys.argv[1]))
-assert 'a:renew:lost' not in state['requests'] and 'a:pulse:batch-two' not in state['requests']
+assert 'a:renew:lost' not in state['requests'] and state['requests']['a:pulse:batch-two']['payload']['request_id']!='lost-pulse'
 assert not json.loads(sys.argv[2])['local_pending']
 PY
 pass 'readmit opens a new session and intent after recovery revokes the claim and drops stale renew and pulse requests'
@@ -253,6 +254,8 @@ cat > "$tmp/fakebin/gh-axi" <<SH
 case "\$3" in
   repos/owner/repo/pulls/7) body=\$(cat "$tmp/pr-state") ;;
   repos/owner/repo/git/ref/heads/main) body=$landed_base ;;
+  graphql) body='false|none' ;;
+  repos/owner/repo/compare/*) body=ahead ;;
   *) exit 1 ;;
 esac
 printf 'api_response:\n  body: "%s"\n  truncated: false\n' "\$body"
@@ -260,7 +263,8 @@ SH
 chmod +x "$tmp/fakebin/gh" "$tmp/fakebin/gh-axi"
 printf '%s|open|false|%s|main|\n' "$pr" "$head_a" > "$tmp/pr-state"
 view_a=$(printf '{"baseRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$forge_base")
-land() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' adapter "$tmp/a" pre-merge a "$pr" "$head_a"; }
+# Each land runs under its own short-lived wrapper shell, as fm-pr-merge.sh is the adapter's parent in production.
+land() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' FM_HOME="$tmp/a" bash -c 'python3 "$0" pre-merge a "$1" "$2"; exit $?' "$ROOT/bin/fm-coord-adapter.py" "$pr" "$head_a"; }
 result() { PATH="$tmp/fakebin:$PATH" FM_PR_GITHUB_VIEW=$view_a adapter "$tmp/a" merge-result a "$pr" "$1"; }
 slot_state() { python3 -c 'import json,sys; c=json.loads(sys.argv[1]); i=json.load(open(sys.argv[2]))["tasks"]["a"]["intent_id"]; print(" ".join([q["state"] for q in c["queue"] if q["intent_id"]==i]+["slot:"+s["state"] for s in c["slots"]]))' "$(coord inspect)" "$tmp/a/state/fm-coord-adapter.json"; }
 for forge_error in 'HTTP 403: API rate limit exceeded' 'HTTP 502: Bad Gateway'; do
@@ -293,10 +297,14 @@ pass 'pre-merge attaches the PR and advances an ordinary dispatched task to the 
 pass 'the forge, not a stale task worktree, decides whether the merge head contains the current base'
 
 result refused > /dev/null 2> "$tmp/err" || fail "a refused merge must report its outcome: $(cat "$tmp/err")"
-[ "$(slot_state)" = refused ] || fail "a refused merge proven unlanded must release the integration slot: $(slot_state)"
-land > /dev/null 2> "$tmp/err" || fail "a refused task must re-queue to a new attempt: $(cat "$tmp/err")"
+[ "$(slot_state)" = 'outcome-unknown slot:outcome-unknown' ] || fail "a wrapper-reported refusal must stay outcome-unknown while the wrapper may still act: $(slot_state)"
+FM_COORD_QUIET_SECONDS=0 land > /dev/null 2> "$tmp/err" || fail "the next merge run must settle the exited attempt from the forge and re-queue: $(cat "$tmp/err")"
+python3 - "$(coord outbox '{"limit":1000}')" <<'PY' || fail 'the prior attempt must settle refused before the new attempt'
+import json,sys
+assert [e['type'] for e in json.loads(sys.argv[1])['events'] if e['type'] in {'merge-refused','merge-attempted'}][-2:]==['merge-refused','merge-attempted']
+PY
 [ "$(slot_state)" = 'attempting slot:attempting' ] || fail "re-queued task must hold the attempting slot again: $(slot_state)"
-pass 'a refused merge releases the integration slot for the next attempt'
+pass 'a refused merge settles from the forge once its wrapper exits and releases the slot for the next attempt'
 
 result unknown > /dev/null 2> "$tmp/err" || fail "a timed-out merge must report its outcome: $(cat "$tmp/err")"
 [ "$(slot_state)" = 'outcome-unknown slot:outcome-unknown' ] || fail "an unproven merge must stay outcome-unknown: $(slot_state)"
@@ -318,12 +326,12 @@ pass 'missing local intent cannot bypass enforcement'
 mkdir -p "$tmp/shadow/config" "$tmp/shadow/state"
 printf '{"mode":"shadow","home_id":"shadow","repos":["owner/repo"],"db":"%s"}\n' "$db" > "$tmp/shadow/config/coordination.json"
 printf 'Coordination resources: []\n' > "$tmp/empty.brief"
-adapter "$tmp/shadow" dispatch shadow "$repo" "$tmp/empty.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'shadow dispatch with the scaffolded empty declaration must only warn'
-case "$(cat "$tmp/err")" in *'nonempty JSON array'*) ;; *) fail 'shadow declaration problem must stay visible' ;; esac
+adapter "$tmp/shadow" dispatch shadow "$repo" "$repo" "$tmp/empty.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'shadow dispatch with the scaffolded empty declaration must only warn'
+case "$(cat "$tmp/err")" in *'no coordination resources'*) ;; *) fail 'shadow declaration problem must stay visible' ;; esac
 adapter "$tmp/shadow" pre-push shadow "$repo" > /dev/null 2> "$tmp/err" || fail 'shadow push without a local intent must only warn'
 printf '{"mode":"shadow","home_id":"shadow","repos":["other/repo"],"db":"%s"}\n' "$db" > "$tmp/shadow/config/coordination.json"
-adapter "$tmp/shadow" dispatch shadow "$repo" "$tmp/b.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'dispatch outside coordination enrollment must only warn'
-if adapter "$tmp/b" dispatch b2 "$repo" "$tmp/empty.brief" branch/b2 codex > /dev/null 2> "$tmp/err"; then
+adapter "$tmp/shadow" dispatch shadow "$repo" "$repo" "$tmp/b.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'dispatch outside coordination enrollment must only warn'
+if adapter "$tmp/b" dispatch b2 "$repo" "$repo" "$tmp/empty.brief" branch/b2 codex > /dev/null 2> "$tmp/err"; then
   fail 'enforced dispatch must refuse an empty declaration'
 fi
 mkdir -p "$tmp/mixed/config" "$tmp/mixed/state" "$tmp/shadowrepo" "$tmp/gitlabrepo"
@@ -333,8 +341,8 @@ for other in shadowrepo gitlabrepo; do
 done
 git -C "$tmp/gitlabrepo" remote add origin git@gitlab.com:owner/elsewhere.git
 printf '{"mode":"shadow","home_id":"mixed","repos":["owner/repo","other/shadow"],"enforce_repos":["owner/repo"],"db":"%s","project_repos":{"%s":"other/shadow"}}\n' "$db" "$(cd "$tmp/shadowrepo" && pwd -P)" > "$tmp/mixed/config/coordination.json"
-adapter "$tmp/mixed" dispatch mixed "$tmp/shadowrepo" "$tmp/empty.brief" branch/mixed codex > /dev/null 2> "$tmp/err" || fail 'shadow repository dispatch in an enforcing home must only warn'
-adapter "$tmp/mixed" pre-ci mixed batch-mixed > /dev/null 2> "$tmp/err" || fail "shadow repository CI pulse without a full intent must only warn in an enforcing home: $(cat "$tmp/err")"
+adapter "$tmp/mixed" dispatch mixed "$tmp/shadowrepo" "$tmp/shadowrepo" "$tmp/empty.brief" branch/mixed codex > /dev/null 2> "$tmp/err" || fail 'shadow repository dispatch in an enforcing home must only warn'
+adapter "$tmp/mixed" pre-ci mixed batch-mixed "$tmp/shadowrepo" > /dev/null 2> "$tmp/err" || fail "shadow repository CI pulse without a full intent must only warn in an enforcing home: $(cat "$tmp/err")"
 adapter "$tmp/mixed" pre-push mixed "$tmp/shadowrepo" > /dev/null 2> "$tmp/err" || fail 'shadow repository push without a full intent must only warn in an enforcing home'
 adapter "$tmp/mixed" pre-push elsewhere "$tmp/gitlabrepo" > /dev/null 2> "$tmp/err" || fail 'push from a non-GitHub repository outside enforcement must only warn'
 if adapter "$tmp/mixed" pre-ci never-dispatched > /dev/null 2> "$tmp/err"; then

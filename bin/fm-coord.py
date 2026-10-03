@@ -3,25 +3,29 @@
 
 import hashlib
 import fcntl
+import hmac
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import sqlite3
+import socket
 import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 import uuid
 from datetime import datetime, timezone
 
 
 SCHEMA_DIR = Path(__file__).with_name("fm-coord-migrations")
-MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "pulse-batch"}
+MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort", "queue-wrapper-exited", "pulse-batch"}
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\Z")
 RECOVERY_GAP = 10
 
 
@@ -52,9 +56,65 @@ def boot_id():
     raise Refusal("boot identity unavailable; only macOS and Linux are supported")
 
 
+def local_host_id():
+    linux = Path("/etc/machine-id")
+    if linux.exists():
+        value = linux.read_text(encoding="ascii", errors="replace").strip()
+        require(re.fullmatch(r"[0-9a-f]{32}", value) is not None, "machine identity unavailable; /etc/machine-id is empty, uninitialized, or malformed")
+        return "machine:" + value
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], capture_output=True, text=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            raise Refusal("machine identity unavailable; ioreg failed")
+        match = re.search(r'"IOPlatformUUID" = "([0-9A-Fa-f-]+)"', result.stdout)
+        require(match is not None, "machine identity unavailable")
+        return "machine:" + match.group(1)
+    raise Refusal("machine identity unavailable; /etc/machine-id or macOS IOPlatformUUID is required")
+
+
+def process_start(pid):
+    if Path("/proc/self/stat").exists():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[19]
+        except FileNotFoundError:
+            return None
+    result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    start = result.stdout.strip()
+    require(result.returncode == 0 or not start and not result.stderr.strip(), "process identity cannot be checked")
+    return start or None
+
+
 def token(value, field):
     require(isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 for c in value), f"{field} must be a nonempty printable string")
     return value
+
+
+def authority_hash():
+    value = os.environ.get("FM_COORD_AUTHORITY_TOKEN")
+    if value is None:
+        return None
+    token(value, "FM_COORD_AUTHORITY_TOKEN")
+    require(len(value) >= 32, "FM_COORD_AUTHORITY_TOKEN must be at least 32 characters")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def authority_identity():
+    uid = os.geteuid()
+    try:
+        account = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        account = "uid"
+    return f"@authority:{account}:{uid}"
+
+
+def authority_actor(db, payload):
+    require("home_id" not in payload, "operator abort requires the @authority actor")
+    require("operator" not in payload, "operator identity comes from the authenticated actor")
+    credential = authority_hash()
+    enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+    require(credential is not None and enrolled is not None and hmac.compare_digest(credential, enrolled[0]), "enrolled authority credential required")
+    return authority_identity()
 
 
 def path(value):
@@ -66,10 +126,9 @@ def path(value):
 
 
 def pr_url(value, repo):
-    token(value, "pr_url")
-    parsed = urlsplit(value)
-    require(parsed.scheme == "https" and parsed.hostname and parsed.path and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and " " not in value, "pr_url must be a canonical full HTTPS URL")
-    require(parsed.path.split("/")[1:3] == repo.split("/"), "pr_url must belong to the intent repository")
+    match = PR_URL.fullmatch(token(value, "pr_url"))
+    require(match is not None, "pr_url must be https://github.com/<owner>/<repo>/pull/<number>")
+    require(match.group(1) == repo, "pr_url must belong to the intent repository")
     return value
 
 
@@ -168,6 +227,14 @@ def write_marker(db_path, anchor_path, marker):
 
 
 def revoke(db, claim, state, reason):
+    item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (claim["intent_id"],)).fetchone()
+    if item is not None and item["state"] in {"ready", "syncing", "validating", "awaiting-checks", "sync-needed", "repair-needed"}:
+        slot = db.execute("SELECT * FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"])).fetchone()
+        if slot is not None:
+            require(slot["state"] in {"syncing", "validating", "awaiting-checks"}, "cannot revoke an unsettled merge slot")
+            db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+            emit(db, "slot-claim-revoked", None, {"intent_id": item["intent_id"], "claim_id": claim["claim_id"], "generation": slot["generation"], "prior_state": item["state"], "reason": reason})
+        db.execute("UPDATE queue_items SET state='repair-needed',base_oid=NULL,validation_id=NULL,manifest_version=NULL,updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
     db.execute("UPDATE claims SET state=? WHERE claim_id=? AND state='active'", (state, claim["claim_id"]))
     db.execute("DELETE FROM branch_owners WHERE claim_id=?", (claim["claim_id"],))
     db.execute("UPDATE intents SET state=? WHERE intent_id=?", (state, claim["intent_id"]))
@@ -291,19 +358,20 @@ def terminal_outcome(db, item, request_id, outcome, p):
     require(prior is None, "merge attempt already has a terminal outcome")
     observed_base = oid(p.get("observed_base_oid"), "observed_base_oid")
     merge_oid = None
+    forge = p.get("_forge_outcome")
+    if forge is not None:
+        require(forge == outcome and p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
     if outcome == "merged":
-        require(p.get("_forge_landing") is True and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
-        require(p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
+        require(forge == "merged" and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
         merge_oid = oid(p.get("merge_oid"), "merge_oid")
         require(observed_base != item["base_oid"], "merged base must advance")
     else:
-        require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
+        require(forge == "refused", "live forge read must prove the attempted head did not land")
+        require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
+        require(p.get("_settled_attempt") == item["attempt_event_id"], "merge wrapper was not proven gone before the forge reads")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
     db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
     db.execute("UPDATE queue_items SET state=?,updated_at=? WHERE intent_id=?", (outcome, stamp(), item["intent_id"]))
-    if outcome == "merged":
-        for other in db.execute("SELECT * FROM queue_items WHERE repo=? AND base_ref=? AND intent_id<>? AND state='ready'", (item["repo"], item["base_ref"], item["intent_id"])).fetchall():
-            invalidate(db, other, request_id, "base advanced after predecessor merge")
     event_id = emit(db, "merge-" + outcome, request_id, {"intent_id": item["intent_id"], "attempt_event_id": attempt, "merge_oid": merge_oid, "observed_base_oid": observed_base})
     return {"ok": True, "state": outcome, "attempt_event_id": attempt, "event_id": event_id}
 
@@ -335,6 +403,7 @@ def queue_operation(db, op, p):
         intent_id = token(p.get("intent_id"), "intent_id")
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None and intent["state"] == "claimed" and intent["pr_url"], "intent needs a live claim and attached PR")
+        pr_url(intent["pr_url"], intent["repo"])
         participant(db, p, intent["repo"])
         require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
         active_claim(db, p, intent)
@@ -346,7 +415,7 @@ def queue_operation(db, op, p):
         priority = p.get("priority", 0)
         require(type(priority) is int and 0 <= priority <= 9, "priority must be 0..9")
         require(predecessors(db, intent, json.loads(intent["predecessors_json"])) == sorted(json.loads(intent["predecessors_json"])), "invalid predecessors")
-        db.execute("INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,priority,ready_epoch,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(intent_id) DO UPDATE SET head_oid=excluded.head_oid,state='ready',priority=excluded.priority,ready_epoch=excluded.ready_epoch,base_oid=NULL,validation_id=NULL,manifest_version=NULL,attempt_event_id=NULL,updated_at=excluded.updated_at", (intent_id, intent["repo"], intent["base_ref"], head, "ready", priority, int(time.time()), stamp()))
+        db.execute("INSERT INTO queue_items(intent_id,repo,base_ref,head_oid,state,priority,ready_epoch,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(intent_id) DO UPDATE SET head_oid=excluded.head_oid,state='ready',priority=excluded.priority,ready_epoch=excluded.ready_epoch,base_oid=NULL,validation_id=NULL,manifest_version=NULL,attempt_event_id=NULL,attempt_epoch=NULL,wrapper_pid=NULL,wrapper_start=NULL,wrapper_boot=NULL,wrapper_home_id=NULL,wrapper_host_id=NULL,wrapper_local=NULL,wrapper_exit_attested_at=NULL,updated_at=excluded.updated_at", (intent_id, intent["repo"], intent["base_ref"], head, "ready", priority, int(time.time()), stamp()))
         event_id = emit(db, "queue-ready", request_id, {"intent_id": intent_id, "head_oid": head, "priority": priority})
         return {"ok": True, "state": "ready", "event_id": event_id}
     if op == "queue-next":
@@ -374,13 +443,33 @@ def queue_operation(db, op, p):
         db.execute("UPDATE queue_items SET state='syncing',updated_at=? WHERE intent_id=?", (stamp(), chosen["intent_id"]))
         event_id = emit(db, "sync-requested", request_id, {"intent_id": chosen["intent_id"], "generation": generation, "head_oid": chosen["head_oid"]})
         return {"ok": True, "intent_id": chosen["intent_id"], "generation": generation, "state": "syncing", "event_id": event_id}
-    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort"})
+    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort", "queue-wrapper-exited"})
     slot = occupied_slot(db, item)
-    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
+    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile", "queue-operator-abort"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
     if op == "queue-abort":
         require(item["state"] in {"syncing", "validating", "awaiting-checks"}, "forge attempt cannot be aborted")
         reason = token(p.get("reason"), "reason")
         return invalidate(db, item, request_id, reason, repair=p.get("repair_needed") is True)
+    if op == "queue-operator-abort":
+        require(item["state"] == "outcome-unknown", "operator abort is limited to an unknown forge outcome")
+        reason = token(p.get("reason"), "reason")
+        db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='repair-needed',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": p["_authority_actor"], "reason": reason})
+        return {"ok": True, "state": "repair-needed", "event_id": event_id}
+    if op == "queue-wrapper-exited":
+        require(item["state"] in {"attempting", "outcome-unknown"} and item["wrapper_local"] == 0, "remote wrapper exit attestation requires an unsettled remote attempt")
+        participant(db, p, intent["repo"])
+        require(p.get("home_id") == item["wrapper_home_id"], "wrapper exit must come from the owning participant session")
+        owner = db.execute("SELECT host_id FROM participants WHERE home_id=?", (p["home_id"],)).fetchone()
+        require(owner is not None and owner["host_id"] == item["wrapper_host_id"], "participant host changed")
+        require(p.get("attempt_event_id") == item["attempt_event_id"], "wrapper exit attempt identity mismatch")
+        require(p.get("wrapper_host_id") == item["wrapper_host_id"] and p.get("wrapper_pid") == item["wrapper_pid"] and p.get("wrapper_start") == item["wrapper_start"], "wrapper exit process identity mismatch")
+        require(item["wrapper_exit_attested_at"] is None, "wrapper exit is already attested")
+        exited_at = int(time.time())
+        db.execute("UPDATE queue_items SET wrapper_exit_attested_at=?,updated_at=? WHERE intent_id=?", (exited_at, stamp(), item["intent_id"]))
+        event_id = emit(db, "wrapper-exit-attested", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "home_id": p["home_id"], "host_id": item["wrapper_host_id"], "pid": item["wrapper_pid"], "start": item["wrapper_start"], "exited_at": exited_at})
+        return {"ok": True, "state": item["state"], "event_id": event_id}
     if op == "queue-synced":
         require(item["state"] == "syncing", "slot is not syncing")
         current_head = oid(p.get("current_head_oid"), "current_head_oid")
@@ -428,48 +517,81 @@ def queue_operation(db, op, p):
         require(manifest is not None and item["manifest_version"] == manifest[0], "required-check evidence is absent or stale")
         require(p.get("captain_hold_released") is True and p.get("away_merge_allowed") is True and p.get("merge_authorized") is True, "captain hold, away posture, or merge authority refuses attempt")
         require(p.get("head_contains_base") is True, "current head no longer contains current base")
-        event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh"})
-        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,updated_at=? WHERE intent_id=?", (event_id, stamp(), item["intent_id"]))
+        wrapper_pid = p.get("wrapper_pid")
+        require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
+        owner = db.execute("SELECT host_id FROM participants WHERE home_id=?", (intent["home_id"],)).fetchone()
+        require(owner is not None and owner["host_id"] is not None, "participant host_id must be enrolled before a merge attempt")
+        wrapper_host_id = owner["host_id"]
+        local_wrapper = wrapper_host_id == local_host_id()
+        if local_wrapper:
+            wrapper_start = process_start(wrapper_pid)
+            require(wrapper_start is not None, "wrapper process is not running")
+            require(p.get("wrapper_start") is None or p["wrapper_start"] == wrapper_start, "wrapper start time mismatch")
+        else:
+            wrapper_start = token(p.get("wrapper_start"), "wrapper_start")
+        event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh", "wrapper_home_id": intent["home_id"], "wrapper_host_id": wrapper_host_id, "wrapper_pid": wrapper_pid, "wrapper_start": wrapper_start})
+        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,wrapper_home_id=?,wrapper_host_id=?,wrapper_local=?,wrapper_exit_attested_at=NULL,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id() if local_wrapper else None, intent["home_id"], wrapper_host_id, 1 if local_wrapper else 0, stamp(), item["intent_id"]))
         db.execute("UPDATE integration_slots SET state='attempting' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
         require(item["state"] == "attempting", "slot is not attempting")
-        if p.get("outcome") == "unknown":
-            db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
-            db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
-            event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"]})
-            return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
-        require(p.get("outcome") == "refused", "merged outcome requires live queue-reconcile")
-        return terminal_outcome(db, item, request_id, p["outcome"], p)
+        require(p.get("outcome") in {"unknown", "refused"}, "merged outcome requires live queue-reconcile")
+        db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
+        event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "reported_outcome": p["outcome"]})
+        return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
     if op == "queue-reconcile":
-        require(item["state"] == "outcome-unknown" and p.get("outcome") == "merged", "unknown outcome requires proven landing")
-        return terminal_outcome(db, item, request_id, "merged", p)
+        require(item["state"] == "outcome-unknown" or (item["state"] == "attempting" and p["_forge_outcome"] == "merged"), "only a proven landing can settle an attempting slot")
+        return terminal_outcome(db, item, request_id, p["_forge_outcome"], p)
     raise Refusal("unknown queue operation")
+
+
+def wrapper_settled(item):
+    quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
+    require(quiet >= 0, "quiet period must be nonnegative")
+    if item["wrapper_local"] == 0:
+        exited_at = item["wrapper_exit_attested_at"]
+        return exited_at is not None and int(time.time()) - max(item["attempt_epoch"], exited_at) >= quiet
+    gone = item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"])
+    return gone and int(time.time()) - item["attempt_epoch"] >= quiet
 
 
 def forge_landing(p):
     """Read only, before entering the state transition transaction."""
-    url = urlsplit(token(p.get("pr_url"), "pr_url"))
-    parts = url.path.strip("/").split("/")
-    require(url.scheme == "https" and url.netloc == "github.com" and len(parts) == 4 and parts[2] == "pull" and parts[3].isdigit(), "queue-reconcile requires a GitHub PR URL")
-    repo = "/".join(parts[:2])
+    match = PR_URL.fullmatch(token(p.get("pr_url"), "pr_url"))
+    require(match is not None, "queue-reconcile requires a GitHub PR URL")
+    repo, number = match.groups()
     base = token(p.get("base"), "base")
-    def read(path, template):
-        result = subprocess.run(["gh-axi", "api", "GET", path, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
+    def read(path, template, method="GET", *fields):
+        result = subprocess.run(["gh-axi", "api", method, path, *fields, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
         lines = result.stdout.strip().splitlines()
         require(len(lines) == 3 and lines[0] == "api_response:" and lines[1].startswith("  body: ") and lines[2] == "  truncated: false", "forge response is unreadable or truncated")
         raw_body = lines[1][8:]
         body = json.loads(raw_body) if raw_body.startswith('"') else raw_body
         require(isinstance(body, str), "forge response body is unreadable")
         return body
-    pull = read(f"repos/{repo}/pulls/{parts[3]}", "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}")
-    fields = pull.split("|")
-    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[1] == "closed" and fields[2] == "true" and fields[4] == base, "forge does not prove this PR landed on this base")
-    observed_base = read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}")
-    p["_forge_landing"] = True
-    p["merged_head_oid"] = oid(fields[3], "forge head")
-    p["merge_oid"] = oid(fields[5], "forge merge commit")
-    p["observed_base_oid"] = oid(observed_base, "current forge base")
+    pull_path = f"repos/{repo}/pulls/{number}"
+    pull_template = "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}"
+    fields = read(pull_path, pull_template).split("|")
+    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[4] == base, "forge observation is for a different PR or base")
+    observed_base = oid(read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}"), "current forge base")
+    p["observed_base_oid"] = observed_base
+    if fields[1] == "closed" and fields[2] == "true":
+        p["_forge_outcome"] = "merged"
+        p["merged_head_oid"] = oid(fields[3], "forge head")
+        p["merge_oid"] = oid(fields[5], "forge merge commit")
+        return
+    require(fields[1] in {"open", "closed"} and fields[2] == "false", "forge does not prove whether this PR landed")
+    require(p.get("_settled_attempt") is not None, "merge wrapper is not proven to have exited after the quiet period")
+    owner, name = repo.split("/")
+    pending = read("graphql", "{{with .data.repository.pullRequest}}{{.isInMergeQueue}}|{{if .autoMergeRequest}}armed{{else}}none{{end}}{{end}}", "POST", "--field", f'query=query{{repository(owner:"{owner}",name:"{name}"){{pullRequest(number:{number}){{isInMergeQueue autoMergeRequest{{enabledAt}}}}}}}}')
+    require(pending == "false|none", "PR merge is still pending in the merge queue or auto-merge")
+    head = oid(p.get("head_oid"), "head_oid")
+    status = read(f"repos/{repo}/compare/{observed_base}...{head}", "{{.status}}")
+    require(status in {"ahead", "diverged"}, "forge does not prove the attempted head is off base")
+    require(read(pull_path, pull_template).split("|")[1:5] == fields[1:5], "PR changed during reconciliation")
+    p["_forge_outcome"] = "refused"
+    p["_unlanded_head_oid"] = head
 
 
 def run_operation(db, op, p):
@@ -503,15 +625,23 @@ def run_operation(db, op, p):
         repos = p.get("repos")
         require(isinstance(repos, list) and repos and all(isinstance(r, str) and r for r in repos), "repos must be a nonempty string array")
         require(len(repos) == len(set(repos)), "duplicate repository scope")
+        requested_host = p.get("host_id")
+        if requested_host is not None:
+            requested_host = token(requested_host, "host_id")
         existing = db.execute("SELECT * FROM participants WHERE home_id=?", (home,)).fetchone()
         if existing:
             previous_repos = json.loads(existing["repos_json"])
             require(previous_repos == [] or previous_repos == sorted(repos), "existing enrollment has different repository scope")
             if previous_repos == []:
                 db.execute("UPDATE participants SET repos_json=? WHERE home_id=?", (compact(sorted(repos)), home))
+            require(requested_host is None or existing["host_id"] is None or existing["host_id"] == requested_host, "enrolled host_id cannot change")
+            host_id = requested_host or existing["host_id"] or local_host_id()
+            if existing["host_id"] is None:
+                db.execute("UPDATE participants SET host_id=? WHERE home_id=?", (host_id, home))
         else:
-            db.execute("INSERT INTO participants(home_id,repos_json) VALUES(?,?)", (home, compact(sorted(repos))))
-        event_id = emit(db, "participant-enrolled", request_id, {"home_id": home, "repos": sorted(repos)})
+            host_id = requested_host or local_host_id()
+            db.execute("INSERT INTO participants(home_id,repos_json,host_id) VALUES(?,?,?)", (home, compact(sorted(repos)), host_id))
+        event_id = emit(db, "participant-enrolled", request_id, {"home_id": home, "repos": sorted(repos), "host_id": host_id})
         return {"ok": True, "home_id": home, "event_id": event_id}
     if op == "session":
         home = token(p.get("home_id"), "home_id")
@@ -575,10 +705,16 @@ def run_operation(db, op, p):
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None, "intent does not exist")
         participant(db, p, intent["repo"])
-        require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
+        require(intent["home_id"] == p["home_id"], "intent holder mismatch")
         if op == "claim":
             require(intent["version"] == p.get("version"), "intent version mismatch")
-            require(intent["state"] == "submitted", "intent cannot be claimed in current state")
+            require(intent["state"] in {"submitted", "expired", "released", "revoked"}, "intent cannot be claimed in current state")
+            if intent["state"] == "submitted":
+                require(intent["generation"] == p["generation"], "intent generation mismatch")
+            else:
+                require(intent["generation"] <= p["generation"], "intent generation is newer than claimant")
+            queued = db.execute("SELECT state FROM queue_items WHERE intent_id=?", (intent_id,)).fetchone()
+            require(queued is None or queued[0] not in {"attempting", "outcome-unknown", "merged"}, "unsettled or landed intent cannot be reclaimed")
             ttl = p.get("ttl_seconds", 900)
             require(isinstance(ttl, int) and 1 <= ttl <= 86400, "ttl_seconds must be 1..86400")
             candidate = [tuple(x) for x in json.loads(intent["resources_json"])]
@@ -596,9 +732,10 @@ def run_operation(db, op, p):
             for kind, name in candidate:
                 db.execute("INSERT INTO claim_resources(claim_id,kind,name) VALUES(?,?,?)", (claim_id, kind, name))
             db.execute("INSERT INTO branch_owners(repo,branch,claim_id,fence,home_id,generation) VALUES(?,?,?,?,?,?)", (intent["repo"], intent["branch"], claim_id, fence, p["home_id"], p["generation"]))
-            db.execute("UPDATE intents SET state='claimed' WHERE intent_id=?", (intent_id,))
+            db.execute("UPDATE intents SET state='claimed',generation=? WHERE intent_id=?", (p["generation"], intent_id))
             event_id = emit(db, "claim-granted", request_id, {"intent_id": intent_id, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires})
             return {"ok": True, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires, "event_id": event_id}
+        require(intent["generation"] == p["generation"], "intent generation mismatch")
         claim = active_claim(db, p, intent)
         if op == "attach-pr":
             url = pr_url(p.get("pr_url"), intent["repo"])
@@ -647,7 +784,8 @@ def run_operation(db, op, p):
     if op in {"renew", "release", "check"}:
         claim = active_claim(db, p)
         if op == "check":
-            return {"ok": True, "claim_id": claim["claim_id"], "fence": claim["fence"], "expires_mono_ns": claim["expires_mono_ns"]}
+            latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (claim["intent_id"],)).fetchone()
+            return {"ok": True, "claim_id": claim["claim_id"], "fence": claim["fence"], "expires_mono_ns": claim["expires_mono_ns"], "head_oid": latest[0] if latest else None}
         if op == "renew":
             ttl = p.get("ttl_seconds", 900)
             require(isinstance(ttl, int) and 1 <= ttl <= 86400, "ttl_seconds must be 1..86400")
@@ -671,7 +809,7 @@ def run_operation(db, op, p):
         db.execute("UPDATE outbox SET acknowledged_at=COALESCE(acknowledged_at,?) WHERE event_id=?", (stamp(), event_id))
         return {"ok": True, "event_id": event_id}
     if op == "inspect":
-        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")]}
+        return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,host_id,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")]}
     if op == "view":
         return {"ok": True,
                 "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,base_ref,branch,task_id,issue,state,version FROM intents WHERE state IN ('submitted','claimed') ORDER BY created_at,intent_id")],
@@ -690,6 +828,7 @@ def main():
         anchor_path = Path(db_path + ".authority.json")
         payload = json.loads(raw)
         require(isinstance(payload, dict), "JSON payload must be an object")
+        require(not any(key.startswith("_") for key in payload), "payload fields starting with _ are reserved")
         request_payload = compact(payload)
         if op == "init":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -721,18 +860,44 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
         db.execute("PRAGMA foreign_keys=ON")
         if op == "init":
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            require(version <= 4, f"unsupported future schema version: {version}")
-            if version < 4:
+            require(version <= 7, f"unsupported future schema version: {version}")
+            credential = authority_hash()
+            if version < 7:
                 db.execute("BEGIN IMMEDIATE")
                 try:
-                    for target in range(version + 1, 5):
+                    for target in range(version + 1, 8):
                         schema = SCHEMA_DIR / f"{target:03}.sql"
-                        for statement in schema.read_text(encoding="utf-8").split(";"):
-                            if statement.strip():
-                                db.execute(statement)
+                        if target == 3:
+                            expected = {"attempt_epoch": "INTEGER", "wrapper_pid": "INTEGER", "wrapper_start": "TEXT", "wrapper_boot": "TEXT"}
+                            columns = {row["name"]: row["type"].upper() for row in db.execute("PRAGMA table_info(queue_items)")}
+                            present = set(expected) & set(columns)
+                            require(not present or present == set(expected), "partial v2 attempt columns; manual repair required")
+                            for name in present:
+                                require(columns[name] == expected[name], "incompatible v2 attempt column type")
+                            if not present:
+                                for statement in schema.read_text(encoding="utf-8").split(";"):
+                                    if statement.strip():
+                                        db.execute(statement)
+                        else:
+                            params = {"legacy_host": socket.gethostname(), "machine_host": local_host_id()} if target == 5 else {}
+                            for statement in schema.read_text(encoding="utf-8").split(";"):
+                                if statement.strip():
+                                    db.execute(statement, params)
                         if target == 1:
                             db.execute("INSERT INTO meta(key,value) VALUES('boot_id',?)", (boot_id(),))
                         db.execute(f"PRAGMA user_version={target}")
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
+            if credential is not None:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    enrolled = db.execute("SELECT value FROM meta WHERE key='authority_token_sha256'").fetchone()
+                    require(enrolled is None or hmac.compare_digest(credential, enrolled[0]), "authority credential mismatch")
+                    if enrolled is None:
+                        db.execute("INSERT INTO meta(key,value) VALUES('authority_token_sha256',?)", (credential,))
+                        emit(db, "authority-enrolled", None, {"actor": authority_identity()})
                     db.execute("COMMIT")
                 except Exception:
                     db.execute("ROLLBACK")
@@ -748,9 +913,9 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
                 require(bound_path is not None and bound_path[0] == db_path, "database authority is bound to another path")
                 check_authority(db, identity, anchor_path)
             seal_authority(db, db_path, identity, anchor_path)
-            print(compact({"ok": True, "schema_version": 4, "db": db_path, "mode": "shadow-advisory"}))
+            print(compact({"ok": True, "schema_version": 7, "db": db_path, "mode": "shadow-advisory"}))
             return
-        require(db.execute("PRAGMA user_version").fetchone()[0] == 4, "unsupported or uninitialized schema version; run init")
+        require(db.execute("PRAGMA user_version").fetchone()[0] == 7, "unsupported or uninitialized schema version; run init")
         identity = db.execute("SELECT value FROM meta WHERE key='authority_id'").fetchone()
         bound_path = db.execute("SELECT value FROM meta WHERE key='authority_path'").fetchone()
         require(identity is not None and bound_path is not None and bound_path[0] == db_path, "database has no authority binding for this path; manual fenced recovery required")
@@ -806,24 +971,40 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
             seal_authority(db, db_path, identity[0], anchor_path, force=True)
             raise
         seal_authority(db, db_path, identity[0], anchor_path, force=True)
-        if op == "queue-reconcile":
+        if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
-            digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
-            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor='@authority' AND request_id=?", (request_id,)).fetchone()
+            if op == "queue-wrapper-exited":
+                host_id = participant(db, payload)["host_id"]
+                require(type(payload.get("wrapper_pid")) is int and payload["wrapper_pid"] > 0, "wrapper_pid must be a positive integer")
+                if host_id == local_host_id():
+                    require(process_start(payload["wrapper_pid"]) != payload.get("wrapper_start"), "wrapper process is still running")
+                else:
+                    # A foreign PID is never checked here; only the participant adapter's check on its own host counts.
+                    require(host_id is not None and payload.get("exit_verified_host_id") == host_id, "remote wrapper exit requires the participant adapter's host attestation")
+            actor = authority_actor(db, payload) if op == "queue-operator-abort" else payload.get("home_id", "@authority")
+            if op == "queue-operator-abort":
+                payload["_authority_actor"] = actor
+            token(actor, "actor")
+            require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
+            keyed = json.loads(request_payload)
+            if op == "queue-wrapper-exited":
+                # Replay is keyed to the attempt and exact wrapper identity, so a lost reply survives a new session.
+                keyed.pop("generation", None)
+            digest = hashlib.sha256(compact({"operation": op, "payload": keyed}).encode()).hexdigest()
+        if op == "queue-reconcile":
+            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
             if prior:
                 require(prior["digest"] == digest, "idempotency key reused with different request")
                 print(prior["result_json"])
                 return
+            item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (payload.get("intent_id"),)).fetchone()
+            if item is not None and item["state"] == "outcome-unknown" and wrapper_settled(item):
+                payload["_settled_attempt"] = item["attempt_event_id"]
             forge_landing(payload)
         seal_authority(db, db_path, identity[0], anchor_path, pending=True)
         db.execute("BEGIN IMMEDIATE")
         try:
             if op in MUTATIONS:
-                request_id = token(payload.get("request_id"), "request_id")
-                actor = payload.get("home_id", "@authority")
-                token(actor, "actor")
-                require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
-                digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
                 prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
                 if prior:
                     require(prior["digest"] == digest, "idempotency key reused with different request")

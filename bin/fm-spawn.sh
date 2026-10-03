@@ -1214,6 +1214,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 GIT_HOOKS_DIR=
 SPAWN_LAUNCH_SENT=0
+SPAWN_COORD_DISPATCHED=0
 SPAWN_ENDPOINT_CLOSED=0
 
 spawn_fresh_commit_rollback() {
@@ -1373,6 +1374,14 @@ spawn_abort_cleanup() {
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
+  fi
+  # A worker that never launched must not keep the coordination claim its
+  # dispatch acquired until the lease expires.
+  if [ "$status" -ne 0 ] && [ "$SPAWN_COORD_DISPATCHED" = 1 ] &&
+    { [ "$SPAWN_LAUNCH_SENT" = 0 ] || [ "$SPAWN_ENDPOINT_CLOSED" = 1 ]; }; then
+    SPAWN_COORD_DISPATCHED=0
+    FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" release "$ID" ||
+      echo "warning: could not release $ID coordination claim after aborted spawn" >&2
   fi
   # The per-id spawn lock is retaken so a concurrent spawn of the same id, which
   # reinstalls this strip dir, is never undone. A launched agent whose endpoint
@@ -3075,7 +3084,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
 # Coordination for this task
 The local Firstmate enrolled this intent at dispatch when the coordinator was reachable.
 Before any push or /no-mistakes run, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-push $coord_id "\$PWD"\` from this task worktree.
-Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id BATCH_ID\` with the stable batch ID agreed by the integration owner.
+Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id BATCH_ID "\$PWD"\` from this task worktree with the stable batch ID agreed by the integration owner.
 While actively working, execute \`FM_HOME=$coord_home python3 $coord_adapter heartbeat $coord_id\` about every 60 seconds to renew the claim.
 These calls only record and warn in shadow/advisory mode; report any warning in your ordinary task status so Firstmate can coordinate it.
 For an enforced repository, a failed adapter command stops that push or CI request until the owner explicitly readmits the intent; never treat an unreachable store as advisory.
@@ -3195,18 +3204,6 @@ fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
-
-# The adapter keeps shadow repositories advisory and refuses dispatch for an
-# explicitly enforced repository until its claim is admitted.
-if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
-  if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
-    echo "error: $ID coordination adapter is missing; dispatch paused" >&2
-    exit 1
-  elif ! FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" dispatch "$ID" "$PROJ_ABS" "$SOURCE_BRIEF" "$BRANCH" "$HARNESS"; then
-    echo "error: $ID coordination dispatch refused; inspect the adapter reason before retrying" >&2
-    exit 1
-  fi
-fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -4359,6 +4356,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  # The adapter keeps shadow repositories advisory and refuses dispatch for an
+  # explicitly enforced repository until its claim is admitted.
+  # Dispatch runs after the refresh so the intent base is the worker's start commit.
+  if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
+    if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
+      echo "error: $ID coordination adapter is missing; dispatch paused" >&2
+      exit 1
+    fi
+    SPAWN_COORD_DISPATCHED=1
+    if ! FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" dispatch "$ID" "$PROJ_ABS" "$WT" "$SOURCE_BRIEF" "$BRANCH" "$HARNESS"; then
+      echo "error: $ID coordination dispatch refused; inspect the adapter reason before retrying" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Re-assert the durable task copy after either treehouse acquisition or endpoint
