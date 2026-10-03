@@ -723,7 +723,7 @@ github_verify_mergeable() {
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,baseRefOid,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -860,6 +860,7 @@ EOF
     "$URL" "$live_head" >&2
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
+  FM_PR_GITHUB_VIEW=$json
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -1342,7 +1343,8 @@ coord_merge_guard() {
     echo "error: coordination adapter is missing; merge paused" >&2
     return 1
   fi
-  FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" pre-merge "$URL" "$FM_PR_MERGE_HEAD"
+  FM_HOME="$FM_HOME" FM_PR_GITHUB_VIEW="${FM_PR_GITHUB_VIEW:-}" FM_PR_GITHUB_REQUIRED="${FM_PR_GITHUB_REQUIRED:-}" \
+    python3 "$FM_ROOT/bin/fm-coord-adapter.py" pre-merge "$ID" "$URL" "$FM_PR_MERGE_HEAD"
 }
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an

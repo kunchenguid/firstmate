@@ -762,6 +762,9 @@ def run_locked(db_path, op, payload, request_payload, anchor_path):
             write_marker(db_path, anchor_path, {**anchor, "pending": True})
             db.execute("BEGIN IMMEDIATE")
             try:
+                seq = max(anchor["highwater_seq"], authority_seq(db)) + RECOVERY_GAP
+                if db.execute("UPDATE sqlite_sequence SET seq=? WHERE name='events'", (seq,)).rowcount == 0:
+                    db.execute("INSERT INTO sqlite_sequence(name,seq) VALUES('events',?)", (seq,))
                 for repo, namespace, number in anchor.get("allocation_counters", []):
                     db.execute("INSERT INTO allocation_counters(repo,namespace,next_number) VALUES(?,?,?) ON CONFLICT(repo,namespace) DO UPDATE SET next_number=MAX(next_number,excluded.next_number)", (repo, namespace, number))
                 db.execute("UPDATE allocation_counters SET next_number=next_number+?", (RECOVERY_GAP,))

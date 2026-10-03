@@ -333,7 +333,66 @@ class Adapter:
         self.save()
         self.scope(task_id, worktree)
 
-    def pre_merge(self, url, head):
+    def land(self, task_id, task, url, head):
+        """Advance this task's queue item to an attempting slot from the observed central state.
+
+        Each transition is guarded by the central queue state, so a lost reply is
+        recovered by re-reading that state rather than replaying a journaled request.
+        The wrapper's live GitHub view (FM_PR_GITHUB_VIEW) and required checks
+        (FM_PR_GITHUB_REQUIRED) are the check, base, and validation evidence; the
+        wrapper has already passed the captain hold, away, and merge authority checks.
+        """
+        live = self.live_claim(task_id)
+        if not live or head != task.get("published_head"):
+            warn(f"{task_id}: merge head {head} is not the live published head")
+            return
+        view = json.loads(os.environ.get("FM_PR_GITHUB_VIEW") or "{}")
+        required = json.loads(os.environ.get("FM_PR_GITHUB_REQUIRED") or "[]")
+        base_oid = view.get("baseRefOid")
+        contains = bool(base_oid) and bool(task.get("worktree")) and subprocess.run(["git", "-C", task["worktree"], "merge-base", "--is-ancestor", base_oid, head], capture_output=True).returncode == 0
+        # ponytail: the wrapper already judged reruns and waivers; any ok run of a name counts here.
+        ok = {}
+        for check in view.get("statusCheckRollup", []):
+            name = check.get("name") or check.get("context")
+            ok[name] = ok.get(name, False) or check.get("conclusion", check.get("state")) in {"SUCCESS", "NEUTRAL", "SKIPPED"}
+        checks = [{"name": name, "head_oid": head, "conclusion": "success" if green else "failure"} for name, green in ok.items()]
+        owner = {**live, "intent_id": task["intent_id"]}
+        evidence = {"current_head_oid": head, "current_base_oid": base_oid, "head_contains_base": contains}
+        for _ in range(10):
+            central = self.call("inspect", {})
+            if central is None:
+                return
+            intent = next((i for i in central["intents"] if i["intent_id"] == task["intent_id"]), None)
+            item = next((q for q in central["queue"] if q["intent_id"] == task["intent_id"]), None)
+            slot = next((s for s in central["slots"] if s["intent_id"] == task["intent_id"]), None)
+            state = item["state"] if item else None
+            if intent is None or state in {"attempting", "outcome-unknown", "merged"}:
+                return
+            fresh = {"request_id": str(uuid.uuid4())}
+            if intent["pr_url"] is None:
+                step = ("attach-pr", {**owner, "pr_url": url})
+            elif state in {None, "sync-needed", "repair-needed", "refused"}:
+                step = ("queue-ready", {**owner, "head_oid": head})
+            elif state == "ready":
+                granted = self.call("queue-next", {**fresh, "repo": task["repo"], "base": task["base"]})
+                if not granted or granted.get("intent_id") != task["intent_id"]:
+                    warn(f"{task_id}: integration slot is held by another candidate")
+                    return
+                continue
+            elif slot is None:
+                return
+            elif state == "syncing":
+                step = ("queue-synced", {**owner, **evidence, "slot_generation": slot["generation"]})
+            elif state == "validating":
+                step = ("queue-validated", {**owner, **evidence, "slot_generation": slot["generation"], "validation_passed": True, "validation_id": f"fm-pr-merge:{head}"})
+            elif item["manifest_version"] is None:
+                step = ("queue-checks", {**owner, **evidence, "slot_generation": slot["generation"], "protection_available": True, "forge_required_checks": sorted({c["context"] for c in required}), "checks": checks})
+            else:
+                step = ("queue-attempt", {**owner, **evidence, "slot_generation": slot["generation"], "captain_hold_released": True, "away_merge_allowed": True, "merge_authorized": True})
+            if self.call(step[0], {**fresh, **step[1]}) is None:
+                return
+
+    def pre_merge(self, task_id, url, head):
         match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)/pull/[0-9]+", url)
         if not match:
             return
@@ -342,6 +401,9 @@ class Adapter:
             return
         if not OID.fullmatch(head):
             raise ValueError("merge head must be a full Git object ID")
+        task = self.state["tasks"].get(task_id)
+        if task and task["repo"] == repo:
+            self.land(task_id, task, url, head)
         receipt = self.call("merge-guard", {"pr_url": url, "head_oid": head})
         self.required(repo, receipt is not None and receipt.get("ok") is True, "integration slot is absent, stale, or unreachable")
 
@@ -394,7 +456,7 @@ class Adapter:
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "pre-merge", "readmit", "heartbeat", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH]|pre-merge PR_URL HEAD|readmit TASK WORKTREE|heartbeat TASK|replay|view>", file=sys.stderr)
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [BATCH]|pre-merge TASK PR_URL HEAD|readmit TASK WORKTREE|heartbeat TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
@@ -428,8 +490,8 @@ def main():
             adapter.readmit(sys.argv[2], sys.argv[3])
         elif command == "pre-ci" and len(sys.argv) in {3, 4}:
             adapter.pre_ci(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else sys.argv[2])
-        elif command == "pre-merge" and len(sys.argv) == 4:
-            adapter.pre_merge(sys.argv[2], sys.argv[3])
+        elif command == "pre-merge" and len(sys.argv) == 5:
+            adapter.pre_merge(sys.argv[2], sys.argv[3], sys.argv[4])
         elif command == "replay" and len(sys.argv) == 2:
             adapter.replay()
         elif command == "view" and len(sys.argv) == 2:

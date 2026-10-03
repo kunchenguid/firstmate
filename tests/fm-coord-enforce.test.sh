@@ -88,7 +88,7 @@ fi
 case "$(cat "$tmp/err")" in *'already requested'*) ;; *) fail 'duplicate pulse must name batch' ;; esac
 pass 'enforcement pauses offline dispatch and undeclared push until re-admission; one CI pulse per batch survives a lost reply'
 
-if adapter "$tmp/a" pre-merge https://github.com/owner/repo/pull/1 "$(git -C "$repo" rev-parse HEAD)" > "$tmp/out" 2> "$tmp/err"; then
+if adapter "$tmp/a" pre-merge undispatched https://github.com/owner/repo/pull/1 "$(git -C "$repo" rev-parse HEAD)" > "$tmp/out" 2> "$tmp/err"; then
   fail 'merge without a live integration slot must be refused'
 fi
 pass 'final merge requires a current integration slot'
@@ -139,6 +139,8 @@ issue_r 1
 lost_number=$number_r
 lost_slot=$slot_r
 [ "$pulse_r" = True ] || fail 'batch-r must be authorized once before the restore'
+coord outbox '{"limit":1000}' > "$tmp/newer-outbox.json"
+lost_seq=$(python3 -c 'import json,sys; print(max(e["seq"] for e in json.load(open(sys.argv[1]))["events"]))' "$tmp/newer-outbox.json")
 mv "$tmp/older.sqlite3" "$db"
 if coord session '{"request_id":"stale-session","home_id":"a"}' > "$tmp/out" 2> "$tmp/err"; then
   fail 'restored older database must not re-grant an old generation'
@@ -146,6 +148,16 @@ fi
 case "$(cat "$tmp/err")" in *'older than authority marker'*) ;; *) fail 'restored DB refusal must name authority marker' ;; esac
 pass 'restored older database cannot re-grant superseded generations'
 coord recover '{"confirm":"FENCE_AND_REENROLL"}' > /dev/null || fail 'manual recovery must fence prior generations'
+python3 - "$tmp/newer-outbox.json" "$(coord outbox '{"limit":1000}')" "$lost_seq" <<'PY' || fail 'fenced recovery must not reissue an event sequence issued before the restore'
+import json,sys
+newer={e["event_id"] for e in json.load(open(sys.argv[1]))["events"]}
+events=json.loads(sys.argv[2])["events"]
+lost=int(sys.argv[3])
+assert all(e["event_id"] in newer for e in events if e["seq"]<=lost)
+recovered=[e for e in events if e["type"] in {"authority-manually-recovered","lease-revoked"} and e["event_id"] not in newer]
+assert recovered and all(e["seq"]>lost for e in recovered)
+PY
+pass 'fenced recovery advances event sequences past the recorded high-water mark'
 coord enroll '{"request_id":"later-reenrollment","home_id":"later","repos":["owner/repo"]}' > /dev/null
 later_generation=$(coord session '{"request_id":"later-new-session","home_id":"later"}')
 python3 - "$later_generation" <<'PY' || fail 'lost participant must not reuse a pre-restore generation'
@@ -217,6 +229,21 @@ assert 'a:renew:lost' not in state['requests'] and 'a:pulse:batch-two' not in st
 assert not json.loads(sys.argv[2])['local_pending']
 PY
 pass 'readmit opens a new session and intent after recovery revokes the claim and drops stale renew and pulse requests'
+
+coord manifest-set '{"request_id":"manifest-land","repo":"owner/repo","base":"main","checks":["ci"]}' > /dev/null
+head_a=$(git -C "$repo" rev-parse HEAD)
+view_a=$(printf '{"baseRefOid":"%s","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}' "$(git -C "$repo" rev-parse HEAD~1)")
+land() { FM_PR_GITHUB_VIEW=$view_a FM_PR_GITHUB_REQUIRED='[{"context":"ci","app_id":null}]' adapter "$tmp/a" pre-merge a https://github.com/owner/repo/pull/7 "$head_a"; }
+land > /dev/null 2> "$tmp/err" || fail "ordinary dispatched task must reach an attempting integration slot at merge: $(cat "$tmp/err")"
+land > /dev/null 2> "$tmp/err" || fail "a retried merge must reuse the attempting slot: $(cat "$tmp/err")"
+python3 - "$(coord inspect)" "$tmp/a/state/fm-coord-adapter.json" <<'PY' || fail 'pre-merge must attach the PR and hold the attempting slot for the task intent'
+import json,sys
+central=json.loads(sys.argv[1])
+intent=json.load(open(sys.argv[2]))['tasks']['a']['intent_id']
+assert [i['pr_url'] for i in central['intents'] if i['intent_id']==intent]==['https://github.com/owner/repo/pull/7']
+assert [(s['intent_id'],s['state']) for s in central['slots']]==[(intent,'attempting')]
+PY
+pass 'pre-merge attaches the PR and advances an ordinary dispatched task to the attempting integration slot'
 
 if adapter "$tmp/b" pre-push missing "$repo" > /dev/null 2> "$tmp/err"; then
   fail 'enforced push without a local intent must refuse'
