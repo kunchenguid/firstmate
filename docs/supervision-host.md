@@ -281,8 +281,8 @@ Before it arms, the next host does two things:
 The host stays parked across every close it handled itself and exits only when main is needed.
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
 Cursor's `stop` hook carries the same tracked 28,800-second registration.
-A plain watcher park rarely lasts that long, because heartbeat closes wake main.
-But a host absorbs its own wakes, so it ends its park itself before that registration.
+A host absorbs its own wakes, so it ends its park itself before that registration.
+Without the host, Claude's plain Stop-hook park applies its own boundary for the same reason ([turnend-guard.md](turnend-guard.md#failure-progression-and-block-budget)), because an idle home's absorbed heartbeats never close it.
 
 ### Setting the boundary
 

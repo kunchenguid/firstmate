@@ -382,9 +382,10 @@ An upgrade mid-session can therefore neither double-arm nor deadlock, and a fail
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
 
-The foreground arm legitimately follows a healthy watcher until its next wake.
-The hook therefore catches HUP, TERM, and INT from host timeout or teardown and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
-Claude drops that exit 2 when it terminated the hook at the configured timeout itself, so a park that outlives the timeout ends without a rewake (`bin/fm-claude-stop-autoarm.sh` header).
+The foreground arm follows a healthy watcher until its next wake or the quiet-park boundary.
+Claude drops the exit 2 of a hook it terminated at the configured timeout, so the Stop hook ends a quiet park before that timeout and can deliver a drain-first renewal wake.
+The `bin/fm-claude-stop-autoarm.sh` header owns the boundary, identity-scoped watcher stop, successor handoff, and commit budget.
+The hook also catches HUP, TERM, and INT from host timeout or teardown and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn, as defense in depth for an interruption the boundary did not pre-empt.
 
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count.
 Later fresh failed epochs advance the same monotonic progression instead of resetting it.
