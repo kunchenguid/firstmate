@@ -26,6 +26,7 @@ STALL_WORKER_PID=
 STALL_REPLACEMENT_PID=
 STALL_JOB_GROUP=
 QUIET_WORKER_PID=
+SCAN_LANE_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 # worker.pid records the serving child, not its restart supervisor, so stopping
 # that pid alone leaves the supervisor to respawn - the leak
@@ -38,6 +39,7 @@ cleanup_remote_job_fixture() {
   [ -z "$LOST_TERM_PID" ] || kill -KILL "$LOST_TERM_PID" 2>/dev/null || true
   [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
   [ -z "$QUIET_WORKER_PID" ] || kill -KILL "$QUIET_WORKER_PID" 2>/dev/null || true
+  [ -z "$SCAN_LANE_PID" ] || kill -KILL "$SCAN_LANE_PID" 2>/dev/null || true
   local stall_pid
   for stall_pid in "$STALL_WORKER_PID" "$STALL_REPLACEMENT_PID"; do
     [ -n "$stall_pid" ] || continue
@@ -106,6 +108,85 @@ git -C "$REMOTE_ROOT" config user.email test@example.com
 git -C "$REMOTE_ROOT" config user.name Test
 git -C "$REMOTE_ROOT" add AGENTS.md bin
 git -C "$REMOTE_ROOT" commit -qm 'remote job fixture'
+
+# Observe the actual sleep executable boundary for the result consumer, a
+# top-level command lane, and the dispatcher. Re-source the public library as
+# callers may do; its own dispatcher default must not become a legacy override.
+poll_cadence_case() (
+  local label=$1 legacy=$2 active=$3 expected=$4 dispatch=$5 poll_dir pid='' i
+  poll_dir="$TMP_ROOT/poll-$label"
+  mkdir -p "$poll_dir/bin"
+  cat > "$poll_dir/bin/sleep" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$FM_POLL_SLEEP_LOG"
+exec /bin/sleep "$@"
+SH
+  chmod +x "$poll_dir/bin/sleep"
+  trap '[ -z "$pid" ] || { kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; }' EXIT
+  unset FM_REMOTE_JOB_POLL_SECONDS FM_REMOTE_JOB_ACTIVE_POLL_SECONDS
+  # shellcheck disable=SC2030 # The legacy override is local to this cadence fixture.
+  [ -z "$legacy" ] || export FM_REMOTE_JOB_POLL_SECONDS="$legacy"
+  # shellcheck disable=SC2030 # The active override is local to this cadence fixture.
+  [ -z "$active" ] || export FM_REMOTE_JOB_ACTIVE_POLL_SECONDS="$active"
+  export FM_REMOTE_JOB_STATE_ROOT="$poll_dir/state" FM_ROOT_OVERRIDE="$REMOTE_ROOT"
+  # shellcheck disable=SC2030 # Each cadence fixture owns its subshell's bounds.
+  export FM_REMOTE_JOB_QUEUE_TIMEOUT=60 FM_REMOTE_JOB_TIMEOUT=30
+  # shellcheck disable=SC2030 # The recording executable is local to this fixture.
+  export PATH="$poll_dir/bin:$PATH" FM_POLL_SLEEP_LOG="$poll_dir/sleeps"
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  # shellcheck source=bin/fm-remote-job-lib.sh
+  . "$ROOT/bin/fm-remote-job-lib.sh"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-delay-job.sh 0.8 "$poll_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
+  # Publish a real bounded result after the caller has entered its wait, without
+  # a lane's own samples contaminating this consumer-only executable log.
+  (
+    /bin/sleep 0.8
+    : > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/stdout"
+    : > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/stderr"
+    printf '0\n' > "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID/exit"
+    fm_remote_job_write_state "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID" 'done'
+  ) &
+  pid=$!
+  fm_remote_job_wait "$ACCOUNT_HOME" "$FM_REMOTE_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+  wait "$pid" || fail "$label result producer failed"
+  pid=''
+  [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "$label result consumer lost the exit status"
+  grep -qx "$expected" "$FM_POLL_SLEEP_LOG" || fail "$label consumer never sampled at $expected seconds"
+  [ "$(sort -u "$FM_POLL_SLEEP_LOG")" = "$expected" ] || fail "$label consumer used another cadence"
+
+  : > "$FM_POLL_SLEEP_LOG"
+  fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+    fm-delay-job.sh 0.8 "$poll_dir/ran" </dev/null >/dev/null || fail "$FM_REMOTE_JOB_ERROR"
+  HOME="$ACCOUNT_HOME" "$BASH" "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --lane "$FM_REMOTE_JOB_ID" &
+  pid=$!
+  wait "$pid" || fail "$label command lane failed"
+  pid=''
+  [ -e "$poll_dir/ran" ] || fail "$label lane did not execute its command"
+  [ "$(fm_remote_job_read_state "$FM_REMOTE_JOB_JOBS/$FM_REMOTE_JOB_ID")" = 'done' ] || fail "$label lane did not publish completion"
+  grep -qx "$expected" "$FM_POLL_SLEEP_LOG" || fail "$label lane never sampled at $expected seconds"
+  if [ "$expected" != 0.05 ]; then
+    ! grep -qx 0.05 "$FM_POLL_SLEEP_LOG" || fail "$label lane still sampled at the dispatcher default"
+  fi
+
+  : > "$FM_POLL_SLEEP_LOG"
+  HOME="$ACCOUNT_HOME" "$BASH" "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" > "$poll_dir/worker.log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    grep -qx 1 "$FM_POLL_SLEEP_LOG" && break
+    /bin/sleep 0.05
+  done
+  grep -qx 1 "$FM_POLL_SLEEP_LOG" || fail "$label dispatcher never reached its one-second quiet wait"
+  [ "$(grep -cx "$dispatch" "$FM_POLL_SLEEP_LOG")" -eq 4 ] || fail "$label dispatcher did not limit its fast burst to four $dispatch-second waits"
+  kill -TERM "$pid" || fail "$label dispatcher stopped unexpectedly"
+  wait "$pid" 2>/dev/null || true
+  pid=''
+  pass "$label: result and command samples use $expected seconds; dispatcher uses four $dispatch-second waits then one second"
+)
+poll_cadence_case default '' '' 0.25 0.05 || exit 1
+poll_cadence_case legacy 0.07 '' 0.07 0.07 || exit 1
+poll_cadence_case active 0.07 0.12 0.12 0.07 || exit 1
 
 DEFAULT_STATE="$TMP_ROOT/default-timeout-jobs"
 DEFAULT_BOUNDS=$(
@@ -957,6 +1038,7 @@ fi
 exec '$(command -v sleep)' "\$@"
 SH
 chmod +x "$STALL_BIN/sleep"
+# shellcheck disable=SC2031 # Cadence fixture PATH changes stayed in their subshells.
 HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux PATH="$STALL_BIN:$PATH" \
   "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
@@ -1174,6 +1256,209 @@ done
 quiet_stop "$QUIET_WORKER_PID"
 QUIET_WORKER_PID=
 pass "an idle worker still repairs queue permissions and stops promptly on TERM"
+
+# fm_remote_job_read_state is the per-sample read of the result consumers and
+# the lane preemption scan, so it is built from builtins and must keep the
+# published contract: a regular non-symlink file of at most 64 bytes, one
+# newline-terminated line, and a value in the published set. An unterminated
+# trailing fragment inside the size bound is still tolerated, matching the
+# former tail -n +2 check.
+STATE_CORPUS="$TMP_ROOT/state-corpus"
+mkdir -p "$STATE_CORPUS/job-x"
+state_accepts() { # <expected-value> <label>
+  local expected=$1 label=$2 printed outvar
+  printed=$(fm_remote_job_read_state "$STATE_CORPUS/job-x" 2>/dev/null) \
+    || fail "$label: a valid state record was rejected"
+  [ "$printed" = "$expected" ] || fail "$label: read '$printed' instead of '$expected'"
+  fm_remote_job_read_state "$STATE_CORPUS/job-x" outvar 2>/dev/null \
+    || fail "$label: the result-variable read was rejected"
+  [ "$outvar" = "$expected" ] || fail "$label: the result-variable read returned '$outvar'"
+}
+state_rejects() { # <label>
+  local label=$1 outvar=untouched
+  fm_remote_job_read_state "$STATE_CORPUS/job-x" > /dev/null 2>&1 \
+    && fail "$label: a malformed state record was accepted"
+  fm_remote_job_read_state "$STATE_CORPUS/job-x" outvar 2>/dev/null \
+    && fail "$label: the result-variable read accepted a malformed record"
+  [ "$outvar" = untouched ] \
+    || fail "$label: a rejected read still wrote the result variable"
+}
+printf 'queued\n' > "$STATE_CORPUS/job-x/state"
+state_accepts queued 'a queued record'
+printf 'done\n' > "$STATE_CORPUS/job-x/state"
+state_accepts 'done' 'a done record'
+printf 'queued' > "$STATE_CORPUS/job-x/state"
+state_rejects 'an unterminated record'
+printf 'queued\nextra\n' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a two-line record'
+printf 'queued\nshort-tail' > "$STATE_CORPUS/job-x/state"
+state_accepts queued 'an unterminated trailing fragment'
+printf 'queued\n%0200d\n' 0 > "$STATE_CORPUS/job-x/state"
+state_rejects 'a record padded past the bound'
+printf 'bogus\n' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a value outside the published set'
+printf '\n' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a blank record'
+printf 'queued\n\n' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a terminated empty second line'
+printf 'queued\r\n' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a carriage-return record'
+printf 'queued\n\r' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a carriage-return trailing fragment'
+printf 'queued\n\0pad' > "$STATE_CORPUS/job-x/state"
+state_rejects 'a NUL-padded record'
+rm -f -- "$STATE_CORPUS/job-x/state"
+state_rejects 'a missing record'
+mkdir "$STATE_CORPUS/job-x/state"
+state_rejects 'a directory record'
+rmdir "$STATE_CORPUS/job-x/state"
+printf 'queued\n' > "$STATE_CORPUS/state-target"
+ln -s ../state-target "$STATE_CORPUS/job-x/state"
+state_rejects 'a symlinked record'
+rm -f -- "$STATE_CORPUS/job-x/state" "$STATE_CORPUS/state-target"
+pass "the fork-free state read keeps every malformed-record rejection"
+
+# The record bounds are bytes, not characters: in a UTF-8 locale a multibyte
+# tail that fits the character count but busts the byte bound still rejects.
+UTF8_LOCALE=
+for CANDIDATE in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+  if locale -a 2>/dev/null | grep -qx "$CANDIDATE"; then UTF8_LOCALE=$CANDIDATE; break; fi
+done
+[ -n "$UTF8_LOCALE" ] || fail "no UTF-8 locale is available for the byte-bound checks"
+perl -e 'print "queued\n", "\xc3\xa9" x 30' > "$STATE_CORPUS/job-x/state"
+( LC_ALL="$UTF8_LOCALE" state_rejects 'a multibyte tail within 65 characters but past 64 bytes' ) || exit 1
+printf '%s\n' "$REMOTE_HOME" > "$STATE_CORPUS/job-x/home"
+( LC_ALL="$UTF8_LOCALE" fm_remote_job_read_line "$STATE_CORPUS/job-x/home" 8192 HOME_VALUE \
+    || fail 'a home record within its byte bound was rejected'
+  [ "$HOME_VALUE" = "$REMOTE_HOME" ] || fail "the home record read '$HOME_VALUE'" ) || exit 1
+perl -e 'print $ARGV[0], "\n", "\xc3\xa9" x 4100' "$REMOTE_HOME" > "$STATE_CORPUS/job-x/home"
+( if LC_ALL="$UTF8_LOCALE" fm_remote_job_read_line "$STATE_CORPUS/job-x/home" 8192 HOME_VALUE 2>/dev/null; then
+    fail 'a multibyte home record past its byte bound was accepted'
+  fi ) || exit 1
+rm -f -- "$STATE_CORPUS/job-x/home"
+pass "the builtin record reads bound bytes, not characters, in a UTF-8 locale"
+
+# While a lane runs a preemptible long poll it scans staged queued jobs once a
+# second for a same-home waiter. The field reads must not exec: the scan used
+# to spend a pipeline per field per record per second, which the counting
+# shims make observable. A same-home non-poll job still preempts, while a
+# queued job for another home or another preemptible poll does not.
+SCAN_ACCOUNT="$TMP_ROOT/scan-account"
+SCAN_STATE="$TMP_ROOT/scan-state"
+SCAN_HOME_B="$TMP_ROOT/scan-home-b"
+SCAN_EXEC_LOG="$TMP_ROOT/scan-execs"
+SCAN_CHILD_LOG="$TMP_ROOT/scan-child-execs"
+mkdir -p "$SCAN_ACCOUNT" "$SCAN_HOME_B" "$SCAN_ACCOUNT/.local/bin"
+# The delta-read child runs under env -i with the composed child PATH, which
+# includes the account's .local/bin: a shim there counts its stat polls where
+# the lane-level shims cannot see them.
+cat > "$SCAN_ACCOUNT/.local/bin/stat" <<SH
+#!/bin/bash
+printf 'child-stat\n' >> '$SCAN_CHILD_LOG'
+exec /usr/bin/stat "\$@"
+SH
+chmod +x "$SCAN_ACCOUNT/.local/bin/stat"
+scan_stage() { # <home> <command> [args...]; echoes the staged job id
+  local home=$1
+  shift
+  (
+    FM_REMOTE_JOB_STATE_ROOT="$SCAN_STATE" FM_REMOTE_JOB_QUEUE_TIMEOUT=60 \
+      FM_REMOTE_JOB_TIMEOUT=40 \
+      fm_remote_job_stage "$SCAN_ACCOUNT" "$REMOTE_ROOT" "$home" "$@" \
+        </dev/null >/dev/null || exit 1
+    printf '%s\n' "$FM_REMOTE_JOB_ID"
+  )
+}
+SCAN_POLL_ID=$(scan_stage "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 20)
+[ -n "$SCAN_POLL_ID" ] || fail "the scan fixture's long poll did not stage"
+# A queued sibling poll for the running lane's own home exercises the full
+# field read and must not count as a waiter; a queued command for a second
+# home must be invisible to this lane's scan.
+SCAN_SIBLING_ID=$(scan_stage "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 3)
+SCAN_OTHER_ID=$(scan_stage "$SCAN_HOME_B" fm-delay-job.sh 1 "$TMP_ROOT/other-ran")
+[ -n "$SCAN_SIBLING_ID" ] && [ -n "$SCAN_OTHER_ID" ] \
+  || fail "the scan fixture's queued jobs did not stage"
+: > "$SCAN_EXEC_LOG"
+: > "$SCAN_CHILD_LOG"
+# Direct exec, not "$BASH": the production shebang is /bin/bash, so this lane
+# runs on the stock macOS bash the same way the deployed worker does.
+HOME="$SCAN_ACCOUNT" PATH="$QUIET_SHIM:/usr/bin:/bin:/usr/sbin:/sbin" \
+  FM_TEST_EXEC_LOG="$SCAN_EXEC_LOG" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SCAN_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --lane "$SCAN_POLL_ID" \
+  > "$TMP_ROOT/scan-lane.out" 2> "$TMP_ROOT/scan-lane.err" &
+SCAN_LANE_PID=$!
+for _ in $(seq 1 200); do
+  [ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_POLL_ID" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_POLL_ID" 2>/dev/null || true)" = running ] \
+  || fail "the long poll did not begin running in the scan fixture"
+sleep 1.5
+: > "$SCAN_EXEC_LOG"
+sleep 4
+for SCAN_TOOL in wc tr tail; do
+  SCAN_HITS=$(grep -cx "$SCAN_TOOL" "$SCAN_EXEC_LOG" || true)
+  [ "$SCAN_HITS" -eq 0 ] \
+    || fail "the lane scan ran $SCAN_TOOL $SCAN_HITS times in a 4-second window"
+done
+[ "$(grep -cx sleep "$SCAN_EXEC_LOG" || true)" -gt 0 ] \
+  || fail "the lane stopped sampling during the window"
+[ "$(grep -cx 'child-stat' "$SCAN_CHILD_LOG" || true)" -gt 0 ] \
+  || fail "the long poll stopped statting during the window"
+[ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_POLL_ID" 2>/dev/null || true)" = running ] \
+  || fail "a queued job for another home preempted the running poll"
+pass "the lane scan reads staged records without execs and honors home isolation"
+
+SCAN_WAITER_ID=$(scan_stage "$REMOTE_HOME" fm-touch-job.sh "$TMP_ROOT/scan-touched")
+[ -n "$SCAN_WAITER_ID" ] || fail "the same-home waiter did not stage"
+for _ in $(seq 1 200); do
+  [ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_POLL_ID" 2>/dev/null || true)" = 'done' ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_POLL_ID" 2>/dev/null || true)" = 'done' ] \
+  || fail "a same-home queued command did not preempt the running poll"
+[ "$(cat "$SCAN_STATE/jobs/$SCAN_POLL_ID/exit")" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
+  || fail "the preempted poll did not publish the preemption exit"
+wait "$SCAN_LANE_PID" 2>/dev/null || true
+SCAN_LANE_PID=
+pass "a same-home queued command still preempts the poll through the builtin scan"
+
+# A queued poll whose argv busts the byte bound is not a valid poll, so it
+# preempts like any other waiter. Its multibyte field fits the bound in
+# characters, which the scan must not count in a UTF-8 locale. The earlier
+# fixture's queued same-home waiter is cancelled so only this record can
+# preempt.
+( FM_REMOTE_JOB_STATE_ROOT="$SCAN_STATE" fm_remote_job_cancel "$SCAN_ACCOUNT" "$SCAN_WAITER_ID" ) \
+  || fail "the earlier same-home waiter could not be cancelled"
+SCAN_BOUND_POLL_ID=$(scan_stage "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 20)
+SCAN_BOUND_SIBLING_ID=$(scan_stage "$REMOTE_HOME" \
+  fm-remote-delta-read.sh "$REPLY_LOG_REL" 0 "$EMPTY_SHA" 3)
+[ -n "$SCAN_BOUND_POLL_ID" ] && [ -n "$SCAN_BOUND_SIBLING_ID" ] \
+  || fail "the byte-bound scan fixture did not stage"
+perl -e 'print "fm-remote-delta-read.sh\0", "\xc3\xa9" x 2100, "\0"' \
+  > "$SCAN_STATE/jobs/$SCAN_BOUND_SIBLING_ID/argv"
+HOME="$SCAN_ACCOUNT" PATH="$QUIET_SHIM:/usr/bin:/bin:/usr/sbin:/sbin" \
+  FM_TEST_EXEC_LOG="$SCAN_EXEC_LOG" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
+  FM_REMOTE_JOB_STATE_ROOT="$SCAN_STATE" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
+  FM_REMOTE_JOB_MAX_BYTES=4096 LC_ALL="$UTF8_LOCALE" \
+  "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --lane "$SCAN_BOUND_POLL_ID" \
+  > "$TMP_ROOT/scan-bound-lane.out" 2> "$TMP_ROOT/scan-bound-lane.err" &
+SCAN_LANE_PID=$!
+for _ in $(seq 1 200); do
+  [ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_BOUND_POLL_ID" 2>/dev/null || true)" = 'done' ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$SCAN_STATE/jobs/$SCAN_BOUND_POLL_ID" 2>/dev/null || true)" = 'done' ] \
+  || fail "a queued poll with a multibyte argv past the byte bound did not preempt"
+[ "$(cat "$SCAN_STATE/jobs/$SCAN_BOUND_POLL_ID/exit")" -eq "$FM_REMOTE_JOB_PREEMPTED_EXIT" ] \
+  || fail "the byte-bound preemption did not publish the preemption exit"
+wait "$SCAN_LANE_PID" 2>/dev/null || true
+SCAN_LANE_PID=
+pass "the lane scan bounds argv in bytes, not characters, in a UTF-8 locale"
 
 # A child that stays up for FM_REMOTE_JOB_SUPERVISOR_HEALTHY_SECONDS clears the
 # consecutive-failure backoff, so a child that dies just past that threshold
