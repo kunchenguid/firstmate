@@ -5,11 +5,13 @@ import { spawn } from "node:child_process";
 // PreToolUse seatbelt for OpenCode: the arm mechanism itself lives entirely in
 // fm-primary-watch-arm.js (a plugin-owned child process, never a model tool
 // call), so the residual risk here is the AGENT shelling `bin/fm-watch-arm.sh`
-// wrong through its own bash tool - the anti-pattern bin/fm-arm-pretool-check.sh
+// wrong through its own shell tool - the anti-pattern bin/fm-arm-pretool-check.sh
 // guards against (see that script's header and docs/arm-pretool-check.md).
-// tool.execute.before can block by throwing (verified 2026-07-09 against
-// OpenCode 1.17.15: throwing here prevents the bash command from running and
-// surfaces the thrown message as the failed tool result).
+// OpenCode v2's built-in command-execution tool id is "shell" (renamed from
+// V1's "bash"; verified 2026-09-27 against OpenCode 2.0.18 with a live
+// tool.execute.before dump). ctx.tool.hook("execute.before", ...) can block by
+// throwing (verified the same way: the thrown message surfaced as the failed
+// tool result and the command never ran).
 
 function runProcess(command, args) {
   return new Promise((resolvePromise) => {
@@ -39,19 +41,14 @@ async function resolveRoot(anchor) {
   }
 }
 
-export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
-  const root = worktree ? (() => {
-    try {
-      return realpathSync(worktree);
-    } catch {
-      return resolve(worktree);
-    }
-  })() : await resolveRoot(directory);
+export default {
+  id: "fm-primary-pretool-check",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location?.directory);
 
-  return {
-    "tool.execute.before": async (input, output) => {
-      if (!root || input?.tool !== "bash") return;
-      const command = output?.args?.command;
+    await ctx.tool.hook("execute.before", async (event) => {
+      if (!root || event?.tool !== "shell") return;
+      const command = event?.input?.command;
       if (!command || typeof command !== "string") return;
 
       const result = await runProcess(`${root}/bin/fm-arm-pretool-check.sh`, ["--command", command]);
@@ -59,6 +56,6 @@ export const FmPrimaryPretoolCheck = async ({ directory, worktree }) => {
 
       const reason = result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt";
       throw new Error(reason);
-    },
-  };
+    });
+  },
 };

@@ -1002,14 +1002,13 @@ EOF
 }
 
 test_opencode_plugin_anchors_guard_to_worktree() {
-  local plugin parent worktree_dir wrong_dir out status
+  local plugin worktree_dir nested out status
   plugin="$ROOT/.opencode/plugins/fm-primary-turnend-guard.js"
   [ -f "$plugin" ] || fail "tracked OpenCode primary plugin is missing"
-  parent="$TMP_ROOT/opencode-plugin-parent"
-  git init -q "$parent"
-  worktree_dir="$parent/nested/opencode-plugin-worktree"
-  wrong_dir="$TMP_ROOT/opencode-plugin-cwd/subdir"
-  mkdir -p "$worktree_dir/bin" "$wrong_dir"
+  worktree_dir="$TMP_ROOT/opencode-plugin-worktree"
+  nested="$worktree_dir/deep/path"
+  mkdir -p "$worktree_dir/bin" "$nested"
+  git init -q "$worktree_dir"
   cat > "$worktree_dir/bin/fm-turnend-guard.sh" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -1017,25 +1016,49 @@ printf 'guard-fired\n' >&2
 exit 2
 EOF
   chmod +x "$worktree_dir/bin/fm-turnend-guard.sh"
-  # Runtime module-format warnings are host noise; this assertion owns plugin output only.
-  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$wrong_dir" WORKTREE="$worktree_dir" node 2>&1 <<'EOF'
+  # OpenCode v2 exposes one project location, ctx.location.directory, with no
+  # separate worktree override (verified 2026-09-27 against the installed
+  # OpenCode 2.0.18), so the surviving regression is that the guard still
+  # anchors to the git root when ctx.location.directory names a nested
+  # subdirectory. Runtime module-format warnings are host noise; this
+  # assertion owns plugin output only.
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$nested" node 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let promptBody = "";
-const client = {
+const queue = [];
+const waiters = [];
+function pushEvent(event) {
+  if (waiters.length) waiters.shift()(event);
+  else queue.push(event);
+}
+const bus = {
+  [Symbol.asyncIterator]() {
+    return {
+      next() {
+        return new Promise((resolve) => {
+          if (queue.length) { resolve({ done: false, value: queue.shift() }); return; }
+          waiters.push((event) => resolve({ done: false, value: event }));
+        });
+      },
+    };
+  },
+};
+const ctx = {
+  location: { directory: process.env.DIRECTORY },
+  event: { subscribe: () => bus },
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
     },
   },
 };
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
-});
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+await mod.default.setup(ctx);
+pushEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
+for (let i = 0; i < 250 && !promptBody; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
@@ -1055,9 +1078,9 @@ if (promptBody.includes("Resume supervision according to the session-start opera
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode plugin must run the guard from worktree even when directory is elsewhere"
+  expect_code 0 "$status" "OpenCode plugin must anchor the guard to the resolved git root even when ctx.location.directory is a nested subdirectory"
   [ -z "$out" ] || fail "OpenCode plugin worktree-root test printed output: $out"
-  pass ".opencode primary plugin: guard path is anchored to worktree, not directory"
+  pass ".opencode primary plugin: guard path is anchored to the resolved git root, not a nested ctx.location.directory"
 }
 
 test_pi_extension_injects_once_per_logical_agent_run() {

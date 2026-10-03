@@ -16,7 +16,11 @@ function runProcess(command, args) {
   });
 }
 
-function resolvePath(anchor) {
+async function resolveRoot(anchor) {
+  if (!anchor) return "";
+  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
+  const root = result.stdout.trim();
+  if (result.code === 0 && root) return root;
   try {
     return realpathSync(anchor);
   } catch {
@@ -24,37 +28,35 @@ function resolvePath(anchor) {
   }
 }
 
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  return resolvePath(anchor);
-}
+export default {
+  id: "fm-primary-sessionstart-nudge",
+  async setup(ctx) {
+    const root = await resolveRoot(ctx.location?.directory);
+    const controller = new AbortController();
 
-export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.created") return;
-      const sessionID = event.properties?.info?.id ?? event.properties?.sessionID;
-      if (!sessionID || handledSessions.has(sessionID) || !root) return;
-      handledSessions.add(sessionID);
-
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
-      const nudge = result.code === 0 ? result.stdout.trim() : "";
-      if (!nudge) return;
-
+    void (async () => {
       try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type !== "session.created") continue;
+          const sessionID = event.data?.sessionID;
+          if (!sessionID || handledSessions.has(sessionID) || !root) continue;
+          handledSessions.add(sessionID);
+
+          const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
+          const nudge = result.code === 0 ? result.stdout.trim() : "";
+          if (!nudge) continue;
+
+          try {
+            await ctx.session.prompt({ sessionID, text: nudge, delivery: "queue" });
+          } catch {
+            // Best-effort nudge; a delivery failure never blocks the session.
+          }
+        }
       } catch {
+        // The event stream ends when the abort signal fires at teardown.
       }
-    },
-  };
+    })();
+
+    return () => controller.abort();
+  },
 };

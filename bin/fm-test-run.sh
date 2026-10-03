@@ -1574,6 +1574,21 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
+    .opencode/plugins/*)
+      # The ported primary plugins and the shared operational-input library
+      # they import. Selecting the loading suites by script, rather than
+      # through the reference scan, keeps a plugin whose full path no test
+      # names (the two seatbelt plugins) from dying as unmapped and avoids
+      # widening each consumer to its whole family. The live OpenCode E2E is
+      # named explicitly because it is the only suite that loads these plugins
+      # into a real OpenCode.
+      printf '%s\n' __script__:fm-opencode-v2-plugins.test.sh
+      printf '%s\n' __script__:fm-operational-input.test.sh
+      printf '%s\n' __script__:fm-turnend-guard.test.sh
+      printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)
       # The run tier's two harness-supplied facts (source vocabulary and
@@ -1699,6 +1714,13 @@ families_for_changed_path() {
         families_for_test_reference "fixtures/$fixture_ref" \
           || printf '%s\n' "__unmapped__:$path"
       fi
+      ;;
+    tests/assets/*)
+      # A test asset belongs to whichever suite reads it, found by the same
+      # reference scan the fixture arm above uses. Without this arm the
+      # generic tests/* case maps a changed asset to __unmapped__.
+      families_for_test_reference "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
       # Shared top-level test files, selected by the suites that name them.
