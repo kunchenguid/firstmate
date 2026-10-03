@@ -363,6 +363,11 @@ try {
   if (!await retainedDetails.evaluate(element => element.open)) throw new Error("live append collapsed an expanded record");
   const retainedTopAfterAppend = (await retainedRecord.boundingBox())?.y;
   if (retainedTop === undefined || retainedTopAfterAppend === undefined || Math.abs(retainedTopAfterAppend - retainedTop) > 2) throw new Error("live append moved the record being read out of position");
+  const retainedTopBeforeFilterGrowth = (await retainedRecord.boundingBox())?.y;
+  fs.appendFileSync(journal, '{"type":"layout-changing-record-type-with-a-deliberately-wide-filter-label","role":"layout-changing-record-role-with-a-deliberately-wide-filter-label","timestamp":1780000001000.5,"content":[{"type":"text","text":"layout changing live append"}]}\n');
+  await page.getByText("layout changing live append", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  const retainedTopAfterFilterGrowth = (await retainedRecord.boundingBox())?.y;
+  if (retainedTopBeforeFilterGrowth === undefined || retainedTopAfterFilterGrowth === undefined || Math.abs(retainedTopAfterFilterGrowth - retainedTopBeforeFilterGrowth) > 2) throw new Error("live filter-option growth moved the record being read out of position");
   await page.locator("#role-filter").selectOption("assistant");
   const filteredRetainedTop = (await retainedRecord.boundingBox())?.y;
   fs.appendFileSync(journal, '{"type":"message_end","message":{"role":"toolResult","timestamp":1780000001001,"content":[{"type":"text","text":"filtered live append"}]}}\n');
@@ -374,7 +379,7 @@ try {
   await page.locator("#event-search").fill("no-event-can-match-this");
   if (await page.locator(".event-card:visible").count()) throw new Error("search did not filter rendered events");
   await page.locator("#event-search").fill("");
-  if (await page.locator(".event-card:visible").count() !== 5) throw new Error("live append did not preserve all events");
+  if (await page.locator(".event-card:visible").count() !== 6) throw new Error("live append did not preserve all events");
   fs.renameSync(journal, `${journal}.rotated`);
   fs.writeFileSync(journal, Array.from({ length: 201 }, (_, index) => JSON.stringify({ type: "message_end", message: { role: "assistant", timestamp: 1780000002000 + index, content: [{ type: "text", text: `replacement generation record ${index + 1}` }] } })).join("\n") + "\n");
   await page.getByText("replacement generation record 201", { exact: true }).waitFor({ state: "visible", timeout: 3000 });

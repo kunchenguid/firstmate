@@ -417,9 +417,11 @@ function entryTimestamp(entry) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function renderEntriesNewestFirst() {
-  const anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
-  const anchorTop = anchor?.getBoundingClientRect().top;
+function renderEntriesNewestFirst(anchor = null, anchorTop = undefined) {
+  if (!anchor) {
+    anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
+    anchorTop = anchor?.getBoundingClientRect().top;
+  }
   const fragment = document.createDocumentFragment();
   for (const segment of [...state.eventSegments].reverse()) {
     const ordered = segment.entries.map((entry, index) => ({ entry, index, timestamp: entryTimestamp(entry) }))
@@ -448,14 +450,16 @@ function renderEntriesNewestFirst() {
 }
 
 function appendEntries(entries, boundaryMessage = "") {
+  const anchor = [...elements.events.children].find(node => node.getBoundingClientRect().bottom > 0) || null;
+  const anchorTop = anchor?.getBoundingClientRect().top;
   const prepared = entries.map(entry => ({ ...entry, displayKey: String(++state.entrySequence) }));
   state.entries.push(...prepared);
   if (!state.eventSegments.length || boundaryMessage) {
     state.eventSegments.push({ entries: [], boundary: boundaryMessage ? boundaryNode(boundaryMessage) : null });
   }
   state.eventSegments.at(-1).entries.push(...prepared);
-  renderEntriesNewestFirst();
   refreshFilterOptions();
+  renderEntriesNewestFirst(anchor, anchorTop);
   applyFilters();
 }
 
