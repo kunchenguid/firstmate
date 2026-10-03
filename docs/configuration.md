@@ -424,6 +424,14 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since herdr, zellij, and cmux are session providers only; Orca provides both the task worktree and terminal endpoint.
 
+Each firstmate home uses its own absolute Treehouse root at `~/.firstmate-treehouse/<key>` (`FM_TREEHOUSE_POOL_BASE` overrides the base with another absolute path), keyed by the home's resolved path, so new pooled slots can link only to that home's project clone.
+The root lives outside the home on purpose: a pooled checkout nested under the home would sit below firstmate's own `CLAUDE.md`, and a harness walking up from it would import firstmate's job description into a project worker.
+Because Treehouse is driven with `TREEHOUSE_ROOT` and `HOME` pointed at that root, the root links the launching user's `~/Library`, `~/.gitconfig`, `~/.git-credentials`, `~/.netrc`, and `~/.ssh`, plus each entry under `~/.config` except `treehouse`, so git and its credential helpers (the macOS keychain included) keep working inside the pool without exposing a user-configured shared Treehouse root; `firstmate-home` in the root records which home owns it.
+New acquisitions use this root, while returns recover the root from Treehouse's fixed `<root>/.treehouse/<project>/<slot>/<repo>` worktree layout so legacy shared slots drain safely and paths outside that layout fall back to the home root.
+Spawns refuse a project containing `treehouse.toml` because that file can redirect acquisition to another pool.
+The main home therefore uses this per-home root instead of the historical `~/.treehouse` pools, and existing shared pools are not migrated.
+The next spawn in each home creates its own pool, while old shared pools drain as their existing tasks finish.
+
 ### Backend selection order
 
 New spawns choose the backend in this order:
