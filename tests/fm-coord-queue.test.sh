@@ -36,14 +36,11 @@ candidate() {
   coord attach-pr "$(printf '{"request_id":"pr-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"https://github.com/owner/repo/pull/%s"}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$( [ "$id" = a ] && echo 1 || echo 2 )")" > /dev/null
   coord publish-head "$(printf '{"request_id":"head-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s","expected_previous_oid":null}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$head")" > /dev/null
   coord queue-ready "$(printf '{"request_id":"ready-%s","intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s","priority":%s}' "$id" "$id" "$home" "$generation" "$claim_id" "$fence" "$head" "${5:-0}")" > /dev/null
-  case "$id" in
-    a) claim_a=$claim_id; fence_a=$fence ;;
-    b) claim_b=$claim_id; fence_b=$fence ;;
-    *) : ;;
-  esac
 }
 candidate a a "$ga" "$head_a"
+claim_a=$claim_id fence_a=$fence
 candidate b b "$gb" "$head_b"
+claim_b=$claim_id fence_b=$fence
 
 first=$(coord queue-next '{"request_id":"next-a","repo":"owner/repo","base":"main"}')
 [ "$(field "$first" intent_id)" = a ] || fail 'first ready candidate should occupy the slot'
@@ -79,29 +76,43 @@ pass 'repo manifest fails closed and holds refuse a merge decision'
 
 attempt=$(coord queue-attempt "$(printf '{"request_id":"attempt-a","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true}' "$ga" "$claim_a" "$fence_a" "$gen3" "$head_a" "$base_new")")
 attempt_id=$(field "$attempt" attempt_event_id)
-unknown=$(coord queue-result "$(printf '{"request_id":"result-unknown","intent_id":"a","generation":%s,"outcome":"unknown"}' "$gen3")")
-[ "$(field "$unknown" state)" = outcome-unknown ] || fail 'timeout must retain unknown outcome'
+unknown=$(coord queue-result "$(printf '{"request_id":"result-forged-refusal","intent_id":"a","generation":%s,"outcome":"refused","wrapper_refused":true,"pr_merged":false,"observed_base_oid":"%s"}' "$gen3" "$base_new")")
+[ "$(field "$unknown" state)" = outcome-unknown ] || fail 'caller-supplied refusal and base OID must not settle a merge attempt'
 reject queue-next '{"request_id":"next-while-unknown","repo":"owner/repo","base":"main"}' 'unknown outcome must occupy slot'
+pass 'caller-supplied refusal evidence leaves the slot outcome-unknown'
 mkdir "$tmp/bin"
 cat > "$tmp/bin/gh-axi" <<'EOF'
 #!/usr/bin/env bash
 [ "${FM_TEST_FAIL:-0}" = 1 ] && exit 1
 case "$3" in
-  */pulls/1) printf 'api_response:\n  body: "https://github.com/owner/repo/pull/1|closed|%s|%s|main|%s"\n  truncated: false\n' "$FM_TEST_MERGED" "$FM_TEST_HEAD" "$FM_TEST_MERGE_OID" ;;
+  */pulls/*)
+    if [ -n "${FM_TEST_KILL:-}" ]; then
+      kill "$FM_TEST_KILL"
+      while kill -0 "$FM_TEST_KILL" 2> /dev/null; do sleep 0.05; done
+    fi
+    state=${FM_TEST_STATE:-closed} merged=$FM_TEST_MERGED
+    if [ -n "${FM_TEST_FLIP:-}" ]; then
+      [ -e "$FM_TEST_FLIP" ] && state=closed merged=true
+      : > "$FM_TEST_FLIP"
+    fi
+    printf 'api_response:\n  body: "https://github.com/owner/repo/pull/%s|%s|%s|%s|main|%s"\n  truncated: false\n' "${3##*/}" "$state" "$merged" "$FM_TEST_HEAD" "$FM_TEST_MERGE_OID" ;;
+  graphql) printf 'api_response:\n  body: %s\n  truncated: false\n' "${FM_TEST_PENDING:-false|none}" ;;
   */git/ref/heads/main) printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_BASE_OID" ;;
+  */compare/"$FM_TEST_BASE_OID...$FM_TEST_HEAD") printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_COMPARE" ;;
   *) exit 1 ;;
 esac
 EOF
 chmod +x "$tmp/bin/gh-axi"
-reconcile_payload=$(printf '{"request_id":"reconcile-landed","intent_id":"a","generation":%s,"outcome":"merged","pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$gen3")
-if PATH="$tmp/bin:$PATH" FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$reconcile_payload" > "$tmp/unexpected" 2> "$tmp/error"; then
-  fail 'unproved landing must not release unknown slot'
+reconcile_payload=$(printf '{"request_id":"reconcile-landed","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$gen3" "$head_a")
+if PATH="$tmp/bin:$PATH" FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" FM_TEST_COMPARE=identical coord queue-reconcile "$(printf '{"request_id":"reconcile-on-base","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$gen3" "$head_a")" > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'an unmerged PR whose head is already on base must not release unknown slot'
 fi
+reject queue-reconcile "$(printf '{"request_id":"reconcile-injected","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","_forge_outcome":"refused"}' "$gen3")" 'caller must not inject a forge observation'
 landed=$(PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$reconcile_payload")
 [ "$(field "$landed" state)" = merged ] || fail 'live read should confirm actual landing'
 [ "$(field "$landed" attempt_event_id)" = "$attempt_id" ] || fail 'landing must bind original attempt event'
 [ "$(PATH="$tmp/bin:$PATH" FM_TEST_FAIL=1 coord queue-reconcile "$reconcile_payload")" = "$landed" ] || fail 'lost reconciliation reply must replay without a new forge read'
-if PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$(printf '{"request_id":"reconcile-again","intent_id":"a","generation":%s,"outcome":"merged","pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$gen3")" > "$tmp/unexpected" 2> "$tmp/error"; then
+if PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$(printf '{"request_id":"reconcile-again","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$gen3")" > "$tmp/unexpected" 2> "$tmp/error"; then
   fail 'a second terminal outcome must be refused'
 fi
 pass 'timeout and restart reconciliation preserve one terminal outcome'
@@ -151,3 +162,193 @@ coord queue-abort "$(printf '{"request_id":"abort-low","intent_id":"low","slot_g
 after_failure=$(coord queue-next '{"request_id":"next-after-failure","repo":"owner/repo","base":"main"}')
 [ "$(field "$after_failure" intent_id)" = high ] || fail 'failed preparation must yield to independent ready work'
 pass 'one failing candidate yields its slot'
+
+db=$tmp/unlanded.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-a","home_id":"a","repos":["owner/repo"]}' > /dev/null
+coord enroll '{"request_id":"enroll-b","home_id":"b","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-a","home_id":"a"}')" generation)
+gb=$(field "$(coord session '{"request_id":"session-b","home_id":"b"}')" generation)
+coord manifest-set '{"request_id":"manifest","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+candidate a a "$ga" "$head_a"
+claim_a=$claim_id fence_a=$fence
+candidate b b "$gb" "$head_b"
+claim_b=$claim_id fence_b=$fence
+for bad in https://github.com/owner/repo/pull/1/files https://gitlab.com/owner/repo/pull/1 http://github.com/owner/repo/pull/1 https://github.com/owner/repo/pull/0 https://github.com/owner/other/pull/1; do
+  reject attach-pr "$(printf '{"request_id":"pr-bad","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"pr_url":"%s"}' "$ga" "$claim_a" "$fence_a" "$bad")" "attach-pr must refuse unevaluable PR URL $bad"
+done
+pass 'attach-pr accepts only an exact GitHub PR URL for the intent repository'
+
+attempt() {
+  id=$1; home=$2; generation=$3; claim=$4; fence=$5; head=$6
+  pick=$(coord queue-next "$(printf '{"request_id":"next-%s-%s","repo":"owner/repo","base":"main"}' "$id" "$7")")
+  [ "$(field "$pick" intent_id)" = "$id" ] || fail "$id should occupy the slot"
+  slot=$(field "$pick" generation)
+  common=$(printf '"intent_id":"%s","home_id":"%s","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s"' "$id" "$home" "$generation" "$claim" "$fence" "$slot" "$head" "$base")
+  coord queue-synced "{\"request_id\":\"sync-$id-$7\",$common,\"head_contains_base\":true}" > /dev/null
+  coord queue-validated "{\"request_id\":\"validate-$id-$7\",$common,\"validation_passed\":true,\"validation_id\":\"v-$id-$7\"}" > /dev/null
+  coord queue-checks "{\"request_id\":\"checks-$id-$7\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head\",\"conclusion\":\"success\"}]}" > /dev/null
+  coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true${8:+,\"wrapper_pid\":$8}}" > /dev/null
+}
+attempt_unknown() {
+  attempt "$@"
+  coord queue-result "$(printf '{"request_id":"unknown-%s-%s","intent_id":"%s","generation":%s,"outcome":"unknown"}' "$id" "$7" "$id" "$slot")" > /dev/null
+}
+
+still_unknown() {
+  case "$(field "$(coord inspect '{}')" slots)" in *"'state': 'outcome-unknown'"*) ;; *) fail "$1" ;; esac
+}
+not_landed() {
+  PATH="$tmp/bin:$PATH" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$(printf '{"request_id":"%s","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$1" "$slot" "$head_a")"
+}
+(sleep 600 & echo $! > "$tmp/wrapper-a"; wait) &
+while [ ! -s "$tmp/wrapper-a" ]; do sleep 0.05; done
+wrapper=$(cat "$tmp/wrapper-a")
+attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 1 "$wrapper"
+for pending in 'true|none' 'false|armed'; do
+  if FM_TEST_PENDING="$pending" FM_COORD_QUIET_SECONDS=0 not_landed "reconcile-pending-${pending%%|*}${pending##*|}" > "$tmp/unexpected" 2> "$tmp/error"; then
+    fail "pending merge ($pending) must not release the unknown slot"
+  fi
+  still_unknown "pending merge ($pending) must keep the slot outcome-unknown"
+done
+pass 'merge queue or armed auto-merge keeps the slot outcome-unknown'
+if FM_COORD_QUIET_SECONDS=0 not_landed reconcile-live-wrapper > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a live merge wrapper must not release the unknown slot'
+fi
+still_unknown 'a live merge wrapper must keep the slot outcome-unknown'
+pass 'live merge wrapper keeps the slot outcome-unknown'
+if FM_TEST_KILL="$wrapper" FM_COORD_QUIET_SECONDS=0 not_landed reconcile-wrapper-exits-mid-read > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a wrapper alive when the forge reads start must not release the unknown slot'
+fi
+still_unknown 'a wrapper alive when the forge reads start must keep the slot outcome-unknown'
+pass 'wrapper exiting during the forge reads keeps the slot outcome-unknown'
+if not_landed reconcile-too-soon > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'the default quiet period must not release a fresh attempt'
+fi
+still_unknown 'the quiet period must keep the slot outcome-unknown'
+if FM_TEST_FLIP="$tmp/flip" FM_COORD_QUIET_SECONDS=0 not_landed reconcile-flipped > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'a PR that merges during reconciliation must not be recorded as not merged'
+fi
+still_unknown 'a PR that merges during reconciliation must keep the slot outcome-unknown'
+pass 'PR merging during reconciliation keeps the slot outcome-unknown'
+unlanded=$(FM_COORD_QUIET_SECONDS=0 not_landed reconcile-timeout)
+[ "$(field "$unlanded" state)" = refused ] || fail 'open unmerged PR off base must record a not-merged outcome'
+pass 'exited wrapper after the quiet period releases a not-landed slot with one terminal outcome'
+
+attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 1
+if PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$(printf '{"request_id":"reconcile-no-identity","intent_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")" > "$tmp/unexpected" 2> "$tmp/error"; then
+  fail 'an attempt without wrapper identity must never auto-release as not merged'
+fi
+still_unknown 'an attempt without wrapper identity must keep the slot outcome-unknown'
+reject queue-operator-abort "$(printf '{"request_id":"operator-abort-anonymous","intent_id":"b","generation":%s,"reason":"wrapper lost"}' "$slot")" 'operator abort must name the operator'
+aborted=$(coord queue-operator-abort "$(printf '{"request_id":"operator-abort-b","intent_id":"b","generation":%s,"operator":"captain","reason":"wrapper lost"}' "$slot")")
+[ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
+field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]=="captain" and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' || fail 'operator abort must record who aborted and why'
+pass 'unknown wrapper identity never auto-releases; only a named operator abort does'
+
+coord queue-ready "$(printf '{"request_id":"ready-b-retry","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
+sleep 600 &
+wrapper=$!
+attempt_unknown b b "$gb" "$claim_b" "$fence_b" "$head_b" 2 "$wrapper"
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+coord queue-ready "$(printf '{"request_id":"ready-a-2","intent_id":"a","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$ga" "$claim_a" "$fence_a" "$head_a")" > /dev/null
+refusal_payload=$(printf '{"request_id":"reconcile-lost-refusal","intent_id":"b","home_id":"b","generation":%s,"pr_url":"https://github.com/owner/repo/pull/2","base":"main","head_oid":"%s"}' "$slot" "$head_b")
+lost=$(PATH="$tmp/bin:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_MERGED=false FM_TEST_HEAD="$head_b" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=diverged coord queue-reconcile "$refusal_payload")
+[ "$(field "$lost" state)" = refused ] || fail 'closed unmerged PR off base must record a not-merged outcome'
+[ "$(PATH="$tmp/bin:$PATH" FM_TEST_FAIL=1 coord queue-reconcile "$refusal_payload")" = "$lost" ] || fail 'reconciliation replay with home_id must return the stored receipt without a forge read'
+pass 'lost refusal reply releases the slot and replays its receipt'
+
+coord queue-ready "$(printf '{"request_id":"ready-b-2","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
+epoch_b() { field "$(coord inspect '{}')" queue | python3 -c 'import ast,sys; print([q for q in ast.literal_eval(sys.stdin.read()) if q["intent_id"]=="b"][0]["ready_epoch"])'; }
+before=$(epoch_b)
+attempt a a "$ga" "$claim_a" "$fence_a" "$head_a" 2
+direct=$(PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$(printf '{"request_id":"reconcile-a-merged","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$slot")")
+[ "$(field "$direct" state)" = merged ] || fail 'a forge-proven landing must settle directly from attempting'
+[ "$(epoch_b)" = "$before" ] || fail 'a merge must not reset waiting ready items'
+next_b=$(coord queue-next '{"request_id":"next-b-after-merge","repo":"owner/repo","base":"main"}')
+[ "$(field "$next_b" intent_id)" = b ] || fail 'waiting ready item must keep its queue position after a merge'
+pass 'forge-proven landing settles from attempting and keeps waiting ready items and their age'
+
+python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("UPDATE intents SET pr_url=? WHERE intent_id=?", ("https://github.com/owner/repo/pull/2/files","b")); db.commit()' "$db"
+coord queue-abort "$(printf '{"request_id":"abort-b","intent_id":"b","slot_generation":%s,"reason":"legacy url"}' "$(field "$next_b" generation)")" > /dev/null
+reject queue-ready "$(printf '{"request_id":"ready-b-legacy","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" 'queue-ready must refuse a stored PR URL that reconciliation cannot evaluate'
+pass 'queue-ready refuses an unevaluable PR URL'
+
+db=$tmp/revocation.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-recovery","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-recovery-1","home_id":"a"}')" generation)
+queue_state() { coord inspect '{}' | python3 -c 'import json,sys; print(next(q["state"] for q in json.load(sys.stdin)["queue"] if q["intent_id"]==sys.argv[1]))' "$1"; }
+slot_count() { coord inspect '{}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["slots"]))'; }
+reclaim() {
+  id=$1; generation=$2; head=$3
+  grant=$(coord claim "$(printf '{"request_id":"reclaim-%s-%s","intent_id":"%s","home_id":"a","generation":%s,"version":1}' "$id" "$generation" "$id" "$generation")")
+  claim_id=$(field "$grant" claim_id)
+  fence=$(field "$grant" fence)
+  coord queue-ready "$(printf '{"request_id":"requeue-%s-%s","intent_id":"%s","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$id" "$generation" "$id" "$generation" "$claim_id" "$fence" "$head")" > /dev/null
+}
+
+candidate released a "$ga" "$head_a"
+released_claim=$claim_id released_fence=$fence
+picked=$(coord queue-next '{"request_id":"next-released","repo":"owner/repo","base":"main"}')
+coord release "$(printf '{"request_id":"release-queued","home_id":"a","generation":%s,"claim_id":"%s","fence":%s}' "$ga" "$released_claim" "$released_fence")" > /dev/null
+[ "$(slot_count)" = 0 ] || fail 'release must free an unattempted integration slot'
+[ "$(queue_state released)" = repair-needed ] || fail 'released queue item must be re-admittable'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="slot-claim-revoked" and e["payload"]["intent_id"]=="released" for e in json.load(sys.stdin)["events"])' || fail 'pre-attempt slot release needs a durable event'
+ga=$(field "$(coord session '{"request_id":"session-recovery-2","home_id":"a"}')" generation)
+reclaim released "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reclaimed","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = released ] || fail 'same intent must re-enter after a new generation claims it'
+coord queue-abort "$(printf '{"request_id":"abort-reclaimed","intent_id":"released","slot_generation":%s,"reason":"test complete"}' "$(field "$picked" generation)")" > /dev/null
+pass 'release frees the slot and a new session can re-admit the same intent'
+
+candidate expired a "$ga" "$head_b"
+coord renew "$(printf '{"request_id":"shorten-queued","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"ttl_seconds":1}' "$ga" "$claim_id" "$fence")" > /dev/null
+sleep 1.2
+[ "$(queue_state expired)" = repair-needed ] || fail 'expiry must remove ready work from the queue'
+ga=$(field "$(coord session '{"request_id":"session-recovery-3","home_id":"a"}')" generation)
+reclaim expired "$ga" "$head_b"
+[ "$(queue_state expired)" = ready ] || fail 'expired item must re-enter ready under the new generation'
+pass 'expiry removes stale ready work and supports re-admission'
+
+picked=$(coord queue-next '{"request_id":"next-expired","repo":"owner/repo","base":"main"}')
+coord queue-synced "$(printf '{"request_id":"sync-expired","intent_id":"expired","home_id":"a","generation":%s,"claim_id":"%s","fence":%s,"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true}' "$ga" "$claim_id" "$fence" "$(field "$picked" generation)" "$head_b" "$base")" > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-recovery-4","home_id":"a"}')" generation)
+[ "$(slot_count)" = 0 ] || fail 'session revocation must free a validating slot before a forge attempt'
+[ "$(queue_state expired)" = repair-needed ] || fail 'revoked validation must be re-admittable'
+reclaim expired "$ga" "$head_b"
+[ "$(queue_state expired)" = ready ] || fail 'revoked item must re-enter ready under the new generation'
+pass 'session revocation frees the validating slot and supports re-admission'
+
+coord manifest-set '{"request_id":"manifest-recovery","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+attempt_unknown expired a "$ga" "$claim_id" "$fence" "$head_b" 3
+coord release "$(printf '{"request_id":"release-unsettled","home_id":"a","generation":%s,"claim_id":"%s","fence":%s}' "$ga" "$claim_id" "$fence")" > /dev/null
+[ "$(slot_count)" = 1 ] || fail 'claim release must not free an unknown forge outcome'
+[ "$(queue_state expired)" = outcome-unknown ] || fail 'unknown outcome must survive claim revocation'
+ga=$(field "$(coord session '{"request_id":"session-recovery-5","home_id":"a"}')" generation)
+reject claim "$(printf '{"request_id":"reclaim-unsettled","intent_id":"expired","home_id":"a","generation":%s,"version":1}' "$ga")" 'unsettled intent must not be reclaimed'
+pass 'claim revocation cannot release or re-admit an unsettled merge attempt'
+
+db=$tmp/reboot.sqlite3
+coord init > /dev/null
+coord enroll '{"request_id":"enroll-reboot","home_id":"a","repos":["owner/repo"]}' > /dev/null
+ga=$(field "$(coord session '{"request_id":"session-reboot-1","home_id":"a"}')" generation)
+candidate reboot a "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reboot","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = reboot ] || fail 'reboot candidate must hold the pre-attempt slot'
+python3 - "$db" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE meta SET value='synthetic-previous-boot' WHERE key='boot_id'")
+PY
+[ "$(slot_count)" = 0 ] || fail 'coordinator reboot must free a pre-attempt slot after claim revocation'
+[ "$(queue_state reboot)" = repair-needed ] || fail 'reboot-revoked work must be re-admittable'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="slot-claim-revoked" and e["payload"]["intent_id"]=="reboot" and e["payload"]["reason"]=="coordinator reboot" for e in json.load(sys.stdin)["events"])' || fail 'reboot slot release needs a durable event'
+ga=$(field "$(coord session '{"request_id":"session-reboot-2","home_id":"a"}')" generation)
+reclaim reboot "$ga" "$head_a"
+picked=$(coord queue-next '{"request_id":"next-reboot-reclaimed","repo":"owner/repo","base":"main"}')
+[ "$(field "$picked" intent_id)" = reboot ] || fail 'reboot-revoked intent must re-enter under the new session generation'
+pass 'coordinator reboot releases pre-attempt slot and permits fenced re-admission'

@@ -10,16 +10,17 @@ import sqlite3
 import subprocess
 import sys
 import time
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 import uuid
 from datetime import datetime, timezone
 
 
 SCHEMA_DIR = Path(__file__).with_name("fm-coord-migrations")
-MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort"}
+MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim", "amend", "renew", "release", "reserve", "publish-head", "attach-pr", "ack", "manifest-set", "predecessors-set", "queue-ready", "queue-next", "queue-synced", "queue-validated", "queue-checks", "queue-attempt", "queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"}
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\Z")
 
 
 class Refusal(Exception):
@@ -49,6 +50,18 @@ def boot_id():
     raise Refusal("boot identity unavailable; only macOS and Linux are supported")
 
 
+def process_start(pid):
+    if Path("/proc/self/stat").exists():
+        try:
+            return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[19]
+        except FileNotFoundError:
+            return None
+    result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    start = result.stdout.strip()
+    require(result.returncode == 0 or not start and not result.stderr.strip(), "process identity cannot be checked")
+    return start or None
+
+
 def token(value, field):
     require(isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 for c in value), f"{field} must be a nonempty printable string")
     return value
@@ -63,10 +76,9 @@ def path(value):
 
 
 def pr_url(value, repo):
-    token(value, "pr_url")
-    parsed = urlsplit(value)
-    require(parsed.scheme == "https" and parsed.hostname and parsed.path and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and " " not in value, "pr_url must be a canonical full HTTPS URL")
-    require(parsed.path.split("/")[1:3] == repo.split("/"), "pr_url must belong to the intent repository")
+    match = PR_URL.fullmatch(token(value, "pr_url"))
+    require(match is not None, "pr_url must be https://github.com/<owner>/<repo>/pull/<number>")
+    require(match.group(1) == repo, "pr_url must belong to the intent repository")
     return value
 
 
@@ -115,6 +127,14 @@ def emit(db, event_type, request_id, payload):
 
 
 def revoke(db, claim, state, reason):
+    item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (claim["intent_id"],)).fetchone()
+    if item is not None and item["state"] in {"ready", "syncing", "validating", "awaiting-checks", "sync-needed", "repair-needed"}:
+        slot = db.execute("SELECT * FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"])).fetchone()
+        if slot is not None:
+            require(slot["state"] in {"syncing", "validating", "awaiting-checks"}, "cannot revoke an unsettled merge slot")
+            db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+            emit(db, "slot-claim-revoked", None, {"intent_id": item["intent_id"], "claim_id": claim["claim_id"], "generation": slot["generation"], "prior_state": item["state"], "reason": reason})
+        db.execute("UPDATE queue_items SET state='repair-needed',base_oid=NULL,validation_id=NULL,manifest_version=NULL,updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
     db.execute("UPDATE claims SET state=? WHERE claim_id=? AND state='active'", (state, claim["claim_id"]))
     db.execute("DELETE FROM branch_owners WHERE claim_id=?", (claim["claim_id"],))
     db.execute("UPDATE intents SET state=? WHERE intent_id=?", (state, claim["intent_id"]))
@@ -238,19 +258,20 @@ def terminal_outcome(db, item, request_id, outcome, p):
     require(prior is None, "merge attempt already has a terminal outcome")
     observed_base = oid(p.get("observed_base_oid"), "observed_base_oid")
     merge_oid = None
+    forge = p.get("_forge_outcome")
+    if forge is not None:
+        require(forge == outcome and p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
     if outcome == "merged":
-        require(p.get("_forge_landing") is True and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
-        require(p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
+        require(forge == "merged" and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
         merge_oid = oid(p.get("merge_oid"), "merge_oid")
         require(observed_base != item["base_oid"], "merged base must advance")
     else:
-        require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
+        require(forge == "refused", "live forge read must prove the attempted head did not land")
+        require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
+        require(p.get("_settled_attempt") == item["attempt_event_id"], "merge wrapper was not proven gone before the forge reads")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
     db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
     db.execute("UPDATE queue_items SET state=?,updated_at=? WHERE intent_id=?", (outcome, stamp(), item["intent_id"]))
-    if outcome == "merged":
-        for other in db.execute("SELECT * FROM queue_items WHERE repo=? AND base_ref=? AND intent_id<>? AND state='ready'", (item["repo"], item["base_ref"], item["intent_id"])).fetchall():
-            invalidate(db, other, request_id, "base advanced after predecessor merge")
     event_id = emit(db, "merge-" + outcome, request_id, {"intent_id": item["intent_id"], "attempt_event_id": attempt, "merge_oid": merge_oid, "observed_base_oid": observed_base})
     return {"ok": True, "state": outcome, "attempt_event_id": attempt, "event_id": event_id}
 
@@ -282,6 +303,7 @@ def queue_operation(db, op, p):
         intent_id = token(p.get("intent_id"), "intent_id")
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None and intent["state"] == "claimed" and intent["pr_url"], "intent needs a live claim and attached PR")
+        pr_url(intent["pr_url"], intent["repo"])
         participant(db, p, intent["repo"])
         require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
         active_claim(db, p, intent)
@@ -321,13 +343,21 @@ def queue_operation(db, op, p):
         db.execute("UPDATE queue_items SET state='syncing',updated_at=? WHERE intent_id=?", (stamp(), chosen["intent_id"]))
         event_id = emit(db, "sync-requested", request_id, {"intent_id": chosen["intent_id"], "generation": generation, "head_oid": chosen["head_oid"]})
         return {"ok": True, "intent_id": chosen["intent_id"], "generation": generation, "state": "syncing", "event_id": event_id}
-    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort"})
+    item, intent = queue_item(db, p, owner=op not in {"queue-result", "queue-reconcile", "queue-abort", "queue-operator-abort"})
     slot = occupied_slot(db, item)
-    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
+    require(p.get("generation") == slot["generation"] if op in {"queue-result", "queue-reconcile", "queue-operator-abort"} else p.get("slot_generation") == slot["generation"], "integration generation mismatch")
     if op == "queue-abort":
         require(item["state"] in {"syncing", "validating", "awaiting-checks"}, "forge attempt cannot be aborted")
         reason = token(p.get("reason"), "reason")
         return invalidate(db, item, request_id, reason, repair=p.get("repair_needed") is True)
+    if op == "queue-operator-abort":
+        require(item["state"] == "outcome-unknown", "operator abort is limited to an unknown forge outcome")
+        operator = token(p.get("operator"), "operator")
+        reason = token(p.get("reason"), "reason")
+        db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='repair-needed',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        event_id = emit(db, "slot-operator-aborted", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "operator": operator, "reason": reason})
+        return {"ok": True, "state": "repair-needed", "event_id": event_id}
     if op == "queue-synced":
         require(item["state"] == "syncing", "slot is not syncing")
         current_head = oid(p.get("current_head_oid"), "current_head_oid")
@@ -375,48 +405,72 @@ def queue_operation(db, op, p):
         require(manifest is not None and item["manifest_version"] == manifest[0], "required-check evidence is absent or stale")
         require(p.get("captain_hold_released") is True and p.get("away_merge_allowed") is True and p.get("merge_authorized") is True, "captain hold, away posture, or merge authority refuses attempt")
         require(p.get("head_contains_base") is True, "current head no longer contains current base")
+        wrapper_pid = p.get("wrapper_pid")
+        wrapper_start = None
+        if wrapper_pid is not None:
+            require(type(wrapper_pid) is int and wrapper_pid > 0, "wrapper_pid must be a positive integer")
+            wrapper_start = process_start(wrapper_pid)
+            require(wrapper_start is not None, "wrapper process is not running")
         event_id = emit(db, "merge-attempted", request_id, {"intent_id": item["intent_id"], "head_oid": item["head_oid"], "base_oid": item["base_oid"], "pr_url": intent["pr_url"], "wrapper": "bin/fm-pr-merge.sh"})
-        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,updated_at=? WHERE intent_id=?", (event_id, stamp(), item["intent_id"]))
+        db.execute("UPDATE queue_items SET state='attempting',attempt_event_id=?,attempt_epoch=?,wrapper_pid=?,wrapper_start=?,wrapper_boot=?,updated_at=? WHERE intent_id=?", (event_id, int(time.time()), wrapper_pid, wrapper_start, boot_id() if wrapper_pid is not None else None, stamp(), item["intent_id"]))
         db.execute("UPDATE integration_slots SET state='attempting' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
         return {"ok": True, "state": "attempting", "attempt_event_id": event_id, "event_id": event_id, "merge_command": ["bin/fm-pr-merge.sh", intent["task_id"], intent["pr_url"]]}
     if op == "queue-result":
         require(item["state"] == "attempting", "slot is not attempting")
-        if p.get("outcome") == "unknown":
-            db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
-            db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
-            event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"]})
-            return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
-        require(p.get("outcome") == "refused", "merged outcome requires live queue-reconcile")
-        return terminal_outcome(db, item, request_id, p["outcome"], p)
+        require(p.get("outcome") in {"unknown", "refused"}, "merged outcome requires live queue-reconcile")
+        db.execute("UPDATE queue_items SET state='outcome-unknown',updated_at=? WHERE intent_id=?", (stamp(), item["intent_id"]))
+        db.execute("UPDATE integration_slots SET state='outcome-unknown' WHERE repo=? AND base_ref=?", (item["repo"], item["base_ref"]))
+        event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "reported_outcome": p["outcome"]})
+        return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
     if op == "queue-reconcile":
-        require(item["state"] == "outcome-unknown" and p.get("outcome") == "merged", "unknown outcome requires proven landing")
-        return terminal_outcome(db, item, request_id, "merged", p)
+        require(item["state"] == "outcome-unknown" or (item["state"] == "attempting" and p["_forge_outcome"] == "merged"), "only a proven landing can settle an attempting slot")
+        return terminal_outcome(db, item, request_id, p["_forge_outcome"], p)
     raise Refusal("unknown queue operation")
+
+
+def wrapper_settled(item):
+    quiet = int(os.environ.get("FM_COORD_QUIET_SECONDS", "600"))
+    require(quiet >= 0, "quiet period must be nonnegative")
+    gone = item["wrapper_pid"] is not None and (item["wrapper_boot"] != boot_id() or process_start(item["wrapper_pid"]) != item["wrapper_start"])
+    return gone and int(time.time()) - item["attempt_epoch"] >= quiet
 
 
 def forge_landing(p):
     """Read only, before entering the state transition transaction."""
-    url = urlsplit(token(p.get("pr_url"), "pr_url"))
-    parts = url.path.strip("/").split("/")
-    require(url.scheme == "https" and url.netloc == "github.com" and len(parts) == 4 and parts[2] == "pull" and parts[3].isdigit(), "queue-reconcile requires a GitHub PR URL")
-    repo = "/".join(parts[:2])
+    match = PR_URL.fullmatch(token(p.get("pr_url"), "pr_url"))
+    require(match is not None, "queue-reconcile requires a GitHub PR URL")
+    repo, number = match.groups()
     base = token(p.get("base"), "base")
-    def read(path, template):
-        result = subprocess.run(["gh-axi", "api", "GET", path, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
+    def read(path, template, method="GET", *fields):
+        result = subprocess.run(["gh-axi", "api", method, path, *fields, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
         lines = result.stdout.strip().splitlines()
         require(len(lines) == 3 and lines[0] == "api_response:" and lines[1].startswith("  body: ") and lines[2] == "  truncated: false", "forge response is unreadable or truncated")
         raw_body = lines[1][8:]
         body = json.loads(raw_body) if raw_body.startswith('"') else raw_body
         require(isinstance(body, str), "forge response body is unreadable")
         return body
-    pull = read(f"repos/{repo}/pulls/{parts[3]}", "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}")
-    fields = pull.split("|")
-    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[1] == "closed" and fields[2] == "true" and fields[4] == base, "forge does not prove this PR landed on this base")
-    observed_base = read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}")
-    p["_forge_landing"] = True
-    p["merged_head_oid"] = oid(fields[3], "forge head")
-    p["merge_oid"] = oid(fields[5], "forge merge commit")
-    p["observed_base_oid"] = oid(observed_base, "current forge base")
+    pull_path = f"repos/{repo}/pulls/{number}"
+    pull_template = "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}"
+    fields = read(pull_path, pull_template).split("|")
+    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[4] == base, "forge observation is for a different PR or base")
+    observed_base = oid(read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}"), "current forge base")
+    p["observed_base_oid"] = observed_base
+    if fields[1] == "closed" and fields[2] == "true":
+        p["_forge_outcome"] = "merged"
+        p["merged_head_oid"] = oid(fields[3], "forge head")
+        p["merge_oid"] = oid(fields[5], "forge merge commit")
+        return
+    require(fields[1] in {"open", "closed"} and fields[2] == "false", "forge does not prove whether this PR landed")
+    require(p.get("_settled_attempt") is not None, "merge wrapper is not proven to have exited after the quiet period")
+    owner, name = repo.split("/")
+    pending = read("graphql", "{{with .data.repository.pullRequest}}{{.isInMergeQueue}}|{{if .autoMergeRequest}}armed{{else}}none{{end}}{{end}}", "POST", "--field", f'query=query{{repository(owner:"{owner}",name:"{name}"){{pullRequest(number:{number}){{isInMergeQueue autoMergeRequest{{enabledAt}}}}}}}}')
+    require(pending == "false|none", "PR merge is still pending in the merge queue or auto-merge")
+    head = oid(p.get("head_oid"), "head_oid")
+    status = read(f"repos/{repo}/compare/{observed_base}...{head}", "{{.status}}")
+    require(status in {"ahead", "diverged"}, "forge does not prove the attempted head is off base")
+    require(read(pull_path, pull_template).split("|")[1:5] == fields[1:5], "PR changed during reconciliation")
+    p["_forge_outcome"] = "refused"
+    p["_unlanded_head_oid"] = head
 
 
 def run_operation(db, op, p):
@@ -497,10 +551,16 @@ def run_operation(db, op, p):
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None, "intent does not exist")
         participant(db, p, intent["repo"])
-        require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
+        require(intent["home_id"] == p["home_id"], "intent holder mismatch")
         if op == "claim":
             require(intent["version"] == p.get("version"), "intent version mismatch")
-            require(intent["state"] == "submitted", "intent cannot be claimed in current state")
+            require(intent["state"] in {"submitted", "expired", "released", "revoked"}, "intent cannot be claimed in current state")
+            if intent["state"] == "submitted":
+                require(intent["generation"] == p["generation"], "intent generation mismatch")
+            else:
+                require(intent["generation"] <= p["generation"], "intent generation is newer than claimant")
+            queued = db.execute("SELECT state FROM queue_items WHERE intent_id=?", (intent_id,)).fetchone()
+            require(queued is None or queued[0] not in {"attempting", "outcome-unknown", "merged"}, "unsettled or landed intent cannot be reclaimed")
             ttl = p.get("ttl_seconds", 900)
             require(isinstance(ttl, int) and 1 <= ttl <= 86400, "ttl_seconds must be 1..86400")
             candidate = [tuple(x) for x in json.loads(intent["resources_json"])]
@@ -518,9 +578,10 @@ def run_operation(db, op, p):
             for kind, name in candidate:
                 db.execute("INSERT INTO claim_resources(claim_id,kind,name) VALUES(?,?,?)", (claim_id, kind, name))
             db.execute("INSERT INTO branch_owners(repo,branch,claim_id,fence,home_id,generation) VALUES(?,?,?,?,?,?)", (intent["repo"], intent["branch"], claim_id, fence, p["home_id"], p["generation"]))
-            db.execute("UPDATE intents SET state='claimed' WHERE intent_id=?", (intent_id,))
+            db.execute("UPDATE intents SET state='claimed',generation=? WHERE intent_id=?", (p["generation"], intent_id))
             event_id = emit(db, "claim-granted", request_id, {"intent_id": intent_id, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires})
             return {"ok": True, "claim_id": claim_id, "fence": fence, "expires_mono_ns": expires, "event_id": event_id}
+        require(intent["generation"] == p["generation"], "intent generation mismatch")
         claim = active_claim(db, p, intent)
         if op == "attach-pr":
             url = pr_url(p.get("pr_url"), intent["repo"])
@@ -609,6 +670,7 @@ def main():
     try:
         payload = json.loads(raw)
         require(isinstance(payload, dict), "JSON payload must be an object")
+        require(not any(key.startswith("_") for key in payload), "payload fields starting with _ are reserved")
         request_payload = compact(payload)
         if op == "init":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -646,23 +708,25 @@ def main():
         except Exception:
             db.execute("ROLLBACK")
             raise
-        if op == "queue-reconcile":
+        if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
+            actor = payload.get("home_id", "@authority")
+            token(actor, "actor")
+            require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
             digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
-            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor='@authority' AND request_id=?", (request_id,)).fetchone()
+        if op == "queue-reconcile":
+            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
             if prior:
                 require(prior["digest"] == digest, "idempotency key reused with different request")
                 print(prior["result_json"])
                 return
+            item = db.execute("SELECT * FROM queue_items WHERE intent_id=?", (payload.get("intent_id"),)).fetchone()
+            if item is not None and item["state"] == "outcome-unknown" and wrapper_settled(item):
+                payload["_settled_attempt"] = item["attempt_event_id"]
             forge_landing(payload)
         db.execute("BEGIN IMMEDIATE")
         try:
             if op in MUTATIONS:
-                request_id = token(payload.get("request_id"), "request_id")
-                actor = payload.get("home_id", "@authority")
-                token(actor, "actor")
-                require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
-                digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
                 prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
                 if prior:
                     require(prior["digest"] == digest, "idempotency key reused with different request")
