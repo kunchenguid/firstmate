@@ -131,6 +131,8 @@ make_brief challenger base 99
 adapter "$tmp/challenger" dispatch challenger "$repo" "$tmp/challenger.brief" branch/challenger claude > /dev/null 2> "$tmp/conflict.err" || fail 'conflict remains advisory'
 case "$(cat "$tmp/conflict.err")" in *'held by offline'*) ;; *) fail 'conflict must name holder' ;; esac
 pass 'pre-dispatch conflict names current holder'
+adapter "$tmp/challenger" pre-push challenger "$repo" > /dev/null 2>&1 || fail 'refused task push checkpoint must stay advisory'
+adapter "$tmp/challenger" pre-ci challenger > /dev/null 2>&1 || fail 'refused task CI checkpoint must stay advisory'
 
 python3 - "$db" <<'PY'
 import sqlite3,sys

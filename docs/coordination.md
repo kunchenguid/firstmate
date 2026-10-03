@@ -152,7 +152,7 @@ The launch brief gives every supported harness the same `pre-push`, `pre-ci`, an
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
 
-Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage; it revisits only tasks with a pending dispatch or checkpoint, so finished tasks never reclaim resources, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
+Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage; it submits and claims only tasks whose dispatch is still pending and resumes checkpoints only for tasks that already hold a claim, so refused or finished tasks never reclaim resources, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
 Each request is written to the home-local journal named in [configuration](configuration.md) before it is sent with a stable UUID; a lost reply reuses that UUID and receives the stored central receipt.
 The file is serialized with a home-local lock and replaced atomically; a checkpoint that cannot take the lock within five seconds warns and skips.
 An offline request remains pending and is never represented as a confirmed claim.

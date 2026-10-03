@@ -327,9 +327,10 @@ class Adapter:
         for task_id, task in list(self.state["tasks"].items()):
             if self.reset:
                 return
-            if not any(task.get(flag) for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths", "renew_key")):
+            if task.get("pending_dispatch"):
+                self.ensure_task(task_id)
+            if "claim" not in task:
                 continue
-            self.ensure_task(task_id)
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
                 self.scope(task_id, task["worktree"])
             if task.get("pending_ci") and self.live_claim(task_id):
