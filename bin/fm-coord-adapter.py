@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -60,8 +61,8 @@ def declared(brief):
     if len(resources) != 1:
         raise ValueError("brief must declare exactly one 'Coordination resources:' JSON line")
     parsed = json.loads(resources[0])
-    if not isinstance(parsed, list) or not parsed:
-        raise ValueError("brief coordination resources must be a nonempty JSON array")
+    if not isinstance(parsed, list):
+        raise ValueError("brief coordination resources must be a JSON array")
     if len(issues) > 1:
         raise ValueError("brief has duplicate coordination issue lines")
     return parsed, issues[0] if issues else None
@@ -98,13 +99,23 @@ class Adapter:
         self.lock = home / "state/fm-coord-adapter.lock"
         self.lock.parent.mkdir(parents=True, exist_ok=True)
         self.lock_handle = self.lock.open("a+")
-        fcntl.flock(self.lock_handle, fcntl.LOCK_EX)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(self.lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise ValueError("adapter journal is busy; checkpoint skipped, no grant assumed")
+                time.sleep(0.1)
+        self.reset = False
         self.state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"requests": {}, "tasks": {}}
 
     def save(self):
         atomic_write(self.path, self.state)
 
     def call(self, op, payload):
+        self.last_error = ""
         try:
             raw = json.dumps(payload, separators=(",", ":"))
             if self.config.get("remote") is not None:
@@ -117,12 +128,31 @@ class Adapter:
                 timeout = 5
             result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
             if result.returncode:
+                if "expired session generation" in result.stderr:
+                    self.reset_session()
+                self.last_error = result.stderr
                 warn(f"central {op} unavailable or refused: {result.stderr.strip() or result.returncode}; request remains local")
                 return None
             return json.loads(result.stdout)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
             warn(f"central {op} unavailable: {exc}; request remains local")
             return None
+
+    def reset_task(self, task_id):
+        task = self.state["tasks"][task_id]
+        for key in [k for k in self.state["requests"] if k.startswith(f"{task_id}:")]:
+            del self.state["requests"][key]
+        for field in ("claim", "version", "resources", "published_head", "renew_key"):
+            task.pop(field, None)
+        task["epoch"] = task.get("epoch", 0) + 1
+        task["intent_id"] = f"{self.config['home_id']}:{task['repo']}:{task_id}#{task['epoch']}"
+        self.reset = True
+        self.save()
+
+    def reset_session(self):
+        self.state["requests"].pop("session", None)
+        for task_id in self.state["tasks"]:
+            self.reset_task(task_id)
 
     def send(self, key, op, payload):
         requests = self.state["requests"]
@@ -133,12 +163,16 @@ class Adapter:
         item = requests[key]
         if item["op"] != op or {k: v for k, v in item["payload"].items() if k != "request_id"} != payload:
             raise ValueError(f"local request key changed payload: {key}")
-        if "reply" not in item:
-            reply = self.call(op, item["payload"])
-            if reply is not None:
+        if "reply" in item:
+            return item["reply"]
+        reply = self.call(op, item["payload"])
+        if reply is not None:
+            if reply.get("ok") is False:
+                del requests[key]
+            else:
                 item["reply"] = reply
-                self.save()
-        return item.get("reply")
+            self.save()
+        return reply
 
     def setup(self):
         home_id = self.config["home_id"]
@@ -149,6 +183,9 @@ class Adapter:
 
     def ensure_task(self, task_id):
         task = self.state["tasks"][task_id]
+        if not task["declared"]:
+            warn(f"{task_id}: brief declares no coordination resources; intent recorded locally as unclaimed")
+            return task
         generation = self.setup()
         if generation is None:
             warn(f"{task_id}: offline intent pending; no claim granted")
@@ -180,7 +217,7 @@ class Adapter:
         if repo not in self.config["repos"]:
             raise ValueError(f"{repo} is outside coordination enrollment")
         base = self.config.get("base", "main")
-        base_oid = git(project, "rev-parse", base)
+        base_oid = git(project, "rev-parse", f"origin/{base}")
         if not OID.fullmatch(base_oid):
             raise ValueError("base does not resolve to a full Git OID")
         key = f"{repo}:{task_id}"
@@ -202,12 +239,14 @@ class Adapter:
         payload = {"home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}
         checked = self.call("check", payload)
         if checked is None:
+            if "claim is not active" in self.last_error:
+                self.reset_task(task_id)
             warn(f"{task_id}: branch writer generation cannot be checked; no grant assumed")
             return None
         return payload
 
     def changed_paths(self, task, worktree):
-        output = subprocess.run(["git", "-C", str(worktree), "diff", "--name-only", "--no-renames", "-z", task["base_oid"], "HEAD"], check=True, capture_output=True).stdout
+        output = subprocess.run(["git", "-C", str(worktree), "diff", "--name-only", "--no-renames", "-z", f"origin/{task['base']}...HEAD"], check=True, capture_output=True).stdout
         return sorted({x.decode("utf-8", "surrogateescape") for x in output.split(b"\0") if x})
 
     def scope(self, task_id, worktree):
@@ -218,11 +257,11 @@ class Adapter:
         live = self.live_claim(task_id)
         paths = self.changed_paths(task, worktree)
         covered = lambda name: any((kind == "file" and value == name) or (kind == "directory" and (name == value or name.startswith(value + "/"))) for kind, value in task.get("resources", []))
-        undeclared = sorted(set(task.get("pending_paths", [])) | {p for p in paths if not covered(p)})
+        undeclared = sorted(p for p in set(task.get("pending_paths", [])) | set(paths) if not covered(p))
         if undeclared:
             warn(f"{task_id}: undeclared changed paths: {', '.join(undeclared)}; amendment requested")
-            task["pending_paths"] = undeclared
-            self.save()
+        task["pending_paths"] = undeclared
+        self.save()
         if live and undeclared:
             payload = {**live, "intent_id": task["intent_id"], "version": task["version"], "resources": [{"type": kind, "name": value} for kind, value in task["resources"]] + [{"type": "file", "name": p} for p in undeclared if not covered(p)]}
             key = f"{task_id}:amend:{task['version']}"
@@ -243,6 +282,19 @@ class Adapter:
         if not live:
             return
         head = git(worktree, "rev-parse", "HEAD")
+        for key, item in list(self.state["requests"].items()):
+            if item["op"] != "publish-head" or not key.startswith(f"{task_id}:") or "reply" in item:
+                continue
+            stale = item["payload"]
+            if stale["expected_previous_oid"] != task.get("published_head"):
+                del self.state["requests"][key]
+                self.save()
+            elif stale["head_oid"] != head:
+                if not self.send(key, "publish-head", {k: v for k, v in stale.items() if k != "request_id"}):
+                    return
+                task["published_head"] = stale["head_oid"]
+                del self.state["requests"][key]
+                self.save()
         if head != task.get("published_head"):
             previous = task.get("published_head")
             reply = self.send(f"{task_id}:head:{head}", "publish-head", {**live, "intent_id": task["intent_id"], "head_oid": head, "expected_previous_oid": previous})
@@ -256,9 +308,13 @@ class Adapter:
 
     def replay(self):
         for key, item in list(self.state["requests"].items()):
-            if "reply" not in item:
+            if self.reset:
+                return
+            if "reply" not in item and item["op"] != "publish-head":
                 self.send(key, item["op"], {k: v for k, v in item["payload"].items() if k != "request_id"})
         for task_id in list(self.state["tasks"]):
+            if self.reset:
+                return
             self.ensure_task(task_id)
             task = self.state["tasks"][task_id]
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
@@ -291,6 +347,34 @@ class Adapter:
         print(json.dumps({"mode": self.config["mode"], "central": central, "local_pending": pending, "local_tasks": self.state["tasks"]}, sort_keys=True))
 
 
+def run(adapter, command):
+    if command == "dispatch" and len(sys.argv) == 7:
+        adapter.dispatch(*sys.argv[2:])
+    elif command == "pre-push" and len(sys.argv) == 4:
+        task = adapter.state["tasks"].get(sys.argv[2])
+        if task:
+            task["worktree"] = sys.argv[3]
+            task["pending_head"] = git(sys.argv[3], "rev-parse", "HEAD")
+            adapter.save()
+        adapter.scope(sys.argv[2], sys.argv[3])
+    elif command == "heartbeat" and len(sys.argv) == 3:
+        adapter.heartbeat(sys.argv[2])
+    elif command == "pre-ci" and len(sys.argv) == 3:
+        task = adapter.state["tasks"].get(sys.argv[2])
+        if task:
+            task["pending_ci"] = True
+            adapter.save()
+        if adapter.live_claim(sys.argv[2]) and task:
+            task.pop("pending_ci", None)
+            adapter.save()
+    elif command == "replay" and len(sys.argv) == 2:
+        adapter.replay()
+    elif command == "view" and len(sys.argv) == 2:
+        adapter.view()
+    else:
+        raise ValueError("wrong adapter arguments")
+
+
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "replay", "view"}:
         print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK|heartbeat TASK|replay|view>", file=sys.stderr)
@@ -303,32 +387,11 @@ def main():
         adapter = Adapter(Path(home))
         if not adapter.enabled:
             return 0
-        command = sys.argv[1]
-        if command == "dispatch" and len(sys.argv) == 7:
-            adapter.dispatch(*sys.argv[2:])
-        elif command == "pre-push" and len(sys.argv) == 4:
-            task = adapter.state["tasks"].get(sys.argv[2])
-            if task:
-                task["worktree"] = sys.argv[3]
-                task["pending_head"] = git(sys.argv[3], "rev-parse", "HEAD")
-                adapter.save()
-            adapter.scope(sys.argv[2], sys.argv[3])
-        elif command == "heartbeat" and len(sys.argv) == 3:
-            adapter.heartbeat(sys.argv[2])
-        elif command == "pre-ci" and len(sys.argv) == 3:
-            task = adapter.state["tasks"].get(sys.argv[2])
-            if task:
-                task["pending_ci"] = True
-                adapter.save()
-            if adapter.live_claim(sys.argv[2]) and task:
-                task.pop("pending_ci", None)
-                adapter.save()
-        elif command == "replay" and len(sys.argv) == 2:
-            adapter.replay()
-        elif command == "view" and len(sys.argv) == 2:
-            adapter.view()
-        else:
-            raise ValueError("wrong adapter arguments")
+        for _ in range(3):
+            adapter.reset = False
+            run(adapter, sys.argv[1])
+            if not adapter.reset:
+                break
         return 0
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         warn(str(exc))

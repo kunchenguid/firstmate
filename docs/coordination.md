@@ -142,18 +142,22 @@ The coordinator initializes the database with `bin/fm-coord.sh --db PATH init` b
 Same-host participants call the central database directly, while remote homes use the configured batch SSH transport to invoke the central command with quoted fixed arguments and an eight-second upper bound.
 Do not copy a database into a second live authority.
 
-A ship brief declares exactly one `Coordination resources:` line containing a nonempty JSON array of the resource objects above, and may declare one `Coordination issue:` line with its stable issue name.
-`fm-brief.sh` scaffolds an empty array to make the declaration visible; fill it before a coordinated spawn.
+A ship brief declares exactly one `Coordination resources:` line containing a JSON array of the resource objects above, and may declare one `Coordination issue:` line with its stable issue name.
+In a home with `config/coordination.json`, `fm-brief.sh` scaffolds an empty array to make the declaration visible; fill it before spawn.
+A brief that still declares an empty array is recorded locally as an unclaimed intent with a warning and is not submitted centrally.
 `fm-spawn.sh` records the pre-dispatch intent and claim from that brief for Claude Code, Codex, omp, and OpenCode workers.
 The launch brief gives every supported harness the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.
-`pre-push` compares the commit diff from the declared base OID to HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head when that fence is live.
+`pre-push` compares the commit diff from the merge base of `origin/<base>` and HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head when that fence is live.
 `pre-ci` checks the same fence before a `ci:batch` request.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
 
 Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
 Each request is written to the home-local journal named in [configuration](configuration.md) before it is sent with a stable UUID; a lost reply reuses that UUID and receives the stored central receipt.
-The file is serialized with a home-local lock and replaced atomically.
+The file is serialized with a home-local lock and replaced atomically; a checkpoint that cannot take the lock within five seconds warns and skips.
 An offline request remains pending and is never represented as a confirmed claim.
+A refused claim or amendment is dropped from the journal, so the next checkpoint retries it with a new request ID.
+When the coordinator reports an expired session generation, the adapter starts a fresh session and resubmits every local task as a new intent; a claim that is no longer active resubmits that task the same way.
+Stale `publish-head` requests are resent only by `pre-push` or `replay` in head order, so the published head chain stays consistent.
 
 The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh tests/fm-coord-adapter.test.sh`.

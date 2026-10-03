@@ -18,6 +18,7 @@ git -C "$repo" remote add origin git@github.com:owner/repo.git
 printf 'base\n' > "$repo/src/base.py"
 git -C "$repo" add src/base.py
 git -C "$repo" commit -qm base
+git -C "$repo" update-ref refs/remotes/origin/main HEAD
 
 coord() { "$ROOT/bin/fm-coord.sh" --db "$db" "$@"; }
 adapter() { FM_HOME=$1 python3 "$ROOT/bin/fm-coord-adapter.py" "${@:2}"; }
@@ -131,6 +132,19 @@ adapter "$tmp/challenger" dispatch challenger "$repo" "$tmp/challenger.brief" br
 case "$(cat "$tmp/conflict.err")" in *'held by offline'*) ;; *) fail 'conflict must name holder' ;; esac
 pass 'pre-dispatch conflict names current holder'
 
+python3 - "$db" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect(sys.argv[1])
+db.execute("UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'offline:%'")
+db.commit()
+PY
+adapter "$tmp/challenger" replay > /dev/null 2> "$tmp/retry.err" || fail 'refused claim retry must complete'
+python3 - "$tmp/challenger/state/fm-coord-adapter.json" <<'PY' || fail 'refused claim must be retried after the holder lease expires'
+import json,sys
+assert json.load(open(sys.argv[1]))['tasks']['challenger']['claim']['ok'] is True
+PY
+pass 'refused claim is retried with a new request once the conflict clears'
+
 printf 'extra\n' > "$repo/src/extra.py"
 git -C "$repo" add src/extra.py
 git -C "$repo" commit -qm extra
@@ -179,6 +193,30 @@ assert not json.loads(sys.argv[1])['local_pending']
 PY
 pass 'offline push and CI checkpoints remain visible until replay'
 
+printf 'h1\n' > "$repo/src/codex.py"
+git -C "$repo" add src/codex.py
+git -C "$repo" commit -qm h1
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'h1 push checkpoint must complete'
+python3 - "$tmp/codex/state/fm-coord-adapter.json" "$(git -C "$repo" rev-parse HEAD~1)" "$(git -C "$repo" rev-parse HEAD)" <<'PY'
+import json,sys
+path,previous,h1=sys.argv[1:]
+state=json.load(open(path))
+state['requests']['codex:head:'+h1].pop('reply')
+state['tasks']['codex']['published_head']=previous
+state['tasks']['codex']['pending_head']=h1
+json.dump(state,open(path,'w'))
+PY
+printf 'h2\n' > "$repo/src/codex.py"
+git -C "$repo" commit -qam h2
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2> "$tmp/head-chain.err" || fail 'h2 push checkpoint must complete'
+python3 - "$(adapter "$tmp/codex" view)" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail 'lost head reply must not wedge the next head publication'
+import json,sys
+view=json.loads(sys.argv[1])
+assert not view['local_pending'], view['local_pending']
+assert view['local_tasks']['codex']['published_head']==sys.argv[2]
+PY
+pass 'lost publish-head reply is replayed before the next head is published'
+
 python3 - "$tmp/codex/state/fm-coord-adapter.json" <<'PY'
 import json,sys
 path=sys.argv[1]
@@ -205,6 +243,7 @@ spawn_repo=$tmp/spawn-repo
 spawn_wt=$tmp/spawn-wt
 fm_test_spawn_home "$spawn_home" codex
 fm_git_worktree "$spawn_repo" "$spawn_wt" fixture-slot
+git -C "$spawn_repo" fetch -q origin
 fm_test_spawn_brief "$spawn_home" spawned
 printf 'Coordination resources: [{"type":"file","name":"README.md"}]\n' >> "$spawn_home/data/spawned/brief.md"
 printf '{"mode":"advisory","home_id":"spawn-home","repos":["owner/repo"],"db":"%s","project_repos":{"%s":"owner/repo"}}\n' "$db" "$spawn_repo" > "$spawn_home/config/coordination.json"
@@ -218,3 +257,66 @@ assert state['tasks']['spawned']['claim']['ok'] is True
 assert 'pre-push' in brief and 'pre-ci' in brief and 'heartbeat' in brief
 PY
 pass 'spawn submits declared resources and projects the same adapter into worker brief'
+
+git -C "$repo" worktree add -q --detach "$tmp/lag-wt" main
+printf 'upstream\n' > "$tmp/lag-wt/src/upstream.py"
+git -C "$tmp/lag-wt" add src/upstream.py
+git -C "$tmp/lag-wt" commit -qm upstream
+git -C "$repo" update-ref refs/remotes/origin/main "$(git -C "$tmp/lag-wt" rev-parse HEAD)"
+make_home lag
+make_brief lag lag 103
+adapter "$tmp/lag" dispatch lag "$repo" "$tmp/lag.brief" branch/lag codex > /dev/null 2>&1 || fail 'lagging-main dispatch must complete'
+printf 'lag\n' > "$tmp/lag-wt/src/lag.py"
+git -C "$tmp/lag-wt" add src/lag.py
+git -C "$tmp/lag-wt" commit -qm lag
+adapter "$tmp/lag" pre-push lag "$tmp/lag-wt" > /dev/null 2> "$tmp/lag.err" || fail 'lagging-main push checkpoint must complete'
+case "$(cat "$tmp/lag.err")" in *upstream.py*) fail 'upstream commits must not count as undeclared task paths' ;; esac
+pass 'scope diff starts at the origin base, not a lagging local main'
+
+make_home scaffold
+mkdir -p "$tmp/scaffold/data"
+FM_HOME="$tmp/scaffold" "$ROOT/bin/fm-brief.sh" scaffold some-proj --mode local-only > /dev/null 2>&1 || fail 'coordinated brief must scaffold'
+adapter "$tmp/scaffold" dispatch scaffold "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold.err" || fail 'empty declaration dispatch must stay advisory'
+case "$(cat "$tmp/scaffold.err")" in *'no coordination resources'*unclaimed*) ;; *) fail 'empty declaration must warn it is unclaimed' ;; esac
+python3 - "$tmp/scaffold/state/fm-coord-adapter.json" <<'PY' || fail 'empty declaration must be recorded as an unclaimed local intent'
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['scaffold']
+assert task['declared']==[] and 'claim' not in task
+PY
+mkdir -p "$tmp/plain/data"
+FM_HOME="$tmp/plain" "$ROOT/bin/fm-brief.sh" plain some-proj --mode local-only > /dev/null 2>&1 || fail 'uncoordinated brief must scaffold'
+if grep -q 'Coordination resources' "$tmp/plain/data/plain/brief.md"; then fail 'uncoordinated brief must not scaffold a coordination declaration'; fi
+adapter "$tmp/plain" dispatch plain "$repo" "$tmp/plain/data/plain/brief.md" branch/plain codex > /dev/null 2> "$tmp/plain.err" || fail 'uncoordinated dispatch must be a no-op'
+[ ! -s "$tmp/plain.err" ] && [ ! -e "$tmp/plain/state/fm-coord-adapter.json" ] || fail 'uncoordinated dispatch must record nothing'
+pass 'coordination scaffold follows home enrollment; an empty declaration is a visible unclaimed intent'
+
+python3 -c 'import fcntl,sys,time; f=open(sys.argv[1],"a+"); fcntl.flock(f,fcntl.LOCK_EX); open(sys.argv[2],"w").close(); time.sleep(15)' "$tmp/claude/state/fm-coord-adapter.lock" "$tmp/lock.ready" &
+holder=$!
+while [ ! -e "$tmp/lock.ready" ]; do sleep 0.1; done
+start=$(date +%s)
+if adapter "$tmp/claude" heartbeat claude > /dev/null 2> "$tmp/lock.err"; then fail 'busy journal checkpoint must fail visibly'; fi
+elapsed=$(($(date +%s) - start))
+kill "$holder"
+wait "$holder" 2> /dev/null || true
+case "$(cat "$tmp/lock.err")" in *busy*) ;; *) fail 'busy journal must warn' ;; esac
+[ "$elapsed" -lt 12 ] || fail 'busy journal wait must be bounded'
+pass 'a held adapter journal lock bounds the checkpoint wait'
+
+python3 - "$db" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect(sys.argv[1])
+db.execute("UPDATE meta SET value='previous-boot' WHERE key='boot_id'")
+db.commit()
+PY
+printf '## Firstmate spec\nCoordination resources: [{"type":"file","name":"src/claude-b.py"}]\n' > "$tmp/claude-b.brief"
+adapter "$tmp/claude" dispatch claude-b "$repo" "$tmp/claude-b.brief" branch/claude-b claude > /dev/null 2> "$tmp/reboot.err" || fail 'post-reboot dispatch must complete'
+adapter "$tmp/claude" pre-ci claude > /dev/null 2>&1 || fail 'post-reboot checkpoint must complete'
+adapter "$tmp/claude" pre-ci claude > /dev/null 2> "$tmp/reboot-ci.err" || fail 'recovered checkpoint must complete'
+[ ! -s "$tmp/reboot-ci.err" ] || fail "recovered writer must check cleanly: $(cat "$tmp/reboot-ci.err")"
+python3 - "$tmp/claude/state/fm-coord-adapter.json" <<'PY' || fail 'coordinator reboot must recover through a fresh session'
+import json,sys
+tasks=json.load(open(sys.argv[1]))['tasks']
+assert tasks['claude-b']['claim']['ok'] is True
+assert tasks['claude']['claim']['ok'] is True
+PY
+pass 'coordinator reboot starts a fresh session and resubmits local intents'
