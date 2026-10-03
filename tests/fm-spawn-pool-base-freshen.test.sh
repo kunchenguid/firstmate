@@ -743,6 +743,173 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# Keep the remote deliberately unusable after an authorized fixture sync, and
+# record/refuse every Git transport entry point. A hidden fetch cannot pass even
+# if it fails and falls back to local refs.
+prepare_local_base_case() {
+  local id=$1 name=$2 rec real_git
+  rec=$(make_case "$name" "$id" trunk)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" remote set-head origin --auto >/dev/null
+  LOCAL_SHA=$(git -C "$PROJECT_DIR" rev-parse origin/trunk)
+  git -C "$PROJECT_DIR" reset --hard "$LOCAL_SHA" >/dev/null
+  git -C "$POOL_DIR" reset --hard "$LOCAL_SHA" >/dev/null
+  lay_out_as_pool_slot
+  git -C "$PROJECT_DIR" remote set-url origin "file://$CASE_DIR/unreachable.git"
+  real_git=$(command -v git)
+  cat > "$FAKEBIN_DIR/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+  fetch|ls-remote|push|clone)
+    printf '%s\\n' "\$*" >> '$CASE_DIR/network-attempts'
+    exit 91 ;;
+  esac
+done
+exec '$real_git' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/git"
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = 'get --help' ]; then
+  printf '  --no-fetch Skip fetching\n  --base string Explicit base\n'
+  exit 0
+fi
+exit 92
+SH
+  chmod +x "$FAKEBIN_DIR/treehouse"
+}
+
+test_explicit_local_base_launch_and_refusals() {
+  local id out status mutation expected before
+  local -a args
+  id=local-base-success
+  prepare_local_base_case "$id" "$id"
+  out=$(FM_FAKE_PANE_LOG="$CASE_DIR/pane.log" run_spawn "$id" --mode no-mistakes --yolo off --local-base "$LOCAL_SHA")
+  status=$?
+  expect_code 0 "$status" "explicit locally verified base should launch without a usable remote"$'\n'"$out"
+  assert_grep "GIT_NO_LAZY_FETCH=1 TREEHOUSE_NO_UPDATE_CHECK=1 treehouse get --no-fetch --base 'trunk'" "$CASE_DIR/pane.log" \
+    "acquisition omitted its explicit base or no-fetch flag"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$LOCAL_SHA" ] || fail "local base launch changed the acquired commit"
+  [ ! -e "$CASE_DIR/network-attempts" ] || fail "local base launch attempted network access"
+  assert_grep "task=$id" "$SLOT_CLAIM" "local base launch did not retain slot ownership"
+  pass "explicit local base launches from the verified non-main default tip with zero transport attempts"
+
+  for mutation in mismatch missing short empty dirty-source dirty-pool missing-default local-branch-mismatch changed-tip wrong-head foreign-copy unknown-slot unsafe-claim unsupported-treehouse orca relaunch secondmate; do
+    id="local-base-$mutation"
+    prepare_local_base_case "$id" "$id"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
+    args=(--scout --local-base "$LOCAL_SHA")
+    case "$mutation" in
+    mismatch) args=(--scout --local-base "$INITIAL_SHA"); expected='exactly matching' ;;
+    missing) args=(--scout --local-base 0000000000000000000000000000000000000000); expected='locally available commit' ;;
+    short) args=(--scout --local-base "${LOCAL_SHA:0:12}"); expected='full lowercase commit SHA' ;;
+    empty) args=(--scout --local-base=); expected='full lowercase commit SHA' ;;
+    dirty-source) printf 'keep\n' > "$PROJECT_DIR/untracked"; expected='spawning project is not clean' ;;
+    dirty-pool) printf 'keep\n' > "$POOL_DIR/untracked"; expected='is not clean' ;;
+    missing-default) git -C "$PROJECT_DIR" symbolic-ref --delete refs/remotes/origin/HEAD; expected='unambiguous local symbolic origin/HEAD' ;;
+    local-branch-mismatch) git -C "$PROJECT_DIR" checkout --quiet --detach "$LOCAL_SHA"; git -C "$PROJECT_DIR" update-ref refs/heads/trunk "$INITIAL_SHA"; expected='refusing ambiguous Treehouse base selection' ;;
+    changed-tip)
+      mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux.delegate"
+      cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+*'treehouse get --no-fetch --base'*)
+  git -C '$PROJECT_DIR' update-ref refs/remotes/origin/trunk '$INITIAL_SHA' ;;
+esac
+exec '$FAKEBIN_DIR/tmux.delegate' "\$@"
+SH
+      chmod +x "$FAKEBIN_DIR/tmux"
+      expected='exactly matching' ;;
+    wrong-head) git -C "$POOL_DIR" reset --hard "$INITIAL_SHA" >/dev/null; before=$INITIAL_SHA; expected='acquired HEAD' ;;
+    foreign-copy)
+      git clone --quiet "$PROJECT_DIR" "$CASE_DIR/foreign"
+      git -C "$CASE_DIR/foreign" worktree add --quiet --detach "$CASE_DIR/foreign-pool" "$LOCAL_SHA"
+      POOL_DIR="$CASE_DIR/foreign-pool"; expected='ambiguous Treehouse ownership' ;;
+    unknown-slot) rm "$CASE_DIR/slots/treehouse-state.json"; expected='ambiguous Treehouse ownership' ;;
+    unsafe-claim) ln -s "$PROJECT_DIR/README.md" "$SLOT_CLAIM"; expected='could not claim Treehouse pool slot' ;;
+    unsupported-treehouse) printf '#!/usr/bin/env bash\nprintf "old help\\n"\n' > "$FAKEBIN_DIR/treehouse"; expected='support for --no-fetch and --base' ;;
+    orca) args+=(--backend orca); expected='requires a Treehouse-backed' ;;
+    relaunch) args=(--relaunch --local-base "$LOCAL_SHA"); expected='only to fresh ship/scout' ;;
+    secondmate) args=(--secondmate --local-base "$LOCAL_SHA"); expected='only to fresh ship/scout' ;;
+    esac
+    # The rejection concerns the path, not spending a minute sampling it.
+    fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+    out=$(run_spawn "$id" "${args[@]}")
+    status=$?
+    [ "$status" -ne 0 ] || fail "local base accepted $mutation"
+    assert_contains "$out" "$expected" "local base refusal did not explain $mutation"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "local base $mutation published metadata"
+    [ ! -e "$CASE_DIR/network-attempts" ] || fail "local base $mutation attempted transport"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "local base $mutation reset a rejected copy"
+    case "$mutation" in
+    dirty-source) assert_grep keep "$PROJECT_DIR/untracked" "discarded source work" ;;
+    dirty-pool) assert_grep keep "$POOL_DIR/untracked" "discarded pool work" ;;
+    esac
+    pass "explicit local base refuses $mutation without fetching, resetting, or publishing"
+  done
+
+  id=local-base-primary-alias
+  prepare_local_base_case "$id" "$id"
+  ln -s "$PROJECT_DIR" "$CASE_DIR/alias"
+  POOL_DIR="$CASE_DIR/alias"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(run_spawn "$id" --scout --local-base "$LOCAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "local base accepted a primary alias"
+  assert_contains "$out" 'did not enter an isolated worktree' 'local base skipped isolation'
+  [ ! -e "$CASE_DIR/network-attempts" ] || fail "primary alias refusal fetched"
+  pass "explicit local base preserves isolation against primary aliases"
+
+  out=$(fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" \
+    "local-base-batch=$PROJECT_DIR" --scout --local-base "$LOCAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "local base accepted a batch launch"
+  assert_contains "$out" 'does not support batch launch' 'local base silently shared a commit across projects'
+  pass "explicit local base requires independent per-project verification rather than batch launch"
+}
+
+# No model tokens: the worker is a local shell script. A private tmux socket
+# exercises the real interactive Treehouse subshell and the real spawn path.
+# Optional installed tools are explicitly reported by the shared live gate.
+test_real_treehouse_local_base_launch() (
+  fm_live_gate default-on FM_TEST_TREEHOUSE_LOCAL_BASE_LIVE treehouse tmux || exit 0
+  local id=local-base-live out status wt real_tmux socket
+  prepare_local_base_case "$id" "$id"
+  real_tmux=$(command -v tmux)
+  socket="fm-local-base-test-$$"
+  trap '"$real_tmux" -L "$socket" kill-server 2>/dev/null || true' EXIT
+  rm "$FAKEBIN_DIR/treehouse"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+exec '$real_tmux' -L '$socket' "\$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  mkdir -p "$CASE_DIR/real-slots"
+  cat > "$CASE_DIR/worker.sh" <<'SH'
+#!/usr/bin/env bash
+while IFS= read -r line; do printf 'received\n'; done
+SH
+  PATH="$FAKEBIN_DIR:$PATH" TREEHOUSE_ROOT="$CASE_DIR/real-slots" HOME="$HOME_DIR/user-home" \
+    "$real_tmux" -L "$socket" -f /dev/null new-session -d -s local-base -c "$PROJECT_DIR" '/bin/bash --noprofile --norc'
+  "$real_tmux" -L "$socket" set-option -g default-shell /bin/bash
+  "$real_tmux" -L "$socket" set-option -g default-command '/bin/bash --noprofile --norc'
+  out=$(TMUX="$($real_tmux -L "$socket" display-message -p '#{socket_path},#{pid},0')" \
+    TREEHOUSE_ROOT="$CASE_DIR/real-slots" \
+    run_spawn "$id" --scout --local-base "$LOCAL_SHA" --harness "/bin/bash $CASE_DIR/worker.sh")
+  status=$?
+  expect_code 0 "$status" "real interactive Treehouse launch failed"$'\n'"$out"$'\n'"$($real_tmux -L "$socket" capture-pane -p -t local-base:fm-$id)"
+  wt=$(awk -F= '$1 == "worktree" { print $2 }' "$HOME_DIR/state/$id.meta")
+  [ "$wt" != "$PROJECT_DIR" ] || fail "live launch used primary copy"
+  [ "$(git -C "$wt" rev-parse HEAD)" = "$LOCAL_SHA" ] || fail "live launch changed the verified commit"
+  [ ! -e "$CASE_DIR/network-attempts" ] || fail "real Treehouse local launch attempted transport"
+  assert_grep "task=$id" "$(dirname "$wt")/.fm-slot-owner" "live launch omitted ownership claim"
+  pass "real Treehouse interactive acquisition and tmux launch retain the same verified commit with zero transport attempts"
+)
+
+test_real_treehouse_local_base_launch || fail 'real Treehouse local base launch failed'
+test_explicit_local_base_launch_and_refusals
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh

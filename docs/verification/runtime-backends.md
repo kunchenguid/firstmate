@@ -109,6 +109,27 @@ The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, 
 
 ## tmux
 
+### Explicit locally verified launch base
+
+Verified on 2026-10-03 with Git 2.54.0 (Apple Git-157), Treehouse v3.1.0, and tmux 3.6b:
+
+```sh
+FM_TEST_TREEHOUSE_LOCAL_BASE_LIVE=1 bin/fm-test-run.sh tests/fm-spawn-pool-base-freshen.test.sh
+```
+
+Observed output:
+
+```text
+ok - real Treehouse interactive acquisition and tmux launch retain the same verified commit with zero transport attempts
+ok - explicit local base launches from the verified non-main default tip with zero transport attempts
+```
+
+The live case uses a private tmux socket, real interactive Treehouse acquisition, an unreachable fixture origin, and a local shell worker without model calls.
+Its Git shim records and rejects transport attempts, and Treehouse's update check is disabled.
+The mechanics and limitations of `--local-base` belong to `bin/fm-spawn.sh --help`; the portable cases in the same regression retain isolation, cleanliness, ownership, unsupported-backend, and default-fetch refusals.
+The acquisition and freshness path precedes harness-specific launch commands and is shared by the Treehouse-backed tmux, Herdr, Zellij, and cmux integrations; Orca owns acquisition itself and explicitly refuses this option.
+This live result proves the tmux integration only, not a live run on the other three integrations, and local verification does not prove the remote has not advanced since the last authorized sync.
+
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
 
 ```sh

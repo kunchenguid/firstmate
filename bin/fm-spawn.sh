@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--local-base <full-commit-sha>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--local-base <full-commit-sha>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -248,8 +248,23 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   --local-base <full-commit-sha> explicitly opts a fresh ship/scout into locally
+#   verified freshness on Treehouse-backed tmux/herdr/zellij/cmux only, never
+#   Orca, secondmates, relaunch, or batch. Requires a clean spawning project,
+#   a locally available commit exactly matching the symbolic origin/HEAD tip,
+#   and Treehouse get support for --no-fetch and --base. Acquisition passes both
+#   flags with the verified default branch (Treehouse accepts branch names, not
+#   raw SHAs); any same-named local branch must also match the SHA. Treehouse's
+#   update check is disabled for this acquisition. Subsequent checks read local
+#   refs only, require the same tip and acquired HEAD, and never fetch or reset.
+#   The acquired copy must be a recognizable Treehouse slot of this repository with a claimable
+#   owner record. Missing objects (including promisor objects) refuse rather than
+#   fetching. This proves explicit locally verified freshness, NOT that the remote
+#   has not advanced since the last authorized sync. Default fetching and all
+#   publication/validation routes are unchanged; network failure never opts in.
+#
 #   Only after this isolation check, every fresh ship or scout requires a clean
-#   task worktree. When an origin configuration is detected, spawn fetches it,
+#   task worktree. Without --local-base, when an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
 #   is detected, spawn skips that remote freshness check and launches from the
 #   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
@@ -651,6 +666,9 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+LOCAL_BASE=
+LOCAL_BASE_SET=0
+LOCAL_BASE_BRANCH=
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
@@ -690,6 +708,10 @@ for a in "$@"; do
     backend)
       BACKEND_ARG=$a
       BACKEND_SET=1
+      ;;
+    local-base)
+      LOCAL_BASE=$a
+      LOCAL_BASE_SET=1
       ;;
     mode)
       MODE=$a
@@ -744,6 +766,11 @@ for a in "$@"; do
   --backend=*)
     BACKEND_ARG=${a#--backend=}
     BACKEND_SET=1
+    ;;
+  --local-base) want_value=local-base ;;
+  --local-base=*)
+    LOCAL_BASE=${a#--local-base=}
+    LOCAL_BASE_SET=1
     ;;
   --mode) want_value=mode ;;
   --mode=*)
@@ -800,6 +827,18 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+  if ! [[ "$LOCAL_BASE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    echo "error: --local-base requires a concrete full lowercase commit SHA" >&2
+    exit 1
+  fi
+  if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+    echo "error: --local-base applies only to fresh ship/scout launches" >&2
+    exit 1
+  fi
+  # Git must not satisfy an object read by fetching from a promisor remote.
+  export GIT_NO_LAZY_FETCH=1
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1465,6 +1504,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+    echo "error: --local-base does not support batch launch; verify each project's commit separately" >&2
+    exit 1
+  fi
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1656,6 +1699,12 @@ if [ "$RELAUNCH" -eq 0 ]; then
     BACKEND=$BACKEND_ARG
   else
     BACKEND=$(fm_backend_name)
+  fi
+  if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+    case "$BACKEND" in
+    tmux | herdr | zellij | cmux) ;;
+    *) echo "error: --local-base requires a Treehouse-backed tmux/herdr/zellij/cmux launch, not '$BACKEND'" >&2; exit 1 ;;
+    esac
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
@@ -3341,6 +3390,60 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+verify_spawn_local_base() { # <repository> - reads only local origin/HEAD and objects
+  local repository=$1 ref tip commit branch local_tip
+  ref=$(git -C "$repository" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null) || ref=
+  case "$ref" in
+  refs/remotes/origin/?*) ;;
+  *) echo "error: --local-base requires an unambiguous local symbolic origin/HEAD" >&2; return 1 ;;
+  esac
+  commit=$(git -C "$repository" rev-parse --verify --quiet "$LOCAL_BASE^{commit}" 2>/dev/null) || commit=
+  tip=$(git -C "$repository" rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) || tip=
+  if [ "$commit" != "$LOCAL_BASE" ] || [ "$tip" != "$LOCAL_BASE" ]; then
+    echo "error: --local-base '$LOCAL_BASE' must be a locally available commit exactly matching '$ref' ('${tip:-missing}'); refusing without fetching" >&2
+    return 1
+  fi
+  branch=${ref#refs/remotes/origin/}
+  local_tip=
+  if git -C "$repository" show-ref --verify --quiet "refs/heads/$branch"; then
+    local_tip=$(git -C "$repository" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null) || {
+      echo "error: --local-base local branch '$branch' has no locally available commit; refusing without fetching" >&2
+      return 1
+    }
+  fi
+  if [ -n "$local_tip" ] && [ "$local_tip" != "$LOCAL_BASE" ]; then
+    echo "error: --local-base local branch '$branch' differs from the verified remote-tracking tip; refusing ambiguous Treehouse base selection" >&2
+    return 1
+  fi
+  if [ -n "$LOCAL_BASE_BRANCH" ] && [ "$branch" != "$LOCAL_BASE_BRANCH" ]; then
+    echo "error: --local-base default branch changed during acquisition; refusing to launch" >&2
+    return 1
+  fi
+  LOCAL_BASE_BRANCH=$branch
+}
+
+preflight_spawn_local_base() {
+  local status help
+  status=$(git -C "$PROJ_ABS" status --porcelain) || {
+    echo "error: --local-base could not inspect spawning project cleanliness" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: --local-base spawning project is not clean; leaving it untouched" >&2
+    return 1
+  fi
+  verify_spawn_local_base "$PROJ_ABS" || return 1
+  help=$(TREEHOUSE_NO_UPDATE_CHECK=1 fm_run_timed 10 treehouse get --help 2>&1) || {
+    echo "error: --local-base could not verify Treehouse get support" >&2
+    return 1
+  }
+  if ! grep -Eq -- '(^|[[:space:]])--no-fetch([[:space:]]|$)' <<< "$help" ||
+     ! grep -Eq -- '(^|[[:space:]])--base([[:space:]]|$)' <<< "$help"; then
+    echo "error: --local-base requires Treehouse get support for --no-fetch and --base" >&2
+    return 1
+  fi
+}
+
 freshen_spawn_worktree_base() { # <worktree>
   local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -3354,6 +3457,15 @@ freshen_spawn_worktree_base() { # <worktree>
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi
     return 1
+  fi
+  if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+    verify_spawn_local_base "$PROJ_ABS" && verify_spawn_local_base "$worktree" || return 1
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$LOCAL_BASE" ]; then
+      echo "error: --local-base acquired HEAD '${actual:-unknown}', expected '$LOCAL_BASE'; refusing without reset" >&2
+      return 1
+    fi
+    return 0
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     return 0
@@ -3470,6 +3582,10 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
     ;;
   esac
 }
+
+if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+  preflight_spawn_local_base || exit 1
+fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
@@ -4249,7 +4365,11 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$LOCAL_BASE_SET" -eq 1 ]; then
+    spawn_send_text_line "$WT_TARGET" "GIT_NO_LAZY_FETCH=1 TREEHOUSE_NO_UPDATE_CHECK=1 treehouse get --no-fetch --base $(shell_quote "$LOCAL_BASE_BRANCH")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4322,6 +4442,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # under its successor.
   # Written under the Treehouse project lock held from before slot allocation
   # through metadata publication, so no other spawn or return sees a half-claim.
+  if [ "$LOCAL_BASE_SET" -eq 1 ] && ! fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+    echo "error: --local-base acquired copy has ambiguous Treehouse ownership for '$PROJ_ABS'; refusing to launch" >&2
+    exit 1
+  fi
   if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
       echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing to launch a worker whose slot cannot later be proved to be its own; inspect window $T" >&2
