@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -130,14 +130,23 @@
 #   authority, and every ambiguous recovery stays on the flat fallback after
 #   duplicate-agent risk is independently absent. Treehouse allocation and task
 #   metadata are unchanged.
-#   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
-#   contention warns and falls back to the ordinary flat layout before any
-#   projection mutation. The exact response-derived new workspace is inserted
-#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
-#   child block. Ordering never authorizes lifecycle cleanup, and any
-#   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   A clean projected create and an exact resume both hold the one
+#   session-scoped presentation-order lock (keyed by named session plus
+#   canonical socket, outside any home's state/) through launch handoff.
+#   On contention a create makes one bounded attempt and falls back to the
+#   ordinary flat layout before any projection mutation. A resume refuses by
+#   default on the same contention (it does not degrade flat; a concurrent
+#   resume is a hard failure). Pass --herdr-resume-lock-wait to opt that
+#   resume into waiting for the lock instead, so two concurrent recoveries
+#   can serialize and each still replace its own exact husk. The flag acts
+#   only on that fresh ship or scout spawn path: --relaunch reuses the
+#   recorded endpoint without taking this lock, so the flag has no effect
+#   there, and a secondmate spawn never projects. Unbounded
+#   blocking on a third-party session lock is never the default. The exact
+#   response-derived new workspace is inserted immediately after its owning
+#   parent (firstmate or 2ndmate-<id>) contiguous child block. Ordering never
+#   authorizes lifecycle cleanup, and any unavailable, ambiguous, or failed
+#   move warns while the spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -664,6 +673,9 @@ YOLO_SET=0
 BRANCH_PREFIX_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+# Opt-in only: exact-resume presentation-order lock waits instead of refusing.
+# Absent/unset keeps upstream refuse-on-contention. See header.
+HERDR_RESUME_LOCK_WAIT=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -725,6 +737,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --herdr-resume-lock-wait) HERDR_RESUME_LOCK_WAIT=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -1390,14 +1403,30 @@ spawn_abort_cleanup() {
 }
 trap spawn_abort_cleanup EXIT
 
-# One bounded lock per live Herdr session/socket, shared across all homes.
-# <session> is required so secondmate and primary spawns serialize against the
-# same session without writing any other home's state directory.
+# One lock per live Herdr session/socket, shared across all homes. <session>
+# is required so secondmate and primary spawns serialize against the same
+# session without writing any other home's state directory.
+#
+# Default mode is one BOUNDED attempt. A clean create uses that default and
+# falls back to the ordinary flat layout on contention. An exact resume also
+# defaults to the bounded attempt and hard-refuses on contention (it does not
+# degrade flat). Passing mode `wait` makes this call WAIT for the lock instead
+# (`fm_lock_acquire_wait`, the same unbounded-wait idiom this file already uses
+# for its other fleet-shared locks). Only the recovery path under the explicit
+# --herdr-resume-lock-wait opt-in passes `wait`, so unbounded blocking on a
+# third-party session lock never becomes the default for every caller.
+# Dead-owner reclaim inside `fm_lock_try_acquire` still bounds a wait against a
+# holder that crashed mid-hold.
 spawn_herdr_presentation_order_lock_acquire() {
-  local session=${1:-} attempt lock_path
+  local session=${1:-} mode=${2:-} attempt lock_path
   [ -n "$session" ] || session=$(fm_backend_herdr_session)
   lock_path=$(fm_backend_herdr_presentation_session_lock_path "$session") || return 1
   HERDR_PRESENTATION_ORDER_LOCK="$lock_path"
+  if [ "$mode" = wait ]; then
+    fm_lock_acquire_wait "$HERDR_PRESENTATION_ORDER_LOCK"
+    HERDR_PRESENTATION_ORDER_LOCK_HELD=1
+    return 0
+  fi
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     if fm_lock_try_acquire "$HERDR_PRESENTATION_ORDER_LOCK"; then
@@ -1472,6 +1501,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$MODE_SET" -eq 0 ] || shared_args+=(--mode "$MODE")
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
+  [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
   for pair in "${POS[@]}"; do
     case "$pair" in
     *=*) : ;;
@@ -3654,10 +3684,19 @@ else
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
           exit 1
         }
-        spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
-          echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
-          exit 1
-        }
+        # Refuse-by-default on contention. Wait only when the caller opted in
+        # with --herdr-resume-lock-wait (see header).
+        if [ "$HERDR_RESUME_LOCK_WAIT" = 1 ]; then
+          spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" wait || {
+            echo "error: herdr presentation recovery could not resolve its session lock" >&2
+            exit 1
+          }
+        else
+          spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+            echo "error: herdr presentation recovery could not acquire its session lock; refusing a concurrent resume" >&2
+            exit 1
+          }
+        fi
         if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
           herdr_projection_existing_meta_allows_flat "$STATE/$ID.meta" || exit 1
         fi
