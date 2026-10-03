@@ -6,6 +6,12 @@
 # newer branch outcome, OPEN DECISIONS, captain-call record divergence, and on
 # a supervision-host home the supervision session's new and unprocessed
 # outcomes (BRANCH OUTCOMES), then assert liveness.
+# --list-open-decisions prints every current decision and recorded moot closure
+# without claiming or acknowledging queue rows. The ordinary view prints live
+# decisions newest first, closes at most 20 torn-down keys per drain, and folds
+# the remainder into a count. FM_OPEN_DECISIONS_MAX_ROWS (default 10000) is an
+# emergency live-row limit; any omitted live rows are named loudly with this
+# full-list command, never silently swallowed by the former 4 KB byte cap.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
@@ -43,6 +49,7 @@ RECOVERY_MARKER_TOKEN=
 RECOVERY_ACK_REQUIRED=false
 RECOVERY_ACK_MOVED=false
 ACK_THROUGH=
+LIST_OPEN=0
 ACK_GENERATION=
 ACK_REMOVED=0
 PRESENTED_MAX=0
@@ -219,6 +226,7 @@ presented_max_row() { # <rows-file>
 
 case "${1:-}" in
   '') ;;
+  --list-open-decisions) [ "$#" -eq 1 ] || exit 2; LIST_OPEN=1 ;;
   --ack-through)
     ACK_THROUGH=${2:-}
     case "$ACK_THROUGH" in ''|*[!0-9]*) echo "wake drain: invalid acknowledgement sequence" >&2; exit 2 ;; esac
@@ -228,10 +236,10 @@ case "${1:-}" in
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--list-open-decisions|--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
 esac
 
-[ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
+[ "$ACTOR" != branch ] || [ "$LIST_OPEN" -eq 1 ] || require_branch_eligible_rows || exit 1
 
 # Defense in depth for the supervision chain: this script runs at the top of
 # every wake-handling and recovery turn, so assert supervision health here too. A
@@ -450,6 +458,31 @@ EOF
   [ "$shown" -gt 0 ] || return 0
 }
 
+# A task with no metadata has been torn down. Close its orphaned decisions in
+# the same status stream that owns their open/closed state, with a durable reason.
+# The per-task metadata lock prevents racing a new incarnation of that task.
+close_torn_down_decision() { # <task> <key>
+  local task=$1 key=$2 meta="$STATE/$1.meta" status="$STATE/$1.status" lock open row found=0 rc=0
+  case "$key" in captain-hold-*|pending-reply-*|remote-reply-continuity-*) return 1 ;; esac
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ] && [ -f "$status" ] && [ ! -L "$status" ]; then
+    open=$(status_open_decisions "$status")
+    while IFS= read -r row; do
+      case "$row" in "$key"$'\t'*) found=1; break ;; esac
+    done <<EOF
+$open
+EOF
+    if [ "$found" -eq 1 ]; then
+      fm_wake_status_append_self_announced "$STATE" "$status" \
+        "resolved [key=$key]: moot: task metadata absent after teardown" || rc=$?
+      if [ "$rc" -le 1 ]; then rc=0; else rc=1; fi
+    fi
+  fi
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
@@ -466,50 +499,99 @@ EOF
 # Bounded and silent: prints nothing when no decision is open, which is the
 # common case.
 print_open_decisions_section() {
-  local snapshot=${1:-} open task key verb note line item_bytes=220 global_bytes=4000
-  local output='' used=0 shown=0 omitted=0 bytes
-
-  if [ -n "$snapshot" ]; then
+  local snapshot=${1:-} open task key verb note line item_bytes=220 origin epoch age now threshold
+  local rows='' rank meta max_rows shown=0 terminal_count=0 omitted_live=0 moot_closed=0
+  max_rows=${FM_OPEN_DECISIONS_MAX_ROWS:-10000}
+  case "$max_rows" in ''|0|0*|*[!0-9]*) max_rows=10000 ;; esac
+  [ "${#max_rows}" -le 9 ] || max_rows=10000
+  if [ "$LIST_OPEN" -eq 1 ]; then
+    open=$(scan_open_decisions "$STATE") || return 1
+  elif [ -n "$snapshot" ]; then
     open=$(scan_open_decisions_snapshot "$STATE" "$snapshot") || return 1
   else
     open=$(scan_open_decisions_incremental "$STATE") || return 1
   fi
   [ -n "$open" ] || return 0
+  now=$(date +%s)
+  threshold=$(fm_decision_age_threshold)
 
   while IFS=$(printf '\t') read -r task key verb note; do
     [ -n "$task" ] || continue
-    line="$task"
-    [ "$key" = default ] || line="$line [key=$key]"
-    line="$line $verb: $note"
-    # The shared cut counts the item's own characters; the trailing newline this
-    # section's global budget also pays for is this caller's, so the per-item
-    # allowance passed down is one short of the cap.
-    fm_cap_line_var "$line" $((item_bytes - 1))
-    line=$FM_LINE_CAP_LINE
-    bytes=$(( ${#line} + 1 ))
-    if [ $((used + bytes)) -gt "$global_bytes" ]; then
-      omitted=$((omitted + 1))
+    meta="$STATE/$task.meta"
+    rank=0
+    if [ -e "$meta" ] || [ -L "$meta" ]; then rank=1; fi
+    if [ "$rank" -eq 0 ] && [ "$LIST_OPEN" -eq 0 ]; then
+      terminal_count=$((terminal_count + 1))
+      if [ "$moot_closed" -lt 20 ] && close_torn_down_decision "$task" "$key"; then
+        moot_closed=$((moot_closed + 1))
+      fi
       continue
     fi
-    output="$output$line
-"
-    used=$((used + bytes))
-    shown=$((shown + 1))
+    epoch=0
+    origin=$(status_open_decision_origin "$STATE/$task.status" "$key") || origin=''
+    [ -z "$origin" ] || epoch=${origin%% *}
+    line="$task"
+    [ "$key" = default ] || line="$line [key=$key]"
+    if [ "$epoch" -gt 0 ]; then
+      age=$((now - epoch))
+      [ "$age" -ge 0 ] || age=0
+      line="$line [age=${age}s]"
+      if [ "$verb" = needs-decision ] && [ "$age" -ge "$threshold" ]; then
+        line="$line [actionable: unanswered]"
+      fi
+    else
+      line="$line [age=unknown]"
+    fi
+    line="$line $verb: $note"
+    fm_cap_line_var "$line" $((item_bytes - 1))
+    line=$FM_LINE_CAP_LINE
+    rows="${rows}${rank}"$'\t'"${epoch}"$'\t'"${line}"$'\n'
   done <<EOF
 $open
 EOF
-
-  [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
+  [ -n "$rows" ] || [ "$terminal_count" -gt 0 ] || return 0
   printf 'OPEN DECISIONS (still open, folded from the durable status logs - not just the latest line):\n' || return 1
-  printf '%s' "$output" || return 1
-  if [ "$omitted" -gt 0 ]; then
-    printf 'OPEN DECISIONS: %d more omitted (byte cap)\n' "$omitted" || return 1
+  while IFS=$'\t' read -r rank epoch line; do
+    [ -n "$line" ] || continue
+    if [ "$LIST_OPEN" -eq 0 ] && [ "$shown" -ge "$max_rows" ]; then
+      omitted_live=$((omitted_live + 1))
+      continue
+    fi
+    printf '%s\n' "$line" || return 1
+    shown=$((shown + 1))
+  done <<EOF
+$(printf '%s' "$rows" | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2nr)
+EOF
+  if [ "$terminal_count" -gt 0 ]; then
+    printf 'OPEN DECISIONS: %d terminal decisions folded; list: bin/fm-wake-drain.sh --list-open-decisions\n' "$terminal_count" || return 1
+  fi
+  if [ "$omitted_live" -gt 0 ]; then
+    printf 'OPEN DECISIONS: %d LIVE DECISIONS OMITTED; list: bin/fm-wake-drain.sh --list-open-decisions\n' "$omitted_live" || return 1
   fi
   # Answerer-closes hint, printed at exactly the moment an answer gets written:
   # the send that answers a listed decision also closes it, so closure never
   # depends on the busy worker writing a matching resolved line (contract:
   # bin/fm-send.sh header).
   printf "OPEN DECISIONS: close one by answering it: bin/fm-send.sh <task> --resolve-key <key> '<answer>'\n" || return 1
+}
+
+print_moot_decisions_section() {
+  local f task line key note printed=0
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    task=${f##*/}; task=${task%.status}
+    while IFS= read -r line || [ -n "$line" ]; do
+      [ "$(status_line_verb "$line")" = resolved ] || continue
+      note=$(status_line_note "$line")
+      [ "$note" = 'moot: task metadata absent after teardown' ] || continue
+      key=$(_fm_decision_key "$line") || continue
+      if [ "$printed" -eq 0 ]; then
+        printf 'MOOT DECISIONS (closed with a recorded reason):\n' || return 1
+      fi
+      printf '%s [key=%s] resolved: %s\n' "$task" "$key" "$note" || return 1
+      printed=$((printed + 1))
+    done < "$f"
+  done
 }
 
 # Print the RECORD DIVERGENCE section: every captain call whose two records
@@ -823,6 +905,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [ "$LIST_OPEN" -eq 1 ]; then
+  print_open_decisions_section
+  print_moot_decisions_section
+  exit $?
+fi
 
 if [ -n "$ACK_THROUGH" ]; then
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"

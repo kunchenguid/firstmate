@@ -84,6 +84,10 @@
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: decision unanswered <age>s: <task> <key> after
+#                          FM_DECISION_AGE_SECS (default 900); per-key opener
+#                          backoff rechecks after 15, 30, then 60 minutes at
+#                          the default threshold, until a matching resolution
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -951,7 +955,7 @@ secondmate_ring_to_drain() {  # <task> <window>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
-  local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
+  local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w row_threshold
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -1010,7 +1014,13 @@ EOF
     fi
     [ "$episode_alerted" -eq 0 ] || continue
     idle=$((now - observed_at))
-    [ "$idle" -ge "$threshold" ] || continue
+    row_threshold=$threshold
+    case "$_row_payload" in
+      'check: decision unanswered '*|'decision unanswered '*)
+        [ "$row_threshold" -ge "$(fm_decision_age_threshold)" ] || row_threshold=$(fm_decision_age_threshold)
+        ;;
+    esac
+    [ "$idle" -ge "$row_threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     ! secondmate_in_active_turn "$w" "$idle" || continue
     already_rung=0
@@ -1041,6 +1051,78 @@ EOF
     wake "$reason"
   done
   return 0
+}
+
+# A status decision can be buried by later routine appends, so inspect the
+# authoritative open set independently of signal/stale classification. The
+# marker identifies one opener within one spawn generation; its next due time
+# survives watcher restarts, while the queue key prevents a crash between append
+# and marker write from publishing the same generation twice.
+decision_age_tick() {
+  local now threshold cap open task key verb note origin epoch position age meta generation identity marker queue_key
+  local recorded next interval next_interval queued tmp current current_key current_verb current_note still_open
+  now=$(date +%s)
+  threshold=$(fm_decision_age_threshold)
+  cap=$((threshold * 4))
+  open=$(scan_open_decisions_incremental "$STATE") || return 1
+  [ -n "$open" ] || return 0
+  while IFS=$'\t' read -r task key verb note; do
+    [ "$verb" = needs-decision ] || continue
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    meta="$STATE/$task.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    origin=$(status_open_decision_origin "$STATE/$task.status" "$key") || continue
+    epoch=${origin%% *}
+    position=${origin#* }
+    [ "$now" -ge "$epoch" ] || continue
+    age=$((now - epoch))
+    [ "$age" -ge "$threshold" ] || continue
+    generation=$(fm_meta_get "$meta" spawn_gen 2>/dev/null || true)
+    [ -n "$generation" ] || generation=$(_fm_open_decisions_file_ident "$STATE/$task.status")
+    identity=$(printf '%s' "$task|$key|$generation|$position|$epoch" | hash_pane)
+    marker="$STATE/.decision-age-$(printf '%s' "$task|$key" | hash_pane)"
+    [ ! -L "$marker" ] || return 1
+    recorded=$(cat "$marker" 2>/dev/null || true)
+    next=0
+    interval=$threshold
+    if [ "${recorded%% *}" = "$identity" ]; then
+      recorded=${recorded#* }
+      next=${recorded%% *}
+      interval=${recorded#* }
+      case "$next:$interval" in *[!0-9:]*|:*) next=0; interval=$threshold ;; esac
+    fi
+    [ "$now" -ge "$next" ] || continue
+    # The cursor snapshot and the append are separate reads. Recheck due keys
+    # against the current fold so an answer written during this tick wins.
+    current=$(status_open_decisions "$STATE/$task.status")
+    still_open=0
+    while IFS=$'\t' read -r current_key current_verb current_note; do
+      if [ "$current_key" = "$key" ] && [ "$current_verb" = needs-decision ]; then
+        still_open=1
+        break
+      fi
+    done <<EOF
+$current
+EOF
+    [ "$still_open" -eq 1 ] || continue
+    [ "$(status_open_decision_origin "$STATE/$task.status" "$key" || true)" = "$origin" ] || continue
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    queue_key="decision-age:$identity"
+    queued=$(fm_wake_queued_keys check)
+    printf '%s\n' "$queued" | grep -Fx "$queue_key" >/dev/null 2>&1 && continue
+    fm_wake_append check "$queue_key" "check: decision unanswered ${age}s: $task $key" || return 1
+    next_interval=$((interval * 2))
+    [ "$next_interval" -le "$cap" ] || next_interval=$cap
+    tmp=$(mktemp "$STATE/.decision-age.XXXXXX") || return 1
+    if ! printf '%s %s %s\n' "$identity" "$((now + interval))" "$next_interval" > "$tmp" \
+      || ! mv -f "$tmp" "$marker"; then
+      rm -f "$tmp"
+      return 1
+    fi
+    wake "check: decision unanswered ${age}s: $task $key"
+  done <<EOF
+$open
+EOF
 }
 
 # The ordinary-supervision half of the secondmate liveness guarantee, paired
@@ -2991,6 +3073,14 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+
+  # A fresh status signal gets its bounded delta read and its own wake first.
+  # Quiet cycles still recheck aged decisions, including those buried below
+  # unrelated appends after the supervisor missed the original signal.
+  decision_age_tick || {
+    echo "watcher: decision-age scan failed" >&2
+    exit 1
+  }
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct

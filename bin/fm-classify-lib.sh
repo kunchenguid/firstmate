@@ -904,6 +904,42 @@ status_open_decisions() {  # <status-file> [<kind>]
   printf '%s' "$open"
 }
 
+# Locate the most recent valid opener for a key already present in the open set.
+# The fold above decides whether it is still open; this reader only supplies its
+# event time and append position for age reporting and wake deduplication.
+# Unstamped events have unknown age, as required by the event-time contract.
+status_open_decision_origin() {  # <status-file> <open-key> -> <epoch> <line-number>
+  local f=$1 wanted=$2 line verb key note epoch='' found='' number
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  # The file scan is done by awk so a long status history costs one native
+  # streaming pass, with Bash grammar checks only for candidate opener lines.
+  # The awk predicate is deliberately a superset: the canonical parsers below
+  # still decide whether a candidate really opens this key.
+  while IFS=$'\t' read -r number line; do
+    status_line_verb "$line" verb
+    case "$verb" in needs-decision|blocked) ;; *) continue ;; esac
+    key=$(_fm_decision_key "$line") || continue
+    [ "$key" = "$wanted" ] || continue
+    note=$(status_line_note "$line")
+    _fm_decision_key_transition_allowed "$key" "$note" || continue
+    epoch=$(status_line_at_epoch "$line") || epoch=''
+    found=$number
+  done < <(awk -v key="$wanted" '
+    /needs-decision|blocked/ && (key == "default" || index($0, "[key=" key "]")) {
+      printf "%d\t%s\n", NR, $0
+    }
+  ' "$f")
+  [ -n "$found" ] && [ -n "$epoch" ] || return 1
+  printf '%s %s\n' "$epoch" "$found"
+}
+
+fm_decision_age_threshold() {
+  local value=${FM_DECISION_AGE_SECS:-900}
+  case "$value" in ''|0|0*|*[!0-9]*) value=900 ;; esac
+  [ "${#value}" -le 9 ] || value=900
+  printf '%s' "$value"
+}
+
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
 # fold's most recently opened record supplies it; a standing declared wait, then

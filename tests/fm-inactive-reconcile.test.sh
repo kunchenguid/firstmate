@@ -1076,4 +1076,22 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 
+test_open_decision_prevents_inactive_terminal_outcome() {
+  local now err
+  make_world open-decision; write_child "$MAIN" child 'done: unrelated milestone'
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 120))" >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  : > "$MAIN/state/.wake-queue"
+  err="$WORLD/decision.err"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup 2> "$err"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "open decision was reported as terminal"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "open decision created a terminal receipt"
+  grep -F 'waiting on decision publication for ' "$err" >/dev/null \
+    || fail "inactive reconciliation did not explain the decision wait"
+  pass "an open keyed decision prevents an inactive terminal report"
+}
+test_open_decision_prevents_inactive_terminal_outcome
+
 echo "all inactive reconciliation tests passed"

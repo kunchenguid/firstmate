@@ -497,6 +497,7 @@ report_child() { # <id>
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local open key decision_key decision_verb decision_note origin decision_age
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -518,6 +519,24 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   if [ -n "$self" ]; then
     child_terminal_ledger_line "$status" >/dev/null
     case "$?" in 0|2) return 0 ;; esac
+  fi
+  open=$(status_open_decisions "$status" "$kind")
+  decision_key=
+  while IFS=$'\t' read -r key decision_verb decision_note; do
+    [ "$decision_verb" = needs-decision ] || continue
+    decision_key=$key
+    break
+  done <<EOF
+$open
+EOF
+  if [ -n "$decision_key" ]; then
+    decision_age=unknown
+    if origin=$(status_open_decision_origin "$status" "$decision_key"); then
+      decision_age="$(( $(date +%s) - ${origin%% *} ))s"
+      case "$decision_age" in -*) decision_age=0s ;; esac
+    fi
+    printf 'waiting on decision %s for %s: child=%s\n' "$decision_key" "$decision_age" "$id" >&2
+    return 0
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;

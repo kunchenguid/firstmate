@@ -2,6 +2,7 @@ Mode: Claude Stop-hook-owned supervision.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
+   Treat an OPEN DECISIONS row marked `[actionable: unanswered]` as a decision to reconcile this turn.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Routine watcher arm and re-arm are owned by the Stop `asyncRewake` hook (`bin/fm-claude-stop-autoarm.sh`), never by you.
    Every turn end while supervision is needed launches or attaches one home-scoped watcher cycle with no model command and no model tokens.

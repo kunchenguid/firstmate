@@ -15,6 +15,12 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-drain-open-decisions-tests)
 
+mark_live() { # <state> <task>...
+  local state=$1 task
+  shift
+  for task in "$@"; do printf 'kind=ship\n' > "$state/$task.meta"; done
+}
+
 test_buried_decision_still_surfaces() {
   local dir state out
   dir=$(make_case buried)
@@ -26,6 +32,7 @@ test_buried_decision_still_surfaces() {
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task1.status"
   printf 'working: continuing other work\n' >> "$state/task1.status"
   printf 'resolved [key=other]: unrelated decision closed\n' >> "$state/task1.status"
+  mark_live "$state" task1
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a buried decision"
 
@@ -67,6 +74,7 @@ test_reserved_key_namespace_is_owned_by_its_library() {
   printf 'blocked [key=pending-reply-abcdef0123456789]: pending-reply-missed: task=ios pending-reply-id=abcdef0123456789 request=ship it\n' > "$state/task9.status"
   printf 'blocked [key=pending-reply-abcdef0123456789]: shipping is blocked on infra\n' >> "$state/task9.status"
   printf 'resolved [key=pending-reply-abcdef0123456789]: all good now\n' >> "$state/task9.status"
+  mark_live "$state" task9
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on reserved-key lines"
 
@@ -94,6 +102,7 @@ test_later_unrelated_terminal_line_does_not_close_it() {
   # "default" key; it must never clear the still-open api-shape decision.
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task3.status"
   printf 'done: unrelated later milestone\n' >> "$state/task3.status"
+  printf 'kind=secondmate\n' > "$state/task3.meta"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after an unrelated terminal line"
 
@@ -130,6 +139,7 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake() {
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$state/task6.status"
   printf 'working: continuing\n' >> "$state/task6.status"
   printf 'blocked: waiting on credentials\n' > "$state/task7.status"
+  mark_live "$state" task6 task7
   append_wake "$state" signal task7.status "blocked: waiting on credentials" \
     || fail "queueing the unrelated wake failed"
 
@@ -150,6 +160,7 @@ test_buried_decision_surfaces_on_the_empty_queue_fast_path() {
   # open on disk - session-start relies on exactly this path.
   printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task8.status"
   printf 'working: continuing\n' >> "$state/task8.status"
+  mark_live "$state" task8
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "empty-queue drain failed"
 
@@ -167,10 +178,11 @@ test_status_symlink_is_not_followed() {
   printf 'needs-decision [key=local]: keep this visible\n' > "$state/local.status"
   printf 'needs-decision [key=foreign]: do not expose this\n' > "$dir/outside/foreign.status"
   ln -s ../outside/foreign.status "$state/linked.status"
+  mark_live "$state" local
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed with a symlinked status file"
 
-  grep -F 'local [key=local] needs-decision: keep this visible' "$out" >/dev/null \
+  grep -F 'local [key=local] [age=unknown] needs-decision: keep this visible' "$out" >/dev/null \
     || fail "the valid local decision did not surface alongside a rejected status symlink"
   if grep -F 'do not expose this' "$out" >/dev/null; then
     fail "the fleet scan followed a status symlink outside the state directory"
@@ -193,20 +205,22 @@ test_over_long_decision_note_is_capped_with_a_marker() {
     awk 'BEGIN { while (i++ < 200) printf " and-then-some" }'
     printf '\n'
   } > "$state/task-long.status"
+  mark_live "$state" task-long
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an over-long decision note"
 
   line=$(grep -F 'task-long' "$out")
   case "$line" in
-    'task-long [key=api-shape] needs-decision: pick REST or RPC'*' [truncated]') : ;;
+    'task-long [key=api-shape] [age=unknown] needs-decision: pick REST or RPC'*' [truncated]') : ;;
     *) fail "an over-long decision note was not capped with its lede intact: $line" ;;
   esac
   longest=${#line}
   [ "$longest" -le 219 ] || fail "a capped decision item ran $longest characters past its per-item budget"
 
   printf 'needs-decision [key=short]: brief enough to keep whole\n' > "$state/task-short.status"
+  mark_live "$state" task-short
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on a short decision note"
-  grep -F 'task-short [key=short] needs-decision: brief enough to keep whole' "$out" >/dev/null \
+  grep -F 'task-short [key=short] [age=unknown] needs-decision: brief enough to keep whole' "$out" >/dev/null \
     || fail "a decision note already under the cap was altered"
   if grep -F 'brief enough to keep whole [truncated]' "$out" >/dev/null; then
     fail "a decision note already under the cap was marked truncated"
@@ -224,3 +238,70 @@ test_no_open_decisions_prints_nothing
 test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
+
+test_open_decision_shows_age_and_actionable_threshold() {
+  local dir state out now
+  dir=$(make_case decision-age); state="$dir/state"; out="$dir/drain.out"
+  now=$(date +%s)
+  printf 'needs-decision [key=publication] [at=%s]: approve publication\n' "$((now - 30))" > "$state/docs.status"
+  mark_live "$state" docs
+  FM_STATE_OVERRIDE="$state" FM_DECISION_AGE_SECS=15 "$DRAIN" > "$out" \
+    || fail "drain failed on an aged decision"
+  grep -E 'docs \[key=publication\] \[age=[0-9]+s\] \[actionable: unanswered\] needs-decision:' "$out" >/dev/null \
+    || fail "drain omitted the actionable decision age: $(cat "$out")"
+  pass "an overdue OPEN DECISIONS row includes its age and actionable marker"
+}
+test_open_decision_shows_age_and_actionable_threshold
+
+test_many_terminal_decisions_do_not_hide_newest_live_decision() {
+  local dir state out i now
+  dir=$(make_case crowded-decisions); state="$dir/state"; out="$dir/drain.out"
+  now=$(date +%s)
+  i=0
+  while [ "$i" -lt 150 ]; do
+    i=$((i + 1))
+    printf 'needs-decision [key=old-%s] [at=%s]: stale lane\n' "$i" "$((now - 3600))" > "$state/old-$i.status"
+  done
+  printf 'kind=ship\n' > "$state/live.meta"
+  printf 'needs-decision [key=newest] [at=%s]: approve current publication\n' "$((now - 1200))" > "$state/live.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on 150 older decisions"
+  grep -F 'live [key=newest]' "$out" | grep -F 'approve current publication' >/dev/null \
+    || fail "newest live decision was hidden by terminal decisions"
+  grep -F '150 terminal decisions folded' "$out" >/dev/null \
+    || fail "terminal decisions were not folded into a count"
+  grep -F 'bin/fm-wake-drain.sh --list-open-decisions' "$out" >/dev/null \
+    || fail "folded decisions had no full-list command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --list-open-decisions > "$out" \
+    || fail "full decision list failed"
+  grep -F 'old-1 [key=old-1] resolved: moot: task metadata absent after teardown' "$out" >/dev/null \
+    || fail "torn-down decisions were not closed with a recorded reason"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "second drain failed after moot closure"
+  grep -F '130 terminal decisions folded' "$out" >/dev/null \
+    || fail "closed terminal keys kept accumulating"
+  pass "150 stale terminal decisions cannot hide the newest live decision"
+}
+test_many_terminal_decisions_do_not_hide_newest_live_decision
+
+test_emergency_limit_reports_live_omissions() {
+  local dir state out now
+  dir=$(make_case live-omission); state="$dir/state"; out="$dir/drain.out"
+  now=$(date +%s)
+  printf 'kind=ship\n' > "$state/a.meta"
+  printf 'kind=ship\n' > "$state/b.meta"
+  printf 'needs-decision [key=a] [at=%s]: first\n' "$((now - 1800))" > "$state/a.status"
+  printf 'needs-decision [key=b] [at=%s]: newer\n' "$((now - 1200))" > "$state/b.status"
+  FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_MAX_ROWS=1 "$DRAIN" > "$out" \
+    || fail "drain failed at the emergency row limit"
+  grep -F 'b [key=b]' "$out" >/dev/null || fail "newest live decision was not first"
+  grep -F '1 LIVE DECISIONS OMITTED' "$out" >/dev/null \
+    || fail "an omitted live decision was silent"
+  grep -F 'bin/fm-wake-drain.sh --list-open-decisions' "$out" >/dev/null \
+    || fail "live omission had no full-list command"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" --list-open-decisions > "$out" \
+    || fail "full-list mode failed after a live omission"
+  grep -F 'a [key=a]' "$out" >/dev/null \
+    || fail "full-list mode still omitted the older live decision"
+  pass "an emergency live omission is loud and points to the full list"
+}
+test_emergency_limit_reports_live_omissions

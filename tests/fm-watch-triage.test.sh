@@ -1805,6 +1805,7 @@ test_folded_worker_decision_without_home_append_still_wakes() {
   dir=$(make_case folded-decision-wakes); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
   status_file="$state/task.status"
   printf 'working: building\n' > "$status_file"
+  printf 'kind=ship\n' > "$state/task.meta"
   prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
   printf 'needs-decision [key=k3]: pick a region\n' >> "$status_file"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \

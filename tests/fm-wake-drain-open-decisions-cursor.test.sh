@@ -46,6 +46,7 @@ test_buried_decision_survives_many_growing_drains_and_resolution_clears_it() {
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
   status="$state/task1.status"
+  printf 'kind=ship\n' > "$state/task1.meta"
   : > "$probe"
 
   # Open a keyed decision, buried under an initial filler round big enough to
@@ -117,6 +118,7 @@ test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision() {
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
   status="$state/task2.status"
+  printf 'kind=ship\n' > "$state/task2.meta"
   : > "$probe"
 
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$status"
@@ -150,6 +152,7 @@ test_same_size_rewrite_is_detected_via_inode_identity() {
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
   status="$state/task3.status"
+  printf 'kind=ship\n' > "$state/task3.meta"
   : > "$probe"
 
   printf 'needs-decision [key=migration]: pick the rollout plan\n' > "$status"
@@ -190,6 +193,7 @@ test_read_failure_preserves_state_for_retry() {
   state="$dir/state"
   reader="$dir/fail-reader"
   statusfile="$state/task4.status"
+  printf 'kind=ship\n' > "$state/task4.meta"
   cursor="$state/.task4.open-decisions-cursor"
   out="$dir/drain.out"
 
@@ -228,6 +232,7 @@ test_cursor_cache_read_failure_refolds_without_replaying_unread_status() {
   fakebin="$dir/failbin"
   mkdir -p "$fakebin"
   statusfile="$state/task5.status"
+  printf 'kind=ship\n' > "$state/task5.meta"
   cursor="$state/.task5.open-decisions-cursor"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
@@ -278,6 +283,7 @@ test_pre_fix_cursor_refolds_corr_tagged_decision() {
   dir=$(make_case cursor-corr-tag-migration)
   state="$dir/state"
   status="$state/task7.status"
+  printf 'kind=ship\n' > "$state/task7.meta"
   cursor="$state/.task7.open-decisions-cursor"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
@@ -297,7 +303,7 @@ test_pre_fix_cursor_refolds_corr_tagged_decision() {
 
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "drain failed while migrating the pre-fix corr-tag cursor"
-  grep -F 'task7 [key=loan-installment-cadence-amount] needs-decision: pick the cadence' "$out" >/dev/null \
+  grep -F 'task7 [key=loan-installment-cadence-amount] [age=unknown] needs-decision: pick the cadence' "$out" >/dev/null \
     || fail "the pre-fix cursor hid the corr-tagged decision after migration: $(cat "$out")"
   probe_bytes=$(last_probe_bytes "$probe" "$status")
   [ "$probe_bytes" = "$status_bytes" ] \
@@ -311,6 +317,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   dir=$(make_case cursor-fold-version)
   state="$dir/state"
   status="$state/task6.status"
+  printf 'kind=ship\n' > "$state/task6.meta"
   cursor="$state/.task6.open-decisions-cursor"
   out="$dir/drain.out"
   probe="$dir/probe.tsv"
@@ -338,7 +345,7 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   appended_bytes=$(printf 'needs-decision [key=current]: choose the current path\n' | tee -a "$status" | LC_ALL=C wc -c | tr -d '[:space:]')
   FM_STATE_OVERRIDE="$state" FM_OPEN_DECISIONS_READ_PROBE="$probe" "$DRAIN" > "$out" \
     || fail "same-version incremental drain failed after cache migration"
-  grep -F 'task6 [key=current] needs-decision: choose the current path' "$out" >/dev/null \
+  grep -F 'task6 [key=current] [age=unknown] needs-decision: choose the current path' "$out" >/dev/null \
     || fail "the same-version append did not fold into the migrated open set"
   probe_bytes=$(last_probe_bytes "$probe" "$status")
   [ "$probe_bytes" = "$appended_bytes" ] \
@@ -356,7 +363,7 @@ test_terminal_supersession_reaches_cached_drains() {
       printf 'kind=%s\n' "$kind" > "$state/task.meta"
       printf 'blocked [key=access]: waiting\n' > "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "initial blocked drain failed"
-      assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' "initial blocker must surface"
+      assert_contains "$(cat "$out")" 'task [key=access] [age=unknown] blocked: waiting' "initial blocker must surface"
       printf '%s: report saved\nnote: cleanup complete\n' "$terminal" >> "$status"
       expected=''; closing=$terminal
       if [ "$kind" = secondmate ]; then expected=$'access\tblocked\twaiting'; closing=blocked; fi
@@ -368,7 +375,7 @@ test_terminal_supersession_reaches_cached_drains() {
         fi
         FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "$kind terminal drain failed"
         if [ "$kind" = secondmate ]; then
-          assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' "secondmate blocker must survive $terminal and cache migration"
+          assert_contains "$(cat "$out")" 'task [key=access] [age=unknown] blocked: waiting' "secondmate blocker must survive $terminal and cache migration"
         else
           assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' "$kind pre-terminal blocker resurfaced after $terminal or cache migration"
         fi
@@ -384,8 +391,8 @@ test_terminal_supersession_reaches_cached_drains() {
       fi
       printf 'blocked [key=access]: reopened\nneeds-decision [key=new]: a new decision\nnote: more cleanup\n' >> "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "reopened drain failed"
-      assert_contains "$(cat "$out")" 'task [key=access] blocked: reopened' "post-terminal reopening must surface"
-      assert_contains "$(cat "$out")" 'task [key=new] needs-decision: a new decision' "post-terminal new key must surface"
+      assert_contains "$(cat "$out")" 'task [key=access] [age=unknown] blocked: reopened' "post-terminal reopening must surface"
+      assert_contains "$(cat "$out")" 'task [key=new] [age=unknown] needs-decision: a new decision' "post-terminal new key must surface"
       printf 'resolved [key=access]: answered\nresolved [key=new]: answered\nnote: final cleanup\n' >> "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "resolved drain failed"
       assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' "matching resolutions must close reopened decisions"

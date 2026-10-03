@@ -561,3 +561,17 @@ test_declared_wait_survives_answers_past_the_event_window() {
 test_keyless_wait_survives_stated_default_retraction
 test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
+
+test_hyphenated_captain_hold_resolution_closes_both_folds() {
+  local dir f
+  dir=$(case_dir captain-hold-release)
+  f="$dir/mate.status"
+  printf 'needs-decision [key=captain-hold-t13-dev-promotion-1] [at=1791006055]: promotion review\n' > "$f"
+  printf 'resolved [key=captain-hold-t13-dev-promotion-1] [at=1791023068]: released\n' >> "$f"
+  [ -z "$(status_open_decisions "$f" secondmate)" ] \
+    || fail "whole fold retained the released captain hold"
+  [ -z "$(status_open_decisions_incremental "$f")" ] \
+    || fail "incremental fold retained the released captain hold"
+  pass "a hyphenated captain-hold key closes after its stamped resolution"
+}
+test_hyphenated_captain_hold_resolution_closes_both_folds
