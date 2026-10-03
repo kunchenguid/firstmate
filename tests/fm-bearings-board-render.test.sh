@@ -307,8 +307,8 @@ test_milestone_fields_render_on_the_strip_rows_and_cards() {
     .projects == [
       {repo:"crewhouse", goal:"Chief-only onboarding", date:"release 2026-10-10",
        meta:"next v0.5.0 · last v0.4.1 · 3 merged today · 4 in progress",
-       badges:[{tone:"warn", text:"at risk"}]},
-      {repo:"muxr", goal:"", date:"", meta:"", badges:[{tone:"danger", text:"off track"}]}
+       badges:[{tone:"warn", text:"at risk"}], board:[]},
+      {repo:"muxr", goal:"", date:"", meta:"", badges:[{tone:"danger", text:"off track"}], board:[]}
     ]
   ' >/dev/null || fail "the project strip did not show release goal, date, and health: $out"
   printf '%s' "$out" | jq -e '
@@ -349,7 +349,66 @@ test_an_old_payload_renders_no_milestone_surfaces() {
   pass "a payload without milestone fields renders exactly the pre-milestone board"
 }
 
+# Home-board links on project cards plus image and non-image evidence on every
+# row type that carries evidence_url.
+LINKS_PAYLOAD='{
+  "schema":"fm-bearings-board.v1","home":"render-home","generated":"2026-10-03T12:00Z","prs_live":false,
+  "projects":[
+    {"repo":"ownvoice","health":"G","board_url":"http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9"},
+    {"repo":"takeone","health":"Y"}
+  ],
+  "captains_call":[
+    {"key":"pick-hero","type":"decision","repo":"ownvoice","title":"Hero shot","decide":"Which?",
+     "options":[{"value":"a","label":"A"},{"value":"b","label":"B"}],
+     "evidence_url":"https://example.com/evidence/hero.JPEG?v=2"}
+  ],
+  "underway":[
+    {"id":"ov-rec","repo":"ownvoice","name":"Recorder","state":"working","kind":"ship","doing":"implementing",
+     "evidence_url":"http://extreme.tail0de54.ts.net:8080/recorder.webp"},
+    {"id":"to-clip","repo":"takeone","name":"Clip export","state":"working","kind":"ship","doing":"implementing",
+     "evidence_url":"https://example.com/evidence/clip.mp4"}
+  ],
+  "landed":[
+    {"id":"ov-login","repo":"ownvoice","what":"Login","owner":"ship","evidence_url":"http://extreme.tail0de54.ts.net:8080/login.png"},
+    {"id":"to-page","repo":"takeone","what":"Evidence page","owner":"ship","evidence_url":"https://example.com/evidence/page"},
+    {"id":"to-none","repo":"takeone","what":"No evidence","owner":"ship"},
+    {"id":"ov-local","repo":"ownvoice","what":"Local proof","owner":"ship","evidence_url":"evidence/local-proof.gif"},
+    {"id":"ov-clip","repo":"ownvoice","what":"Local clip","owner":"ship","evidence_url":"evidence/clip.mp4"}
+  ],
+  "charted":[]
+}'
+
+test_project_cards_link_home_boards_and_image_evidence_shows_thumbnails() {
+  local home out
+  home=$(make_home links)
+  out=$(render_payload "$home" "$LINKS_PAYLOAD")
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the links board rendered its error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    [.projects[] | {repo, board}] == [
+      {repo:"ownvoice", board:[{text:"open board ↗",
+        href:"http://extreme.tail0de54.ts.net:4387/session/8e1e7e6e94d5f4b9", target:"_blank", rel:"noopener"}]},
+      {repo:"takeone", board:[]}
+    ]
+  ' >/dev/null || fail "project cards did not link their home board in a new tab, or linked one without board_url: $out"
+  printf '%s' "$out" | jq -e '
+    def thumb($u): [{href:$u, target:"_blank", src:$u, loading:"lazy"}];
+    .calls[0].thumbs == thumb("https://example.com/evidence/hero.JPEG?v=2")
+      and .underway[0].thumbs == thumb("http://extreme.tail0de54.ts.net:8080/recorder.webp")
+      and .landed[0].thumbs == thumb("http://extreme.tail0de54.ts.net:8080/login.png")
+      and .landed[3].thumbs == thumb("evidence/local-proof.gif")
+  ' >/dev/null || fail "image evidence did not render as a lazy new-tab thumbnail of the full image: $out"
+  printf '%s' "$out" | jq -e '
+    .underway[1].thumbs == [] and .underway[1].links == [{text:"evidence", href:"https://example.com/evidence/clip.mp4"}]
+      and .landed[1].thumbs == [] and .landed[1].links == [{text:"evidence", href:"https://example.com/evidence/page"}]
+      and .landed[2].thumbs == [] and .landed[2].links == []
+      and .landed[4].thumbs == [] and .landed[4].links == [{text:"evidence", href:"evidence/clip.mp4"}]
+  ' >/dev/null || fail "non-image or absent evidence did not keep the plain link or nothing: $out"
+  pass "project cards link home boards and image evidence renders as thumbnails"
+}
+
 test_milestone_fields_render_on_the_strip_rows_and_cards
+test_project_cards_link_home_boards_and_image_evidence_shows_thumbnails
 test_an_old_payload_renders_no_milestone_surfaces
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status

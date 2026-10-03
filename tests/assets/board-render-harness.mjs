@@ -4,10 +4,11 @@
 //
 // Usage: node board-render-harness.mjs <built-board.html>
 // Prints one JSON document:
-//   { projects:[{repo,goal,date,meta,badges}], stats:[{n,label}],
-//     underway:[{title,sub,badges,aside,links}],
-//     charted:[{title,sub,badges,pickable,aside,links}],
-//     calls:[{key,ctx:[{k,v}],options:[{value,markers}],links}],
+//   { projects:[{repo,goal,date,meta,badges,board}], stats:[{n,label}],
+//     underway:[{title,sub,badges,aside,links,thumbs}],
+//     landed:[{title,sub,badges,aside,links,thumbs}],
+//     charted:[{title,sub,badges,pickable,aside,links,thumbs}],
+//     calls:[{key,ctx:[{k,v}],options:[{value,markers}],links,thumbs}],
 //     empty, more, error }
 import { readFileSync } from "node:fs";
 
@@ -108,6 +109,12 @@ const findAll = (node, cls) => {
   return out;
 };
 
+// An evidence thumbnail is a new-tab link wrapping one lazy image.
+const thumbsOf = (node) => findAll(node, "bb-thumb").map((a) => {
+  const img = a.children.find((c) => c.tagName === "img");
+  return { href: a.href, target: a.target, src: img?.src ?? "", loading: img?.loading ?? "" };
+});
+
 const projStrip = byId.get("bb-projects") || new Node("div");
 const projects = projStrip.children.map((p) => {
   const top = p.children.find((c) => c.className.includes("bb-proj__top"));
@@ -117,6 +124,7 @@ const projects = projStrip.children.map((p) => {
     date: textOf(p, "bb-proj__date"),
     meta: textOf(p, "bb-proj__meta"),
     badges: badgesOf(top),
+    board: findAll(p, "bb-proj__board").map((a) => ({ text: a.textContent, href: a.href, target: a.target, rel: a.rel })),
   };
 });
 
@@ -131,6 +139,7 @@ const calls = deck.children
       markers: o.children.filter((c) => /bb-opt__(rec|default)/.test(c.className)).map((c) => c.textContent),
     })),
     links: linksOf(card),
+    thumbs: thumbsOf(card),
   }));
 
 const strip = byId.get("bb-stats") || new Node("div");
@@ -151,11 +160,14 @@ const rowsOf = (container) =>
         pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
         aside: findAll(row, "bb-row__aside").map((a) => a.children.map((c) => c.textContent)).flat(),
         links: linksOf(row),
+        thumbs: thumbsOf(row),
       };
     });
 
 const uw = byId.get("bb-underway") || new Node("div");
 const underway = rowsOf(uw);
+
+const landed = rowsOf(byId.get("bb-landed") || new Node("div"));
 
 const ch = byId.get("bb-charted") || new Node("div");
 const charted = rowsOf(ch);
@@ -169,4 +181,4 @@ const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
 process.stdout.write(
-  JSON.stringify({ projects, stats, calls, underway, charted, empty, more, error: errorText }) + "\n");
+  JSON.stringify({ projects, stats, calls, underway, landed, charted, empty, more, error: errorText }) + "\n");

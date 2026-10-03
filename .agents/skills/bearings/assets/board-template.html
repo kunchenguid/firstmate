@@ -164,6 +164,13 @@ a { color: inherit; text-decoration: none; }
 .bb-proj__goal { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.3; }
 .bb-proj__date { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--rust-600); font-weight: 600; }
 .bb-proj__meta { font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--text-muted); }
+.bb-proj__board { align-self: flex-start; font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ocean-600); }
+.bb-proj__board:hover { text-decoration: underline; }
+/* evidence screenshots: a small thumbnail that opens the full image */
+.bb-thumb { flex: none; display: block; line-height: 0; }
+.bb-thumb img { width: 64px; height: 44px; object-fit: cover; border-radius: var(--radius-xs);
+  border: 1.5px solid var(--border-default); background: var(--paper-200); }
+.bb-thumb:hover img { border-color: var(--ocean-500); }
 .bb-cols { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 22px; }
 
 /* ---- Captain's Call: one card at a time, dealt off a visible stack ---- */
@@ -469,6 +476,15 @@ __FM_BEARINGS_BOARD_DATA__
     a.href = url; a.title = url; a.target = "_blank"; a.rel = "noopener";
     return a;
   }
+  /* An image evidence URL becomes a lazy thumbnail; anything else a plain link. */
+  function evidence(cls, text, url) {
+    if (!/\.(png|jpe?g|webp|gif)$/i.test(url.split(/[?#]/)[0])) return link(cls, text, url);
+    var a = link("bb-thumb", null, url);
+    var img = el("img");
+    img.src = url; img.alt = "evidence screenshot"; img.loading = "lazy";
+    a.appendChild(img);
+    return a;
+  }
   /* Warnings ride the charted feed for layout only; they are alarms, not work,
      so every count of queued work excludes them. */
   function isWarning(t) { return t && t.kind === "warning"; }
@@ -509,6 +525,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (p.merges_today != null) meta.push(p.merges_today + " merged today");
     if (p.wip_count != null) meta.push(p.wip_count + " in progress");
     if (meta.length) card.appendChild(el("div", "bb-proj__meta", meta.join(" · ")));
+    if (p.board_url) card.appendChild(link("bb-proj__board", "open board ↗", p.board_url));
     projStrip.appendChild(card);
   });
   projStrip.hidden = !projects.length;
@@ -574,7 +591,7 @@ __FM_BEARINGS_BOARD_DATA__
     }
     if (item.asked_at) ctx.appendChild(ctxRow("asked", item.asked_at));
     if (ctx.children.length) pad.appendChild(ctx);
-    if (item.evidence_url) pad.appendChild(link("bb-decision__link", "evidence: " + item.evidence_url, item.evidence_url));
+    if (item.evidence_url) pad.appendChild(evidence("bb-decision__link", "evidence: " + item.evidence_url, item.evidence_url));
 
     var form = document.createElement("form");
     form.setAttribute("data-lavish-question", item.key);
@@ -708,7 +725,7 @@ __FM_BEARINGS_BOARD_DATA__
     }
     var uh = healthBadge(t.health);
     if (uh) row.appendChild(uh);
-    if (t.evidence_url) row.appendChild(link("bb-row__pr", "evidence", t.evidence_url));
+    if (t.evidence_url) row.appendChild(evidence("bb-row__pr", "evidence", t.evidence_url));
     uw.appendChild(row);
   });
 
@@ -727,6 +744,7 @@ __FM_BEARINGS_BOARD_DATA__
     if (t.pr_url) {
       row.appendChild(link("bb-row__pr", "#" + t.pr_url.split("/").pop(), t.pr_url));
     }
+    if (t.evidence_url) row.appendChild(evidence("bb-row__pr", "evidence", t.evidence_url));
     ld.appendChild(row);
   });
 
