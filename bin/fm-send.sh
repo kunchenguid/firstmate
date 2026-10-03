@@ -68,7 +68,23 @@
 # type the literal
 # text through the target backend's verified submit core: typed ONCE, then
 # Enter retried (never retyped) until the backend confirms a submit or reports
-# an inconclusive send. Typed-plane exit contract: 0 = submit confirmed;
+# an inconclusive send. Before typing, the target's composer is read once
+# through fm_backend_composer_state: an exact `pending` verdict refuses with
+# exit 1 and nothing typed, because the payload could concatenate onto stale
+# text and the composer clearing after Enter would read as a confirmed submit
+# (#1474). The refusal names the target and pending composer on stderr and
+# resets any just-created pending-reply expectation without an inbox fallback.
+# A Herdr Cursor pane is the narrow exception: its busy follow-up
+# placeholder can read `pending` without user text, so fm-send proceeds only
+# when Cursor identity, the rendered busy signal, and the placeholder shape
+# in the selected composer agree; a transcript hint cannot authorize a draft.
+# The submit core then owns its normal busy-pane confirmation. Any other
+# verdict, including `pending-unproven`, `unknown`, and a failed read, proceeds
+# unchanged. Text entered between this check and typing can still concatenate;
+# the check does not lock the composer. The --key path has no such check:
+# `--key Enter` is the documented way to submit
+# pending text.
+# Typed-plane exit contract: 0 = submit confirmed;
 # 3 = the text was typed into the live endpoint and
 # Enter was sent, but the submit read-back stayed unconfirmed (verify the pane
 # before any resend, and never re-type blindly; a marked request's
@@ -541,6 +557,36 @@ fm_send_known_undelivered_cleanup() {
   else
     fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"
   fi
+}
+fm_send_herdr_cursor_busy_placeholder() { # <target>
+  local target=$1 identity content capture
+  [ "$TARGET_BACKEND" = herdr ] || return 1
+  fm_backend_source herdr || return 1
+  identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || return 1
+  [ "${identity%%$'\t'*}" = cursor ] || return 1
+  [ "$(fm_backend_herdr_rendered_busy_state "$target" cursor 2>/dev/null)" = busy ] || return 1
+  # Ghost stripping leaves the caret-over-A cell; Cursor's follow-up hint must
+  # be on that selected composer row, not an earlier transcript row.
+  content=$(fm_backend_herdr_composer_content "$target" 2>/dev/null) || return 1
+  [ "$content" = A ] || return 1
+  capture=$(fm_backend_herdr_visible_capture "$target") || return 1
+  printf '%s\n' "$capture" | awk '
+    index($0, "▄▄▄") {
+      in_box = 1
+      placeholder = 0
+      selected_box = 0
+      next
+    }
+    in_box && index($0, "▀▀▀") {
+      selected_box = placeholder
+      in_box = 0
+      next
+    }
+    in_box && /→[[:space:]]+Add a follow-up[[:space:]]+ctrl\+c to stop/ {
+      placeholder = 1
+    }
+    END { exit selected_box ? 0 : 1 }
+  '
 }
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
@@ -1138,6 +1184,16 @@ else
     *) retries=${FM_SEND_RETRIES:-3} ;;
   esac
   sleep_s=${FM_SEND_SLEEP:-0.4}
+  # The TYPED header owns the pre-type guard, its Herdr Cursor exception,
+  # and the refusal contract; tests/fm-send-inbox.test.sh pins those boundaries.
+  pre_state=$(fm_backend_composer_state "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" 2>/dev/null) ||
+    pre_state=unknown
+  if [ "$pre_state" = pending ] && ! fm_send_herdr_cursor_busy_placeholder "$T"; then
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    echo "error: text not sent to $T: its composer already holds pending unsubmitted text, and typing would concatenate onto it; nothing was typed. Inspect with fm-peek.sh, clear or submit that text, then resend (tried $RESOLUTION_TRIED)" >&2
+    exit 1
+  fi
   # Type once, submit, verify. Only exact empty confirms delivery; every other
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
