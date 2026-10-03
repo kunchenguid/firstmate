@@ -54,6 +54,7 @@
 #   (x) transient lock cleared after first failed return      -> retry ALLOW
 #   (y) persistent lock (never clears, not provably stale)    -> REFUSE loudly
 set -u
+unset USAGE_AXI_HOOK USAGE_AXI_STORE
 
 # shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -4289,12 +4290,33 @@ test_retained_sources_still_reach_the_ordinary_refusal() {
   pass "present required sources still reach the ordinary teardown refusal"
 }
 
+test_usage_capture_teardown() {
+  local case_dir
+  case_dir=$(make_case usage-capture)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/state"
+  cat > "$case_dir/capture hook" <<'SH'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$1/state/captured"
+exit 9
+SH
+  chmod +x "$case_dir/capture hook"
+  FM_HOME="$case_dir" USAGE_AXI_HOOK="$case_dir/capture hook" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || fail "capture failure affected teardown"
+  assert_grep 'task-x1|teardown' "$case_dir/state/captured" "teardown capture missing"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "capture prevented cleanup"
+  pass "teardown captures named task and tolerates capture failure"
+}
+
+
 test_missing_startup_source_refuses_before_cleanup
 test_unreadable_startup_source_refuses_before_cleanup
 test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+
+test_usage_capture_teardown
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note

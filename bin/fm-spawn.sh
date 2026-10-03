@@ -4417,6 +4417,15 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# Opt-in usage-axi capture (usage-axi docs/capture.md): each turn-end hook runs
+# one file test, so it stays off until the hook is installed.
+usage_axi_suffix=""
+pi_usage_callback=""
+if [ -n "${USAGE_AXI_HOOK:-}" ]; then
+  usage_axi_hook="[ ! -x $(shell_quote "$USAGE_AXI_HOOK") ] || $(shell_quote "$USAGE_AXI_HOOK") $(shell_quote "$FM_HOME") $(shell_quote "$ID") stop"
+  usage_axi_suffix="; $usage_axi_hook"
+  pi_usage_callback=", () => execFile(\"bash\", [\"-c\", \"$(json_escape "$usage_axi_hook")\"])"
+fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -4501,7 +4510,7 @@ if [ "$KIND" != secondmate ]; then
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true$usage_axi_suffix")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
@@ -4541,7 +4550,7 @@ EOF
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
       g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
+      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true$usage_axi_suffix; printf '{}'")
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
@@ -4630,7 +4639,7 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]$pi_usage_callback));
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
   let lastProgress = 0;
@@ -5076,6 +5085,15 @@ if [ "$HARNESS" = rovo ]; then
   LAUNCH=${LAUNCH//__ROVOCONFIGOVERRIDE__/$ROVOCONFIGOVERRIDE}
 fi
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
+if [ "$HARNESS" = codex ]; then
+  # Codex's notify command sits in a JSON string inside a double-quoted shell
+  # argument, so escape it for both: JSON first, then \ " $ ` for the shell.
+  sq_turnend=$(json_escape "$sq_turnend$usage_axi_suffix")
+  sq_turnend=${sq_turnend//\\/\\\\}
+  sq_turnend=${sq_turnend//\"/\\\"}
+  sq_turnend=${sq_turnend//\$/\\\$}
+  sq_turnend=${sq_turnend//\`/\\\`}
+fi
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
