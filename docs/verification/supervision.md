@@ -506,6 +506,38 @@ The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM`
 | Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
 | Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
 
+### Codex Stop-owned auto-arm, 2026-09-30
+
+This supports the Codex cooperative guard mode and the Codex auto-arm delivery contract ([turnend-guard.md](../turnend-guard.md) "Cooperative mode (Claude and Codex)"), measured on Linux arm64 in throwaway git projects and isolated lab homes on private tmux sockets, never against a live home. The interactive TUI is the operator surface; `codex exec` facts are noted only where they bound the design.
+
+Mechanism facts established first, in separate throwaway workspaces:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Do project `.codex/hooks.json` Stop hooks fire in the TUI? | recorder hooks, one short prompt | Yes, every turn end; payload snake_case `session_id, turn_id, transcript_path, cwd, hook_event_name, model, permission_mode, stop_hook_active, last_assistant_message`. |
+| Does `"async": true` keep the hook off the turn boundary? | async recorder plus sync hook | Yes; the async hook survives past the turn end and the whole hook tree is reaped at session exit. |
+| Does an async hook's exit 2 re-wake the session (asyncRewake)? | async hook sleeps, exits 2 with a distinctive stderr line | No, on both 0.159.0 and 0.159.2: no new turn, stderr never surfaces. Codex's own external-agent migration skips `asyncRewake` as unsupported. |
+| Can `codex queue` wake an idle session? | `codex queue --thread <payload session_id>` from inside an async Stop hook, pane idle | Yes, on both versions: the idle TUI started a real turn by itself and answered the message (QUEUE_RC=0). Mid-turn it is delivered at the next turn boundary without loss; a dead thread errors gracefully. |
+| Does the wake turn re-fire Stop? | recorder on the wake turn | Yes, with `stop_hook_active: false`, so the re-arm loop closes. |
+| When does the async hook fire relative to a blocked stop? | sync hook always exits 2 while an async recorder runs | The async hook still fires, but its first firing lands 1-3s after the turn end, which is why the cooperative wait defaults to 4000ms for `--codex`; with the old 800ms wait the guard blocked first every time. |
+
+The full loop then ran against the real tracked registration and scripts through the opt-in guard, twice on codex-cli 0.159.2:
+
+```sh
+FM_CODEX_AUTOARM_LIVE_E2E=1 tests/fm-codex-autoarm-live-e2e.test.sh
+# ok - Codex codex-cli 0.159.2 live E2E armed at a real turn end, delivered two actionable closes as queued wake turns, re-armed through the wake Stops, and kept the cooperative guard silent
+```
+
+The live run proves: at a real turn end the async auto-arm reclaimed the stale session-lock owner, armed the watcher with no model-issued arm command, delivered each actionable close as a queued `codex queue` user turn that woke the idle session into a handling turn, re-armed through each wake turn's own Stop, and never forced a guard continuation. The portable suites pin the remaining contract:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-stop-autoarm.test.sh tests/fm-turnend-guard.test.sh tests/fm-supervision-instructions.test.sh
+```
+
+A hazard found live and designed against: an async Stop hook that delivers on every turn end loops wake turns forever on 0.159.2, because each wake turn re-fires Stop. The shipped arm delivers only when the watcher's close output matches the actionable pattern, and a quiet park delivers nothing, so the loop terminates with the fleet's real event stream.
+
+Uncovered on this record: macOS queue and daemon behavior (the installed CLI version matches at 0.159.2, but the Mac secondmate's activation evidence is not refreshed by this run), and a sandboxed session that denies `ps` stays inert by the identity gate rather than being exercised live. The opt-in guard above is the command that refreshes the Linux TUI evidence.
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.

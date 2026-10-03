@@ -71,7 +71,7 @@ The host's header owns the output contract they read.
 | OpenCode | the TUI plugin, `.opencode/plugins/fm-primary-watch-arm.js`, which restarts its own successor after each close | a `watcher` prompt through `promptAsync` |
 | omp | the watch extension, `.omp/extensions/fm-primary-omp-watch.ts`, which restarts its own successor after each close | the extension's `watcher` follow-up |
 | Grok | the model's tracked background call, rendered as `bin/fm-supervision-host.sh park` at session start | the background task's completion notification |
-| Codex | the foreground checkpoint, `bin/fm-watch-checkpoint.sh`, in the watcher's place | the checkpoint's own output |
+| Codex | the Stop auto-arm, `bin/fm-codex-stop-autoarm.sh`, inside its single-flight generation; the failure-path foreground checkpoint, `bin/fm-watch-checkpoint.sh`, also runs it | a queued `codex queue` watcher turn, or the checkpoint's own output |
 
 Hook, plugin, extension, and checkpoint owners pass their harness as the primary pin.
 Grok's model-owned call relies on primary detection.
@@ -152,7 +152,7 @@ A captain message typed while an engine turn is already running reaches the engi
 A captain prompt whose hook write fails is not mirrored, so the engine may judge the next attended wake without it; Claude and Cursor have no later source for it.
 
 Claude and Cursor have writers, proven against the real harness to record the session's dialog from its first captain prompt, so only they run the attended posture.
-Codex has no writer yet: a supervising Codex main stays inside one turn across its foreground checkpoints, so a captain message typed then fires no prompt or Stop hook, and only a reader of its transcript could record it.
+Codex has no writer yet, so no Codex captain prompt is mirrored.
 Grok and OpenCode have no writer, because their session takes the fleet lock during its first turn, so that turn's captain prompt could never be recorded.
 omp has no verified writer, because no omp was available to prove one against.
 
@@ -270,7 +270,7 @@ So it never stops the owner's host or watcher or releases its leases.
 ### A host that dies without a close
 
 The host's owner retries it.
-Grok's model and Codex's checkpoint see it as a failed cycle and start the next one.
+Grok's model, Codex's Stop auto-arm, and Codex's failure-path checkpoint see it as a failed cycle and start the next one.
 Before it arms, the next host does two things:
 
 - It stops, by recorded identity, whatever its predecessor left running, including the engine descendants a killed turn recorded.
@@ -280,7 +280,7 @@ Before it arms, the next host does two things:
 
 The host stays parked across every close it handled itself and exits only when main is needed.
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
-Cursor's `stop` hook carries the same tracked 28,800-second registration.
+Cursor's `stop` hook and Codex's async Stop auto-arm carry the same tracked 28,800-second registration.
 A plain watcher park rarely lasts that long, because heartbeat closes wake main.
 But a host absorbs its own wakes, so it ends its park itself before that registration.
 
@@ -298,6 +298,7 @@ Main drains and acknowledges, and the owner starts the next park:
 | Primary | When the next park starts |
 |---|---|
 | Claude and Cursor | At the next turn end. |
+| Codex | At the end of the queued `watcher:` turn that carried the boundary line. |
 | OpenCode and omp | At once. |
 | Grok | At the model's re-arm. |
 
@@ -309,7 +310,8 @@ One short main turn per boundary is the cost of never losing the park silently.
 
 ### Codex checkpoint bound
 
-Codex has no asynchronous wake, so its checkpoint's own bound is the park.
+This applies only to the failure-path foreground checkpoint; the Stop auto-arm parks under the ordinary boundary above.
+A foreground checkpoint blocks the model, so its own bound is the park.
 The checkpoint passes it as the boundary and reports the boundary as its ordinary quiet line (`checkpoint: no actionable wake within <n>s`).
 
 | Posture | Checkpoint bound |
