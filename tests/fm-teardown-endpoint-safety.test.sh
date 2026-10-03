@@ -1100,6 +1100,56 @@ test_reassigned_ship_without_preserved_branch_refuses_even_with_force() {
   pass "fm-teardown: a reassigned ship needs an independent branch ref even under --force"
 }
 
+test_ship_retry_after_return_and_failed_record_removal() {
+  local dir id=stale-task other=live-task rc real_rm
+  dir=$(make_case ship-return-interrupted)
+  mark_case_as_treehouse_pool "$dir"
+  git -C "$dir/worktree" switch -q -c "fm/$id"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "branch=fm/$id" "kind=ship"
+  claim_pool_slot "$dir" "$id"
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -f ] && [ "\${2:-}" = "$dir/home/state/$id.meta" ]; then
+  exit 1
+fi
+exec "$real_rm" "\$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+
+  rc=0
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "ship teardown succeeded despite failed task-record removal"
+  assert_contains "$(cat "$dir/stderr")" "task record could not be removed" \
+    "ship teardown did not reach the intended interrupted-cleanup boundary"
+  assert_present "$dir/home/state/$id.meta" "failed removal lost the ship record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "failed removal left the returned slot claimed"
+  git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "failed removal lost the ship branch before its record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "failed removal did not return the slot"
+
+  rm "$dir/fakebin/rm"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  : > "$dir/worktree/claimant-sentinel"
+  : > "$dir/runtime.log"
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "returned ship could not retire after slot reassignment: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "retry left the stale ship record"
+  assert_present "$dir/home/state/$other.meta" "retry removed the claimant record"
+  assert_present "$dir/worktree/claimant-sentinel" "retry reset the claimant slot"
+  assert_present "$dir/pool/1/.fm-slot-owner" "retry removed the claimant claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "retry returned the claimant slot: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: interrupted ship cleanup retains branch custody for a reassigned retry"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1522,6 +1572,7 @@ test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_stale_record_on_claimed_slot_retires_then_claimant_tears_down
 test_reassigned_ship_without_preserved_branch_refuses_even_with_force
+test_ship_retry_after_return_and_failed_record_removal
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
