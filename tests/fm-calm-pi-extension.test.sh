@@ -3570,7 +3570,6 @@ export default function (pi: ExtensionAPI): void {
       const fixtures = new Map([
         ["watcher", "CURRENT_WATCHER_E2E /tmp/active-probe.status"],
         ["turn-end-guard", "CURRENT_TURN_END_E2E"],
-        ["away-supervisor", "CURRENT_AWAY_E2E"],
         ["launch-brief", "CURRENT_LAUNCH_BRIEF_E2E"],
       ] as const);
       const kind = args.trim() as Parameters<typeof encodeFirstmateOperationalInput>[0];
@@ -3728,7 +3727,6 @@ JSON
   for fixture in \
     "watcher|CURRENT_WATCHER_E2E" \
     "turn-end-guard|CURRENT_TURN_END_E2E" \
-    "away-supervisor|CURRENT_AWAY_E2E" \
     "launch-brief|CURRENT_LAUNCH_BRIEF_E2E"
   do
     kind=${fixture%%|*}
@@ -3764,7 +3762,6 @@ if (
 const expected = new Map([
   ["CURRENT_WATCHER_E2E", "watcher"],
   ["CURRENT_TURN_END_E2E", "turn-end-guard"],
-  ["CURRENT_AWAY_E2E", "away-supervisor"],
   ["CURRENT_LAUNCH_BRIEF_E2E", "launch-brief"],
 ]);
 const current = entries.filter((entry) =>
@@ -3801,7 +3798,6 @@ JS
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
-    CURRENT_AWAY_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
     assert_not_contains "$(cat "$active_hidden_snapshot")" "$hidden" "Calm rendered operational input $hidden"
@@ -3843,7 +3839,7 @@ if (!/<div class="user-message"[^>]*>[\s\S]*Show a deterministic tool example\./
 if (!/<div class="assistant-message"[^>]*>[\s\S]*The deterministic tool example is complete\./.test(messages)) process.exit(1);
 if (messages.includes('<div class="hook-message"')) process.exit(1);
 if (messages.includes("[firstmate-synthetic-input]")) process.exit(1);
-for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_AWAY_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
+for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_LAUNCH_BRIEF_E2E"]) {
   if (!messages.includes(current)) process.exit(1);
 }
 if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
@@ -3869,7 +3865,6 @@ JS
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
-    CURRENT_AWAY_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
     assert_not_contains "$(cat "$export_settled_snapshot")" "$hidden" \
@@ -3891,7 +3886,6 @@ JS
   for restored in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
-    CURRENT_AWAY_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
     assert_contains "$(cat "$restored_snapshot")" "$restored" "second /calm did not restore current operational kind $restored"
@@ -4247,7 +4241,6 @@ JS
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
-    CURRENT_AWAY_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
     assert_not_contains "$(cat "$restarted_snapshot")" "$hidden" "restart/resume rendered operational input $hidden"

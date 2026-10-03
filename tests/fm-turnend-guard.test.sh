@@ -20,7 +20,6 @@ TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='fm_watch_arm_pi'
-AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 
 # REQUIRED_REASON is the Pi repair line, so the cases asserting it need
 # detect_own to answer pi. PI_CODING_AGENT=true alone no longer pins that - a
@@ -717,13 +716,15 @@ test_hook_away_daemon_allows_over_dead_watcher_lock() {
   pass "fm-turnend-guard: away-mode daemon ownership survives a leftover dead watcher lock"
 }
 
-test_hook_away_mode_blocks_without_any_supervisor() {
+test_hook_legacy_mode_record_does_not_replace_supervision() {
   local dir out status
-  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-no-supervisor")
+  dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-legacy-mode-no-supervisor")
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "away mode with no daemon and no watcher must still block"
-  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
-  pass "fm-turnend-guard: away mode with no daemon and no watcher still blocks"
+  expect_code 2 "$status" "legacy mode record with no watcher must still block"
+  assert_contains "$out" "$REQUIRED_REASON" "legacy mode record displaced ordinary watcher recovery"
+  assert_not_contains "$out" "/afk" "legacy record advertised the removed afk skill"
+  assert_not_contains "$out" "/quiet" "legacy record advertised the removed quiet skill"
+  pass "fm-turnend-guard: preserved legacy mode records do not replace ordinary supervision"
 }
 
 test_hook_away_mode_blocks_on_dead_daemon() {
@@ -914,14 +915,4 @@ test_codex_hook_uses_process_pwd_when_payload_cwd_is_outside_root
 test_codex_hook_ignores_nested_git_root_guard
 test_pi_extension_injects_once_per_logical_agent_run
 test_pi_extension_retries_after_followup_delivery_failure
-test_hook_away_daemon_allows_between_watcher_cycles
-test_hook_away_daemon_allows_over_dead_watcher_lock
-test_hook_away_mode_blocks_without_any_supervisor
-test_hook_away_mode_blocks_on_dead_daemon
-test_hook_away_mode_blocks_on_pid_reused_daemon
-test_hook_away_mode_blocks_on_stale_beacon
-test_hook_daemon_lock_is_ignored_without_away_mode
-test_hook_away_daemon_allows_beacon_within_poll_derived_grace
-test_hook_away_daemon_blocks_dead_daemon_despite_poll_derived_grace
-test_hook_away_daemon_blocks_beacon_older_than_poll_derived_grace
-test_hook_no_afk_ignores_poll_derived_grace
+test_hook_legacy_mode_record_does_not_replace_supervision

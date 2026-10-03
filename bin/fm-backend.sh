@@ -452,8 +452,7 @@ fm_backend_busy_state() {  # <backend> <target>
 
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a supervisor
-# input guard or a launch-readiness check. It is exposed for the away-mode
-# daemon's supervisor-pane pending-input guard and retained lifecycle checks;
+# input guard or a launch-readiness check. It is exposed for retained lifecycle checks;
 # ordinary message submission does not call it. Callers can ask the same question
 # without duplicating per-backend composer reading. Every adapter's named
 # classifier is a THIN wrapper - capture plus a capability descriptor fed to

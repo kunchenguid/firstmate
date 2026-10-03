@@ -1693,7 +1693,7 @@ EOF
   pass "branch prompt_cache_key is stable per home across sessions and distinct between homes"
 }
 
-test_branch_default_on_heartbeat_afk_and_fallback() {
+test_branch_default_on_heartbeat_legacy_record_and_fallback() {
   local repo broken home out status
   repo="$TMP_ROOT/gating-root"
   broken="$TMP_ROOT/gating-broken-root"
@@ -1812,17 +1812,16 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
   throw new Error("branch accepted an unscoped, non-heartbeat fleet wake");
 }
 
-// Away mode still owns supervision regardless of default-on eligibility.
+// Preserved legacy mode records are evidence only and do not gate supervision.
 writeFileSync(`${home}/state/.afk`, "");
-if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
+if (!dispatch("signal: with legacy mode record").accepted) throw new Error("legacy mode record gated branch supervision");
 rmSync(`${home}/state/.afk`);
-if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and afk gating must bind: $out"
+  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and legacy-record neutrality must bind: $out"
 
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1850,7 +1849,7 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch settlement must return delivery ownership to the watcher: $out"
-  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch rejects to watcher fallback"
+  pass "branch default-on eligibility ignores legacy mode records and a broken branch rejects to watcher fallback"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -7641,7 +7640,7 @@ test_short_task_success_reaches_main_with_authenticated_body
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_only_identity_bound_ida_results
 test_branch_cache_key_is_per_home_stable
-test_branch_default_on_heartbeat_afk_and_fallback
+test_branch_default_on_heartbeat_legacy_record_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work

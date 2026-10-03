@@ -13,7 +13,7 @@ type Current = { phase: string; count: number; kind: string };
 type Result = { time: string; label: string };
 const kinds = new Set(["signal", "stale", "heartbeat", "check", "continuation"]);
 const expected = new Set(["ineligible-trigger", "main-owned-trigger", "check-main-only", "decision-owned", "unresolved-task",
-  "no-eligible-rows", "branch-busy", "ida-result-busy", "ida-row-not-owned", "reset-in-progress", "away-mode", "afk", "afk-active"]);
+  "no-eligible-rows", "branch-busy", "ida-result-busy", "ida-row-not-owned", "reset-in-progress"]);
 const reasons = new Set([...expected, "ownership-lost", "main-owned", "fleet-lock-lost", "provider-failed",
   "reconcile-failed", "scope-changed", "generation-changed", "branch-settlement-failed", "no-durable-report",
   "handling-failed", "continuation-failed", "corrupt-queue", "not-lock-owner", "branch-broken",

@@ -39,7 +39,7 @@
 # container proof is `unknown` and callers defer. This replaced the historical
 # permissive "blank cursor row = empty = safe to inject" rule fleet-wide: a
 # blank row under the cursor can be a modal dialog, a dead shell between
-# transcript rules, or a mid-redraw pane, and the away-mode injector types
+# transcript rules or a mid-redraw pane, and operational-input senders
 # escalations into whatever it calls empty. Positive container proof means one
 # of the shapes in the catalogue below.
 #
@@ -49,7 +49,7 @@
 # stay unknown. Wrap regions end at structural edges and proven furniture.
 # The glyph declarations below are the single owner of recognized glyphs.
 #
-# GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
+# GHOST/PLACEHOLDER TEXT: a harness fills an
 # otherwise-empty composer with de-emphasized ghost text which a
 # plain capture cannot tell apart from text a human typed. codex-cli 0.154.0
 # draws its `Ask Codex to do anything` placeholder as SGR-2 dim text after the
@@ -73,7 +73,7 @@
 # non-ASCII space, including U+00A0 NO-BREAK SPACE after an empty prompt glyph. POSIX `[[:space:]]` includes U+00A0 only
 # under some locales, so every trim used to be locale-dependent: the same live
 # pane read `empty` under a UTF-8 shell and `pending` under LC_ALL=C (a
-# daemon, launchd, or ssh context), deferring every away-mode escalation.
+# daemon, launchd, or ssh context), deferring every guarded operational input.
 # fm_composer_normalize_trim_var is the one fix: it maps every code point
 # Unicode gives the property White_Space=Yes outside ASCII onto a plain ASCII
 # space before any trim or comparison, byte-exactly, so the verdict cannot

@@ -35,7 +35,7 @@ For recovery and control, use the exact `harness=` in `state/<id>.meta`; never i
 Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> interrupt|exit|relaunch`.
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
-TraeX is verified only for crewmate and scout work on Herdr, never a primary, remote coordinator, or away-mode supervisor.
+TraeX is verified only for crewmate and scout work on Herdr, never a primary or remote coordinator.
 
 ## Detection
 

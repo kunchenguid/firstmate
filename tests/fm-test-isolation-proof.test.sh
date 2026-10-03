@@ -196,7 +196,6 @@ test_candidates_exclude_serial_classes() {
     tests/fm-watcher-lock.test.sh \
     tests/fm-wake-queue.test.sh \
     tests/fm-backend-herdr-smoke.test.sh \
-    tests/fm-afk-inject-e2e.test.sh \
     tests/fm-pi-primary-live-e2e.test.sh \
     tests/fm-pr-check-security.test.sh; do
     printf '%s\n' "$listed" | grep -Fxq "$banned" \

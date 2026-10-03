@@ -141,6 +141,13 @@ EOF
     fi
     printf 'agent: traex\nstate: blocked\nrule: %s\n' "$rule"
     ;;
+  "agent --help")
+    printf '%s\n' 'prompt  Submit a prompt to an agent'
+    ;;
+  "agent prompt")
+    printf '%s\n' "${4:-}" >> "$input"
+    printf working > "$phase_file"
+    ;;
   *) ;;
 esac
 SH
@@ -194,7 +201,7 @@ run_traex_spawn() {
   traex_env env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
-      --model Seed-Evolving --effort high --mode no-mistakes --yolo off 2>&1
+      --model Seed-Evolving --effort high --mode review-PR --yolo off 2>&1
 }
 
 run_traex_send() {
@@ -359,7 +366,7 @@ test_scope_refuses_before_endpoint() {
   rec=$(make_spawn_case scope)
   read_spawn_case "$rec"
   out=$(traex_env "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend herdr \
-    --effort max --mode no-mistakes --yolo off 2>&1)
+    --effort max --mode review-PR --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "TraeX max effort succeeded"
   assert_contains "$out" 'max is not verified and is refused' "max refusal was unclear"
@@ -373,7 +380,7 @@ SH
   : > "$CASE_DIR/tmux.log"
   out=$(FM_FAKE_TMUX_LOG="$CASE_DIR/tmux.log" TMUX='fake,1,0' traex_env \
     "$SPAWN" "$TASK_ID" "$PROJECT_DIR" --harness traex --backend tmux \
-      --mode no-mistakes --yolo off 2>&1)
+      --mode review-PR --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "TraeX tmux spawn succeeded"
   [ ! -s "$CASE_DIR/tmux.log" ] || fail "unsupported backend created an endpoint"
@@ -386,7 +393,7 @@ test_raw_traex_refuses_without_breaking_other_raw_launches() {
   rec=$(make_spawn_case raw)
   read_spawn_case "$rec"
   out=$(traex_env "$SPAWN" "$TASK_ID" "$PROJECT_DIR" \
-    "sh -c 'traex -y arbitrary'" --backend herdr --mode no-mistakes --yolo off 2>&1)
+    "sh -c 'traex -y arbitrary'" --backend herdr --mode review-PR --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "shell-wrapped raw TraeX command succeeded"
   assert_contains "$out" 'verified launch template' "raw TraeX refusal was unclear"
@@ -398,18 +405,19 @@ test_raw_traex_refuses_without_breaking_other_raw_launches() {
   out=$(traex_env env -u HERDR_PANE_ID -u HERDR_SOCKET_PATH -u HERDR_ENV \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     "$SPAWN" "$raw_id" "$PROJECT_DIR" "bash -lc 'printf ok'" \
-      --backend herdr --mode no-mistakes --yolo off 2>&1)
+      --backend herdr --mode review-PR --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "ordinary raw launch regressed: $out"
   pass "raw TraeX is refused while general raw execution remains supported"
 }
 
 test_generic_steer_interrupt_and_keys() {
-  local rec out status verdict inbox_record inbox_body
+  local rec out status verdict inbox_record inbox_body enter_before enter_after
   rec=$(make_spawn_case controls)
   read_spawn_case "$rec"
   run_traex_spawn >/dev/null || fail "control fixture spawn failed"
   printf idle > "$CASE_DIR/phase"
+  enter_before=$(grep -c '^enter$' "$CASE_DIR/key.log" || true)
   out=$(run_traex_send 'reply with exactly STEER_OK')
   status=$?
   expect_code 0 "$status" "generic TraeX steer failed: $out"
@@ -420,8 +428,9 @@ test_generic_steer_interrupt_and_keys() {
   inbox_body=$(fm_task_inbox_body "$inbox_record")
   [ "$inbox_body" = 'reply with exactly STEER_OK' ] || fail "steer inbox body changed: $inbox_body"
   assert_no_grep 'reply with exactly STEER_OK' "$CASE_DIR/input.log" "steer payload leaked onto the Herdr terminal"
-  assert_grep 'Firstmate instruction waiting:' "$CASE_DIR/input.log" "steer doorbell never reached Herdr"
-  assert_grep enter "$CASE_DIR/key.log" "steer Enter never reached Herdr"
+  assert_grep 'Firstmate instruction waiting:' "$CASE_DIR/input.log" "steer doorbell never reached the native agent prompt"
+  enter_after=$(grep -c '^enter$' "$CASE_DIR/key.log" || true)
+  [ "$enter_after" = "$enter_before" ] || fail "native agent prompt unexpectedly used terminal Enter"
   [ "$(cat "$CASE_DIR/phase")" = working ] || fail "steer was not observed working"
 
   # shellcheck source=bin/fm-backend.sh

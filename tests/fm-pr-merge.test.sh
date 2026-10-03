@@ -53,7 +53,7 @@ make_case() {
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=review-PR"
   printf '%s\n' \
     'state=MERGED' \
     'merged=true' \
@@ -3330,14 +3330,5 @@ test_unfinished_rerun_keeps_a_check_red
 test_supersession_never_crosses_check_names
 test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
-test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
-test_away_grant_and_yolo_and_hold_for_return
-test_away_posture_refuses_asynchronous_merge_paths
-test_away_plan_gated_403_does_not_block_the_merge
-test_away_grant_does_not_bypass_red_or_identity
-test_unreadable_away_record_refuses_merge
-test_away_record_cannot_change_between_the_authority_read_and_the_merge
-test_a_grant_revoked_before_the_merge_refuses_it
-test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab

@@ -26,16 +26,11 @@
   "readmeSetupTargets": [
     "docs/configuration.md",
     "docs/feishu-channel.md",
-    "docs/wedge-alarm.md",
     "docs/herdr-backend.md"
   ],
   "requiredOwnerPointers": [
     {
       "source": ".agents/skills/firstmate-coding-guidelines/SKILL.md",
-      "target": "docs/documentation-audiences.md"
-    },
-    {
-      "source": ".no-mistakes.yaml",
       "target": "docs/documentation-audiences.md"
     },
     {
@@ -71,10 +66,6 @@
       "target": "docs/verification/supervision.md"
     },
     {
-      "source": "docs/wedge-alarm.md",
-      "target": "docs/verification/supervision.md"
-    },
-    {
       "source": "docs/herdr-backend.md",
       "target": "docs/verification/runtime-backends.md"
     },
@@ -84,10 +75,6 @@
     }
   ],
   "surfaces": [
-    {
-      "path": ".agents/skills/afk/SKILL.md",
-      "audience": "agent-runtime"
-    },
     {
       "path": ".agents/skills/ahoy/SKILL.md",
       "audience": "agent-runtime"
@@ -114,10 +101,6 @@
     },
     {
       "path": ".agents/skills/cloud-research-worker/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/crewmate-no-mistakes/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -174,10 +157,6 @@
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/quiet/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -278,10 +257,6 @@
     },
     {
       "path": "docs/examples/feishu.env",
-      "audience": "operator-example"
-    },
-    {
-      "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
     {
@@ -386,10 +361,6 @@
     },
     {
       "path": "docs/watcher-continuity.md",
-      "audience": "operator-current"
-    },
-    {
-      "path": "docs/wedge-alarm.md",
       "audience": "operator-current"
     },
     {

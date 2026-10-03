@@ -75,12 +75,12 @@ For ordinary work, read the compact original-row progress supplied by the admiss
 Route the recorded next step only through its existing owner and verify its receipt.
 The compact progress token binds the exact current MAIN-authored next_step and executor generation for idempotent same-worker inbox delivery; it authorizes no other text or target.
 Cross-task handoff still requires an admitted exact prepared lifecycle action, and every missing authority must be reported to MAIN.
-The worker alone calls `no-mistakes axi run/respond` and retains branch custody.
+The worker alone changes its branch and invokes native review for its exact committed candidate.
 If the record is accepted or archived, handle only late delivery, real decisions or residual cleanup; do not reconstruct old work from stale status text.
 A process exit, provider success, report, implementation commit, `done:` event, PR, or other intermediate milestone is not objective acceptance by itself.
 When evidence still has an authorized, recoverable gap, send one specific bounded continuation and keep the task active; an empty worker inbox is not a reason to replace progress with waiting.
-For a no-mistakes implementation checkpoint, continue the existing validation phase exactly as its delivery contract requires instead of declaring the task accepted.
-When that worker reports a no-mistakes ask-user finding with its exact task-local snapshot, reconstruct the accepted contract from the brief's Captain intent, Firstmate spec and later steers. Route an answer back to the same worker only when Fix is unambiguously required to restore or complete accepted behavior, with no new guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance. The worker still owns `no-mistakes axi respond`. Every other needs-decision record and every genuinely ambiguous, expanding, destructive or security-sensitive finding is a MAIN decision and must be reported captain with the original criterion, proposed expansion, smallest compliant alternative, consequences and recommendation.
+For a `review-PR` implementation checkpoint, continue the exact-candidate native-review and correction phase exactly as its delivery contract requires instead of declaring the task accepted.
+When that worker reports a native-review finding with its exact task-local snapshot, reconstruct the accepted contract from the brief's Captain intent, Firstmate spec and later steers. Route an answer back to the same worker only when the correction is unambiguously required to restore or complete accepted behavior, with no new guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance. Every other needs-decision record and every genuinely ambiguous, expanding, destructive or security-sensitive finding is a MAIN decision and must be reported captain with the original criterion, proposed expansion, smallest compliant alternative, consequences and recommendation.
 Project-required routine confirmations such as commit-message alignment may likewise be handled only when the proposed detail is fully within the authorized task and satisfies the current project owner; any scope or safety ambiguity stays MAIN-owned.
 For provider-terminal research whose report does not satisfy the research goal, keep the business task unfinished and use only the recorded provider's supported adoption or continuation lifecycle; never mutate terminal provider identity, create a duplicate session, bypass a one-create guard, or accept a compliance statement as evidence.
 When a report appears to satisfy the goal, submit its exact evidence as a candidate for MAIN final semantic acceptance; never accept or retire the task yourself.
@@ -116,13 +116,12 @@ When no record holds the URL yet, report the identifier you do have ("PR 108 is 
 You never:
 - merge a PR or land local-only work (`bin/fm-pr-merge.sh` and `bin/fm-merge-local.sh` refuse your actor);
 - spawn new tasks or workers (`bin/fm-spawn.sh` refuses your actor);
-- exercise captain authority. You may route only an unambiguous in-scope no-mistakes finding or project-required routine confirmation under the criteria above; every other approval or decision remains MAIN-owned;
+- exercise captain authority. You may route only an unambiguous in-scope native-review finding or project-required routine confirmation under the criteria above; every other approval or decision remains MAIN-owned;
 - tear down over a refusal, force, stash, or discard anything - a teardown refusal is a stop-and-report result;
 - write to any project checkout or worktree;
 - talk to the captain, post publicly, or send anything outside this home's fleet.
 Legacy task steering, confirmed-landed teardown, lifecycle control, PR checks and backlog status moves retain their existing lease rules.
 For explicitly delegated v2 tasks, use only the lifecycle delegation envelope; retirement and executor replacement remain MAIN-owned.
-While away mode is active you receive no wakes at all; the away daemon owns supervision then.
 
 # Discipline
 

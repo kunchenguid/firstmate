@@ -140,7 +140,6 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
-const afkFlag = join(state, ".afk");
 const sessionsDir = join(state, "branch-session");
 const sessionPointer = join(state, ".branch-session");
 const mirrorCursorFile = join(state, ".branch-mirror-cursor");
@@ -227,10 +226,6 @@ const scriptEnv = {
 
 function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
-}
-
-function afkActive(): boolean {
-  return existsSync(afkFlag);
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -498,8 +493,8 @@ function textOfContent(content: unknown): string {
   return "";
 }
 
-// Operational injections (watcher wakes, away-supervisor escalations, launch
-// briefs) are fleet machinery, not captain dialog; the report's volume
+// Operational injections (watcher wakes, turn-end guards, and launch briefs)
+// are fleet machinery, not captain dialog; the report's volume
 // analysis counts them apart from dialog, and mirroring them would feed the
 // branch its own supervision traffic back.
 function isOperationalUserText(text: string): boolean {
@@ -1222,7 +1217,7 @@ export default function (pi: ExtensionAPI) {
   function publishHealth(owned: boolean): void {
     try {
       pi.events.emit(BRANCH_HEALTH_EVENT, { time: Date.now(), generation, owned,
-        disabled: shuttingDown || resetInProgress || afkActive(), broken: branchBrokenKind,
+        disabled: shuttingDown || resetInProgress, broken: branchBrokenKind,
         pending: unsettledWakeOffers, streaming: branch?.session.isStreaming === true });
     } catch { /* Rendering must not affect ownership. */ }
   }
@@ -2372,7 +2367,7 @@ ${context.command}
   // rows and not rich lifecycle grants. Reuse branchChain so observation,
   // same-worker routing, and ordinary wake handling cannot overlap.
   function offerTaskContinuation(offer: TaskContinuationOffer): boolean {
-    if (shuttingDown || resetInProgress || afkActive() || branchBroken || !generationOwnsLockSync(generation)) return false;
+    if (shuttingDown || resetInProgress || branchBroken || !generationOwnsLockSync(generation)) return false;
     const acceptedGeneration = generation;
     const selection = branchSelectionRevision;
     const trace = (stage: string, reason: string) => appendBranchRoutingTrace(state, {
@@ -2447,8 +2442,8 @@ ${context.command}
         await session.prompt(`FIRSTMATE TASK CONTINUATION: ${offer.task}\n` +
           `Admission ${offer.admission}. This is compact progress in the original task record, not a queue wake or a rich lifecycle grant.\n` +
           `Compare the goal and acceptance method with actual task artifacts and current executor state. The exact current MAIN-authored next_step may continue the same worker through fm-send --idempotent; any other same-task text remains unauthorized. Continue a cross-task handoff only through an admitted prepared lifecycle action. ` +
-          `For an implementation checkpoint, inspect the same worker and active no-mistakes state. If an exact continuation is required but no prepared effect owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
-          `The worker alone owns every no-mistakes axi run/respond call and branch custody. Check the active run rather than trusting old status text; do not run or respond to no-mistakes yourself. ` +
+          `For an implementation checkpoint, inspect the same worker and its exact-candidate native-review evidence. If an exact continuation is required but no prepared effect owner binds its payload, target, and executor generation, report that required effect to MAIN instead of sending it. ` +
+          `The worker owns native review, corrections, tests, and branch custody; the review must bind the committed base and candidate plus the accepted intent. MAIN owns authority-bearing findings and final semantic acceptance. ` +
           `A commit, report, passing local test, provider success, process exit, or opened PR is not goal completion. ` +
           `Use silent routine reporting after verified ordinary advancement as well as unchanged healthy observation; the next executor result receives another bounded admission without a MAIN progress rewrite. Report captain when an exact effect must be prepared by MAIN, actual acceptance evidence is ready for MAIN's final semantic judgment, or a genuine blocker, authority, scope, destructive, or security decision remains. ` +
           `MAIN alone updates progress and accepts the goal. Do not replay uncertain effects, revive stopped/archived/parked work, merge, clean up, add reviewers, or broaden authority. New authenticated intent invalidates this admission. Stop after at most eight tool calls.\n` +
@@ -2558,7 +2553,6 @@ ${context.command}
     if (!offerEligible(offer)) return offer.decline?.("ineligible-trigger");
     if (resetInProgress) return offer.decline?.("reset-in-progress");
     if (!generationOwnsLockSync(generation)) return offer.decline?.("not-lock-owner");
-    if (afkActive()) return offer.decline?.("away-mode");
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&

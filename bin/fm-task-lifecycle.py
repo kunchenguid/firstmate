@@ -1475,7 +1475,7 @@ class Task:
         position = start + end.start() if end else len(body)
         body = body[:position].rstrip('\n') + '\n\n' + value['text'] + '\n\n' + body[position:]
         # Newer briefs carry an additional pipeline-only intent subsection.
-        pipeline = '## Captain intent authorized for --intent\n'
+        pipeline = '## Captain intent authorized for review\n'
         if pipeline in body:
             require(body.count(pipeline) == 1, 'ambiguous pipeline intent subsection')
             body = body.rstrip('\n') + '\n\n' + value['text'] + '\n'

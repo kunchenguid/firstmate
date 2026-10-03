@@ -50,7 +50,8 @@ trap cleanup EXIT
 "$HELPER" provision "$SESSION" || fail 'lab provision failed'
 herdr_test_guard_cli "$SESSION" "$LAB/shim" "$HELPER" || fail 'lab guard failed'
 export PATH="$LAB/shim:$PATH" HERDR_SESSION="$SESSION"
-. "$ROOT/bin/fm-supervise-daemon.sh"
+. "$ROOT/bin/fm-composer-lib.sh"
+. "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail 'Herdr adapter unavailable'
 container_raw=$(fm_backend_herdr_container_ensure "$ROOT") || fail 'container failed'
 container=${container_raw%%$'\t'*}

@@ -8,7 +8,6 @@ The related command guards have separate owners: [watcher-arm protection](arm-pr
 
 When a task, process-event source, registered custom check, or Relay poll needs supervision, the primary must not end a turn without a current supervisor.
 The turn-end guard requires an identity-matched watcher process and a fresh beacon.
-An authorized away or quiet daemon with a fresh beacon also satisfies this predicate while it owns supervision.
 The mid-turn pull guard can recognize an extension-owned watcher handoff; that does not relax the turn-end predicate.
 
 ## Guard predicates
@@ -18,14 +17,13 @@ An unmarked linked worker worktree is exempt.
 The session-start wrappers use the same scope owner, as described in [native startup](sessionstart-nudge.md).
 
 No required supervision means exit 0.
-A healthy watcher or authorized away daemon means exit 0.
+A healthy watcher means exit 0.
 Otherwise the guard prints a reason-specific banner and returns 2, including a recovery instruction from `bin/fm-supervision-instructions.sh` for the detected harness.
 An unreadable payload, malformed loop field, or missing `jq` fails open because the guard cannot safely establish the continuation bound.
 A true `stop_hook_active` continuation marker exits 0 to prevent an infinite stop loop.
 
 The ordinary watcher grace is 300 seconds unless `FM_GUARD_GRACE` overrides it.
-Away-mode daemon grace derives from the poll cadence: at least 300 seconds and at least `FM_POLL + 60` seconds.
-A stale beacon, dead daemon, or identity mismatch never establishes supervision merely because an away flag exists.
+A stale beacon or identity mismatch never establishes supervision. Preserved legacy mode records do not satisfy the predicate.
 
 ## Harness integration
 

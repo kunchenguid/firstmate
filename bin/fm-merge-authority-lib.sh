@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Durable ownership of the authority under which a task's merge was accepted.
 #
-# The away-posture record (state/.afk-contract) and the task's recorded yolo
-# posture are resolved only at the merge gate. After a forge accepts the merge,
+# The task's recorded yolo posture is resolved only at the merge gate.
+# After a forge accepts the merge,
 # bin/fm-pr-merge.sh persists that answer as:
 #   state/<task-id>.merge-authority
 #   fm-merge-authority-v1
@@ -10,14 +10,13 @@
 #   <host>
 #   <path>
 #   <number>
-#   <authority>                 yolo | away-grant | attended
+#   <authority>                 yolo | attended
 # The identity comes from the merge run's immutable canonical URL parse;
 # persistence revalidates the task's current pr= metadata under its metadata
 # and lifecycle locks and refuses a mismatch. The file is atomically published,
 # mode 0600, single-link, and on the state filesystem. A poll consumes it only
 # when all identity fields match its own validated snapshot. Missing, malformed,
-# or mismatched state means external; it is never resolved again from a later
-# away-posture record.
+# or mismatched state means external.
 #
 # Resolution authorizes nothing by itself. bin/fm-pr-merge.sh owns the merge
 # gate and persists only after a forge command succeeds, before releasing the
@@ -33,8 +32,6 @@
 _FM_MERGE_AUTHORITY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-pr-lib.sh"
-# shellcheck source=bin/fm-afk-contract.sh
-. "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-afk-contract.sh"
 
 # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
 FM_MERGE_AUTHORITY=
@@ -45,45 +42,22 @@ FM_MERGE_AUTHORITY_RECORD_IDENTITY=
 
 fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   local home=${1-} state=${2-} meta=${3-} id=${4-}
-  local yolo='' grants grant
+  local yolo=''
   FM_MERGE_AUTHORITY=
   FM_MERGE_AUTHORITY_REASON='invalid'
   [ -n "$home" ] && [ -n "$state" ] && [ -n "$meta" ] && [ -n "$id" ] || return 1
 
-  if ! fm_afk_contract_present "$state"; then
-    FM_MERGE_AUTHORITY='attended'
-    FM_MERGE_AUTHORITY_REASON='attended'
-    return 0
-  fi
-  if ! FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1; then
-    FM_MERGE_AUTHORITY_REASON='record-unreadable'
-    return 1
-  fi
   if [ -f "$meta" ]; then
     yolo=$(grep '^yolo=' "$meta" | tail -1 | cut -d= -f2- || true)
   fi
   if [ "$yolo" = on ]; then
     FM_MERGE_AUTHORITY='yolo'
-    FM_MERGE_AUTHORITY_REASON='granted'
+    FM_MERGE_AUTHORITY_REASON='yolo'
     return 0
   fi
-  grants=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
-    "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-afk-contract.sh" grants 2>/dev/null) || {
-    FM_MERGE_AUTHORITY_REASON='grants-unreadable'
-    return 1
-  }
-  while IFS= read -r grant; do
-    [ "$grant" = "$id" ] || continue
-    FM_MERGE_AUTHORITY='away-grant'
-    FM_MERGE_AUTHORITY_REASON='granted'
-    return 0
-  done <<EOF
-$grants
-EOF
-  # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
-  FM_MERGE_AUTHORITY_REASON='not-granted'
-  return 1
+  FM_MERGE_AUTHORITY='attended'
+  FM_MERGE_AUTHORITY_REASON='attended'
+  return 0
 }
 
 fm_merge_authority_record_matches() {  # <record> <device> <provider> <host> <path> <number>

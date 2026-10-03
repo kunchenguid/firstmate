@@ -3,7 +3,7 @@ name: bits-development
 description: >-
   Agent-only procedure for delivering ByteDance-internal code through BITS and PPE.
   Load before creating, reusing, or updating a BITS Dev Task for code delivery, attaching projects, binding merge requests or Change Cards, triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines, or beginning delivery for a deployable BITS/PPE code surface.
-  Owns lifecycle applicability and ordering, exact-candidate evidence, create-versus-reuse, one-time dedicated PPE creation, the existing-PPE revision loop, browser-started test gates, the limited final no-mistakes boundary, multi-project coordination, the read-dry-run-authorize-write-readback discipline, and BITS safety; it does not own bytedcli mechanics, no-mistakes mechanics, or merge authority.
+  Owns lifecycle applicability and ordering, exact-candidate evidence, create-versus-reuse, one-time dedicated PPE creation, the existing-PPE revision loop, browser-started test gates, the final native-review boundary, multi-project coordination, the read-dry-run-authorize-write-readback discipline, and BITS safety; it does not own bytedcli mechanics, native-review mechanics, or merge authority.
 user-invocable: false
 metadata:
   internal: true
@@ -14,8 +14,8 @@ metadata:
 Load this before Firstmate, or a crewmate Firstmate directs, begins delivery for a deployable ByteDance-internal code surface owned by BITS/PPE.
 Also load it before creating, reusing, or updating a BITS Dev Task for code delivery, attaching projects, binding merge requests or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 
-This skill is the single owner of Firstmate's lifecycle for delivering a committed candidate through BITS, creating one dedicated PPE for the first delivery, reusing that PPE for every subsequent revision, proving the exact deployed candidate through the required API or end-to-end test, and running final limited no-mistakes validation.
-It governs workflow and safety rather than wrapping BITS, changing no-mistakes core, or adding a fourth Firstmate delivery mode.
+This skill is the single owner of Firstmate's lifecycle for delivering a committed candidate through BITS, creating one dedicated PPE for the first delivery, reusing that PPE for every subsequent revision, proving the exact deployed candidate through the required API or end-to-end test, and running final intent-aware native review.
+It governs workflow and safety rather than wrapping BITS, changing a harness, or adding a fourth Firstmate delivery mode.
 
 ## Applicability and exclusions
 
@@ -37,7 +37,7 @@ Every mechanical fact lives with its existing owner; this skill only selects and
 - Browser-started test is the sole browser mutation in this lifecycle.
 - Reuse the already running authenticated GUI Chrome through installed `playwright-core` over CDP at `127.0.0.1:9333`; do not launch another browser, use `chrome-devtools-axi`, install an extension, or change browser configuration.
 - Use read-only browser inspection only when the official structured `bytedcli` response does not expose configuration required for the decision or readback.
-- No-mistakes invocation and branch-custody mechanics are owned by the installed no-mistakes skill and current AXI help; this skill owns when that validation may start and which delivery phases it must exclude.
+- Native-review invocation and exact intent/base/candidate binding are owned by `bin/fm-native-review.sh`; this skill owns when that review may start relative to BITS delivery and PPE evidence.
 - BITS retains ownership of source delivery, its existing MR, and CI throughout both the initial delivery and every subsequent revision.
 - Merge, delivery-mode, yolo, and captain-instruction authority are owned by `AGENTS.md` sections 1 and 7 and the captain-instruction precedence rule; this lifecycle adds no production or merge authority.
 - Nonblocking BITS monitoring uses `process-event-sources` whenever an installed source-specific adapter supports the exact wait; otherwise `AGENTS.md` sections 7 and 8 own the supervised-worker path.
@@ -57,15 +57,13 @@ Run these stages in order, distinguishing the first delivery through a newly cre
 8. Independently read back the PPE, deployment, artifact, region, control plane, BOE setting, and deployed candidate identities, then start the required API or end-to-end test once through the authenticated BITS browser UI against that exact deployment.
 9. Read back the browser-started task and pipeline-run identity and monitor that exact run to a completed successful result, with Firstmate responsible for judging whether the API Test passed.
 10. When the API Test requires a fix, repeat the smallest fix -> commit -> exact source push -> independent source-head verification -> same-PPE deployment -> API Test loop until Firstmate judges the test passed.
-11. Only after the required test succeeds against the verified candidate, run no-mistakes as the final validation on that same candidate.
-12. Configure that final no-mistakes pass from its current help so its substantive phases are review, tests, documentation, and lint, while rebase, push, PR, and CI are excluded; no-mistakes must neither change the already-delivered candidate before review nor own BITS delivery.
-13. Treat the final pass as valid only when the tested candidate identity and the validated code remain unchanged through completion.
+11. Only after the required test succeeds against the verified candidate, run the recorded supported harness's native review through `bin/fm-native-review.sh` on that same candidate.
+12. Treat the final review as valid only when it binds the task's immutable intent, exact base, and tested candidate, concludes `INTENT_CONFORMANCE: pass`, and the candidate remains unchanged through completion.
 
-If a no-mistakes fix changes tracked code or another build input, the changed head is a new candidate and the earlier deployment and test evidence no longer qualify it.
-Do not edit by hand while the run owns the branch.
-Complete the supported gate flow without enabling push, PR, or CI, recover branch custody through structured AXI state, commit the resulting candidate if needed, and repeat exact source delivery, independent source-head verification, same-PPE deployment, API Test, and a new final limited no-mistakes pass through the existing Dev Task.
+If a native-review fix changes tracked code or another build input, the changed head is a new candidate and the earlier deployment and test evidence no longer qualify it.
+Commit the corrected candidate, then repeat exact source delivery, independent source-head verification, same-PPE deployment, API Test, and a new final native review through the existing Dev Task.
 Any review, documentation, lint, CI, or API-test fix that changes tracked code or another build input follows the same existing-task and existing-PPE loop.
-Authorize at most two no-mistakes review fix rounds across one delivery task; if another review fix is requested, stop and escalate rather than extending the loop.
+Authorize at most two native-review fix rounds across one delivery task; if another review fix is requested, stop and escalate rather than extending the loop.
 The implementation worker never answers its own ask-user finding; `AGENTS.md` section 7 and `ask-user-authority` own that decision path.
 
 ## Intake and exact identity
@@ -124,7 +122,7 @@ Run each operation through its owner with the discipline above; these notes stat
 - Multi-project coordination: combine related changes across projects and repositories into one new Dev Task through one confirmed creation rather than independent submits, while reusing one eligible existing Dev Task without structural additions when it already owns the complete delivery.
 - Project and Change Card setup: include the exact project, branch, and card set in a new task's confirmed creation snapshot; do not attach or bind extras to an eligible existing task.
 - Release-train target and MR handling: use the release ticket's pinned integration branch, and after any platform-required auto-created MR independently verify its identity, repository, source, exact head, and target before continuing.
-- Source delivery: make each committed candidate the exact remote head of its BITS-owned source branch through the platform's owned delivery surface, independently read that remote head, and stop on any mismatch; never route it through no-mistakes push or PR stages.
+- Source delivery: make each committed candidate the exact remote head of its BITS-owned source branch through the platform's owned delivery surface, independently read that remote head, and stop on any mismatch; native review never owns BITS push or MR stages.
 - Deployment defaults: use `I18N-TT`, skip BOE, and use `Singapore-Central`; a current explicit captain instruction may override a named default for one exact task but does not grant production, shared-environment, stage-pass, or merge authority.
 - Dedicated PPE deployment: for the first delivery through a newly created Dev Task, create exactly one fresh PPE dedicated to that task, preview or dry-run when supported, revalidate every project and deployment field plus each remote source head, deploy, and read back the complete environment and candidate identity before testing.
 - Existing PPE deployment: for every subsequent revision, update or redeploy the existing dedicated PPE through the existing Dev Task, revalidate the same fields and exact new source heads, and read back the complete environment and candidate identity before testing.
@@ -147,16 +145,16 @@ These boundaries hold regardless of yolo posture.
 - Never create a new Dev Task, MR, binding, Change Card, snapshot, environment, or PPE for a subsequent revision after the delivery's Dev Task and dedicated PPE exist.
 - Never mutate an unrelated object, guess a retry after an unknown outcome, or continue from an unproved identity.
 - Never use shared `ppe_test`; create one fresh dedicated PPE for the first delivery and reuse that exact PPE with complete deployment readback for every subsequent revision.
-- Never let no-mistakes rebase, push, open or update a PR, or own CI on the BITS path.
+- Never let native review push, open or update an MR, or own CI on the BITS path.
 - Never pass a stage, force-skip a job, continue a release, deploy to production, merge, or roll back without the exact authority existing Firstmate rules require.
-- Never merge a BITS MR before the exact-candidate PPE API or end-to-end test and final candidate-unchanged no-mistakes validation have both succeeded.
+- Never merge a BITS MR before the exact-candidate PPE API or end-to-end test and final candidate-unchanged native review have both succeeded.
 - Never merge a BITS MR on yolo alone; the captain must explicitly authorize that merge as a separate action.
 - Never persist, print, or paste a BITS token, service identity, cookie, JWT, or authorization header anywhere, including status lines, briefs, commits, or captain chat.
 
 ## Captain-facing outcome reporting
 
 Report BITS outcomes as project outcomes under `AGENTS.md` section 9 rather than raw mechanics, IDs, or command output.
-Lead with the candidate that reached the dedicated PPE, whether the exact-candidate API or end-to-end test and final no-mistakes passed, and the next decision.
+Lead with the candidate that reached the dedicated PPE, whether the exact-candidate API or end-to-end test and final native review passed, and the next decision.
 Include the full `https://...` URL of any MR, Dev Task, deployment, or pipeline the captain needs to act on.
-Report a ready BITS delivery only when the candidate validated by the final limited no-mistakes pass is still the exact code deployed and proven by the required PPE API or end-to-end test.
+Report a ready BITS delivery only when the candidate validated by final native review is still the exact code deployed and proven by the required PPE API or end-to-end test.
 Escalate for the separate MR merge, production deployment, release continuation, rollback, stage pass, another review fix round beyond the maximum of two, or a credential or permission the integration needs.

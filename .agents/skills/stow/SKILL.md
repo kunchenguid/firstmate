@@ -27,7 +27,6 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 
 ```markdown
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
-- While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
 - Never restart the shared no-mistakes daemon while runs are active. <!--P-->
 - Codex writes its trust prompt to stderr, not stdout. <!--a:2026-07-28/6-->
 ```
@@ -135,7 +134,6 @@ Archive provenance stays verbose rather than compact because the cold tier is ne
 
 ```markdown
 ## 2026-08-08 stow
-- (from learnings.md, tier: perishable, reinforced: 2026-06-30) While state/.afk exists, the away-daemon owns triage... [archived: unreinforced 39d]
 ```
 
 Reasons include `unreinforced <N>d`, `unreinforced <N>p`, `budget oldest-first`, and `legacy-unvalidated`.
@@ -217,7 +215,7 @@ Forbidden destinations: any firstmate-repo-tracked skill per the hard rule; firs
    - Curate shared captain preferences only under the existing ownership contract.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
-   - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
+   - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, intent-aware native review, PR, and captain-merge path.
    - For task-scoped notes, inspect the item with `bin/fm-tasks-axi.sh show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `bin/fm-tasks-axi.sh update <id> --body-file <path>`.
      Use `--archive-body` when recoverability matters.
      Never append.

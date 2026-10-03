@@ -161,7 +161,7 @@ exec "$(dirname "$0")/herdr-fixture" "$@"
 SH
     chmod +x "$fakebin/herdr"
     if [ "$mode" = physical ]; then initial=$(cd "$project" && pwd -P); else initial=$project; fi
-    out=$(FM_INITIAL_PATH="$initial" fm_test_run_spawn "$home" "$worktree" "$fakebin" "symlink-$mode" "$project" pi --mode no-mistakes --yolo off); rc=$?
+    out=$(FM_INITIAL_PATH="$initial" fm_test_run_spawn "$home" "$worktree" "$fakebin" "symlink-$mode" "$project" pi --mode review-PR --yolo off); rc=$?
     expect_code 0 "$rc" "symlinked project isolation failed ($mode): $out"
     assert_contains "$out" "worktree=$worktree" 'spawn failed to leave initial project path'
     [ "$(cat "$fakebin/path-reads")" -ge 2 ] || fail 'fixture did not exercise initial and acquired cwd'

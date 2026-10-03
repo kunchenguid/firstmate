@@ -18,7 +18,7 @@
 # sequencing/formatting logic added here stays local to this file. Those four
 # scripts remain fully working
 # standalone with unchanged default behavior - other flows (fm-bootstrap.sh
-# install <tools> after consent, /updatefirstmate, the afk daemon, existing
+# install <tools> after consent, /updatefirstmate, existing
 # tests) still call them directly. The one seam this script needed -
 # bootstrap running its detect-only diagnostics without its six mutating
 # sweeps - is an opt-in FM_BOOTSTRAP_DETECT_ONLY=1 flag on fm-bootstrap.sh
@@ -47,7 +47,7 @@
 #                       identity-complete summary for every state/*.meta, the
 #                       newest state/*.status event with a direct full-log
 #                       pointer, durable provider state with explicit freshness
-#                       gaps for remote tasks, the away posture, and a cheap
+#                       gaps for remote tasks, preserved legacy mode evidence, and a cheap
 #                       endpoint-liveness read for local tasks: read-only,
 #                       always runs.
 #   7. network checks - the result of the deferred network stage started back at
@@ -923,9 +923,6 @@ fi
 
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
-AFK_PRESENT=0
-[ -e "$STATE/.afk" ] && AFK_PRESENT=1
-AFK_MODE=$(fm_afk_mode "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -959,8 +956,6 @@ fi
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
-  --afk "$AFK_PRESENT" \
-  --afk-mode "$AFK_MODE" \
   --x-mode "$X_MODE_PRESENT"
 
 # --- 5. read-once contract -------------------------------------------------
@@ -1014,29 +1009,11 @@ for status in "$STATE"/*.status; do
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
-subsection "AFK"
-# The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
-# still marks a running daemon on the harnesses that launch one.
-if [ -f "$STATE/.afk-contract" ]; then
-  printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
-    "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
-  if [ -e "$STATE/.afk" ]; then
-    if [ "$AFK_MODE" = quiet ]; then
-      printf '; the quiet daemon owns the watcher.\n'
-    else
-      printf '; the away daemon owns the watcher.\n'
-    fi
-  else
-    printf '; no daemon runs, the ordinary supervision session continues.\n'
-  fi
-elif [ -e "$STATE/.afk" ]; then
-  if [ "$AFK_MODE" = quiet ]; then
-    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
-  else
-    printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
-  fi
+subsection "Legacy mode records"
+if [ -e "$STATE/.afk-contract" ] || [ -e "$STATE/.afk" ]; then
+  printf 'preserved but inactive - this version does not start a legacy away/quiet daemon; ordinary supervision remains authoritative.\n'
 else
-  printf 'absent\n'
+  printf '(none)\n'
 fi
 
 # Public commitments made through the myfirstmate relay. A promise to reply in a
@@ -1095,21 +1072,6 @@ if [ "$READ_ONLY" -eq 1 ]; then
 This session did not acquire the fleet lock. Stay read-only: do not arm,
 drain, spawn, steer, merge, or repair fleet state from here. Only a session
 with verified fleet-lock ownership may perform mutable follow-up.
-
-EOF
-elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
-  cat <<'EOF'
-Quiet mode is active. Follow the supervision operating instructions block
-above: load /quiet and ensure the daemon is running, because the daemon owns
-watcher supervision. Ordinary captain chat does not exit it; only an
-explicit /quiet off does.
-
-EOF
-elif [ "$AFK_PRESENT" -eq 1 ]; then
-  cat <<'EOF'
-Away mode is active. Follow the supervision operating instructions block above:
-load /afk and ensure the daemon is running, because the daemon owns watcher
-supervision.
 
 EOF
 elif [ -f "$CONFIG/x-mode.env" ]; then
