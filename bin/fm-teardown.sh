@@ -3202,7 +3202,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_remove_error
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3259,7 +3259,14 @@ cleanup_firstmate_home_children() {
         rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+      child_remove_error=
+      if child_remove_error=$(fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" "$child_wt" 2>&1); then
+        [ -z "$child_remove_error" ] || printf '%s\n' "$child_remove_error" >&2
+      else
+        child_remove_error=${child_remove_error//$'\n'/; }
+        echo "REFUSED: Orca worktree removal failed for child $child_id at ${child_wt:-<missing>}: ${child_remove_error:-unknown Orca error}; retaining that child's durable identity records." >&2
+        return 1
+      fi
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3590,7 +3597,14 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
       || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  orca_remove_error=
+  if orca_remove_error=$(fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID" "$WT" 2>&1); then
+    [ -z "$orca_remove_error" ] || printf '%s\n' "$orca_remove_error" >&2
+  else
+    orca_remove_error=${orca_remove_error//$'\n'/; }
+    echo "REFUSED: Orca worktree removal failed for task $ID at ${WT:-<missing>}: ${orca_remove_error:-unknown Orca error}; preserving metadata." >&2
+    exit 1
+  fi
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
