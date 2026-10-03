@@ -1168,6 +1168,52 @@ SH
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
 }
 
+# A task recording base_branch= landed when its content reached that branch, not
+# the default branch: a squash merge into the base branch is the landing.
+test_content_fallback_uses_recorded_base_branch() {
+  local case_dir rc landed tmp
+  for landed in base default; do
+    case_dir=$(make_case "content-base-$landed")
+    write_meta "$case_dir" direct-PR ship
+    printf 'base_branch=feature/hub\n' >> "$case_dir/state/task-x1.meta"
+    tmp="$case_dir/_hub"
+    git clone -q "$case_dir/origin.git" "$tmp"
+    git -C "$tmp" push -q origin HEAD:refs/heads/feature/hub
+    rm -rf "$tmp"
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    if [ "$landed" = base ]; then
+      tmp="$case_dir/_land"
+      git clone -q "$case_dir/origin.git" "$tmp"
+      git -C "$tmp" checkout -q feature/hub
+      printf 'hello\n' > "$tmp/feature.txt"
+      git -C "$tmp" add feature.txt
+      git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash feature.txt"
+      git -C "$tmp" push -q origin HEAD:feature/hub
+      rm -rf "$tmp"
+    else
+      land_on_origin_main "$case_dir" feature.txt hello
+    fi
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/treehouse"
+
+    set +e
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+    if [ "$landed" = base ]; then
+      expect_code 0 "$rc" "content-base: content squashed into the recorded base branch should count as landed"
+      assert_absent "$case_dir/state/task-x1.meta" "content-base: teardown kept the record of landed work"
+    else
+      [ "$rc" -ne 0 ] || fail "content-base: content only on the default branch passed for a task based on feature/hub"
+      assert_present "$case_dir/state/task-x1.meta" "content-base: a refused teardown removed the task record"
+    fi
+  done
+  pass "the content-landed fallback checks a task's recorded base branch, not the default branch"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -4335,6 +4381,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_content_fallback_uses_recorded_base_branch
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

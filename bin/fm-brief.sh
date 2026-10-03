@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -59,6 +59,14 @@
 # standing per-project preference, and firstmate resolves it per task at intake
 # and passes the explicit flag. Refused on --scout and --secondmate: a scout
 # makes no branch and a charter is not a delivery contract.
+# --base-branch <branch> starts the task from origin's <branch> instead of the
+# repository default, for work that belongs on a named integration, feature, or
+# release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
+# bin/fm-spawn.sh requires to agree with the same --base-branch it is passed to
+# choose the copy's starting point, and a ship's
+# Definition of done then targets that branch with its pull request.
+# bin/fm-dod-lib.sh's fm_base_branch_valid owns which deliveries accept one.
+# Refused on --secondmate.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
@@ -187,6 +195,8 @@ MODE=
 MODE_SET=0
 BRANCH_PREFIX=fm/
 BRANCH_PREFIX_SET=0
+BASE_BRANCH=
+BASE_BRANCH_SET=0
 FORGE=none
 FORGE_SET=0
 SHAPE=
@@ -201,6 +211,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -217,6 +228,8 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
+    --base-branch) want_value="base-branch" ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     --forge) want_value=forge ;;
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
@@ -279,6 +292,13 @@ if [ "$KIND" = ship ]; then
 elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  if [ "$KIND" = secondmate ] || [ -z "$BASE_BRANCH" ]; then
+    echo "error: --base-branch takes a branch name and applies only to ship and scout briefs" >&2
+    exit 1
+  fi
+  fm_base_branch_valid "$BASE_BRANCH" "$MODE" "$FORGE" "fm-brief.sh --base-branch" || exit 1
 fi
 ID=${POS[0]}
 BRANCH="$BRANCH_PREFIX$ID"
@@ -566,6 +586,13 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+if [ -n "$BASE_BRANCH" ]; then
+  SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean copy of its base branch.
+Base branch: $BASE_BRANCH"
+else
+  SETUP_BASE="You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch."
+fi
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -580,7 +607,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_BASE
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -640,8 +667,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -651,7 +678,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+$SETUP_BASE
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
