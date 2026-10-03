@@ -157,6 +157,13 @@ fi
 exec "$REAL_TMUX" -L "$SOCKET" "\$@"
 SHIM
 chmod +x "$TMUX_SHIM_DIR/tmux"
+# The daemon runs its pinned primary's --version once at start; this stub keeps
+# the claude-pinned scenario from launching the host's Claude Code.
+cat > "$TMUX_SHIM_DIR/claude" <<'SHIM'
+#!/usr/bin/env bash
+printf '0.0.0-test (stub)\n'
+SHIM
+chmod +x "$TMUX_SHIM_DIR/claude"
 
 # Create a fake crewmate window (the watcher lists fm-* windows for stale
 # detection). The pane is an inert shell - it just needs to exist.
@@ -456,8 +463,30 @@ test_scenario_d() {
   should_exit_afk "$STATE_DIR" "$doorbell" \
     && fail "Scenario D: the submitted doorbell would read as the captain returning"
 
+  # A Claude turn footer rendered on the pane's terminal, outside the composer,
+  # must defer the next escalation and name the stub version probed at start.
+  local tty i=0 deferral
+  deferral='deferred: supervisor pane busy (agent mid-turn) (source=rendered, backend=tmux, harness=claude, version_at_daemon_start=0.0.0-test (stub))'
+  tty=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$SUPERVISOR_PANE" '#{pane_tty}')
+  printf '\r\nWorking (esc to interrupt)\r\n' > "$tty"
+  until PATH="$TMUX_SHIM_DIR:$PATH" FM_DAEMON_PRIMARY_HARNESS=claude pane_is_busy "$SUPERVISOR_PANE" tmux; do
+    [ "$i" -lt 30 ] || fail "Scenario D: the rendered footer did not make the claude pane read busy"
+    sleep 0.1
+    i=$((i + 1))
+  done
+  echo "done: PR https://example.test/pr/401" >> "$STATE_DIR/fake-c1.status"
+  i=0
+  until grep -qF "$deferral" "$STATE_DIR/.supervise-daemon.log" 2>/dev/null; do
+    [ "$i" -lt 75 ] || fail "Scenario D: no busy deferral named the stub version probed at daemon start: $(cat "$STATE_DIR/.supervise-daemon.log" 2>/dev/null)"
+    sleep 0.2
+    i=$((i + 1))
+  done
+  submitted_count=$(grep -c '' "$LOG_FILE" || true)
+  [ "$submitted_count" -eq 1 ] \
+    || fail "Scenario D: a doorbell was submitted into the busy pane: $(cat "$LOG_FILE")"
+
   stop_daemon
-  pass "Scenario D: a claude primary receives one plain doorbell whose record the away-mode return check reads as internal"
+  pass "Scenario D: a claude primary receives one plain doorbell whose record the away-mode return check reads as internal, and a busy deferral names the version probed at daemon start"
 }
 
 test_scenario_a

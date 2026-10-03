@@ -693,16 +693,42 @@ fm_daemon_primary_harness() {
   printf '%s' "$FM_DAEMON_PRIMARY_HARNESS"
 }
 
+# The source is retained in the calling shell so a deferred escalation can
+# name the evidence that held it. Native idle is not conclusive on Herdr, so a
+# rendered match after native idle must be attributed to the rendered reader.
 pane_is_busy() {  # <target> [backend]
   local target=$1 backend=${2:-tmux} native tail40 harness
+  PANE_BUSY_SOURCE=
   harness=$(fm_daemon_primary_harness)
   native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)
-  case "$native" in
-    busy) return 0 ;;
-  esac
+  if [ "$native" = busy ]; then
+    PANE_BUSY_SOURCE=native
+    return 0
+  fi
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
-    | fm_busy_lines_match "$harness"
+  if printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -12 \
+    | fm_busy_lines_match "$harness"; then
+    PANE_BUSY_SOURCE=rendered
+    return 0
+  fi
+  return 1
+}
+
+# Resolve the primary harness and its CLI version once, at daemon start, in the
+# daemon's own shell so busy deferrals reuse both. The version is the binary on
+# the daemon's PATH at start, which can lag a primary that auto-updated later.
+# Only a known harness CLI is run, bounded and detached from stdin.
+fm_daemon_resolve_primary() {
+  local bin='' version=''
+  fm_daemon_primary_harness >/dev/null
+  case "$FM_DAEMON_PRIMARY_HARNESS" in
+    cursor) bin='cursor-agent' ;;
+    claude|codex|opencode|pi|pi-signed|grok|kimi|omp|muse|gemini|rovo|agy|devin) bin=$FM_DAEMON_PRIMARY_HARNESS ;;
+  esac
+  [ -z "$bin" ] || version=$(fm_run_timed 5 "$bin" --version 2>/dev/null </dev/null | head -1)
+  version=$(printf '%s' "$version" | LC_ALL=C tr -cd ' -~')
+  version=${version:0:80}
+  FM_DAEMON_PRIMARY_VERSION=${version:-unavailable}
 }
 
 # pane_input_pending dispatches through fm_backend_composer_state and treats
@@ -1446,7 +1472,7 @@ inject_msg() {  # <message> [state]
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     INJECT_LAST_FAILURE="deferred: supervisor pane busy (agent mid-turn)"
-    log "inject $INJECT_LAST_FAILURE"
+    log "inject $INJECT_LAST_FAILURE (source=${PANE_BUSY_SOURCE:-unavailable}, backend=$backend, harness=$(fm_daemon_primary_harness), version_at_daemon_start=${FM_DAEMON_PRIMARY_VERSION:-unavailable})"
     return 1
   fi
   #   b) Composer-guard: inject ONLY into a confirmed-empty GENUINE agent
@@ -1859,6 +1885,8 @@ fm_super_main() {
     rm -f "$PIDFILE" 2>/dev/null || true
     exit 1
   fi
+
+  fm_daemon_resolve_primary
 
   local afk_status="off"
   afk_active "$STATE" && afk_status="on"

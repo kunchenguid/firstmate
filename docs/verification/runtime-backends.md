@@ -1229,6 +1229,29 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Away-supervisor Claude busy signal
+
+Measured 2026-10-03 against Claude Code 2.1.288 and Herdr 0.9.1 in a named isolated lab session.
+A tracked background Bash `sleep` remained running after Claude's reply, while `agent get` reported `idle`, the rendered tail showed `1 shell still running`, and `pane_is_busy` reported idle.
+After another one-line reply it still reported idle; during a real foreground Bash turn it reported busy.
+The overnight false-positive root cause remains unverified: the lab did not reproduce a busy verdict on an idle Claude pane, and the date-change reminder was not reproduced.
+The daemon now records `source=native` or `source=rendered` with backend, harness, and `version_at_daemon_start` on the existing busy-deferral log line, so a recurrence can identify the deciding signal without changing its safety posture.
+That version is what the harness CLI on the daemon's PATH reported once at daemon start, so it can lag a primary that auto-updated later.
+`tests/fm-daemon.test.sh` pins the source attribution with a stubbed native verdict and real tmux-rendered panes, and the start-time version probe with stub CLIs.
+`tests/fm-afk-inject-e2e.test.sh` starts a real claude-pinned daemon with a stub `claude` CLI and requires its busy deferral on a rendered Claude footer to name that stub's version.
+The prompt-submitting guard re-checks the live `pane_is_busy` verdicts: idle beside a tracked background task and after a one-line reply, busy during a foreground Bash turn:
+
+```sh
+FM_AFK_CLAUDE_BUSY_LIVE=1 tests/fm-afk-claude-busy-live-e2e.test.sh
+```
+
+On Herdr 0.9.3 the guard's first prompt intermittently went unanswered within the background wait, so the guard now completes a warm-up round trip before the background step.
+Observed 2026-10-03 on Herdr 0.9.3:
+
+```text
+ok - Claude Code 2.1.288 (Claude Code) on Herdr herdr 0.9.3: background task and one-line reply idle, mid-turn busy
+```
+
 ### Claude exit behind the slash-command popup
 
 Measured 2026-09-26 against Herdr 0.9.0 and Claude Code 2.1.283 in an isolated `fm-lab-` session.
