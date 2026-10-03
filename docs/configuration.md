@@ -27,6 +27,7 @@ Start with the directory layout, then use the setting reference for the behavior
 
 When `FM_HOME` is unset, most scripts use the repo root as the home.
 When it is set, scripts still run from this repo's `bin/`, while `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
+Firstmate-generated Codex worker and secondmate launches also set each session's operational home in its tool shells, even when those shells run under a shared Codex daemon started from another home.
 
 ### Root and directory overrides
 
@@ -948,7 +949,7 @@ Firstmate retains basic home, executable search, terminal, locale, temporary-dir
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
 
-Allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
+Allowlisted ambient values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
 
 ### Authentication requirements

@@ -98,15 +98,8 @@ The guard cooperates with that arm rather than trusting a beacon left by the cyc
 
 When an active home instead has a live session lock held by a verified harness that the current session does not own, the Claude guard emits a read-only ownership diagnostic and allows the turn to end safely.
 
-Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`.
-The current session owns the lock when either of these holds:
-
-- The recorded pid is a member of the current session's contiguous harness ancestry.
-- The trusted Claude session id recorded beside the lock in `state/.lock-session` matches this hook's own environment while the recorded pid is still a live harness.
-
-That second signal keeps a background Claude session owning its own lock after the transient helper chain between its hooks and its recorded owner is recycled.
-The library's header owns the trust gate (`CLAUDE_PID` must be a Claude-shaped member of the current run).
-`bin/fm-lock.sh` owns the sidecar and the line-1 anchor it records for such a session.
+Ownership is the shared `fm_session_lock_owned_by_self` verdict in `bin/fm-session-lock-lib.sh`; its header owns the ancestry, Claude session-id, and Codex client identity rules.
+`bin/fm-lock.sh` owns the sidecar and the line-1 anchor recorded for a session.
 
 A Claude session that does not own the lock cannot arm or repair the home without stealing the live owner's lock, so blocking it would create an unbounded loop.
 The lock-owning session remains responsible for restoring supervision.
@@ -266,7 +259,7 @@ Each enabled primary harness adapts its own turn-end mechanism to the shared gua
 The registrations in detail:
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.
-- Codex registers a `Stop` hook in `.codex/hooks.json`, anchors the executable to the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
+- Codex registers a `Stop` hook in `.codex/hooks.json`, derives the executable and operational home from the hook process working directory, verifies a Firstmate-shaped hook-bearing root, and passes the original payload to the shared guard.
 - OpenCode listens for `session.idle` in `.opencode/plugins/fm-primary-turnend-guard.js`, lets the watcher coordinator act first, and calls `client.session.promptAsync` once when the guard returns 2.
 - Pi listens for `agent_settled` in `.pi/extensions/fm-primary-turnend-guard.ts`, runs once per logical agent run, and calls `pi.sendUserMessage(..., { deliverAs: "followUp" })` once when the guard returns 2.
 - omp answers its blocking `session_stop` hook in `.omp/extensions/fm-primary-turnend-guard.ts`, passing the payload's own `stop_hook_active` to the shared guard.
