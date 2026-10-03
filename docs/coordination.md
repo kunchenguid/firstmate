@@ -161,8 +161,9 @@ An enforced repository refuses a second request for the same batch, an unconfirm
 When the central claim is no longer active after lease expiry, a coordinator reboot or manual recovery, `readmit` opens a new session with new request IDs if the home's generation changed, then submits and claims a fresh intent for the task.
 A journaled `pre-ci` request without a reply is replayed with its original request ID on the next `pre-ci` for that batch.
 A lifecycle checkpoint for a repository outside `enforce_repos` warns and exits 0 on any adapter error; an enforced repository or an unreadable coordination config refuses.
-`pre-push` without a local intent resolves the repository from its worktree, and `pre-ci` without one refuses whenever the home enforces any repository.
-A readmitted task keys its journaled `pre-ci` and renewal requests by the new admission, so a request lost under the revoked claim is never replayed against the new one.
+Dispatch records each task's repository before validating its declaration, so a shadow task without a full intent keeps its repository's exit rule.
+`pre-push` for a task this home never dispatched resolves the repository from its worktree, and `pre-ci` for one refuses whenever the home enforces any repository.
+A readmitted task keys its journaled `pre-ci` and renewal requests by the new admission and drops unanswered requests that carry the revoked claim, so they are never replayed or left pending.
 `fm-pr-merge.sh` calls `pre-merge` immediately before the forge merge for an enforced GitHub repository, and refuses an absent, stale, or unreachable integration slot.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings in shadow mode and refuse the checkpoint in enforced mode.

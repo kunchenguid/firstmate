@@ -210,6 +210,12 @@ adapter "$tmp/a" readmit a "$repo" > /dev/null 2> "$tmp/err" || fail "readmit mu
 adapter "$tmp/a" pre-push a "$repo" > /dev/null 2> "$tmp/err" || fail "readmitted writer must publish under its new generation: $(cat "$tmp/err")"
 adapter "$tmp/a" heartbeat a > /dev/null 2> "$tmp/err" || fail "readmitted writer must renew despite a lost pre-readmit renew: $(cat "$tmp/err")"
 adapter "$tmp/a" pre-ci a batch-two > /dev/null 2> "$tmp/err" || fail "readmitted writer must pulse a batch whose pre-readmit request was lost: $(cat "$tmp/err")"
+python3 - "$tmp/a/state/fm-coord-adapter.json" "$(adapter "$tmp/a" view)" <<'PY' || fail 'readmit must drop unanswered requests that carry the revoked claim'
+import json,sys
+state=json.load(open(sys.argv[1]))
+assert 'a:renew:lost' not in state['requests'] and 'a:pulse:batch-two' not in state['requests']
+assert not json.loads(sys.argv[2])['local_pending']
+PY
 pass 'readmit opens a new session and intent after recovery revokes the claim and drops stale renew and pulse requests'
 
 if adapter "$tmp/b" pre-push missing "$repo" > /dev/null 2> "$tmp/err"; then
@@ -230,5 +236,19 @@ printf '{"mode":"shadow","home_id":"shadow","repos":["other/repo"],"db":"%s"}\n'
 adapter "$tmp/shadow" dispatch shadow "$repo" "$tmp/b.brief" branch/shadow codex > /dev/null 2> "$tmp/err" || fail 'dispatch outside coordination enrollment must only warn'
 if adapter "$tmp/b" dispatch b2 "$repo" "$tmp/empty.brief" branch/b2 codex > /dev/null 2> "$tmp/err"; then
   fail 'enforced dispatch must refuse an empty declaration'
+fi
+mkdir -p "$tmp/mixed/config" "$tmp/mixed/state" "$tmp/shadowrepo" "$tmp/gitlabrepo"
+for other in shadowrepo gitlabrepo; do
+  git -C "$tmp/$other" init -q -b main
+  git -C "$tmp/$other" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m base
+done
+git -C "$tmp/gitlabrepo" remote add origin git@gitlab.com:owner/elsewhere.git
+printf '{"mode":"shadow","home_id":"mixed","repos":["owner/repo","other/shadow"],"enforce_repos":["owner/repo"],"db":"%s","project_repos":{"%s":"other/shadow"}}\n' "$db" "$(cd "$tmp/shadowrepo" && pwd -P)" > "$tmp/mixed/config/coordination.json"
+adapter "$tmp/mixed" dispatch mixed "$tmp/shadowrepo" "$tmp/empty.brief" branch/mixed codex > /dev/null 2> "$tmp/err" || fail 'shadow repository dispatch in an enforcing home must only warn'
+adapter "$tmp/mixed" pre-ci mixed batch-mixed > /dev/null 2> "$tmp/err" || fail "shadow repository CI pulse without a full intent must only warn in an enforcing home: $(cat "$tmp/err")"
+adapter "$tmp/mixed" pre-push mixed "$tmp/shadowrepo" > /dev/null 2> "$tmp/err" || fail 'shadow repository push without a full intent must only warn in an enforcing home'
+adapter "$tmp/mixed" pre-push elsewhere "$tmp/gitlabrepo" > /dev/null 2> "$tmp/err" || fail 'push from a non-GitHub repository outside enforcement must only warn'
+if adapter "$tmp/mixed" pre-ci never-dispatched > /dev/null 2> "$tmp/err"; then
+  fail 'CI pulse for a task this enforcing home never dispatched must refuse'
 fi
 pass 'shadow repositories warn and continue; enforced repositories refuse'

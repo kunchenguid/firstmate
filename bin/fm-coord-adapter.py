@@ -193,7 +193,13 @@ class Adapter:
         return self.config.get("project_repos", {}).get(str(Path(project).resolve())) or repo_name(project)
 
     def dispatch(self, task_id, project, brief, branch, harness):
-        repo = self.repo = self.resolve_repo(project)
+        self.state.setdefault("task_repos", {})[task_id] = None
+        try:
+            self.repo = self.resolve_repo(project)
+        finally:
+            self.state["task_repos"][task_id] = self.repo
+            self.save()
+        repo = self.repo
         if harness not in {"claude", "codex", "omp", "opencode"}:
             warn(f"{task_id}: {harness} has no coordination adapter; dispatch continues without a grant")
             self.required(repo, False, f"{harness} has no coordination adapter")
@@ -311,6 +317,9 @@ class Adapter:
             task["intent_id"] = f"{home_id}:{task['repo']}:{task_id}:{task['admission']}"
             for field in ("claim", "claim_attempt", "version", "resources", "published_head", "renew_key"):
                 task.pop(field, None)
+            for key, item in list(self.state["requests"].items()):
+                if "reply" not in item and item["payload"].get("claim_id") == claim["claim_id"]:
+                    del self.state["requests"][key]
             self.save()
         if not task.get("claim", {}).get("ok"):
             attempt = task.get("claim_attempt", 0)
@@ -393,13 +402,16 @@ def main():
         return 1
     command = sys.argv[1]
     adapter = None
+    undispatched = False
     try:
         adapter = Adapter(Path(home))
         if not adapter.enabled:
             return 0
         if command in {"pre-push", "pre-ci", "heartbeat"} and len(sys.argv) > 2:
-            adapter.repo = adapter.state["tasks"].get(sys.argv[2], {}).get("repo")
-            if adapter.repo is None and command == "pre-push" and len(sys.argv) == 4:
+            dispatched = {**{task_id: task["repo"] for task_id, task in adapter.state["tasks"].items()}, **adapter.state.get("task_repos", {})}
+            undispatched = sys.argv[2] not in dispatched
+            adapter.repo = dispatched.get(sys.argv[2])
+            if undispatched and command == "pre-push" and len(sys.argv) == 4:
                 adapter.repo = adapter.resolve_repo(sys.argv[3])
         if command == "dispatch" and len(sys.argv) == 7:
             adapter.dispatch(*sys.argv[2:])
@@ -427,7 +439,7 @@ def main():
         return 0
     except (ValueError, KeyError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         warn(str(exc))
-        unowned = adapter is not None and adapter.repo is None and command in {"pre-push", "pre-ci"} and adapter.enforced_repos
+        unowned = undispatched and command == "pre-ci" and adapter.enforced_repos
         return 0 if adapter is not None and command in {"dispatch", "pre-push", "pre-ci", "pre-merge", "heartbeat"} and adapter.repo not in adapter.enforced_repos and not unowned else 1
 
 
