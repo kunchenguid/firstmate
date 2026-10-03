@@ -1470,6 +1470,120 @@ test_reaper_stops_a_tracked_watcher() {
   pass "watch-arm: the test reaper stops a watcher armed for a tracked temporary home"
 }
 
+# A handling-delivery confirmation for an episode the drain already
+# acknowledged must succeed as a no-op when the generation matches: the pid is
+# alive and holds the lock, so the handling is already retired, not rejected.
+# A mismatched generation, a dead pid, and a lock mismatch stay rejections.
+test_handling_delivered_accepts_already_acked_generation() {
+  local dir home state pid identity generation status dead
+  dir=$(make_case handling-delivered-acked)
+  home="$dir/home"
+  state="$dir/state"
+  mkdir -p "$home/data" "$state/.watch.lock"
+  sleep 60 &
+  pid=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") \
+    || fail "could not read the fixture watcher identity"
+  printf '%s' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s' "$identity" > "$state/.watch.lock/pid-identity"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
+    || fail "could not publish the fixture downtime episode"
+  generation=$(recovery_marker_generation "$state/.watcher-down")
+  [ -n "$generation" ] || fail "published episode left no recovery generation"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$pid" || fail "confirmed prompt delivery did not begin handling"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_ack "$2" "$3"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" "$generation" \
+    || fail "could not acknowledge the fixture handling episode"
+  case "$(cat "$state/.watcher-down")" in
+    acked:handling:"$generation") ;;
+    *) fail "acknowledged episode did not retire: $(cat "$state/.watcher-down")" ;;
+  esac
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$pid"
+  expect_code 0 "$?" "an already-acknowledged confirmation must succeed as a no-op"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "superseded.0.deadbeef" \
+    --watcher-pid "$pid" 2>/dev/null
+  expect_code 3 "$?" "a superseded generation must stay rejected"
+  sleep 0 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$dead" 2>/dev/null
+  expect_code 1 "$?" "a dead watcher pid must stay rejected"
+  printf 'foreign-identity\n' > "$state/.watch.lock/pid-identity"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$generation" \
+    --watcher-pid "$pid" 2>/dev/null
+  status=$?
+  printf '%s' "$identity" > "$state/.watch.lock/pid-identity"
+  expect_code 1 "$status" "a lock mismatch must stay rejected"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watch-arm: an already-acknowledged handling confirmation succeeds as a no-op"
+}
+
+# A non-successor arm start mints a fresh generation, and a confirmation for
+# the churned generation reports a mismatch (status 3). The closing arm check
+# without a reopen - the marker step a handling successor runs - keeps the
+# churned generation. This characterizes existing marker behavior that the Pi
+# superseded-delivery path relies on.
+test_handling_delivered_rejects_a_superseded_generation() {
+  local dir home state pid identity first second status
+  dir=$(make_case handling-delivered-superseded)
+  home="$dir/home"
+  state="$dir/state"
+  mkdir -p "$home/data" "$state/.watch.lock"
+  sleep 60 &
+  pid=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid") \
+    || fail "could not read the fixture watcher identity"
+  printf '%s' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s' "$identity" > "$state/.watch.lock/pid-identity"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_publish "$2" downtime && fm_recovery_marker_arm_check "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
+    || fail "could not announce the fixture downtime episode"
+  first=$(recovery_marker_generation "$state/.watcher-down")
+  case "$(cat "$state/.watcher-down")" in
+    announced:downtime:"$first") ;;
+    *) fail "announced episode has the wrong shape: $(cat "$state/.watcher-down")" ;;
+  esac
+  # Reopening mints a fresh generation only when unrecovered work is queued:
+  # an announced episode with an empty queue must survive untouched, so queue
+  # one wake and re-announce first. Without this the reopen below is a no-op
+  # by design (no idle churn) and the fresh-generation assertion below fails.
+  append_wake "$state" check inbox:fixture 'check: manual-restart churn fixture' \
+    || fail "could not queue the fixture wake for the manual restart"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_arm_check "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
+    || fail "could not re-announce the queued fixture episode"
+  first=$(recovery_marker_generation "$state/.watcher-down")
+  case "$(cat "$state/.watcher-down")" in
+    announced:downtime:"$first") ;;
+    *) fail "queued episode has the wrong shape: $(cat "$state/.watcher-down")" ;;
+  esac
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_reopen_announced "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
+    || fail "a manual arm start could not reopen the announced episode"
+  second=$(recovery_marker_generation "$state/.watcher-down")
+  [ -n "$second" ] && [ "$second" != "$first" ] \
+    || fail "a non-successor arm start did not mint a fresh generation: $(cat "$state/.watcher-down")"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --handling-delivered "$first" \
+    --watcher-pid "$pid" 2>/dev/null
+  expect_code 3 "$?" "a confirmation for the churned generation must report a mismatch"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_arm_check "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" \
+    || fail "the arm check after the reopen could not run"
+  status=$(recovery_marker_generation "$state/.watcher-down")
+  [ "$status" = "$second" ] \
+    || fail "an arm check without a reopen minted another generation: $(cat "$state/.watcher-down")"
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  pass "watch-arm: a churned generation's handling confirmation reports a mismatch and an arm check keeps it"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1495,6 +1609,8 @@ test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
 test_stop_ends_the_home_watcher_and_publishes_downtime
+test_handling_delivered_accepts_already_acked_generation
+test_handling_delivered_rejects_a_superseded_generation
 test_take_over_attaches_to_a_cycle_the_named_arm_does_not_own
 test_take_over_owns_a_fresh_cycle_and_keeps_queued_work_surfacing
 test_take_over_preserves_downtime_from_watcher_self_exit
