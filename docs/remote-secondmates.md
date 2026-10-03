@@ -267,16 +267,20 @@ Every claude pane under such a server falls back to a stale plaintext credential
 Herdr's own SSH remote attach starts a server born in another session when it finds none.
 At boot, that server wins the `fm-remote` socket, because sshd accepts connections before the login session exists.
 The guard is what makes the launch agent converge.
-It acts on whichever server owns the `fm-remote` socket:
+The [guard's header](../bin/fm-remote-herdr-guard.sh) owns the socket-owner decision table, takeover behavior, and launchd exit policy; [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
+Takeover closes the session's panes, so the parent firstmate must relaunch its mates into the Aqua-born server.
 
-| Socket owner | Guard action |
-| --- | --- |
-| Nothing | Execs the server in the foreground under launchd. |
-| An Aqua-born server | Exits 0. |
-| Any other (foreign) server | Stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server. |
+### Show the remote host in the primary's Herdr sidebar
 
-`KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket.
-The guard's header owns the decision table, and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
+Run these commands on the primary to save the host as a Herdr machine and list the remote second mate's `fm-remote` workspaces under its host group beside Local in the machines sidebar:
+
+```sh
+herdr machine add --label <label> --remote-session fm-remote <ssh-alias>
+herdr machine list
+```
+
+Herdr refuses the machine while the remote server is still one the guard started before it led its own session; restart that server once through the guard.
+Saved-machine support requires `perl` on the launch agent's `PATH`; without it, the guard preserves server supervision but cannot make the server a session leader.
 
 ### Other repairs and limits
 
