@@ -18,7 +18,9 @@
 # and left byte-identical when it already names that id. A same-session
 # confirmation never rewrites line 1 while the recorded pid is alive, because
 # bin/fm-startup-network.sh compares that pid across its deferred sweeps; a dead
-# recorded pid is reclaimed and rewritten to this session's anchor.
+# recorded pid is reclaimed and rewritten to this session's anchor. An anchor
+# that is the shared managed Codex daemon is refused without a trusted thread
+# id, since no sidecar could then tell its threads apart.
 #
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0.
