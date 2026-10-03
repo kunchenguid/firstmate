@@ -1407,16 +1407,24 @@ test_crewmate_scaffolds_forbid_pattern_kills() {
     assert_grep "Never stop processes by name or pattern" "$brief" \
       "$mode ship brief did not forbid pattern kills"
     # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+    assert_grep '`pkill`, `killall`, `pgrep ... | xargs kill`' "$brief" \
+      "$mode ship brief did not name pkill, killall, and pgrep | xargs kill"
+    # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
     assert_grep 'pkill -f PAT -f' "$brief" "$mode ship brief did not name the BSD trailing-option trap"
     # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
     assert_grep 'lsof -ti tcp:<port> -sTCP:LISTEN' "$brief" \
       "$mode ship brief gave no safe way to stop a listener"
+    assert_grep 'if anything else holds the port, do not kill it - report a blocker' "$brief" \
+      "$mode ship brief allowed killing a listener the worker did not start"
   done
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-kill-scout alpha --scout >/dev/null 2>&1 \
     || fail "fm-brief.sh --scout exited non-zero"
   brief="$home/data/brief-kill-scout/brief.md"
   assert_grep "Never stop processes by name or pattern" "$brief" "scout brief did not forbid pattern kills"
+  # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+  assert_grep '`pkill`, `killall`, `pgrep ... | xargs kill`' "$brief" \
+    "scout brief did not name pkill, killall, and pgrep | xargs kill"
 
   ship_rule=$(awk '/^8\. Never stop processes/,/^$/' "$home/data/brief-kill-no-mistakes/brief.md")
   scout_rule=$(awk '/^8\. Never stop processes/,/^$/' "$brief")

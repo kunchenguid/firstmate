@@ -571,7 +571,8 @@ IFS= read -r -d '' SHARED_KILL_RULE <<'EOF' || true
 8. Never stop processes by name or pattern (`pkill`, `killall`, `pgrep ... | xargs kill`): a pattern
    also matches sibling agents and the operator's shells and apps, and BSD `pkill -f PAT -f` reads
    the trailing `-f` as a second pattern that matches every command line containing `-f`. Kill only
-   PIDs you started and saved, or the listener from `lsof -ti tcp:<port> -sTCP:LISTEN`.
+   PIDs you started and saved, or the listener from `lsof -ti tcp:<port> -sTCP:LISTEN` on a port
+   your own command started; if anything else holds the port, do not kill it - report a blocker.
 EOF
 SHARED_KILL_RULE=${SHARED_KILL_RULE%$'\n'}
 
