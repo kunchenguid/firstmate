@@ -779,6 +779,9 @@ function serve() {
     let url;
     try { url = new URL(req.url || "/", "http://viewer.invalid"); }
     catch { return json(res, 400, { error: "invalid request URL" }); }
+    if (req.headers.accept?.includes("text/html") && /^(?:\/login|\/dashboard|\/reports|\/report\/[A-Za-z0-9._-]+|\/journal\/(?:supervisor|short)(?:\/[A-Za-z0-9._-]+)?)\/?$/.test(url.pathname)) {
+      return text(res, 200, readFileSync(join(assetRoot, "index.html"), "utf8"), "text/html; charset=utf-8");
+    }
     if (Object.hasOwn(assets, url.pathname)) {
       const [name, contentType] = assets[url.pathname];
       return text(res, 200, readFileSync(join(assetRoot, name), "utf8"), contentType);
