@@ -179,7 +179,7 @@ for bad in https://github.com/owner/repo/pull/1/files https://gitlab.com/owner/r
 done
 pass 'attach-pr accepts only an exact GitHub PR URL for the intent repository'
 
-attempt_unknown() {
+attempt() {
   id=$1; home=$2; generation=$3; claim=$4; fence=$5; head=$6
   pick=$(coord queue-next "$(printf '{"request_id":"next-%s-%s","repo":"owner/repo","base":"main"}' "$id" "$7")")
   [ "$(field "$pick" intent_id)" = "$id" ] || fail "$id should occupy the slot"
@@ -189,6 +189,9 @@ attempt_unknown() {
   coord queue-validated "{\"request_id\":\"validate-$id-$7\",$common,\"validation_passed\":true,\"validation_id\":\"v-$id-$7\"}" > /dev/null
   coord queue-checks "{\"request_id\":\"checks-$id-$7\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head\",\"conclusion\":\"success\"}]}" > /dev/null
   coord queue-attempt "{\"request_id\":\"attempt-$id-$7\",$common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true${8:+,\"wrapper_pid\":$8}}" > /dev/null
+}
+attempt_unknown() {
+  attempt "$@"
   coord queue-result "$(printf '{"request_id":"unknown-%s-%s","intent_id":"%s","generation":%s,"outcome":"unknown"}' "$id" "$7" "$id" "$slot")" > /dev/null
 }
 
@@ -259,12 +262,13 @@ pass 'lost refusal reply releases the slot and replays its receipt'
 coord queue-ready "$(printf '{"request_id":"ready-b-2","intent_id":"b","home_id":"b","generation":%s,"claim_id":"%s","fence":%s,"head_oid":"%s"}' "$gb" "$claim_b" "$fence_b" "$head_b")" > /dev/null
 epoch_b() { field "$(coord inspect '{}')" queue | python3 -c 'import ast,sys; print([q for q in ast.literal_eval(sys.stdin.read()) if q["intent_id"]=="b"][0]["ready_epoch"])'; }
 before=$(epoch_b)
-attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 2
-PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$(printf '{"request_id":"reconcile-a-merged","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$slot")" > /dev/null
+attempt a a "$ga" "$claim_a" "$fence_a" "$head_a" 2
+direct=$(PATH="$tmp/bin:$PATH" FM_TEST_MERGED=true FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID="$merge_oid" FM_TEST_BASE_OID="$merge_oid" coord queue-reconcile "$(printf '{"request_id":"reconcile-a-merged","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main"}' "$slot")")
+[ "$(field "$direct" state)" = merged ] || fail 'a forge-proven landing must settle directly from attempting'
 [ "$(epoch_b)" = "$before" ] || fail 'a merge must not reset waiting ready items'
 next_b=$(coord queue-next '{"request_id":"next-b-after-merge","repo":"owner/repo","base":"main"}')
 [ "$(field "$next_b" intent_id)" = b ] || fail 'waiting ready item must keep its queue position after a merge'
-pass 'merge keeps waiting ready items and their age'
+pass 'forge-proven landing settles from attempting and keeps waiting ready items and their age'
 
 python3 -c 'import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute("UPDATE intents SET pr_url=? WHERE intent_id=?", ("https://github.com/owner/repo/pull/2/files","b")); db.commit()' "$db"
 coord queue-abort "$(printf '{"request_id":"abort-b","intent_id":"b","slot_generation":%s,"reason":"legacy url"}' "$(field "$next_b" generation)")" > /dev/null

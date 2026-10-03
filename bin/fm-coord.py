@@ -423,7 +423,7 @@ def queue_operation(db, op, p):
         event_id = emit(db, "merge-outcome-unknown", request_id, {"intent_id": item["intent_id"], "attempt_event_id": item["attempt_event_id"], "reported_outcome": p["outcome"]})
         return {"ok": True, "state": "outcome-unknown", "event_id": event_id}
     if op == "queue-reconcile":
-        require(item["state"] == "outcome-unknown", "slot outcome is not unknown")
+        require(item["state"] == "outcome-unknown" or (item["state"] == "attempting" and p["_forge_outcome"] == "merged"), "only a proven landing can settle an attempting slot")
         return terminal_outcome(db, item, request_id, p["_forge_outcome"], p)
     raise Refusal("unknown queue operation")
 

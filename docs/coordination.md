@@ -90,6 +90,7 @@ The wrapper remains authoritative for live hold, away, check, and merge authorit
 The attestations here are advisory until the step-4 dispatch and merge boundaries enforce this protocol.
 A wrapper refusal or ambiguous reply reported through `queue-result` leaves the slot `outcome-unknown` until `queue-reconcile` proves landing or non-landing from the forge.
 Caller-supplied refusal flags and base OIDs cannot settle an attempt.
+`queue-reconcile` can settle an `attempting` slot directly only when the live forge read proves the exact head landed.
 A refused candidate may re-enter `queue-ready` after its owner repairs the issue, creating a new attempt event without changing the prior terminal record.
 A timeout or lost reply goes to `outcome-unknown`, retaining the slot across process restarts.
 `queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to read the exact GitHub PR and the current base OID.
