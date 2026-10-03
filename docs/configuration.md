@@ -1284,6 +1284,7 @@ A herdr, zellij, or cmux home is therefore never told `tmux` is missing, and the
 
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
+Bootstrap also reports one `NO_MISTAKES_MIRROR:` line per no-mistakes-posture project clone, and for the home's own firstmate checkout, whose `no-mistakes` gate remote is absent or does not live under `repos/` in the data root the installed CLI resolves (`NM_HOME` when set non-empty, else `~/.no-mistakes`); the printed `no-mistakes init` fix inside the affected clone is the operator's to run, never bootstrap's.
 
 **Project refresh at startup**
 
