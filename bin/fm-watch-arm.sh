@@ -68,6 +68,17 @@
 # bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
 # (secondmate homes run the same script) and would kill siblings.
 #
+# --take-over <arm-pid>: own the cycle that arm <arm-pid> owns, for an owner
+# that left a successor cycle running through main's turn and now parks again
+# (bin/fm-supervision-host.sh). Only when this home's healthy watcher is that
+# arm's own child, it stops that watcher by its locked identity: a cycle that
+# delivered a reason before the stop landed reports it exactly as an attached
+# arm would, and otherwise this arm owns a fresh cycle as a plain arm does.
+# Recovery restoration follows docs/watcher-continuity.md "Generation reuse";
+# an unconfirmed stop leaves downtime for the fresh cycle's recovery check.
+# Any other watcher, or one that outlives the stop,
+# is attached to exactly as a plain arm attaches.
+#
 # --stop: the same home-scoped stop without re-arming, for an owner that ends
 # its own supervision cycle on purpose (the supervision host's park boundary,
 # bin/fm-supervision-host.sh). The stopped watcher publishes downtime exactly
@@ -137,9 +148,10 @@ ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
 
-# The lifecycle ledger is diagnostic evidence, not a supervision dependency.
-# Writes are bounded and best-effort so an observability failure cannot stall an
-# otherwise healthy watcher cycle.
+# Lifecycle writes are bounded and best-effort so an observability failure
+# cannot stall an otherwise healthy watcher cycle. Take-over also uses the
+# owner's row as stop evidence; missing evidence takes the safe recovery path
+# (docs/watcher-continuity.md "Generation reuse").
 cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
@@ -237,9 +249,10 @@ cycle_log_append() {
 # A persistent adapter passes the arm pid that just closed. Once this new arm
 # verifies its watcher, update that predecessor's final record in place so the
 # one-record-per-cycle ledger captures the actual successor outcome without an
-# extra synthetic lifecycle row.
+# extra synthetic lifecycle row. A taking-over arm names itself instead, so its
+# record of the cycle it took over names the cycle it started.
 cycle_mark_predecessor_successor() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} i tmp
+  local successor=$1 predecessor=${2:-${FM_WATCH_PREDECESSOR_ARM_PID:-}} i tmp
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
@@ -324,31 +337,35 @@ fail_unexplained_cycle() {
   return 1
 }
 
-# Close a cycle whose reason line this arm could not read against the bounded
-# terminal-delivery ledger the watcher publishes before releasing its lock.
-close_unobserved_cycle() {
-  local i reason clean_identity record_pid record_identity record_reason
+# Read the reason the current cycle's watcher recorded in the bounded
+# terminal-delivery ledger it publishes before releasing its lock. Sets
+# DELIVERED_REASON; fails when no record matches the cycle's pid and identity.
+DELIVERED_REASON=
+cycle_delivered_reason() {
+  local i clean_identity record_pid record_identity record_reason
+  DELIVERED_REASON=
   clean_identity=$(printf '%s' "$cycle_watcher_identity" | tr '\t\r\n' '   ')
   i=0
   while ! fm_lock_try_acquire "$WATCH_DELIVERY_LOCK"; do
-    [ "$i" -lt 20 ] || {
-      fail_unexplained_cycle
-      return 1
-    }
+    [ "$i" -lt 20 ] || return 1
     sleep 0.02
     i=$((i + 1))
   done
-  reason=
   if [ -f "$WATCH_DELIVERY_LOG" ]; then
     while IFS=$'\t' read -r record_pid record_identity record_reason; do
       if [ "$record_pid" = "$cycle_watcher_pid" ] && [ "$record_identity" = "$clean_identity" ]; then
-        reason=$record_reason
+        DELIVERED_REASON=$record_reason
       fi
     done < "$WATCH_DELIVERY_LOG"
   fi
   fm_lock_release "$WATCH_DELIVERY_LOCK"
-  if [ -n "$reason" ]; then
-    printf '%s\n' "$reason"
+  [ -n "$DELIVERED_REASON" ]
+}
+
+# Close a cycle whose reason line this arm could not read against that ledger.
+close_unobserved_cycle() {
+  if cycle_delivered_reason; then
+    printf '%s\n' "$DELIVERED_REASON"
     return 0
   fi
   fail_unexplained_cycle
@@ -461,10 +478,17 @@ handling_successor_generation() {
 mode=arm
 handling_generation=
 handling_watcher_pid=
+take_over_arm_pid=
 case "${1:-}" in
   ''|arm|--arm) mode=arm ;;
   --restart) mode=restart ;;
   --stop) mode=stop ;;
+  --take-over)
+    mode=take-over
+    take_over_arm_pid=${2:-}
+    case "$take_over_arm_pid" in ''|*[!0-9]*) echo "watcher: invalid take-over arm pid" >&2; exit 2 ;; esac
+    [ "$#" -eq 2 ] || { echo "watcher: unexpected take-over arguments" >&2; exit 2; }
+    ;;
   --handling-delivered)
     mode=handling-delivered
     handling_generation=${2:-}
@@ -474,7 +498,7 @@ case "${1:-}" in
     case "$handling_watcher_pid" in ''|*[!0-9]*) echo "watcher: invalid successor watcher pid" >&2; exit 2 ;; esac
     [ "$#" -eq 4 ] || { echo "watcher: unexpected handling delivery arguments" >&2; exit 2; }
     ;;
-  *) echo "usage: $(basename "$0") [--restart | --stop | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [--restart | --stop | --take-over ARM_PID | --handling-delivered GENERATION --watcher-pid PID]" >&2; exit 2 ;;
 esac
 
 if [ "$mode" = handling-delivered ]; then
@@ -522,6 +546,67 @@ if [ "$mode" = stop ]; then
     echo "watcher: none running"
   fi
   exit 0
+fi
+
+# Stop the watcher the named arm owns, by its locked identity, and wait for it
+# to exit (header, --take-over). Returns 3 after printing the reason that cycle
+# delivered before the stop landed, 0 once it stopped without delivering, and
+# 1 when it was not stopped (its handover state was unreadable, or it outlived
+# the stop), which leaves it to the plain attach below.
+take_over_cycle() {  # <watcher-pid> <identity>
+  local pid=$1 i owner_signal
+  cycle_begin "$pid" attached "$2"
+  fm_recovery_marker_handover_snapshot "$STATE/.watcher-down" || return 1
+  if attached_holder_live "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+  fi
+  i=0
+  while [ "$i" -lt 50 ] && fm_pid_alive "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if fm_pid_alive "$pid"; then
+    return 1
+  fi
+  if cycle_delivered_reason; then
+    cycle_log_append unknown unknown taken-over-delivered-wake none
+    printf '%s\n' "$DELIVERED_REASON"
+    return 3
+  fi
+  # Only the owner can wait on this watcher and distinguish our TERM from a
+  # self-exit that raced the stop. Give its post-wait ledger append a short bound.
+  i=0
+  owner_signal=
+  while [ "$i" -lt 50 ]; do
+    owner_signal=$(awk -F '\t' -v arm="$take_over_arm_pid" -v watcher="$pid" '
+      $1 == "arm_pid=" arm && $2 == "watcher_pid=" watcher { signal = $7 }
+      END { sub(/^signal=/, "", signal); print signal }
+    ' "$CYCLE_LOG" 2>/dev/null || true)
+    [ -z "$owner_signal" ] || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if [ "$owner_signal" = TERM ]; then
+    fm_recovery_marker_handover_restore "$STATE/.watcher-down" \
+      "$FM_RECOVERY_HANDOVER_TOKEN" "$FM_RECOVERY_HANDOVER_SEQ" || true
+    cycle_log_append unknown unknown taken-over none
+  else
+    cycle_log_append unknown unknown taken-over-unconfirmed-stop none
+  fi
+  return 0
+}
+
+TAKEN_OVER=0
+if [ "$mode" = take-over ]; then
+  mode=arm
+  if healthy_watcher \
+    && [ "$(ps -o ppid= -p "$HEALTHY_PID" 2>/dev/null | tr -d ' ')" = "$take_over_arm_pid" ]; then
+    take_over_cycle "$HEALTHY_PID" "$HEALTHY_IDENTITY"
+    case $? in
+      0) TAKEN_OVER=1 ;;
+      3) exit 0 ;;
+    esac
+  fi
 fi
 
 # If a genuinely live+fresh watcher already holds the lock, do not start a second
@@ -672,6 +757,7 @@ while :; do
         exit 1
       fi
       cycle_mark_predecessor_successor "started:$child"
+      [ "$TAKEN_OVER" -eq 0 ] || cycle_mark_predecessor_successor "started:$child" "$ARM_PID"
       if [ -n "$handling_generation" ]; then
         echo "watcher: started pid=$child (beacon fresh) recovery-generation=$handling_generation"
       else

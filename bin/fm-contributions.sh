@@ -5,7 +5,7 @@
 #   fm-contributions.sh snapshot <input.json> [--all]
 #   fm-contributions.sh poll
 #   fm-contributions.sh pending
-#   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <actor> <summary>
+#   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>
 #   fm-contributions.sh ack <task> <url> <event-token>
 #   fm-contributions.sh arm [--if-owned]
 #
@@ -23,9 +23,10 @@
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
 # observation's lane names also disclose a lane absent from the next head.
-# A verdict records the EXACT judged head, source URL, actor and summary. A
-# comment's arrival time never supplies its judged head. Record a prose verdict
-# only after its source identifies that head; otherwise leave it unbound and
+# A verdict records the EXACT judged head, source URL, actor and summary. The
+# actor is exactly one of captain, fleet, maintainer or nobody; any other value
+# is refused. A comment's arrival time never supplies its judged head. Record a
+# prose verdict only after its source identifies that head; otherwise leave it unbound and
 # triage its signal. Formal reviews carry GitHub's own commit_id. Neither kind
 # can grant merge authority. Captain-actor prose requires an existing live hold;
 # an eligible merge remains a captain call, never an automatic forge action.
@@ -473,7 +474,7 @@ case "${1:-}" in
     else
       [ "$#" -eq 4 ] || fail 'verdict needs judged-head, source-url, actor and summary'
       fm_pr_head_valid "$1" || fail 'an exact judged commit is required'
-      case "$3" in captain|fleet|maintainer|nobody) ;; *) fail 'invalid required actor' ;; esac
+      case "$3" in captain|fleet|maintainer|nobody) ;; *) fail "invalid required actor '$3'; expected one of: captain, fleet, maintainer, nobody" ;; esac
       case "$2" in "$url"\#*) ;; *) fail 'verdict source must be a comment or review on this contribution' ;; esac
       jq --arg head "$1" --arg source "$2" --arg actor "$3" --arg summary "$4" \
         '.verdict={head:$head,source:$source,actor:$actor,summary:$summary}' "$TMP/row.json" > "$TMP/update.json"
