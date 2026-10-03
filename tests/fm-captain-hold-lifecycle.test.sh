@@ -1460,14 +1460,17 @@ test_completion_attestation_keeps_an_armed_merge_poll_verifiable() {
   bash -c "$arm" _ "$ROOT" "$home/state" "$url" "$id" || fail "could not arm the merge poll fixture"
   bash -c "$valid" _ "$ROOT" "$home/state" "$id" || fail "the armed merge poll fixture did not authenticate"
 
-  run_captain "$home" complete "$id" --none >/dev/null \
+  chmod 0600 "$home/state/$id.meta"
+  (umask 022; run_captain "$home" complete "$id" --none >/dev/null) \
     || fail "completion attestation of a task with an armed merge poll failed"
   assert_grep "decisions_reviewed=1" "$home/state/$id.meta" "completion attestation missing"
+  [ -n "$(find "$home/state/$id.meta" -perm 0600)" ] \
+    || fail "attestation under umask 022 left the task record readable beyond its owner"
   [ "$(tail -n 2 "$home/state/$id.meta")" = "pr=$url"$'\n'"pr_head=$head" ] \
     || fail "the attested record does not end with its pr= block: $(cat "$home/state/$id.meta")"
   bash -c "$valid" _ "$ROOT" "$home/state" "$id" \
     || fail "the completion attestation disarmed the task's merge poll: $(cat "$home/state/$id.meta")"
-  pass "completion attestation lands ahead of the pr= block, so an armed merge poll still authenticates"
+  pass "completion attestation lands ahead of the pr= block and keeps the record private, so an armed merge poll still authenticates"
 }
 
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
