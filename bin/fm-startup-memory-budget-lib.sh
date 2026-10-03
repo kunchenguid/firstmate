@@ -222,3 +222,20 @@ fm_startup_memory_decimal_le() {
   [ "$left" = "$right" ] && return 0
   [[ "$left" < "$right" ]]
 }
+
+# fm_startup_memory_decimal_multiply_small <normalized decimal> <0..100>
+# Multiply digit by digit so arbitrary-length budgets never enter arithmetic.
+fm_startup_memory_decimal_multiply_small() {
+  local value=$1 factor=$2 result='' carry=0 digit product index
+  for ((index=${#value}-1; index>=0; index--)); do
+    digit=${value:index:1}
+    product=$((digit * factor + carry))
+    result="$((product % 10))$result"
+    carry=$((product / 10))
+  done
+  [ "$carry" -eq 0 ] || result="$carry$result"
+  while [ "${#result}" -gt 1 ] && [ "${result:0:1}" = 0 ]; do
+    result=${result:1}
+  done
+  printf '%s\n' "$result"
+}
