@@ -39,4 +39,53 @@ test_primary_and_secondmate_instruction_generation() {
   pass "primary workers and secondmates receive the authority rule through generated instructions"
 }
 
+# config/worker-decides-findings swaps the never-answer rule for the bounded
+# self-decision policy while keeping the escalation shape and the --yes ban.
+test_worker_decides_findings_flag() {
+  local home ship off
+  home="$TMP_ROOT/decides"
+  mkdir -p "$home/data" "$home/config"
+  : > "$home/config/worker-decides-findings"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$BRIEF" decides-worker sample --mode no-mistakes >/dev/null 2>&1 \
+    || fail "flagged no-mistakes brief generation should succeed"
+  ship="$home/data/decides-worker/brief.md"
+  assert_no_grep 'ask-user findings are never yours to answer' "$ship" \
+    "the flag kept the rule that forbids every worker self-decision"
+  assert_grep 'this home lets you decide a routine ask-user gate yourself' "$ship" \
+    "the flag did not grant the worker routine self-decision"
+  assert_grep 'Fix a finding that is unambiguous toward that contract: an in-scope correction or bug fix the accepted intent requires' "$ship" \
+    "the self-decision policy lost its in-scope fix class"
+  assert_grep 'Decline a finding that is a pure style or preference nit outside that contract' "$ship" \
+    "the self-decision policy lost its style-nit decline class"
+  assert_grep 'Escalate the whole gate instead when you are unsure' "$ship" \
+    "the self-decision policy lost its escalation boundary"
+  assert_grep 'repeats the causal theme of a finding already fixed this run where those fixes are preserving a questionable design or abstraction rather than closing independent in-scope defects, or is destructive, irreversible, or security-sensitive' "$ship" \
+    "the self-decision policy lost the narrowed repeated-theme and destructive escalation cases"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'firstmate reviews every self-decided gate file against `ask-user-authority` before the PR may merge' "$ship" \
+    "the self-decision policy lost the required pre-merge firstmate review"
+  # shellcheck disable=SC2016 # Backticks and placeholders are literal generated Markdown.
+  assert_grep '`working [at=<epoch>]: ask-user self-decided run=<run> step=<step> fixed=<ids|none> declined=<ids|none> file=<that nm-<run>-<step>-<epoch>-findings.txt path>`' "$ship" \
+    "the self-decision policy lost its one-line audit record"
+  # shellcheck disable=SC2016 # Backticks and placeholders are literal generated Markdown.
+  assert_grep 'needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=' "$ship" \
+    "the flag dropped the structured escalation for gates the worker may not decide"
+  assert_grep "self-decision policy does not let you decide, escalate all ask-user findings" "$ship" \
+    "rule 6 still tells a flagged worker to escalate every gate"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
+    "the flag weakened the --yes ban"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$BRIEF" decides-direct sample --mode direct-PR >/dev/null 2>&1 \
+    || fail "flagged direct-PR brief generation should succeed"
+  off="$home/data/decides-direct/brief.md"
+  assert_no_grep 'ask-user self-decided' "$off" \
+    "a direct-PR brief, which has no ask-user gate, gained the self-decision policy"
+  pass "config/worker-decides-findings grants bounded self-decision and keeps escalation and the --yes ban"
+}
+
 test_primary_and_secondmate_instruction_generation
+test_worker_decides_findings_flag
