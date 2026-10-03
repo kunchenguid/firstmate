@@ -1,7 +1,7 @@
 # Advisory coordination store
 
-`bin/fm-coord.sh` is the first increment of the central Firstmate coordination protocol.
-It records intents, grants coarse resource claims, and returns durable receipts from one local SQLite database.
+`bin/fm-coord.sh` implements the shadow coordination store and advisory integration queue.
+It records intents, grants coarse resource claims, serializes final integration decisions, and returns durable receipts from one local SQLite database.
 It is shadow/advisory only: no dispatch, push, CI request, or merge path calls it yet.
 The authority runs on one host with one local database under its `FM_HOME/state/` by default.
 Only trusted local callers should invoke it in this increment; enrollment is an administrative record, not remote authentication.
@@ -23,7 +23,8 @@ V1 has one active coordinator and no automatic standby takeover; fencing numbers
 Submit stores the canonical resource set and leaves the intent `submitted`; it never grants a claim.
 When `issue` is present, submission automatically includes an issue claim in the canonical set, and `amend` keeps it without the caller restating it.
 The planned PR URL may be absent at submission; `attach-pr` records a full HTTPS URL whose `owner/repo` path matches the intent `repo` under the current branch writer claim and does not permit replacement with a different URL.
-This increment has no integration queue record.
+`predecessors` names already submitted intents on the same repository and base.
+`predecessors-set` can change the list before an intent is queued, and refuses a cycle.
 Do not put raw prompts, credentials, secret projections, or full transcripts in a payload.
 `request_id` is a caller-generated stable idempotency key for every mutation, unique within its `home_id` or the administrative `@authority` actor; a `home_id` cannot start with `@`, so the two namespaces never collide.
 Reusing the key with identical operation and payload returns the exact stored result; reusing it for different content fails.
@@ -46,7 +47,7 @@ It grants all requested resources and one branch writer with a monotonic fence, 
 Independent files on separate branches are admitted concurrently.
 `amend` adds scope atomically and increments the intent version; it cannot silently drop an existing resource.
 `publish-head` stores an immutable full Git object ID after checking the current writer claim and exact previous head.
-It records a candidate only; final synchronization, validation and merge belong to the next V1 increment.
+It records a candidate for the queue; the queue itself never runs a merge.
 No arbitrary editor write is brokered, so local editing remains cooperative.
 
 Claims default to a 900-second lease, with a caller heartbeat recommended every 60 seconds.
@@ -59,6 +60,40 @@ Before a namespace's first `reserve`, the operator must inspect the repository's
 Each reservation has a durable allocation ID and unique `(repo, namespace, number)`; numbers increase without reuse even after the claim expires.
 The later integration gate must compare allocations with actual main and applied migrations before landing.
 
+## Advisory integration queue
+
+`manifest-set` records a nonempty repository-owned required-check list for one `(repo, base)` and increments its version.
+`queue-ready` needs the active writer claim, an attached PR, and the latest published head.
+It records the immutable candidate head and a priority from 0 through 9.
+`queue-next` atomically grants one integration slot per `(repo, base)` to a dependency-safe ready item.
+It orders eligible items by priority plus one aging point per 60 ready seconds, then ready time and intent ID.
+`FM_COORD_AGING_SECONDS` changes the interval for deterministic testing.
+A not-ready or blocked predecessor does not occupy the slot, and an independent ready item can proceed.
+The integration generation fences stale phase reports.
+
+The slot moves through `syncing`, `validating`, `awaiting-checks`, `attempting`, and optionally `outcome-unknown` before a terminal `merged` or `refused` outcome.
+`queue-synced` records the current base OID after the owning home attests that the published head contains it.
+`queue-validated` records a passing final validation ID for that exact head and base.
+`queue-checks` requires every named manifest check to have one successful result at the exact head, plus any additional required checks exposed by forge protection.
+An unreadable or empty rollup fails closed, including when the forge cannot expose protection settings.
+Every phase read compares the latest published head with the live head supplied by the caller; validation, checks, and attempt also compare the live base with the recorded base.
+A mismatch releases preparation into `sync-needed`, and `queue-abort` releases an unattempted slot for an explicit reason.
+Neither operation can release an in-flight or unknown forge attempt.
+
+`queue-attempt` requires current head and base evidence, successful check evidence at the current manifest version, and explicit captain-hold, away, and merge-authority attestations.
+It records the attempt event and returns the `bin/fm-pr-merge.sh` command for the owning task home.
+The caller must run that existing guarded wrapper separately; this store never calls a lower-level merge operation.
+The wrapper remains authoritative for live hold, away, check, and merge authority gates.
+The attestations here are advisory until the step-4 dispatch and merge boundaries enforce this protocol.
+A successful wrapper result can be confirmed with `queue-reconcile`; a definitive wrapper refusal can be recorded with `queue-result`.
+A refused candidate may re-enter `queue-ready` after its owner repairs the issue, creating a new attempt event without changing the prior terminal record.
+A timeout or lost reply goes to `outcome-unknown`, retaining the slot across process restarts.
+`queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to verify that the exact GitHub PR is merged at the recorded head and to read the current base OID.
+Only that proved landing releases an unknown slot, and the attempt event ID is unique in the terminal-outcome table.
+Replaying the same reconciliation request returns its stored receipt without another forge read.
+This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
+The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
+
 ## Events, schema and recovery
 
 Every successful transition and every scope denial writes an event and outbox row in the same transaction as its state change or refusal receipt.
@@ -68,8 +103,9 @@ Replaying an unacknowledged event retains its original identity, while request r
 An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
-Schema version 1 lives in `bin/fm-coord-migrations/001.sql` and is applied transactionally through SQLite `user_version`.
+Schema versions 1 and 2 live in `bin/fm-coord-migrations/001.sql` and `002.sql` and are applied transactionally through SQLite `user_version`.
 The tables are `meta` for boot identity; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
+Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
 SQLite's single-writer transaction lock serializes concurrent claim requests on this one local database.
@@ -90,7 +126,12 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `amend`, `reserve`, `publish-head`, and `attach-pr` additionally include `intent_id`.
 `attach-pr` includes `pr_url` and the live `claim_id` and `fence`.
 `migration-seed` includes `repo`, `namespace`, `next_number`, and `request_id`; `reserve` adds `namespace` and requires that namespace in the intent's resources.
+`queue-ready` includes the writer identity, claim, fence, intent ID, and published head OID.
+`queue-next` includes the repository and base; `queue-synced`, `queue-validated`, `queue-checks`, and `queue-attempt` add the returned `slot_generation` plus current head and base OIDs.
+`queue-result` and `queue-reconcile` use the returned integration `generation` because they reconcile an already attempted forge operation after an owner may go offline.
+`queue-reconcile` also includes the exact `pr_url` and `base`, which are checked against the immutable intent before accepting the live forge observation.
+`queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
 
-The current test entry point is `bin/fm-test-run.sh tests/fm-coord.test.sh`.
+The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh`.
