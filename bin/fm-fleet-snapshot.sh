@@ -650,7 +650,10 @@ prefetch_task_observations() {  # <meta> <id>
     # its offset can never pass the captured end. Like the drain, never follow a
     # symlinked cursor.
     cursor=$(_fm_open_decisions_cursor_path "$status_log")
-    [ -L "$cursor" ] || snapshot_capture_optional "$cursor" "$cursor_capture" || current_rc=1
+    # Cursor capture is only an optimization; discard even a partial failed copy
+    # and let the readers fold the whole log instead of failing the observation.
+    [ -L "$cursor" ] || snapshot_capture_optional "$cursor" "$cursor_capture" 2>/dev/null \
+      || rm -f -- "$cursor_capture"
     snapshot_capture_optional "$status_log" "$status_capture" || current_rc=1
     snapshot_mark_optional_present "$report_path" "$report_capture" || current_rc=1
   fi

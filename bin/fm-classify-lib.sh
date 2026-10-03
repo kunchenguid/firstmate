@@ -1147,7 +1147,8 @@ EOF
 # shared fold rule retires removes one.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
-# kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
+# kind, as `<n>:<kind>`, with effective verbs appended for non-default
+# configurations), `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
 # _fm_decision_fold_line semantics change, so persisted state from an older
 # interpretation is discarded and rebuilt from byte 0; the kind suffix does the
@@ -1210,6 +1211,14 @@ _fm_open_decisions_cursor_path() {  # <status-file>
 # cursor persisted under that reading predates this one, so it must still be
 # discarded and rebuilt from byte 0 under the new reading.
 FM_OPEN_DECISIONS_FOLD_VERSION=9
+
+_fm_open_decisions_fold_version() {  # <kind> <resolve-verb> <held-verb>
+  printf '%s:%s' "$FM_OPEN_DECISIONS_FOLD_VERSION" "$1"
+  if [ "$2" != "$FM_CLASSIFY_RESOLVE_VERB_DEFAULT" ] \
+    || [ "$3" != "$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT" ]; then
+    printf ':resolve=%q:held=%q' "$2" "$3"
+  fi
+}
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
@@ -1313,7 +1322,7 @@ _fm_open_decisions_cursor_load() {  # <cursor-file> <fold-version> <offset-var> 
 # no presentation manifest reads it as the presented offset.
 _fm_open_decisions_seeded_fold() {  # <status-file> <kind> <live-status-file> <cursor-file> <resolve-verb> <held-verb>
   local f=$1 kind=$2 live=$3 cf=$4 resolve=$5 held=$6 offset ident open size
-  _fm_open_decisions_cursor_load "$cf" "$FM_OPEN_DECISIONS_FOLD_VERSION:$kind" offset ident open || return 1
+  _fm_open_decisions_cursor_load "$cf" "$(_fm_open_decisions_fold_version "$kind" "$resolve" "$held")" offset ident open || return 1
   [ "$offset" -gt 0 ] || return 1
   [ "$ident" = "$(_fm_open_decisions_file_ident "$live")" ] || return 1
   size=$(_fm_status_file_size "$f") || return 1
@@ -1340,7 +1349,9 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   local target_cursor kind fold_version
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f")
-  fold_version="$FM_OPEN_DECISIONS_FOLD_VERSION:$kind"
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  fold_version=$(_fm_open_decisions_fold_version "$kind" "$resolve" "$held")
   cf=$(_fm_open_decisions_cursor_path "$f")
   offset=0
   ident=''
@@ -1391,8 +1402,6 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     # than re-reading the whole file, without relying on timing or source text.
     [ -n "${FM_OPEN_DECISIONS_READ_PROBE:-}" ] \
       && printf '%s\t%s\n' "$f" "$chunk_size" >> "$FM_OPEN_DECISIONS_READ_PROBE"
-    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
     while IFS= read -r line || [ -n "$line" ]; do
       open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
     done < "$chunk_file"

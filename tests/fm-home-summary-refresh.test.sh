@@ -189,6 +189,8 @@ fold_status="$FOLD_HOME/state/fold-mate.status"
 } > "$fold_status"
 FM_STATE_OVERRIDE="$FOLD_HOME/state" "$ROOT/bin/fm-wake-drain.sh" > /dev/null \
   || fail "the wake drain could not fold the fixture status log"
+fold_cursor="$FOLD_HOME/state/.fold-mate.open-decisions-cursor"
+cp "$fold_cursor" "$TMP_ROOT/fold-cursor-before"
 fold_covered=$(wc -c < "$fold_status" | tr -d '[:space:]')
 printf 'resolved [key=old-blocker]: credentials arrived\n' >> "$fold_status"
 printf 'needs-decision [key=tail-call]: choose the rollout window\n' >> "$fold_status"
@@ -199,6 +201,8 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FOLD_HOME" \
   FM_OPEN_DECISIONS_READ_PROBE="$TMP_ROOT/fold-probe.tsv" \
   "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/fold-seeded.json" \
   || fail "home-summary production failed over a drained status log"
+cmp -s "$fold_cursor" "$TMP_ROOT/fold-cursor-before" \
+  || fail "building the snapshot changed the wake drain's cursor"
 jq -e '[.decisions_open[] | select(.source == "status" and .id == "fold-mate") | .key]
   == ["buried-call", "tail-call"]' "$TMP_ROOT/fold-seeded.json" >/dev/null \
   || fail "the summary lost a buried decision or kept a resolved one: $(jq -c .decisions_open "$TMP_ROOT/fold-seeded.json")"
@@ -226,6 +230,72 @@ jq -e '[.decisions_open[] | select(.source == "status" and .id == "fold-mate") |
   == ["renamed-key", "tail-call"]' "$TMP_ROOT/fold-replaced.json" >/dev/null \
   || fail "a stale cursor seeded a replaced status log: $(jq -c .decisions_open "$TMP_ROOT/fold-replaced.json")"
 pass "home summary folds only status appended since the drain cursor"
+
+# Cursor versions must describe the effective verbs, for both readers, while
+# keeping the default-verb persisted protocol compatible.
+bash -c '
+  set -eu
+  . "$1"
+  f=$2
+  cursor=$(_fm_open_decisions_cursor_path "$f")
+  printf "%s\n" \
+    "needs-decision [key=resolve-call]: choose" \
+    "resolved [key=resolve-call]: closed" \
+    "needs-decision [key=held-call]: choose" \
+    "captain-held [key=held-call]: retained" > "$f"
+  for writer in default resolve held both; do
+    unset FM_CLASSIFY_RESOLVE_VERB FM_CLASSIFY_CAPTAIN_HELD_VERB
+    case "$writer" in resolve|both) export FM_CLASSIFY_RESOLVE_VERB=settled ;; esac
+    case "$writer" in held|both) export FM_CLASSIFY_CAPTAIN_HELD_VERB=parked ;; esac
+    rm -f "$cursor"
+    status_open_decisions_incremental "$f" > /dev/null
+    cp "$cursor" "$cursor.saved"
+    if [ "$writer" = default ]; then
+      IFS= read -r version < "$cursor"
+      [ "$version" = "version=$FM_OPEN_DECISIONS_FOLD_VERSION:$(_fm_status_kind "$f")" ]
+    fi
+    for reader in default resolve held both; do
+      unset FM_CLASSIFY_RESOLVE_VERB FM_CLASSIFY_CAPTAIN_HELD_VERB
+      case "$reader" in resolve|both) export FM_CLASSIFY_RESOLVE_VERB=settled ;; esac
+      case "$reader" in held|both) export FM_CLASSIFY_CAPTAIN_HELD_VERB=parked ;; esac
+      expected=$(status_open_decisions "$f")
+      cp "$cursor.saved" "$cursor"
+      [ "$(status_open_decisions "$f" "" "$f")" = "$expected" ]
+      cmp -s "$cursor" "$cursor.saved"
+      [ "$(status_open_decisions_incremental "$f")" = "$expected" ]
+    done
+  done
+' _ "$ROOT/bin/fm-classify-lib.sh" "$FOLD_HOME/state/verb-check.status" \
+  || fail "cursor folds did not honor changed effective verbs"
+rm -f "$FOLD_HOME/state/verb-check.status"
+pass "cursor readers and writer honor effective verb configuration"
+
+# A failed optional cursor copy, even one leaving partial bytes, must not block
+# real publication or change the whole-log result.
+real_cp=$(command -v cp)
+cat > "$FAKEBIN/cp" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *.open-decisions-cursor*)
+    printf 'partial cursor\n' > "${@: -1}"
+    printf 'failed\n' >> "$FM_TEST_CURSOR_COPY_PROBE"
+    exit 1 ;;
+esac
+exec "$FM_TEST_REAL_CP" "$@"
+SH
+chmod +x "$FAKEBIN/cp"
+cp "$fold_cursor" "$TMP_ROOT/fold-cursor-before"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FOLD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  FM_TEST_REAL_CP="$real_cp" FM_TEST_CURSOR_COPY_PROBE="$TMP_ROOT/cursor-copy-probe" \
+  "$WRITER" || fail "failed cursor capture blocked summary publication"
+[ -s "$TMP_ROOT/cursor-copy-probe" ] || fail "cursor copy failure was not exercised"
+cmp -s "$fold_cursor" "$TMP_ROOT/fold-cursor-before" \
+  || fail "failed capture changed the wake drain's cursor"
+cmp -s "$FOLD_HOME/state/home-summary.json" "$TMP_ROOT/fold-replaced.json" \
+  || fail "failed cursor capture changed the published summary"
+rm -f "$FAKEBIN/cp"
+pass "failed cursor capture falls back without blocking publication"
 
 # A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
 # publishable through both fleet snapshot modes and the real home-summary writer.
