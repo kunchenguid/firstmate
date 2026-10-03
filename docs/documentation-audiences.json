@@ -549,6 +549,18 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "tests/fixtures/fm-brief/absent-scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-secondmate.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-ship.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": ".agents/skills/agent-skill-trigger-index/SKILL.md",
       "audience": "agent-runtime"
     },
