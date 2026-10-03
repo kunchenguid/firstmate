@@ -20,7 +20,7 @@ MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
-PR_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)\Z")
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)\Z")
 
 
 class Refusal(Exception):
@@ -402,8 +402,8 @@ def forge_landing(p):
     require(match is not None, "queue-reconcile requires a GitHub PR URL")
     repo, number = match.groups()
     base = token(p.get("base"), "base")
-    def read(path, template):
-        result = subprocess.run(["gh-axi", "api", "GET", path, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
+    def read(path, template, method="GET", *fields):
+        result = subprocess.run(["gh-axi", "api", method, path, *fields, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
         lines = result.stdout.strip().splitlines()
         require(len(lines) == 3 and lines[0] == "api_response:" and lines[1].startswith("  body: ") and lines[2] == "  truncated: false", "forge response is unreadable or truncated")
         raw_body = lines[1][8:]
@@ -421,6 +421,9 @@ def forge_landing(p):
         p["merge_oid"] = oid(fields[5], "forge merge commit")
         return
     require(fields[1] in {"open", "closed"} and fields[2] == "false", "forge does not prove whether this PR landed")
+    owner, name = repo.split("/")
+    pending = read("graphql", "{{with .data.repository.pullRequest}}{{.isInMergeQueue}}|{{if .autoMergeRequest}}armed{{else}}none{{end}}{{end}}", "POST", "--field", f'query=query{{repository(owner:"{owner}",name:"{name}"){{pullRequest(number:{number}){{isInMergeQueue autoMergeRequest{{enabledAt}}}}}}}}')
+    require(pending == "false|none", "PR merge is still pending in the merge queue or auto-merge")
     head = oid(p.get("head_oid"), "head_oid")
     status = read(f"repos/{repo}/compare/{observed_base}...{head}", "{{.status}}")
     require(status in {"ahead", "diverged"}, "forge does not prove the attempted head is off base")

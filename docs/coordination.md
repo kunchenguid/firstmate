@@ -90,7 +90,7 @@ A refused candidate may re-enter `queue-ready` after its owner repairs the issue
 A timeout or lost reply goes to `outcome-unknown`, retaining the slot across process restarts.
 `queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to read the exact GitHub PR and the current base OID.
 A merged PR at the recorded head releases an unknown slot as `merged`.
-An open or closed-unmerged PR releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
+An open or closed-unmerged PR that is neither in the merge queue nor armed for auto-merge releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.

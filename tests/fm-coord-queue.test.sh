@@ -84,6 +84,7 @@ cat > "$tmp/bin/gh-axi" <<'EOF'
 [ "${FM_TEST_FAIL:-0}" = 1 ] && exit 1
 case "$3" in
   */pulls/*) printf 'api_response:\n  body: "https://github.com/owner/repo/pull/%s|%s|%s|%s|main|%s"\n  truncated: false\n' "${3##*/}" "${FM_TEST_STATE:-closed}" "$FM_TEST_MERGED" "$FM_TEST_HEAD" "$FM_TEST_MERGE_OID" ;;
+  graphql) printf 'api_response:\n  body: %s\n  truncated: false\n' "${FM_TEST_PENDING:-false|none}" ;;
   */git/ref/heads/main) printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_BASE_OID" ;;
   */compare/"$FM_TEST_BASE_OID...$FM_TEST_HEAD") printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_COMPARE" ;;
   *) exit 1 ;;
@@ -179,6 +180,13 @@ attempt_unknown() {
 
 attempt_unknown a a "$ga" "$claim_a" "$fence_a" "$head_a" 1
 timeout_payload=$(printf '{"request_id":"reconcile-timeout","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "$slot" "$head_a")
+for pending in 'true|none' 'false|armed'; do
+  if PATH="$tmp/bin:$PATH" FM_TEST_PENDING="$pending" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$(printf '{"request_id":"reconcile-pending-%s","intent_id":"a","generation":%s,"pr_url":"https://github.com/owner/repo/pull/1","base":"main","head_oid":"%s"}' "${pending%%|*}${pending##*|}" "$slot" "$head_a")" > "$tmp/unexpected" 2> "$tmp/error"; then
+    fail "pending merge ($pending) must not release the unknown slot"
+  fi
+  case "$(field "$(coord inspect '{}')" slots)" in *"'state': 'outcome-unknown'"*) ;; *) false ;; esac || fail "pending merge ($pending) must keep the slot outcome-unknown"
+done
+pass 'merge queue or armed auto-merge keeps the slot outcome-unknown'
 unlanded=$(PATH="$tmp/bin:$PATH" FM_TEST_STATE=open FM_TEST_MERGED=false FM_TEST_HEAD="$head_a" FM_TEST_MERGE_OID=null FM_TEST_BASE_OID="$base" FM_TEST_COMPARE=ahead coord queue-reconcile "$timeout_payload")
 [ "$(field "$unlanded" state)" = refused ] || fail 'open unmerged PR off base must record a not-merged outcome'
 pass 'timeout then not landed releases the slot with one terminal outcome'
