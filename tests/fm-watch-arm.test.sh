@@ -945,12 +945,13 @@ test_append_wakes_live_announced_watcher() {
 }
 
 test_append_wakes_handling_successor() {
-  local phase=$1 dir home state fakebin predecessor successor generation watcher_pid pair sequence
-  dir=$(make_case "append-handling-$phase")
+  local phase=$1 seq_state=${2:-intact} dir home state fakebin predecessor successor generation watcher_pid pair sequence
+  dir=$(make_case "append-handling-$phase-$seq_state")
   home="$dir/home"
   state="$dir/state"
   fakebin="$dir/fakebin"
   mkdir -p "$home/data"
+  append_wake "$state" check inbox:zeroth 'check: captain inbox note zeroth'
   append_wake "$state" check inbox:first 'check: captain inbox note first'
   start_rearm_arm "$home" "$state" "$fakebin" "$dir/first.out"
   wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" || fail "first inbox wake did not surface"
@@ -970,7 +971,13 @@ test_append_wakes_handling_successor() {
   is_live_non_zombie "$successor" || fail "successor repeated the inherited notification"
   if [ "$phase" = after-ack ]; then
     FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
+    [ ! -s "$state/.wake-queue" ] || fail "inherited rows were not acknowledged"
   fi
+  # A lost or unreadable counter must not let a new row look inherited.
+  case "$seq_state" in
+    missing) rm -f "$state/.wake-queue.seq" ;;
+    malformed) printf 'not-a-sequence\n' > "$state/.wake-queue.seq" ;;
+  esac
   append_wake "$state" check inbox:second 'check: captain inbox note second'
   if [ "$phase" = before-ack ]; then
     FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" --recovery-generation "$generation"
@@ -987,7 +994,7 @@ test_append_wakes_handling_successor() {
   [ ! -s "$state/.wake-queue" ] || fail "handled queue was not drained"
   kill -TERM "$ARM_PID"
   wait "$ARM_PID" 2>/dev/null || true
-  pass "watch-arm: handling successor delivers new inbox work $phase without consuming or looping"
+  pass "watch-arm: handling successor delivers new inbox work $phase ($seq_state counter) without consuming or looping"
 }
 
 # Exercise the handling-window recovery invariant owned by
@@ -1761,6 +1768,10 @@ EOF
 
 test_append_wakes_handling_successor after-ack
 test_append_wakes_handling_successor before-ack
+test_append_wakes_handling_successor after-ack missing
+test_append_wakes_handling_successor before-ack missing
+test_append_wakes_handling_successor after-ack malformed
+test_append_wakes_handling_successor before-ack malformed
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
