@@ -2129,6 +2129,7 @@ Detaching a runner into its own process group is what lets a persistent source o
 - So a home's process-event state carries a lease that registration, attached start, reconciliation, acknowledgement, and listing refresh, and the watcher's reconcile cycle is what keeps it fresh in a live home.
 - An attached public `start` continues refreshing the lease while its caller remains attached.
 - Each runner fails closed unless a small guard starts successfully beside it in a separate process group.
+- The runner waits for that guard to report ready or to exit rather than for a fixed interval, so a loaded host that slows the guard's startup does not stop a healthy runner; a 60-second cap only backstops a guard that does neither.
 - That guard accepts the lease only while the state root retains the device/inode identity recorded by the runner's claim, and initiates the verified stop after two consecutive reads cannot prove that identity and lease freshness, so one unreadable read cannot kill a live runner.
 - Those two reads are spaced half a check interval apart, so the pair the debounce requires completes inside one check interval instead of costing two of them.
 
