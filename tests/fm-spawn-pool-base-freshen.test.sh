@@ -6,12 +6,19 @@
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
 # pool as-is, or stops when a configured origin is unusable.
+# A recorded origin/HEAD lets that refresh cost one origin contact only within
+# FM_ORIGIN_HEAD_REFRESH_SECONDS of the clone's last successful origin/HEAD
+# refresh. A missing or stale refresh marker requires the full refresh path.
+# The cases below also cover invalid markers and window settings, following a
+# renamed or switched default, and refusing an unusable origin while one is
+# recorded.
 set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-spawn-pool-base-freshen)
+export FM_ORIGIN_HEAD_REFRESH_SECONDS=600
 
 make_case() {
   local name=$1 id=$2 default=${3:-main} case_dir home project origin pool publisher fakebin initial
@@ -57,6 +64,44 @@ run_spawn() {
   shift
   fm_test_run_spawn "$HOME_DIR" "$POOL_DIR" "$FAKEBIN_DIR" \
     "$id" "$PROJECT_DIR" "$@"
+}
+
+# A clone records origin/HEAD, but these projects gain their origin by
+# `remote add`, so record it and seed the persisted refresh timestamp.
+record_origin_head() {
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" remote set-head origin --auto >/dev/null
+  local marker
+  marker=$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-path common/fm-origin-head-refreshed)
+  mkdir -p "$(dirname "$marker")"
+  date +%s > "$marker"
+}
+
+# Commits <file> on the publisher's current branch, pushes that commit to
+# origin as <branch>, and prints it.
+publish_to_origin() { # <branch> <file>
+  local publisher="$CASE_DIR/publisher"
+  printf '%s\n' "$2" > "$publisher/$2"
+  git -C "$publisher" add "$2"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm "$2"
+  git -C "$publisher" push --quiet origin "HEAD:refs/heads/$1"
+  git -C "$publisher" rev-parse HEAD
+}
+
+# Logs one line to ORIGIN_CONTACTS for every connection the project opens to
+# its origin: the remote's upload-pack side runs once per fetch, ls-remote, or
+# set-head --auto.
+count_origin_contacts() {
+  local wrapper="$CASE_DIR/counting-upload-pack"
+  ORIGIN_CONTACTS="$CASE_DIR/origin-contacts.log"
+  : > "$ORIGIN_CONTACTS"
+  cat > "$wrapper" <<SH
+#!/usr/bin/env bash
+printf 'contact\n' >> '$ORIGIN_CONTACTS'
+exec git upload-pack "\$@"
+SH
+  chmod +x "$wrapper"
+  git -C "$PROJECT_DIR" config remote.origin.uploadpack "$wrapper"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool() {
@@ -215,6 +260,186 @@ test_non_main_default_branch_refreshes_before_branching() {
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
 }
 
+test_recorded_origin_head_refreshes_in_one_origin_contact() {
+  local rec id out status current refs_before contacts
+  id='pool-recorded-head-r14'
+  rec=$(make_case recorded-head "$id")
+  read_case_record "$rec"
+  record_origin_head
+  current=$(publish_to_origin main published-after-the-pool-fetched.txt)
+  git -C "$CASE_DIR/publisher" checkout --quiet -b side
+  publish_to_origin side side-branch-work.txt >/dev/null
+  refs_before=$(git -C "$POOL_DIR" for-each-ref --format='%(refname)')
+  count_origin_contacts
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should refresh a pooled worktree whose origin/HEAD is recorded"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+    || fail "spawn did not reset the pooled worktree to origin's current default-branch tip"
+  contacts=$(grep -c contact "$ORIGIN_CONTACTS")
+  [ "$contacts" -eq 1 ] \
+    || fail "spawn contacted origin $contacts times to refresh a recorded default branch, expected once"
+  [ "$(git -C "$POOL_DIR" for-each-ref --format='%(refname)')" = "$refs_before" ] \
+    || fail "spawn fetched a branch it does not reset to, or left a ref behind:"$'\n'"$(git -C "$POOL_DIR" for-each-ref --format='%(refname)')"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed recorded-origin/HEAD refresh: origin contacts=%s HEAD=%s origin/main=%s\n' \
+      "$contacts" "$(git -C "$POOL_DIR" rev-parse HEAD)" "$current"
+  fi
+  pass "a recorded origin/HEAD refreshes the pooled worktree with one origin contact and no other branch"
+}
+
+test_origin_head_refresh_window() {
+  local rec id out status state marker stamp before after contacts expected_contacts expected_branch window
+  for state in fresh missing expired future invalid unreadable disabled empty-window invalid-window custom-window; do
+    id="pool-head-window-$state"
+    rec=$(make_case "head-window-$state" "$id")
+    read_case_record "$rec"
+    record_origin_head
+    marker=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path common/fm-origin-head-refreshed)
+    [ "$marker" = "$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-path common/fm-origin-head-refreshed)" ] \
+      || fail "the pool and primary do not share the refresh marker"
+    stamp=$(($(date +%s) - 60))
+    printf '%s\n' "$stamp" > "$marker"
+    window=600
+    expected_contacts=3
+    expected_branch=trunk
+    case "$state" in
+      fresh) expected_contacts=1; expected_branch=main ;;
+      missing) rm "$marker" ;;
+      expired) printf '%s\n' "$(($(date +%s) - 3600))" > "$marker" ;;
+      future) printf '%s\n' "$(($(date +%s) + 3600))" > "$marker" ;;
+      invalid) printf 'not-a-time\n' > "$marker" ;;
+      unreadable) rm "$marker"; mkdir "$marker" ;;
+      disabled) window=0 ;;
+      empty-window) window=''; expected_contacts=1; expected_branch=main ;;
+      invalid-window) window=invalid; expected_contacts=1; expected_branch=main ;;
+      custom-window) window=30 ;;
+    esac
+    git -C "$CASE_DIR/publisher" push --quiet origin HEAD:refs/heads/trunk
+    git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/trunk
+    count_origin_contacts
+    before=$(date +%s)
+
+    out=$(FM_ORIGIN_HEAD_REFRESH_SECONDS="$window" run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    after=$(date +%s)
+    expect_code 0 "$status" "spawn should respect the $state refresh marker/window"$'\n'"$out"
+    contacts=$(grep -c contact "$ORIGIN_CONTACTS")
+    [ "$contacts" -eq "$expected_contacts" ] \
+      || fail "$state marker/window contacted origin $contacts times, expected $expected_contacts"
+    [ "$(git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD)" = "refs/remotes/origin/$expected_branch" ] \
+      || fail "$state marker/window left origin/HEAD on the wrong branch"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$CASE_DIR/publisher" rev-parse HEAD)" ] \
+      || fail "$state marker/window spawned from the wrong commit"
+    if [ "$state" = unreadable ]; then
+      [ -d "$marker" ] || fail "spawn replaced the unwritable marker"
+    elif [ "$expected_contacts" -eq 1 ]; then
+      [ "$(cat "$marker")" = "$stamp" ] || fail "fast-path spawn extended the refresh window"
+    else
+      stamp=$(cat "$marker")
+      [[ "$stamp" =~ ^[0-9]+$ ]] || fail "spawn did not persist an epoch refresh time"
+      [ "$stamp" -ge "$before" ] && [ "$stamp" -le "$after" ] \
+        || fail "spawn did not write a current refresh marker"
+    fi
+    pass "$state origin/HEAD marker/window selects the correct refresh path"
+  done
+}
+
+test_local_merge_refreshes_default_inside_spawn_window() {
+  local rec id out status base ship
+  id='pool-local-merge-default'
+  rec=$(make_case local-merge-default "$id")
+  read_case_record "$rec"
+  record_origin_head
+  base=$(git -C "$PROJECT_DIR" rev-parse origin/main)
+  git -C "$PROJECT_DIR" merge --ff-only origin/main >/dev/null
+  git -C "$CASE_DIR/publisher" push --quiet origin HEAD:refs/heads/trunk
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" branch trunk origin/trunk >/dev/null
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/trunk
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" "local-only spawn should succeed"$'\n'"$out"
+  [ "$(git -C "$PROJECT_DIR" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/main ] \
+    || fail "fixture did not retain the cached default inside the spawn window"
+  git -C "$POOL_DIR" checkout --quiet -b "fm/$id"
+  printf 'ship change\n' > "$POOL_DIR/ship.txt"
+  git -C "$POOL_DIR" add ship.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm ship
+  ship=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-merge-local.sh" "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "local merge advanced cached main after origin switched to trunk"
+  assert_contains "$out" "expected default branch 'trunk'" "merge did not resolve the new default"
+  [ "$(git -C "$PROJECT_DIR" rev-parse main)" = "$base" ] || fail "refused merge moved main"
+
+  git -C "$PROJECT_DIR" checkout --quiet trunk
+  git -C "$PROJECT_DIR" remote set-head origin main
+  out=$(FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" "$ROOT/bin/fm-merge-local.sh" "$id" 2>&1)
+  status=$?
+  expect_code 0 "$status" "local merge should target trunk despite the cached main name"$'\n'"$out"
+  [ "$(git -C "$PROJECT_DIR" rev-parse trunk)" = "$ship" ] || fail "local merge did not advance trunk"
+  [ "$(git -C "$PROJECT_DIR" rev-parse main)" = "$base" ] || fail "local merge moved the old default"
+  pass "local merge refreshes the default independently of the spawn window"
+}
+
+test_refresh_marker_is_reused_by_another_pool_slot() {
+  local rec id out status marker stamp
+  id='pool-shared-marker-first'
+  rec=$(make_case shared-marker "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "first slot should refresh origin/HEAD"$'\n'"$out"
+  marker=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path common/fm-origin-head-refreshed)
+  stamp=$(cat "$marker")
+  [[ "$stamp" =~ ^[0-9]+$ ]] || fail "first slot did not persist a refresh time"
+  POOL_DIR="$CASE_DIR/second-pool"
+  git -C "$PROJECT_DIR" worktree add --quiet --detach "$POOL_DIR" "$INITIAL_SHA"
+  git -C "$CASE_DIR/publisher" push --quiet origin HEAD:refs/heads/trunk
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/trunk
+  count_origin_contacts
+  id='pool-shared-marker-second'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "second slot should reuse the clone's refresh marker"$'\n'"$out"
+  [ "$(grep -c contact "$ORIGIN_CONTACTS")" -eq 1 ] || fail "second slot did not take the fast path"
+  [ "$(git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/main ] \
+    || fail "second slot unexpectedly refreshed origin/HEAD"
+  [ "$(cat "$marker")" = "$stamp" ] || fail "second slot extended the refresh window"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$CASE_DIR/publisher" rev-parse HEAD)" ] \
+    || fail "second slot did not refresh its base"
+  pass "a successful refresh shares its marker across pool slots"
+}
+
+test_moved_origin_default_is_followed_past_a_recorded_origin_head() {
+  local rec id out status move current
+  for move in switched renamed; do
+    id="pool-moved-default-$move-r15"
+    rec=$(make_case "moved-default-$move" "$id")
+    read_case_record "$rec"
+    record_origin_head
+    git -C "$CASE_DIR/publisher" checkout --quiet -b trunk
+    current=$(publish_to_origin trunk only-on-the-new-default.txt)
+    git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/trunk
+    [ "$move" = switched ] || git --git-dir="$CASE_DIR/origin.git" update-ref -d refs/heads/main
+
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "spawn should follow origin's $move default branch"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$current" ] \
+      || fail "spawn reset to the default origin/HEAD recorded instead of origin's $move one"
+    [ "$(git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/trunk ] \
+      || fail "spawn left origin/HEAD naming the old default after origin's default was $move"
+  done
+  pass "a spawn follows origin's switched or renamed default branch past a stale recorded origin/HEAD"
+}
+
 make_originless_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -364,24 +589,29 @@ test_inactive_conditional_origin_include_launches_pool() {
 }
 
 test_unreachable_origin_refuses_stale_pool_base() {
-  local rec id out status before after
-  id='pool-unreachable-origin-r2'
-  rec=$(make_case unreachable-origin "$id")
-  read_case_record "$rec"
-  git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  local rec id out status before after origin_head
+  for origin_head in unset recorded; do
+    id="pool-unreachable-origin-$origin_head-r2"
+    rec=$(make_case "unreachable-origin-$origin_head" "$id")
+    read_case_record "$rec"
+    [ "$origin_head" = unset ] || record_origin_head
+    git -C "$POOL_DIR" remote set-url origin "file://$CASE_DIR/missing-origin.git"
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
-  assert_contains "$out" "could not fetch origin" \
-    "spawn did not clearly refuse an unreachable origin"
-  after=$(git -C "$POOL_DIR" rev-parse HEAD)
-  [ "$after" = "$before" ] || fail "spawn changed the pooled worktree after origin became unreachable"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed unreachable-origin refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
-  fi
-  pass "an unreachable origin refuses a potentially stale pooled worktree"
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin (origin/HEAD $origin_head)"
+    assert_contains "$out" "could not fetch origin" \
+      "spawn did not clearly refuse an unreachable origin (origin/HEAD $origin_head)"
+    after=$(git -C "$POOL_DIR" rev-parse HEAD)
+    [ "$after" = "$before" ] \
+      || fail "spawn changed the pooled worktree after origin became unreachable (origin/HEAD $origin_head)"
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed unreachable-origin refusal (origin/HEAD %s): %s\n' \
+        "$origin_head" "$(printf '%s\n' "$out" | tail -n 1)"
+    fi
+  done
+  pass "an unreachable origin refuses a potentially stale pooled worktree, whether or not origin/HEAD is recorded"
 }
 
 test_direct_pr_and_scout_refresh_before_launch() {
@@ -433,24 +663,41 @@ test_dirty_pool_refuses_without_discarding_work() {
 }
 
 test_unresolved_remote_default_refuses_pool() {
-  local rec id out status before
-  id='pool-unresolved-default-r5'
-  rec=$(make_case unresolved-default "$id")
-  read_case_record "$rec"
-  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
-  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  local rec id out status before origin_head marker stamp age
+  for origin_head in unset recorded expired; do
+    id="pool-unresolved-default-$origin_head-r5"
+    rec=$(make_case "unresolved-default-$origin_head" "$id")
+    read_case_record "$rec"
+    [ "$origin_head" = unset ] || record_origin_head
+    marker=$(git -C "$POOL_DIR" rev-parse --path-format=absolute --git-path common/fm-origin-head-refreshed)
+    if [ "$origin_head" != unset ]; then
+      age=60
+      [ "$origin_head" != expired ] || age=3600
+      printf '%s\n' "$(($(date +%s) - age))" > "$marker"
+    fi
+    stamp=$(cat "$marker" 2>/dev/null || true)
+    git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
+    before=$(git -C "$POOL_DIR" rev-parse HEAD)
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolved remote default branch"
-  assert_contains "$out" "could not resolve origin's current default branch" \
-    "spawn did not clearly refuse an unresolved remote default branch"
-  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
-    || fail "spawn moved HEAD after failing to resolve the remote default branch"
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# observed unresolved-default refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
-  fi
-  pass "an unresolved remote default branch refuses the pooled worktree"
+    out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+    status=$?
+    [ "$status" -ne 0 ] \
+      || fail "spawn succeeded despite an unresolved remote default branch (origin/HEAD $origin_head)"
+    assert_contains "$out" "could not resolve origin's current default branch" \
+      "spawn did not clearly refuse an unresolved remote default branch (origin/HEAD $origin_head)"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+      || fail "spawn moved HEAD after failing to resolve the remote default branch (origin/HEAD $origin_head)"
+    if [ "$origin_head" = unset ]; then
+      [ ! -e "$marker" ] || fail "failed set-head created a refresh marker"
+    else
+      [ "$(cat "$marker")" = "$stamp" ] || fail "failed set-head updated the refresh marker"
+    fi
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# observed unresolved-default refusal (origin/HEAD %s): %s\n' \
+        "$origin_head" "$(printf '%s\n' "$out" | tail -n 1)"
+    fi
+  done
+  pass "an unresolved remote default branch refuses the pooled worktree, whether or not origin/HEAD is recorded"
 }
 
 # A slot left on a stale submodule pin is the field failure this diagnosis exists
@@ -748,6 +995,11 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_recorded_origin_head_refreshes_in_one_origin_contact
+test_origin_head_refresh_window
+test_local_merge_refreshes_default_inside_spawn_window
+test_refresh_marker_is_reused_by_another_pool_slot
+test_moved_origin_default_is_followed_past_a_recorded_origin_head
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
