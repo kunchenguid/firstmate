@@ -2,11 +2,11 @@
 
 `bin/fm-coord.sh` implements the shadow coordination store and advisory integration queue.
 It records intents, grants coarse resource claims, serializes final integration decisions, and returns durable receipts from one local SQLite database.
-It is shadow/advisory only: no dispatch, push, CI request, or merge path calls it yet.
+It is shadow/advisory only: the local adapters below record and warn at dispatch, push, and CI request checkpoints without blocking the selected delivery path.
 The authority runs on one host with one local database under its `FM_HOME/state/` by default.
-Only trusted local callers should invoke it in this increment; enrollment is an administrative record, not remote authentication.
+Only trusted callers should invoke it in this increment; enrollment is an administrative record, not remote authentication.
 No network operation occurs in a database transaction.
-The intended later transport is an authenticated fixed-argument entrypoint that invokes this command against the central database.
+The local adapter can invoke this command over batch SSH with fixed, quoted arguments; the SSH account and host trust remain operator configuration.
 A copied database is an archive, not a second live authority.
 
 ## Identity and intent contract
@@ -133,5 +133,27 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
+`view` projects active intents, active claims, recent scope conflicts, the integration queue, and pending central outbox events as one JSON object.
 
-The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh`.
+## Local lifecycle adapter
+
+Each participating home may opt in through the `config/coordination.json` schema in [configuration](configuration.md); both supported modes only record and warn.
+The coordinator initializes the database with `bin/fm-coord.sh --db PATH init` before participants submit.
+Same-host participants call the central database directly, while remote homes use the configured batch SSH transport to invoke the central command with quoted fixed arguments and an eight-second upper bound.
+Do not copy a database into a second live authority.
+
+A ship brief declares exactly one `Coordination resources:` line containing a nonempty JSON array of the resource objects above, and may declare one `Coordination issue:` line with its stable issue name.
+`fm-brief.sh` scaffolds an empty array to make the declaration visible; fill it before a coordinated spawn.
+`fm-spawn.sh` records the pre-dispatch intent and claim from that brief for Claude Code, Codex, omp, and OpenCode workers.
+The launch brief gives every supported harness the same `pre-push`, `pre-ci`, and `heartbeat` adapter commands, and asks workers to surface warnings through their existing task status.
+`pre-push` compares the commit diff from the declared base OID to HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head when that fence is live.
+`pre-ci` checks the same fence before a `ci:batch` request.
+`heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
+Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
+
+Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
+Each request is written to the home-local journal named in [configuration](configuration.md) before it is sent with a stable UUID; a lost reply reuses that UUID and receives the stored central receipt.
+The file is serialized with a home-local lock and replaced atomically.
+An offline request remains pending and is never represented as a confirmed claim.
+
+The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh tests/fm-coord-adapter.test.sh`.

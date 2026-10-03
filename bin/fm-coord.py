@@ -594,6 +594,13 @@ def run_operation(db, op, p):
         return {"ok": True, "event_id": event_id}
     if op == "inspect":
         return {"ok": True, "schema_version": db.execute("PRAGMA user_version").fetchone()[0], "participants": [dict(r) for r in db.execute("SELECT home_id,repos_json,generation,session_id FROM participants ORDER BY home_id")], "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,branch,pr_url,version,state FROM intents ORDER BY created_at")], "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,state,expires_mono_ns FROM claims ORDER BY fence")], "allocations": [dict(r) for r in db.execute("SELECT allocation_id,repo,namespace,number,intent_id,state FROM allocations ORDER BY repo,namespace,number")], "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")], "slots": [dict(r) for r in db.execute("SELECT * FROM integration_slots ORDER BY repo,base_ref")], "outcomes": [dict(r) for r in db.execute("SELECT * FROM merge_outcomes ORDER BY recorded_at")]}
+    if op == "view":
+        return {"ok": True,
+                "intents": [dict(r) for r in db.execute("SELECT intent_id,home_id,repo,base_ref,branch,task_id,issue,state,version FROM intents WHERE state IN ('submitted','claimed') ORDER BY created_at,intent_id")],
+                "claims": [dict(r) for r in db.execute("SELECT claim_id,intent_id,home_id,generation,fence,version,expires_mono_ns FROM claims WHERE state='active' ORDER BY fence")],
+                "conflicts": [{"seq": r["seq"], "type": r["event_type"], "payload": json.loads(r["payload_json"])} for r in db.execute("SELECT seq,event_type,payload_json FROM events WHERE event_type IN ('claim-denied','scope-denied') ORDER BY seq DESC LIMIT 100")],
+                "queue": [dict(r) for r in db.execute("SELECT * FROM queue_items ORDER BY ready_epoch,intent_id")],
+                "outbox": [dict(r) for r in db.execute("SELECT e.seq,e.event_id,e.event_type FROM events e JOIN outbox o ON o.event_id=e.event_id WHERE o.acknowledged_at IS NULL ORDER BY e.seq LIMIT 100")]}
     raise Refusal("unknown operation")
 
 

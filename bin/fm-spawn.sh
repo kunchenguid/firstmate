@@ -3066,6 +3066,21 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
+      if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
+        coord_home=$(shell_quote "$FM_HOME")
+        coord_adapter=$(shell_quote "$FM_ROOT/bin/fm-coord-adapter.py")
+        coord_id=$(shell_quote "$ID")
+        cat <<EOF
+
+# Advisory coordination for this task
+The local Firstmate enrolled this intent at dispatch when the coordinator was reachable.
+Before any push or /no-mistakes run, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-push $coord_id "\$PWD"\` from this task worktree.
+Before requesting a ci:batch pulse, execute \`FM_HOME=$coord_home python3 $coord_adapter pre-ci $coord_id\`.
+While actively working, execute \`FM_HOME=$coord_home python3 $coord_adapter heartbeat $coord_id\` about every 60 seconds to renew the claim.
+These calls only record and warn in shadow/advisory mode; report any warning in your ordinary task status so Firstmate can coordinate it.
+If the adapter command is missing or fails, report that visibly in task status; continue the selected delivery path.
+EOF
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
@@ -3180,6 +3195,16 @@ fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+# Coordination is deliberately advisory in V1. A refusal, unavailable central
+# store, or missing adapter is visible but cannot veto the existing spawn gate.
+if [ "$KIND" = ship ] && [ -f "$CONFIG/coordination.json" ]; then
+  if [ ! -f "$FM_ROOT/bin/fm-coord-adapter.py" ]; then
+    echo "warning: $ID coordination adapter is missing; no intent or claim recorded" >&2
+  elif ! FM_HOME="$FM_HOME" python3 "$FM_ROOT/bin/fm-coord-adapter.py" dispatch "$ID" "$PROJ_ABS" "$SOURCE_BRIEF" "$BRANCH" "$HARNESS"; then
+    echo "warning: $ID coordination dispatch failed; no claim is assumed" >&2
+  fi
+fi
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.

@@ -94,6 +94,15 @@ Each effective `FM_HOME` contains private operational directories.
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
+The optional home-local `config/coordination.json` enables the V1 coordination adapters; its absence leaves them off.
+It is a JSON object with `mode` (`shadow` or `advisory`), a nonempty stable `home_id`, a nonempty `repos` array of `owner/repo` strings, and exactly one authority transport.
+For same-host participants, `db` is the absolute path to the one central SQLite database.
+For another host, `remote` is an object with `host` (SSH destination), `command` (absolute path to that host's `fm-coord.sh`), and `db` (absolute central database path on that host).
+Optional `base` names the branch used for an intent's initial base OID and defaults to `main`.
+Optional `project_repos` maps absolute project checkout paths to `owner/repo` identities when an origin URL does not carry a GitHub identity.
+The participant's generated `state/fm-coord-adapter.json` is its private request journal; `state/fm-coord-adapter.lock` serializes updates within the home.
+The protocol and lifecycle commands are owned by [coordination](coordination.md).
+
 `projects/` holds local project clones.
 Firstmate reads these clones, but changes them only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.

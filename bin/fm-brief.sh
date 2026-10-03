@@ -648,6 +648,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $TASK_SECTION
 
+Coordination resources: []
+
 $HERDR_SECTION
 
 # Setup
