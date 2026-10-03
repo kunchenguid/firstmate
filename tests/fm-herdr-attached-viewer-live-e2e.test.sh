@@ -159,6 +159,28 @@ REASON=$(foreground_reason) || fail "could not probe the session's foreground cl
   || fail "the attached pty viewer did not register as a foreground client (reason=$REASON)"
 pass "attached viewer: a pty sized before the fork registers as a real Herdr foreground client"
 
+# A fresh tab can echo input while shell startup still consumes it. Prove an
+# execution acknowledgement on the real attached terminal before a one-shot
+# preparation command; the command's append is an independent exactly-once
+# oracle, not a screen match of echoed input. No agent or Git network access.
+FIXTURE=$(new_workspace shell-readiness) || fail "could not create shell-readiness workspace"
+IFS=$'\t' read -r READY_WORKSPACE _ _ <<<"$FIXTURE"
+for attempt in 1 2 3; do
+  FIXTURE=$(new_tab "$READY_WORKSPACE" "shell-readiness-$attempt") || fail "could not create fresh readiness tab"
+  IFS=$'\t' read -r _ READY_PANE <<<"$FIXTURE"
+  READY_LOG="$TMP_ROOT/preparation-$attempt"
+  OUT=$(drive fm_backend_herdr_prepare_shell "$LAB_SESSION:$READY_PANE" "printf 'prepared\\n' >> '$READY_LOG'")
+  STATUS=$?
+  [ "$STATUS" -eq 0 ] || fail "fresh shell readiness failed: $OUT"
+  for _ in $(seq 1 30); do
+    [ ! -s "$READY_LOG" ] || break
+    sleep 0.1
+  done
+  [ -f "$READY_LOG" ] || fail "acknowledged shell did not execute preparation"
+  [ "$(cat "$READY_LOG")" = prepared ] || fail "preparation did not execute exactly once"
+done
+pass "attached viewer: fresh shells acknowledge execution before one-shot preparation"
+
 # --- scenario 3: a viewer on the target tab blocks the close ---------------
 
 FIXTURE=$(new_workspace viewer-active) || fail "could not create the scenario 3 workspace"
