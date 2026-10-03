@@ -503,6 +503,19 @@ jobs:
             exit 1
           }
 
+          # fm_exec_timed captures its owner from BASHPID, which stock Bash 3.2
+          # does not define at all; the whole bounded-execution suite runs here
+          # because its fm_exec_timed cases all exercise that capture on the one
+          # shell that has no such variable, and the fm_run_timed and
+          # fm_timed_out cases beside them cost nothing to carry along.
+          timeout_output=$(/bin/bash tests/fm-timeout-lib.test.sh)
+          printf '%s\n' "$timeout_output"
+          timeout_count=$(printf '%s\n' "$timeout_output" | grep -c '^ok - ')
+          [ "$timeout_count" -eq 17 ] || {
+            echo "::error::expected 17 bounded-execution bash 3.2 tests, got $timeout_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
