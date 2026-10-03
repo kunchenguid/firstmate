@@ -1874,6 +1874,50 @@ test_recovery_mint_and_delivery_log_avoid_sibling_subst() {
   pass "recovery mint and delivery log avoid sibling \$()"
 }
 
+# Sequence identifiers are exact digit-only decimals end to end. The allocator
+# keeps bash's 64-bit counter contract whatever the counter's state; the drain
+# compares sequences as awk numbers, so presentation and acknowledgement are
+# exercised through the largest exactly representable one (2^53).
+test_large_sequences_stay_exact_decimal_identifiers() {
+  local start counter dir state queued expected new_seq sequence generation
+  for start in 2147483647 9007199254740991 9223372036854775806; do
+    for counter in intact missing malformed; do
+      dir=$(make_case "large-sequence-$start-$counter")
+      state="$dir/state"
+      queued=$(printf '1700000000\t%s\tcheck\tinbox:queued\tcheck: queued large row' "$start")
+      printf '%s\n' "$queued" > "$state/.wake-queue"
+      case "$counter" in
+        intact) printf '%s\n' "$start" > "$state/.wake-queue.seq" ;;
+        malformed) printf 'not-a-sequence\n' > "$state/.wake-queue.seq" ;;
+      esac
+      append_wake "$state" check inbox:next 'check: appended after large row' \
+        || fail "append after sequence $start ($counter counter) failed"
+      expected=$((start + 1))
+      new_seq=$(awk -F '\t' '$4 == "inbox:next" { print $2 }' "$state/.wake-queue")
+      [ "$new_seq" = "$expected" ] \
+        || fail "sequence $start ($counter counter) advanced to '$new_seq', not $expected"
+      [ "$(cat "$state/.wake-queue.seq")" = "$expected" ] \
+        || fail "counter after $start ($counter counter) is not $expected"
+      [ "$start" = 9223372036854775806 ] && continue
+      FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+        || fail "drain failed after sequence $expected"
+      grep -F "$queued" "$dir/drain.out" >/dev/null \
+        || fail "drain did not present the queued row at sequence $start"
+      grep -F "$(printf '\t%s\tcheck\tinbox:next\t' "$expected")" "$dir/drain.out" >/dev/null \
+        || fail "drain did not present the appended row at sequence $expected"
+      sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$dir/drain.err")
+      generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$dir/drain.err")
+      [ "$sequence" = "$expected" ] && [ -n "$generation" ] \
+        || fail "drain named acknowledgement '$sequence', not $expected"
+      FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
+        --recovery-generation "$generation" \
+        || fail "acknowledgement through $expected failed"
+      [ ! -s "$state/.wake-queue" ] || fail "acknowledgement through $expected left rows queued"
+    done
+  done
+  pass "wake queue: large sequences advance and acknowledge as exact digit-only decimals"
+}
+
 test_legacy_generationless_wake_is_adopted() {
   local dir state row sequence generation
   dir=$(make_case legacy-generationless-wake)
@@ -3467,6 +3511,7 @@ test_main_reclaims_a_grant_whose_branch_owner_exited
 test_branch_actor_without_eligible_snapshot_refuses
 test_wake_publish_requires_atomic_recovery_evidence
 test_recovery_mint_and_delivery_log_avoid_sibling_subst
+test_large_sequences_stay_exact_decimal_identifiers
 test_legacy_generationless_wake_is_adopted
 test_handover_restore_undoes_only_its_own_stop
 test_stale_recovery_generation_cannot_touch_a_newer_episode

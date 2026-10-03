@@ -2441,16 +2441,20 @@ if [ -n "$EVICTED_PID" ]; then
 fi
 WATCHER_RECOVERY_PENDING=0
 WATCHER_HANDLING_ROWS=
+WATCHER_HANDLING_GENERATION=
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   # The predecessor notification covers rows present before this successor is
   # ready. Later rows need their own notification, even while that turn handles
-  # its inherited rows. Snapshot the rows themselves under the producer/drain
-  # lock: a lost sequence counter restarts numbering, so a sequence bound alone
-  # would read a later row as inherited.
+  # its inherited rows. Snapshot the rows themselves and the recovery generation
+  # under the producer/drain lock: a lost sequence counter restarts numbering,
+  # so a later row can repeat an acknowledged inherited row byte for byte, but
+  # an append after that acknowledgement always mints a new generation.
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
   if [ -s "$FM_WAKE_QUEUE" ]; then
     WATCHER_HANDLING_ROWS=$(awk -F '\t' 'NF >= 5' "$FM_WAKE_QUEUE") || exit 1
   fi
+  fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || exit 1
+  WATCHER_HANDLING_GENERATION=${FM_RECOVERY_MARKER_TOKEN##*:}
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
 fi
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
@@ -2624,16 +2628,20 @@ rerecord_device_shifted_pr_poll() {  # <id>
 }
 
 resurface_after_downtime() {
-  # Suppress only rows covered by the predecessor's notification. A permanent
-  # successor exemption strands external inbox appends while the beacon stays
-  # fresh. Do not consume rows here: the actor's sequence-bound drain owns that.
+  # Suppress only rows covered by the predecessor's notification: unchanged
+  # inherited rows in the inherited recovery generation. A permanent successor
+  # exemption strands external inbox appends while the beacon stays fresh. Do
+  # not consume rows here: the actor's sequence-bound drain owns that.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
     local newer=0
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
-    if [ -s "$FM_WAKE_QUEUE" ] && awk -F '\t' \
-      'FNR == NR { covered[$0] = 1; next } NF >= 5 && !($0 in covered) { found = 1 } END { exit !found }' \
-      - "$FM_WAKE_QUEUE" <<< "$WATCHER_HANDLING_ROWS"; then
-      newer=1
+    if [ -s "$FM_WAKE_QUEUE" ]; then
+      fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER" || exit 1
+      if [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "$WATCHER_HANDLING_GENERATION" ] || awk -F '\t' \
+        'FNR == NR { covered[$0] = 1; next } NF >= 5 && !($0 in covered) { found = 1 } END { exit !found }' \
+        - "$FM_WAKE_QUEUE" <<< "$WATCHER_HANDLING_ROWS"; then
+        newer=1
+      fi
     fi
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
     [ "$newer" -eq 1 ] || return 0
