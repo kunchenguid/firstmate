@@ -859,11 +859,8 @@ PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$RESTART_HOME" \
   FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
   "$WATCH" > "$TMP_ROOT/restart-watch-two.out" 2> "$TMP_ROOT/restart-watch-two.err" &
 WATCH_PID=$!
-i=0
-while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-  kill -0 "$WATCH_PID" 2>/dev/null || break
+while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && kill -0 "$WATCH_PID" 2>/dev/null; do
   sleep 0.05
-  i=$((i + 1))
 done
 [ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
   || fail "the replacement restart watcher did not begin polling"
@@ -878,11 +875,8 @@ if ! kill -0 "$WATCH_PID" 2>/dev/null; then
     FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=9999999 FM_HEARTBEAT=9999999 \
     "$WATCH" > "$TMP_ROOT/restart-watch-three.out" 2> "$TMP_ROOT/restart-watch-three.err" &
   WATCH_PID=$!
-  i=0
-  while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && [ "$i" -lt 100 ]; do
-    kill -0 "$WATCH_PID" 2>/dev/null || break
+  while [ ! -e "$RESTART_HOME/state/.last-watcher-beat" ] && kill -0 "$WATCH_PID" 2>/dev/null; do
     sleep 0.05
-    i=$((i + 1))
   done
   [ -e "$RESTART_HOME/state/.last-watcher-beat" ] \
     || fail "the recovery replacement watcher did not begin polling"
