@@ -918,9 +918,11 @@ EOF
   fm_write_meta "$mate/state/failed.meta" \
     "window=firstmate:fm-failed" "worktree=$mate/projects/failed" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_git_init_commit "$mate/projects/done"
+  git -C "$mate/projects/done" update-ref refs/remotes/origin/main "$(git -C "$mate/projects/done" rev-parse HEAD)"
   record_claude_state "$mate/state" "done" idle
   record_claude_state "$mate/state" failed idle
-  printf 'done: complete\n' > "$mate/state/done.status"
+  printf 'done: PR https://example.test/o/r/pull/1 checks green\n' > "$mate/state/done.status"
   printf 'failed: stopped\n' > "$mate/state/failed.status"
   rm "$mate/state/parked.meta" "$mate/state/parked.status"
   refresh_local_secondmate_ledgers "$home"

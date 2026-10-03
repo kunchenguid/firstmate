@@ -19,9 +19,9 @@
 # published only when bin/fm-dod-lib.sh accepts the named head, so an
 # unpushed copy is not reported upstream as ready. The cadence path uses
 # fm-crew-state.sh, which applies the same gate: a no-mistakes
-# pre-validation `done: {summary}` still reads done (the pipeline handoff),
-# while a CI-ready or direct-PR/local-only done whose head lives only in the
-# disposable copy reads blocked and is not a terminal inactive outcome.
+# `done: {summary}` that is not CI-ready reads blocked and is never a terminal
+# inactive outcome, as does a CI-ready or direct-PR/local-only done whose head
+# lives only in the disposable copy.
 # A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them
@@ -460,9 +460,9 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: with no delivery record yet, so it
-# runs on every poll in a secondmate home; a delivery failure is already queued as a
+# Every direct child's ledger, under its meta lock. File reads, plus
+# bin/fm-dod-lib.sh's local acceptance gate for a ship done: with no delivery
+# record yet, so it runs on every poll in a secondmate home; a delivery failure is already queued as a
 # notice and never fails the scan.
 ledger_pass() {
   local meta id lock

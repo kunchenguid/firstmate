@@ -32,7 +32,8 @@
 #      config under an already-running home, a literal-content reread instruction
 #      is written to the secondmate home and only its pointer is sent via the
 #      routed secondmate path (exact destination bytes, no summaries); unchanged
-#      config sends nothing unless a previous send failure is pending.
+#      config, or a payload byte-identical to the latest delivered generation,
+#      sends nothing unless a previous send failure is pending.
 
 #   C) Model/effort pin. config/secondmate-harness may carry optional model and
 #      effort tokens after the harness ("<harness> [<model>] [<effort>]"), read by
@@ -2545,6 +2546,743 @@ test_config_reread_skips_when_unchanged_and_reads_after_push() {
   pass "B17 config reread skips unchanged homes and reads destination post-write bytes"
 }
 
+test_config_reread_skips_byte_identical_payload() {
+  local w head log out status report count first_instr fakebin latest
+  w=$(new_world config-reread-identical-payload)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-identical.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "changed config must send a reread"
+  first_instr=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "changed push did not record exactly one reread pointer (count=$count)"
+
+  # Stale propagate snapshot: report still says pushed, but live dest bytes
+  # already match the payload that was just delivered.
+  report="$w/stale-pushed.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  fakebin=$(make_fake_toolchain "$w")
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "byte-identical payload skip should succeed"
+  [ "$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)" = 1 ] \
+    || fail "byte-identical payload was re-sent"
+  [ "$(reread_instruction_path "$w/sm")" = "$first_instr" ] \
+    || fail "byte-identical skip published a new generation"
+  [ ! -s "$log" ] || fail "byte-identical skip still sent text: $(cat "$log")"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+
+  printf 'pi\n' > "$w/home/config/crew-harness"
+  printf 'codex\n' > "$w/sm/config/crew-harness"
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "later changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "changed config after an identical skip must send"
+  [ "$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)" = 2 ] \
+    || fail "changed payload after identical skip did not send"
+  latest=$(fm_config_reread_latest_delivered "$w/sm") || fail "changed payload left no delivered generation"
+  assert_contains "$(cat "$latest")" $'-----BEGIN config/crew-harness-----\npi\n-----END config/crew-harness-----' \
+    "changed payload must carry the new destination bytes"
+  pass "config reread skips a byte-identical payload and still sends a later change"
+}
+
+test_config_reread_retry_rebuild_skips_byte_identical_payload() {
+  local w head log out status report retry_dir fakebin first_instr latest
+
+  w=$(new_world config-reread-retry-identical)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-retry-identical.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  first_instr=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+  [ "$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)" = 1 ] \
+    || fail "changed push did not record exactly one reread pointer"
+
+  # A retained retry report rebuilds its payload from the live destination
+  # bytes, which already carry the generation this home received.
+  retry_dir="$w/home/state/.fm-inherited-config-reread-retry/sm"
+  mkdir -p "$retry_dir"
+  printf '%s\n' $'crew-harness\tpushed\t' \
+    > "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000001.report"
+  report="$w/retry-rebuild.report"
+  : > "$report"
+  fakebin=$(make_fake_toolchain "$w")
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "retry rebuild of an unchanged destination should succeed"
+  [ "$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)" = 1 ] \
+    || fail "retry rebuild re-sent a byte-identical payload"
+  [ "$(reread_instruction_path "$w/sm")" = "$first_instr" ] \
+    || fail "retry rebuild published a byte-identical generation"
+  [ ! -s "$log" ] || fail "retry rebuild still sent text: $(cat "$log")"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+
+  printf 'drifted\n' > "$w/sm/config/crew-harness"
+  printf '%s\n' $'crew-harness\tpushed\t' \
+    > "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000002.report"
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "retry rebuild of a changed destination should succeed"
+  [ "$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)" = 2 ] \
+    || fail "retry rebuild did not deliver the changed destination bytes"
+  latest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  [ -n "$latest" ] && [ "$latest" != "$first_instr" ] \
+    || fail "retry rebuild did not deliver a new generation"
+  assert_contains "$(cat "$latest")" \
+    $'-----BEGIN config/crew-harness-----\ndrifted\n-----END config/crew-harness-----' \
+    "retry rebuild must carry the current destination bytes"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread retry rebuilds skip byte-identical payloads and deliver changes"
+}
+
+test_config_reread_dedupes_identical_siblings_in_one_delivery() {
+  local w head log out status report retry_dir fakebin count first second third
+
+  w=$(new_world config-reread-identical-siblings)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'codex\n' > "$w/sm/config/crew-harness"
+
+  # One delivery, two producers: a retained retry report and a fresh change,
+  # both rebuilt from the same live destination bytes.
+  retry_dir="$w/home/state/.fm-inherited-config-reread-retry/sm"
+  mkdir -p "$retry_dir"
+  printf '%s\n' $'crew-harness\tpushed\t' \
+    > "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000001.report"
+  report="$w/identical-siblings.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/config-reread-identical-siblings.tmux.log"
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "identical sibling generations should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "identical sibling generations were both sent (count=$count)"
+  first=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | head -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$first")" \
+    $'-----BEGIN config/crew-harness-----\ncodex\n-----END config/crew-harness-----' \
+    "the single delivered sibling must carry the destination bytes"
+  assert_no_reread_retry_stages "$w/home" sm
+  assert_no_reread_pending "$w/sm"
+
+  # Differing bytes in one delivery still send both, oldest generation first.
+  printf 'drifted\n' > "$w/sm/config/crew-harness"
+  printf 'retained-generation\n' > "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000002"
+  chmod 0600 "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000002"
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "differing sibling generations should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 3 ] || fail "differing sibling generations were not both sent (count=$count)"
+  second=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | sed -n '2p' | sed 's/.*CONFIG_REREAD: //')
+  third=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | sed -n '3p' | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$second")" "retained-generation" \
+    "the retained generation must be delivered before the newer one"
+  assert_contains "$(cat "$third")" \
+    $'-----BEGIN config/crew-harness-----\ndrifted\n-----END config/crew-harness-----' \
+    "the newer generation must carry the current destination bytes"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread sends one pointer for byte-identical siblings and both for differing ones"
+}
+
+test_config_reread_salvaged_retry_stage_skips_byte_identical_payload() {
+  local w head log out status report retry_dir fakebin real_mv first_instr count
+
+  w=$(new_world config-reread-salvaged-identical)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-salvaged-identical.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  first_instr=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+
+  # Rebuild the retained report, fail its rename, and let the exact-temp
+  # salvage recover the very bytes this home already received.
+  retry_dir="$w/home/state/.fm-inherited-config-reread-retry/sm"
+  mkdir -p "$retry_dir"
+  retry_dir=$(cd "$retry_dir" && pwd -P)
+  printf '%s\n' $'crew-harness\tpushed\t' \
+    > "$retry_dir/.fm-inherited-config-reread.20260721T000000.00000001.report"
+  report="$w/salvaged-identical.report"
+  : > "$report"
+  fakebin=$(make_fake_toolchain "$w")
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+target=
+for arg in "\$@"; do target="\$arg"; done
+case "\$target" in
+  *"$retry_dir"/.fm-inherited-config-reread.*) exit 1 ;;
+esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "a salvaged byte-identical retry stage should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "a salvaged byte-identical stage was re-sent (count=$count)"
+  [ "$(reread_instruction_path "$w/sm")" = "$first_instr" ] \
+    || fail "a salvaged byte-identical stage published a new generation"
+  [ ! -s "$log" ] || fail "a salvaged byte-identical stage still sent text: $(cat "$log")"
+  assert_no_reread_retry_stages "$w/home" sm
+  assert_no_reread_pending "$w/sm"
+  pass "config reread salvaged retry stages pass the byte-identical skip gate"
+}
+
+test_config_reread_drift_restored_convergence_detects_and_corrects() {
+  local w head log out status count
+  w=$(new_world config-reread-drift-restored)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  log="$w/drift-restored.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "initial changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "initial push must send a reread"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "initial push did not deliver exactly one reread (count=$count)"
+  [ "$(cat "$w/sm/config/crew-harness")" = "codex" ] \
+    || fail "convergence did not write primary value to destination"
+
+  # Simulate the live agent drifting its own config.
+  printf 'pi\n' > "$w/sm/config/crew-harness"
+
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "drift-correction push should succeed"
+  # Convergence detected the drift (src=codex != dest=pi) and restored it.
+  [ "$(cat "$w/sm/config/crew-harness")" = "codex" ] \
+    || fail "convergence did not restore drifted destination"
+  # The reread sender's skip gate suppresses the redundant notification because
+  # the payload bytes are identical to the last delivered generation.
+  # The convergence check owns drift detection; the sender owns duplicate suppression.
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "drift-restoration send count changed (count=$count)"
+  assert_not_contains "$out" "config-reread: sent" \
+    "byte-identical drift-restoration must not send a second reread"
+  [ ! -s "$log" ] || fail "drift-restoration push still sent text: $(cat "$log")"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+
+  # A genuinely new primary value still delivers a new reread after the drift episode.
+  printf 'grok\n' > "$w/home/config/crew-harness"
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "new-value push after drift episode should succeed"
+  assert_contains "$out" "config-reread: sent" "new primary value must send a reread"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 2 ] || fail "new-value push did not deliver a second reread (count=$count)"
+  [ "$(cat "$w/sm/config/crew-harness")" = "grok" ] \
+    || fail "convergence did not write new primary value to destination"
+  pass "convergence detects and corrects destination drift; sender dedupes the restored payload"
+}
+
+# The `config-reread: sent` label reports an actual pointer send. Draining an
+# older pending generation publishes no new generation and leaves the
+# name-ordered head of the delivered set untouched, so a label keyed on that
+# name alone hid this send; the delivered set is the observable a report must
+# track. The drain does move what the home received last.
+test_config_reread_sent_label_reports_older_pending_drain() {
+  local w head log out status older first_instr latest_after count
+  w=$(new_world config-reread-pending-drain-label)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-pending-drain.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "changed push must report its send"
+  first_instr=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+
+  # A failed send left this older-named generation pending while the newer
+  # generation below is already the latest delivered one.
+  older="$w/sm/state/.fm-inherited-config-reread.20200101T000000.00000001"
+  printf '%s\n' older-generation > "$older"
+  chmod 0600 "$older"
+  fm_config_reread_mark_pending "$older" "$older.pending" \
+    || fail "could not mark the older generation pending"
+
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "unchanged push draining a pending generation should succeed"
+  assert_contains "$out" "config-reread: sent" \
+    "draining an older pending generation must report the send"
+  latest_after=$(fm_config_reread_latest_delivered "$w/sm") \
+    || fail "delivered generation missing after the drain"
+  assert_contains "$(cat "$latest_after")" "older-generation" \
+    "the drained generation must be the home's newest-by-arrival generation"
+  [ "$(reread_instruction_path "$w/sm")" = "$first_instr" ] \
+    || fail "the drain published a new generation"
+  assert_contains "$(inbox_stream "$w/home/state" sm)" "CONFIG_REREAD: $older" \
+    "the older pending generation was not drained"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 2 ] || fail "the drain did not deliver exactly one pointer (count=$count)"
+  assert_no_reread_pending "$w/sm"
+  pass "config-reread: sent reports an older pending drain the latest name never shows"
+}
+
+# Every retention lane leaves its generation in the retry queue for the next
+# run, and that entry into the queue is the gate: a retained stage - including
+# the retained exact temporary a failed adoption leaves behind - whose bytes the
+# home already received must be discarded before anything is published or sent.
+test_config_reread_fill_gate_discards_retained_identical_generations() {
+  local w head log out status gen1 retry_dir stage tmp_stage count
+  w=$(new_world config-reread-fill-gate)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-fill-gate.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "changed push must report its send"
+  gen1=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+
+  retry_dir="$w/home/state/.fm-inherited-config-reread-retry/sm"
+  mkdir -p "$retry_dir"
+  stage="$retry_dir/.fm-inherited-config-reread.20260721T000000.00000001"
+  tmp_stage="$retry_dir/.fm-inherited-config-reread.20260721T000000.00000002.tmp.retained"
+  if ! cp "$gen1" "$stage" || ! chmod 0600 "$stage"; then
+    fail "could not plant a retained identical stage"
+  fi
+  if ! cp "$gen1" "$tmp_stage" || ! chmod 0600 "$tmp_stage"; then
+    fail "could not plant a retained identical temporary"
+  fi
+
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "unchanged push over retained generations should succeed"
+  assert_not_contains "$out" "config-reread: sent" \
+    "byte-identical retained generations must not report a send"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "byte-identical retained generations were delivered (count=$count)"
+  [ "$(reread_instruction_path "$w/sm")" = "$gen1" ] \
+    || fail "byte-identical retained generations published a new generation"
+  [ ! -s "$log" ] || fail "byte-identical retained generations still sent text: $(cat "$log")"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "the queue-entry gate discards retained stages byte-identical to the delivered generation"
+}
+
+# A respawn run skips loading pending generations, so the queued-sibling dedup
+# cannot see an identical pending instruction; the skip gate must compare the
+# built payload against pending instruction bytes too, or it publishes a
+# duplicate that is re-sent when the pending one drains.
+test_config_reread_skip_pending_never_republishes_identical_pending() {
+  local w head log out status report gen1 pending count fakebin newest
+  w=$(new_world config-reread-skip-pending-identical)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-skip-pending.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  gen1=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+
+  # A failed send left this generation pending with the exact payload a
+  # respawn run's fresh build would produce from the same destination bytes.
+  printf 'two\n' > "$w/sm/config/crew-harness"
+  report="$w/skip-pending.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  pending="$w/sm/state/.fm-inherited-config-reread.20200101T000000.00000009"
+  fm_config_write_reread_instruction "$w/sm" "$report" "$pending" \
+    || fail "could not write the pending generation"
+  fm_config_reread_mark_pending "$pending" "$pending.pending" \
+    || fail "could not mark the generation pending"
+
+  fakebin=$(make_fake_toolchain "$w")
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_CONFIG_REREAD_SKIP_PENDING=1 \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "a respawn-run identical payload should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "a respawn run published a duplicate of a pending payload (count=$count)"
+  [ "$(reread_instruction_path "$w/sm")" = "$gen1" ] \
+    || fail "a respawn run published a duplicate generation"
+  assert_present "$pending.pending" "the pending generation lost its marker"
+  assert_no_reread_retry_stages "$w/home" sm
+  [ ! -s "$log" ] || fail "duplicate-pending skip still sent text: $(cat "$log")"
+
+  # The pending generation still delivers exactly once on the next normal run,
+  # and the payload that run propagates lands after it, so the home ends on its
+  # current config bytes instead of the drained older payload.
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the pending drain should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -Fc "${pending##*/}" || true)
+  [ "$count" = 1 ] || fail "the pending generation did not deliver exactly once (count=$count)"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 3 ] || fail "the pending drain did not also land the current payload (count=$count)"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\ncodex\n-----END config/crew-harness-----' \
+    "the home must end on its current config bytes, not the drained older payload"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread never republishes a payload byte-identical to a pending generation"
+}
+
+# The fresh-lane instruction write that fails with its exact bytes adoptable is
+# retained for the next run - and that retention is a gate boundary too: when
+# the adopted bytes equal the generation this home already received, the stage
+# is discarded instead of surviving to re-deliver the same payload.
+test_config_reread_fresh_adopt_of_delivered_payload_is_discarded() {
+  local w head log out status report fakebin real_mv retry_dir gen1 count stage
+  w=$(new_world config-reread-adopt-identical)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/config-reread-adopt-identical.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "changed push should succeed"
+  assert_contains "$out" "config-reread: sent" "changed push must report its send"
+  gen1=$(reread_instruction_path "$w/sm") || fail "first reread instruction missing"
+
+  fakebin=$(make_fake_toolchain "$w")
+  real_mv=$(command -v mv)
+  retry_dir="$w/home/state/.fm-inherited-config-reread-retry/sm"
+  mkdir -p "$retry_dir"
+  retry_dir=$(cd "$retry_dir" && pwd -P)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+target=
+for arg in "\$@"; do target="\$arg"; done
+case "\$target" in
+  *"$retry_dir"/.fm-inherited-config-reread.*) exit 1 ;;
+esac
+exec "$real_mv" "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  report="$w/adopt-identical.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 1 "$status" "the instruction-write failure should remain diagnostic"
+  if stage=$(reread_retry_stage_path "$w/home" sm); then
+    fail "an adopted payload identical to the delivered generation was retained: $stage"
+  fi
+
+  rm -f "$fakebin/mv"
+  : > "$log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the follow-up push should succeed"
+  assert_not_contains "$out" "config-reread: sent" \
+    "the discarded duplicate must not report a send"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "the discarded duplicate was delivered anyway (count=$count)"
+  [ "$(reread_instruction_path "$w/sm")" = "$gen1" ] \
+    || fail "the discarded duplicate published a new generation"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread discards a fresh-lane adopted payload identical to the delivered generation"
+}
+
+# The skip gate may only drop a byte-identical fresh generation when that
+# generation is what the delivery leaves as the home's newest instruction. A
+# pushed payload whose send failed leaves an older generation pending, so a
+# revert that rebuilds the already-delivered payload must keep the fresh
+# generation: the pending drain lands in the same run and the home's config
+# bytes, newest instruction, and push report must all end up on the reverted
+# payload - a `config-reread: sent` claim must never describe that drain alone.
+test_config_reread_revert_after_pending_drain_keeps_current_payload() {
+  local w head log out status err gen1 gen2 newest count
+  w=$(new_world config-reread-revert-pending)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'payload-A\n' > "$w/home/config/crew-harness"
+  log="$w/revert-pending-a1.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "payload A push should succeed"
+  assert_contains "$out" "config-reread: sent" "payload A must report its send"
+  gen1=$(reread_instruction_path "$w/sm") || fail "payload A generation missing"
+
+  # payload B publishes its generation, then the durable send fails, so B stays
+  # pending in the destination state with its retry stage retained.
+  printf 'payload-B\n' > "$w/home/config/crew-harness"
+  mv "$w/home/state/sm.inbox" "$w/home/state/sm.inbox.saved"
+  : > "$w/home/state/sm.inbox"
+  err="$w/revert-pending-b1.err"
+  out=$(PATH="$(make_fake_toolchain "$w"):$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-config-push.sh" 2>"$err"); status=$?
+  expect_code 1 "$status" "the failed send must fail the push"
+  assert_contains "$out" "send failed" "the failed send must stay diagnostic"
+  assert_not_contains "$out" "config-reread: sent" "a failed send must not claim a delivery"
+  [ "$(cat "$w/sm/config/crew-harness")" = payload-B ] \
+    || fail "payload B did not propagate before its send failed"
+  gen2=$(reread_instruction_path "$w/sm") || fail "payload B generation missing"
+  [ "$gen2" != "$gen1" ] || fail "payload B reused payload A's generation"
+  assert_present "$(reread_pending_path "$w/sm")" \
+    "payload B's failed send left no pending marker"
+
+  # Reverting to payload A must land after the pending B drain, not be
+  # suppressed against the generation whose bytes happen to match it.
+  rm -f "$w/home/state/sm.inbox"
+  mv "$w/home/state/sm.inbox.saved" "$w/home/state/sm.inbox"
+  printf 'payload-A\n' > "$w/home/config/crew-harness"
+  log="$w/revert-pending-a2.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the revert push should succeed"
+  [ "$(cat "$w/sm/config/crew-harness")" = payload-A ] \
+    || fail "the revert did not restore payload A bytes"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  [ -n "$newest" ] || fail "the revert push delivered no reread pointer"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 3 ] || fail "expected payload A, payload B, payload A pointers (count=$count)"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+  # No `config-reread: sent` claim may describe a stale drain: a claimed send
+  # must leave the home's newest instruction carrying its config bytes.
+  case "$out" in
+    *'config-reread: sent'*)
+      assert_contains "$(cat "$newest")" \
+        $'-----BEGIN config/crew-harness-----\npayload-A\n-----END config/crew-harness-----' \
+        "config-reread: sent claimed a send that left a stale newest instruction"
+      ;;
+  esac
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\npayload-A\n-----END config/crew-harness-----' \
+    "the newest instruction must carry the reverted payload bytes"
+  assert_not_contains "$(cat "$newest")" "payload-B" \
+    "the newest instruction must not be the stale pending payload"
+  pass "config reread reverts to the current payload after a pending drain"
+}
+
+# Two failed sends leave payload A and then payload B pending; reverting to
+# payload A must not be suppressed against the older pending A generation,
+# because the name-ordered drain would then deliver B last.
+test_config_reread_revert_after_two_pending_keeps_current_payload() {
+  local w head out status err newest count pending_count
+  w=$(new_world config-reread-revert-two-pending)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  : > "$w/home/state/sm.inbox"
+  for payload in payload-A payload-B; do
+    printf '%s\n' "$payload" > "$w/home/config/crew-harness"
+    err="$w/revert-two-pending-$payload.err"
+    out=$(PATH="$(make_fake_toolchain "$w"):$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+      FM_SEND_SETTLE=0 \
+      "$ROOT/bin/fm-config-push.sh" 2>"$err"); status=$?
+    expect_code 1 "$status" "the failed $payload send must fail the push"
+    assert_not_contains "$out" "config-reread: sent" "a failed $payload send must not claim a delivery"
+  done
+  pending_count=$(find "$w/sm/state" -maxdepth 1 -name '.fm-inherited-config-reread.*.pending' | wc -l)
+  [ "$pending_count" -eq 2 ] || fail "expected payload A and payload B pending (count=$pending_count)"
+
+  rm -f "$w/home/state/sm.inbox"
+  printf 'payload-A\n' > "$w/home/config/crew-harness"
+  out=$(run_config_push "$w" "$w/revert-two-pending-a2.tmux.log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the revert push should succeed"
+  [ "$(cat "$w/sm/config/crew-harness")" = payload-A ] \
+    || fail "the revert did not restore payload A bytes"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 3 ] || fail "expected payload A, payload B, payload A pointers (count=$count)"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\npayload-A\n-----END config/crew-harness-----' \
+    "the newest instruction must carry the reverted payload bytes"
+  assert_no_reread_pending "$w/sm"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread reverts to the current payload after two pending generations"
+}
+
+# A respawn run (FM_CONFIG_REREAD_SKIP_PENDING=1) delivers its newer-named
+# generation while an older pending generation remains, and a later normal run
+# drains that older generation after it - so generation-name order stops
+# matching what the home received last. The skip gate must take its baseline
+# from arrival order, or the next byte-identical payload is suppressed against
+# a generation the home did not receive last and the home stays stale.
+test_config_reread_respawn_divergence_returns_to_current_payload() {
+  local w head log out status report fakebin pending count newest gen1
+  w=$(new_world config-reread-respawn-current)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+
+  printf 'old\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  log="$w/respawn-current-a1.tmux.log"
+  out=$(run_config_push "$w" "$log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "initial push should succeed"
+  assert_contains "$out" "config-reread: sent" "the initial push must report its send"
+  gen1=$(reread_instruction_path "$w/sm") || fail "initial generation missing"
+
+  # An older generation failed its send and stays pending with payload one.
+  printf 'one\n' > "$w/sm/config/crew-harness"
+  report="$w/respawn-current-one.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  pending="$w/sm/state/.fm-inherited-config-reread.20200101T000000.00000001"
+  fm_config_write_reread_instruction "$w/sm" "$report" "$pending" \
+    || fail "could not write the older pending generation"
+  fm_config_reread_mark_pending "$pending" "$pending.pending" \
+    || fail "could not mark the older generation pending"
+  printf 'two\n' > "$w/sm/config/crew-harness"
+
+  # The respawn run delivers payload two while the older pending remains.
+  report="$w/respawn-current-two.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/respawn-current-skip.tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    FM_CONFIG_REREAD_SKIP_PENDING=1 \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "the respawn run should succeed"
+  [ "$(reread_instruction_path "$w/sm")" != "$gen1" ] \
+    || fail "the respawn run published no new generation"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 2 ] || fail "the respawn run should deliver exactly payload two (count=$count)"
+  assert_present "$pending.pending" "the respawn run drained the older pending generation"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\ntwo\n-----END config/crew-harness-----' \
+    "the respawn run must deliver payload two last"
+
+  # A later normal run drains the older pending generation after it: the home
+  # received payload one last even though payload two owns the newer name.
+  report="$w/respawn-current-drain.report"
+  : > "$report"
+  log="$w/respawn-current-drain.tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "the pending drain should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 3 ] || fail "the older pending generation did not drain (count=$count)"
+  assert_no_reread_pending "$w/sm"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\none\n-----END config/crew-harness-----' \
+    "the drained generation must be the home's newest-by-arrival payload"
+
+  # A payload byte-identical to the newer-named generation must still land:
+  # the home's newest-by-arrival payload is one, not the name-ordered two.
+  report="$w/respawn-current-stale.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+  log="$w/respawn-current-recover.tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "the byte-identical recovery push should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 4 ] || fail "the current payload was suppressed against a stale baseline (count=$count)"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\ntwo\n-----END config/crew-harness-----' \
+    "the home's newest instruction must return to the current payload bytes"
+
+  # With the current payload now the newest arrival, the ordinary
+  # byte-identical skip applies again and sends nothing.
+  : > "$log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "the redundant push should succeed"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 4 ] || fail "a now-current byte-identical payload was re-sent (count=$count)"
+  [ ! -s "$log" ] || fail "the redundant payload still sent text: $(cat "$log")"
+  assert_no_reread_retry_stages "$w/home" sm
+  pass "config reread returns to the current payload after a skip-pending divergence"
+}
+
+# Bounded sent-history cleanup must not evict the generation the home received
+# last when it owns an older name than the retained history; otherwise the skip
+# gate falls back to the name-newest generation and suppresses a payload the
+# home never received last.
+test_config_reread_cleanup_keeps_arrival_generation() {
+  local w head state_real report arrived path n out status fakebin log count newest
+  w=$(new_world config-reread-cleanup-arrival)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  state_real=$(cd "$w/sm/state" && pwd -P)
+  report="$w/cleanup-arrival.report"
+  printf '%s\n' $'crew-harness\tpushed\t' > "$report"
+
+  printf 'two\n' > "$w/sm/config/crew-harness"
+  for n in $(seq 10 26); do
+    path="$state_real/.fm-inherited-config-reread.20200101T000000.000000$n"
+    fm_config_write_reread_instruction "$w/sm" "$report" "$path" \
+      || fail "could not write delivered history generation $n"
+  done
+  # The oldest-named generation (payload one) arrived last, out of name order.
+  printf 'one\n' > "$w/sm/config/crew-harness"
+  arrived="$state_real/.fm-inherited-config-reread.20200101T000000.00000001"
+  fm_config_write_reread_instruction "$w/sm" "$report" "$arrived" \
+    || fail "could not write the arrival generation"
+  fm_config_reread_record_arrival "$arrived"
+
+  fm_config_reread_cleanup_sent "$w/sm"
+  assert_present "$arrived" "history cleanup evicted the generation the home received last"
+  assert_present "$state_real/$FM_CONFIG_REREAD_NEWEST_MARKER" "history cleanup deleted the arrival marker"
+  count=$(fm_config_reread_delivered_paths "$w/sm" | wc -l | tr -d ' ')
+  [ "$count" = 16 ] || fail "history cleanup no longer bounds sent history (count=$count)"
+
+  # The current payload matches the name-newest generation, not the arrival.
+  printf 'two\n' > "$w/sm/config/crew-harness"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/cleanup-arrival.tmux.log"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    fm_config_send_reread_nudge sm "$w/sm" "$report" 2>&1); status=$?
+  expect_code 0 "$status" "the current-payload push should succeed: $out"
+  count=$(inbox_stream "$w/home/state" sm | grep -c 'CONFIG_REREAD:' || true)
+  [ "$count" = 1 ] || fail "the current payload was suppressed against an evicted arrival (count=$count)"
+  newest=$(inbox_stream "$w/home/state" sm | grep 'CONFIG_REREAD:' | tail -n 1 | sed 's/.*CONFIG_REREAD: //')
+  assert_contains "$(cat "$newest")" \
+    $'-----BEGIN config/crew-harness-----\ntwo\n-----END config/crew-harness-----' \
+    "the home's newest instruction must carry the current payload bytes"
+  pass "config reread history cleanup keeps the arrival generation"
+}
+
 test_config_reread_bootstrap_path_and_spawn_flexibility() {
   local w head log out fakebin sm launchlog launch instr report stale
   w=$(new_world config-reread-bootstrap)
@@ -2766,6 +3504,19 @@ test_config_reread_full_retry_queue_drains_before_new_push
 test_config_reread_cleanup_runs_after_mixed_delivery_failure
 test_config_reread_stops_after_failed_generation
 test_config_reread_skips_when_unchanged_and_reads_after_push
+test_config_reread_skips_byte_identical_payload
+test_config_reread_retry_rebuild_skips_byte_identical_payload
+test_config_reread_dedupes_identical_siblings_in_one_delivery
+test_config_reread_salvaged_retry_stage_skips_byte_identical_payload
+test_config_reread_drift_restored_convergence_detects_and_corrects
+test_config_reread_sent_label_reports_older_pending_drain
+test_config_reread_fill_gate_discards_retained_identical_generations
+test_config_reread_skip_pending_never_republishes_identical_pending
+test_config_reread_fresh_adopt_of_delivered_payload_is_discarded
+test_config_reread_revert_after_pending_drain_keeps_current_payload
+test_config_reread_revert_after_two_pending_keeps_current_payload
+test_config_reread_respawn_divergence_returns_to_current_payload
+test_config_reread_cleanup_keeps_arrival_generation
 test_config_reread_bootstrap_path_and_spawn_flexibility
 test_bootstrap_respawns_before_config_reread
 test_spawn_quarantines_pending_rereads_on_cleanup_failure
