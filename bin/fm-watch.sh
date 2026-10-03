@@ -2489,14 +2489,16 @@ if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
 WATCHER_RECOVERY_PENDING=0
-WATCHER_HANDLING_SEQUENCE=0
+WATCHER_HANDLING_ROWS=
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
   # The predecessor notification covers rows present before this successor is
   # ready. Later rows need their own notification, even while that turn handles
-  # its inherited rows. Snapshot under the producer/drain lock.
+  # its inherited rows. Snapshot the rows themselves under the producer/drain
+  # lock: a lost sequence counter restarts numbering, so a sequence bound alone
+  # would read a later row as inherited.
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
   if [ -s "$FM_WAKE_QUEUE" ]; then
-    WATCHER_HANDLING_SEQUENCE=$(awk -F '\t' 'NF >= 5 && $2 > n { n = $2 } END { print n+0 }' "$FM_WAKE_QUEUE") || exit 1
+    WATCHER_HANDLING_ROWS=$(awk -F '\t' 'NF >= 5' "$FM_WAKE_QUEUE") || exit 1
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
 fi
@@ -2678,8 +2680,9 @@ resurface_after_downtime() {
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
     local newer=0
     fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
-    if [ -s "$FM_WAKE_QUEUE" ] && awk -F '\t' -v covered="$WATCHER_HANDLING_SEQUENCE" \
-      'NF >= 5 && $2 > covered { found = 1 } END { exit !found }' "$FM_WAKE_QUEUE"; then
+    if [ -s "$FM_WAKE_QUEUE" ] && awk -F '\t' \
+      'FNR == NR { covered[$0] = 1; next } NF >= 5 && !($0 in covered) { found = 1 } END { exit !found }' \
+      - "$FM_WAKE_QUEUE" <<< "$WATCHER_HANDLING_ROWS"; then
       newer=1
     fi
     fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1

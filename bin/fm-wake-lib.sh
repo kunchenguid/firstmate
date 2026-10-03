@@ -2164,7 +2164,11 @@ fm_wake_append_locked() {
     case "$seq" in
       ''|*[!0-9]*) seq=0 ;;
     esac
-    seq=$((seq + 1))
+    # A lost or unreadable counter must not reuse a queued row's sequence: an
+    # outstanding sequence-bound acknowledgement would consume the new row.
+    seq=$(awk -F '\t' -v n="$seq" '
+      NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 > n + 0 { n = $2 } END { print n + 1 }
+    ' "$FM_WAKE_QUEUE" 2>/dev/null || echo $((seq + 1)))
     printf '%s\n' "$seq" > "$seq_file" || status=$?
   fi
   if [ "$status" -eq 0 ]; then
