@@ -160,7 +160,7 @@ mode=no-mistakes
 worktree=$PROJECT
 project=synthetic-project
 EOF
-cp "$ROOT/.tasks.toml" "$HOME_DIR/.tasks.toml"
+cp "$ROOT/.tasks.toml.example" "$HOME_DIR/.tasks.toml"
 cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 ## In flight
 - [ ] repair-task - Repair the synthetic dependency (repo: synthetic-project, since 2026-07-14)

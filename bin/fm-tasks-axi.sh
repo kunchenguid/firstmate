@@ -18,10 +18,11 @@
 # through bin/fm-hold-reason-lib.sh, which owns the field-only decoding contract.
 # Decoded reasons use quoted strings so embedded line breaks remain intact.
 #
-# Why it exists: a bare `tasks-axi` resolves the tracked `.tasks.toml` paths
-# against its working directory, so from the code root it forks the queue
-# whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
-# owns that rationale.
+# Why it exists: a bare `tasks-axi` resolves `.tasks.toml` paths against its
+# working directory, so from the code root it addresses that root rather than
+# this home - the code root's `data/` when it holds a `.tasks.toml` of its own
+# (forking the queue), tasks-axi's built-in defaults when it does not;
+# docs/configuration.md ("Backlog backend") owns that rationale.
 #
 # Addressing is bin/fm-backlog-transition-lib.sh's fm_backlog_tasks_axi_addressing,
 # the same resolution the lifecycle transitions use: tasks-axi runs from the
