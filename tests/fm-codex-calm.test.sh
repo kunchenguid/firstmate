@@ -102,7 +102,7 @@ root_home="$TMP_ROOT/root-fallback"
 mkdir -p "$root_home/config" "$root_home/fake"
 printf 'on\n' >"$root_home/config/calm"
 make_fake "$root_home/fake"
-PATH="$root_home/fake:$PATH" FAKE_LOG="$root_home/log" FM_HOME= FM_CONFIG_OVERRIDE= \
+PATH="$root_home/fake:$PATH" FAKE_LOG="$root_home/log" FM_HOME='' FM_CONFIG_OVERRIDE='' \
   FM_ROOT_OVERRIDE="$root_home" "$WRAPPER" status >/dev/null 2>"$root_home/err" || fail 'FM_ROOT_OVERRIDE fallback failed'
 grep -qx -- 'hide_agent_reasoning=true' "$root_home/log.argv" || fail 'FM_ROOT_OVERRIDE did not resolve config/calm'
 pass 'FM_ROOT_OVERRIDE resolves config/calm when FM_HOME is absent'
