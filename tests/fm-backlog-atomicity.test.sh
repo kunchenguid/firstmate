@@ -87,12 +87,12 @@ Exercise backlog dispatch for $id.
 Verify the atomic backlog transition.
 
 # Definition of done
-Delivery contract: mode=no-mistakes
+Delivery contract: mode=review-PR
 EOF
   done
 
   fm_test_fake_herdr_spawn "$fakebin"
-  fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  fm_fake_exit0 "$fakebin" treehouse gh gh-axi
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -654,7 +654,7 @@ run_spawn() {  # <case-dir> <args...>
 
 run_ship_spawn() {  # <case-dir> <id>
   local case_dir=$1 id=$2
-  run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off
+  run_spawn "$case_dir" "$id" "$case_dir/project" --mode review-PR --yolo off
 }
 
 # Teardown against a recorded worktree that no longer exists: the landed-work and
@@ -912,7 +912,8 @@ case "\${1:-}" in
     esac
     printf '%s\n' 'task:'
     printf '  id: %s\n' "$id"
-    printf '%s\n' '  state: in_flight' '  held: no' '  blocked: no'
+    printf '%s\n' '  title: "Beads completion fixture"' \
+      '  body: ""' '  state: in_flight' '  held: no' '  blocked: no'
     ;;
   done)
     [ "\${2:-}" = "$id" ] || exit 1
@@ -1449,7 +1450,7 @@ test_failed_launch_delivery_does_not_confirm_goal_action() {
   FM_HOME="$home" "$ROOT/bin/fm-task-state.sh" reconcile "$id" --expected-revision 1 --record "$candidate" >/dev/null
   break_launch_delivery "$case_dir"
 
-  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode no-mistakes --yolo off \
+  out=$(run_spawn "$case_dir" "$id" "$case_dir/project" --mode review-PR --yolo off \
     --action-id "$id.g1.a1" --expected-generation unassigned-g1) || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn reported success though action launch delivery failed"
   jq -e '.execution_generation=="unassigned-g1" and .next_action.phase=="attempted" and .next_action.attempts==1' \
@@ -1536,7 +1537,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
     FM_FAKE_PANE_PATH="$case_dir/wt" FM_BACKEND=herdr HERDR_SESSION=fixture CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
     timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
-    --mode no-mistakes --yolo off 2>&1) || rc=$?
+    --mode review-PR --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
     124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
@@ -2951,7 +2952,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" FM_BACKEND=herdr HERDR_SESSION=fixture \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode review-PR --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \

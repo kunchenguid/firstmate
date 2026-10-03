@@ -43,8 +43,8 @@ Hard rules, in priority order:
 You may maintain this repo's private operational state directly.
 Shared tracked material is `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, and public `skills/`.
 When any crewmate is live, delegate changes to shared tracked material rather than competing with supervision; when the fleet is empty, firstmate may change it directly.
-This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
-Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
+This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, and `projects/` are captain-private and gitignored.
+Ship shared tracked changes through this repo's intent-aware native-review and PR path, with the same merge authority as any other project.
 Commit co-author trailers may include automated agents, models, and CLIs.
 Their inclusion is optional, and repository rules, delivery systems, or task-specific instructions may omit or prohibit them.
 
@@ -94,14 +94,14 @@ When that section reports its checks still in progress it names exactly what is 
    When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
 4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the de-duplicated compact backlog inventory owned by `bin/fm-session-start.sh`; one identity-complete summary for every `state/<id>.meta` with an explicit full-metadata path for omitted fields or ambiguity; the newest event from each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for older history); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and a non-blocking task projection: cheap endpoint liveness for local tasks and validated durable provider state with an explicit freshness gap for remote tasks.
+5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the de-duplicated compact backlog inventory owned by `bin/fm-session-start.sh`; one identity-complete summary for every `state/<id>.meta` with an explicit full-metadata path for omitted fields or ambiguity; the newest event from each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for older history); preserved legacy mode records as inactive historical evidence when present; and a non-blocking task projection: cheap endpoint liveness for local tasks and validated durable provider state with an explicit freshness gap for remote tasks.
    Neither projection is a full current-state read - when you need a task's actual current state, read it with `bin/fm-task-state.sh <id>`; the digest deliberately skips the deeper local-agent read and remote-provider readback so it stays fast and bounded.
    The wake queue remains the owner of raw wake presentation, `OPEN DECISIONS`, `UNREAD STATUS`, and record divergence; the concise fleet inventory never licenses treating omitted metadata fields or older routine status events as already read. Read an individual source only when the startup disclosure or the current operation requires that detail.
 6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
    A read-only session runs no network checks at all and says so.
 7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/captain.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
-   The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
+   The closing reminder points back to the emitted supervision block and preserves only the lock, Relay, and read-once reminders.
 
 Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
 Do not dispatch until the essential launch tools are present and GitHub authentication is good.
@@ -135,7 +135,7 @@ Treat each digest's latest status event as wake-event history and use targeted c
 Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
 For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
 
-If `state/.afk` is present, load `/afk` in away mode or `/quiet` in quiet mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`); where its daemon runs, let the daemon own supervision rather than arming another cycle, and on Pi keep the ordinary supervision session, which runs in both postures.
+Legacy `state/.afk` and `state/.afk-contract` records are preserved but inactive; never start a legacy daemon from them. Ordinary supervision remains authoritative.
 Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
 A restart must be a non-event because durable state and live backend inventory, not conversation memory, are authoritative.
 
@@ -189,8 +189,8 @@ Load `diagnostic-reasoning` before scoping a reported bug and before acting on a
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
-On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name. A deployable ByteDance BITS/PPE surface overrides this classification: it resolves to `no-mistakes` under the BITS/PPE lifecycle below.
-An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
+On a `review-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `review-PR`; never infer internal-only from file location or project name. Legacy `no-mistakes` and `no-mistakes-prod-only` registry rows are read as `review-PR` and `review-prod-only` respectively but are never emitted for fresh tasks. A deployable ByteDance BITS/PPE surface resolves to `review-PR` under the BITS/PPE lifecycle below.
+An unregistered project or absent registry resolves to `review-PR` with yolo off, and the registration gap goes to the captain.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
@@ -221,14 +221,14 @@ Supervise all live work under section 8.
 ### Selected delivery path and merge authority
 
 The selected delivery path owns its own rigor, subject to the deployable ByteDance BITS/PPE lifecycle below.
-Outside that lifecycle, when no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
+Outside that lifecycle, `review-PR` uses the selected worker harness's verified native review capability after the implementation commit; otherwise follow the faster path without adding an independent reviewer.
+Never stack serial reviews or infer authority for an extra reviewer from security, architecture, or risk alone.
 A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
-If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
+If fast-path risk needs more rigor, escalate whether to use `review-PR` instead of inventing a manual gate.
 The path's worker, automated gates, and captain approval remain authoritative:
 
-- **no-mistakes** ordinarily runs the full pipeline through a PR, then waits for the configured merge authority.
-- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
+- **review-PR** has the worker commit, run intent-aware native review plus necessary corrections and tests, push and open a PR, then wait for the configured merge authority.
+- **direct-PR** has the worker push and open a PR without the native-review requirement, then waits for the configured merge authority.
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
@@ -240,46 +240,39 @@ Load `ask-user-authority` before deciding any ask-user finding; the implementati
 Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
 After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
-For deployable ByteDance-internal code with a BITS/PPE delivery surface, resolve the concrete task mode to `no-mistakes`, load `bits-development` before delivery begins, and follow its initial one-time dedicated-PPE delivery or subsequent existing-PPE revision lifecycle through the final limited no-mistakes pass.
-On that path BITS owns push, MR, and CI; final no-mistakes may run review, tests, documentation, and lint but never those delivery phases, and any code-changing fix returns to the existing BITS task, exact source delivery, same-PPE deployment, and API Test before another final pass.
-Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before both the exact-candidate PPE API or end-to-end test and the candidate-unchanged final no-mistakes pass succeed.
+For deployable ByteDance-internal code with a BITS/PPE delivery surface, resolve the concrete task mode to `review-PR`, load `bits-development` before delivery begins, and follow its initial one-time dedicated-PPE delivery or subsequent existing-PPE revision lifecycle through final intent-aware native review.
+On that path BITS owns push, MR, and CI; native review, tests, documentation, and lint validate the exact deployed candidate but never own those delivery phases, and any code-changing fix returns to the existing BITS task, exact source delivery, same-PPE deployment, and API Test before any remaining permitted review attempt.
+Regardless of `yolo`, the BITS MR needs separate explicit captain merge authority and may not merge before the exact-candidate PPE API or end-to-end test succeeds and native review either passes or reaches its two-attempt disposition below.
 Shared IDL source or generated repositories and documentation-only, local-only, or otherwise non-deployable work retain their ordinary resolved delivery path, including direct-PR where configured, and never gain an invented PPE stage.
 
 ### Validate
 
-For an ordinary no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-A deployable ByteDance BITS/PPE ship instead reaches final validation only at the point `bits-development` defines after the exact-candidate PPE API or end-to-end test.
-The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
-Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+For an ordinary `review-PR` ship, the same worker runs `bin/fm-native-review.sh <task-id> --base <commit> --candidate <commit>` after its implementation commit and targeted behavioral checks. The script binds the clean committed candidate, exact ancestor base, and immutable `## Captain's intent` plus `## Firstmate spec` to the recorded harness's native review command and records its result under the task data directory.
+A deployable ByteDance BITS/PPE ship instead reaches final native review only at the point `bits-development` defines after the exact-candidate PPE API or end-to-end test.
+Codex and TraeX are supported native-review routes. Pi remains a supported worker harness, but it has no verified native review command; a `review-PR` task recorded with Pi must stop with the actionable unsupported-route error and be relaunched on Codex or TraeX rather than inventing a command or falling back to another review system.
 When the captain adds or changes an ask mid-task, use the native continuation tool's authenticated brief-update route where available, then relay those words to the worker; `bin/fm-task-lifecycle.py --help` owns that operation and explicit reconciliation for other edits.
 The brief's `## Captain's intent` contains only the captain's words without added speaker labels or direct address; Firstmate build constraints stay in `## Firstmate spec` or the steer.
-After the implementation checkpoint, `crewmate-no-mistakes` owns the worker-side `--intent` contract and gate procedure.
-Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
-
-Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
-That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run has stopped before changing any code.
-The worker then follows `branch_sync.next_action` from structured axi status: use axi sync's supported guarded recovery only when its code is `recover_custody`, and otherwise proceed only when structured status confirms that branch ownership is already returned and no recovery is required.
-Custody recovery settles branch ownership, not content: the worker must replace the obsolete work from the correct pre-invalidation base rather than building on top of the recovered-but-obsolete head, keeping the obsolete run's own pipeline-fix commits out of what gets validated and shipped.
-Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
-Once ownership is settled, an ordinary path validates exactly once against that final head; a BITS path resumes its candidate lifecycle from source delivery under `bits-development`, so no obsolete or intermediate head is ever treated as authoritative.
+One original task may launch at most two native-review attempts; `bin/fm-native-review.sh` records that count across candidate changes, retries, compaction, and renamed evidence and refuses an ordinary third invocation.
+After first-round actionable findings, the worker makes only authorized corrections, reruns relevant tests, commits the new candidate, and uses the second attempt to review the complete base-to-new-head diff.
+After the second attempt, record and ignore non-serious non-blocking residuals and continue necessary tests and green delivery; route only a concrete serious correctness, security, data-loss, or intent-blocking finding to Firstmate for a decision, and never start another review automatically.
+A result is ready when review passes, or when the two-attempt path is exhausted and the remaining findings have that disposition; report honestly when the final corrected head was not reviewed and never describe a non-clean result as passing.
+The review conclusion and the two-attempt disposition never change merge authority.
+Once review starts, prefer routing genuinely new requirements to follow-up work rather than expanding the current task. The smallest downstream changes needed to keep accepted behavior correct, add behavioral tests where an executable contract exists, keep documentation accurate, or resolve in-scope findings remain within the current task.
 
 An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
 Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
 Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
 Resume fleet supervision immediately after the decision lands.
 
-Judge validation by the currently attributed run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed exactly as `bin/fm-crew-state.sh` prints it - only that state line reclassifies an orphaned ci monitor after green checks as held-for-merge done, or a terminal failed record with the daemon unreachable as unknown, never the raw run record.
-A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
-On the ordinary no-mistakes path, the worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+Historical validation records remain readable through `bin/fm-crew-state.sh` and teardown so an old active or parked run is never duplicated or discarded. Fresh tasks do not require that executable or start new runs through it.
 These runtime states establish delivery milestones, not semantic acceptance of the original goal.
 On every returned artifact or terminal-looking event, compare the actual result with the task's goal and acceptance method: accept and continue the selected delivery path when they are satisfied, route one specific bounded continuation when an authorized gap remains, or record the precise hard blocker when no authorized recovery path remains.
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: ordinary `no-mistakes` reports `done: PR <url> checks green` after CI is green, `direct-PR` reports `done: PR <url>` after opening the PR, and `bits-development` owns the conditional BITS/PPE ready signal.
+For PR-based ship tasks, `review-PR` reports `done: PR <url> checks green` after native review and required forge checks are green, `direct-PR` reports `done: PR <url>` after opening the PR, and `bits-development` owns the conditional BITS/PPE ready signal.
 Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal or the task's `pr=` metadata - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Tell the captain the PR's full `https://...` URL copied verbatim from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
+Tell the captain the PR's full `https://...` URL copied verbatim from the worker's ready line or the task's `pr=` metadata and a concise outcome summary.
 A captain instruction to merge is explicit authority; outside the BITS lifecycle, `yolo` is the only standing routine merge authority.
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
 Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
@@ -344,25 +337,9 @@ Queued wakes must be presented before other action and acknowledged only after h
 The spawn assertion and generated ship brief must both enforce that project work starts in an isolated disposable worktree, never the primary checkout.
 Harness-aware turn-end guards are structural backstops, not permission to omit the live cycle.
 
-### Away-mode and quiet-mode stub
-
-Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
-Each skill owns its own daemon procedure, which is otherwise identical; these safety facts remain inline for both:
-
-- Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
-- `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, and the record's clauses are recorded, not executed, in this release.
-- While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
-  The daemon is never launched on Pi, where the ordinary supervision session continues under the record.
-- A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
-- A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.
-- Any other unmarked message means the captain returned in away mode (load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears), or, in quiet mode, is simply answered as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
-- Away and quiet mode never expand approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
-- Bias ambiguous input toward exit because a present captain takes precedence.
-
 ### Stuck-worker trigger
 
-For the full `stuck-crewmate-recovery` trigger, including a live worker claiming its no-mistakes pipeline is dead, unreachable, or timed out, follow section 13.
+For the full `stuck-crewmate-recovery` trigger, including legacy validation custody that can still affect safe cleanup, follow section 13.
 
 ## 9. Escalation and captain etiquette
 
@@ -434,7 +411,7 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) with the captain's own ask and any boundary the captain stated, plus the context needed to read it, including the substance of any report, decision, or PR the ask refers to; never widen the ask there into a general goal or an enumerated coverage list, because the reviewer treats that subsection as acceptance criteria.
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, explicitly stating the intended outcome, observable acceptance evidence or checks, allowed scope and exclusions, and the concrete condition for stopping as hard-blocked.
 Name what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
-`bin/fm-dod-lib.sh` owns intent extraction, provenance markers, and the generated validation trigger; `crewmate-no-mistakes` owns the conditional worker-side intent, gate, recovery, and completion procedure.
+`bin/fm-dod-lib.sh` owns intent extraction, provenance markers, and the generated native-review trigger; `bin/fm-native-review.sh` owns exact base/candidate and task-contract delivery to the supported harness review command.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
@@ -463,7 +440,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `harness-adapters` - load before spawning or recovering a crewmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `project-management` - load before adding, creating, removing, or initializing a project.
   Cloning or registering a project is add intake and uses the same trigger.
-- `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and whenever a live worker reports its no-mistakes pipeline dead, unreachable, or timed out.
+- `stuck-crewmate-recovery` - load when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and whenever legacy validation custody can still affect safe recovery or cleanup.
 - `captain-hold-lifecycle` - load before treating an investigation or structured review as complete, when recording or routing the captain's answer, and on any `RECORD DIVERGENCE` line from the wake drain.
 - `process-event-sources` - load before arming a long-polling source, before registering a deterministic condition->action watch (do X as soon as Y is true), on any `procevent <adapter> <source-id> <sequence>` check wake, and on any `process-event source stranded` or `process-event source failed to start` check wake.
   Never run a registered source's blocking command yourself in a conversational turn.
@@ -472,7 +449,6 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `bits-development` - load before beginning delivery for deployable ByteDance-internal BITS/PPE code, creating, reusing, or updating a BITS Dev Task, attaching projects, binding MRs or Change Cards, or triggering or monitoring BITS PPE, E2E, self-test, or quick-run pipelines.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
-- `crewmate-no-mistakes` - a worker loads this only after its implementation checkpoint when Firstmate instructs ordinary no-mistakes validation, when resuming that run, handling one of its gates, or diagnosing a pipeline failure.
 - `readable-documents` - load before creating or materially revising a substantial reader-facing technical document, including a design, solution study, explanation, guide, tutorial, reference, or report, and when repairing one that is hard to understand, too abstract, poorly structured, or missing clear examples or visuals.
 
 ## 14. Relay

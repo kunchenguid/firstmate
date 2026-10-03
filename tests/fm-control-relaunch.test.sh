@@ -151,7 +151,7 @@ EOF
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=review-PR"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
@@ -737,7 +737,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in review-PR direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
     home="$dir/home"
@@ -1147,6 +1147,21 @@ test_spawn_relaunch_refuses_a_live_agent() {
   pass "fm-spawn --relaunch: refuses to launch a second agent into a live endpoint"
 }
 
+test_spawn_relaunch_refuses_a_legacy_delivery_mode() {
+  local dir out rc
+  dir=$(new_case legacy-mode rl42)
+  add_ship_task "$dir" rl42 pi
+  sed -i 's/^mode=review-PR$/mode=no-mistakes/' "$dir/home/state/rl42.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl42 --relaunch --harness pi); rc=$?
+  expect_code 1 "$rc" "a legacy no-mistakes task must not relaunch into its removed delivery path"
+  assert_contains "$out" "migrate it explicitly to review-PR or direct-PR before relaunch" \
+    "legacy delivery refusal did not provide an actionable migration"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" \
+    "legacy delivery refusal still launched a replacement agent"
+  pass "fm-spawn --relaunch: legacy delivery modes require explicit migration"
+}
+
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection() {
   local dir meta target out rc
   dir=$(new_case symlink-meta rl37)
@@ -1343,6 +1358,7 @@ test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
+test_spawn_relaunch_refuses_a_legacy_delivery_mode
 test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close

@@ -51,9 +51,6 @@ During that invocation it never tears down a task, merges a PR, dispatches new w
    Until then it stays queued with the reason.
    The `(main-inventory)` gate is an action-free integrity warning rather than queued work.
    Render it under Charted Next with the related `omitted` disclosure, never invent an Underway row from backlog-only state, and never move it into Captain's Call.
-   The `(return-catchup)` gate is the same shape: an action-free notice that an away-return catch-up is still open, naming the blockers left to clear or the reason the catch-up was retained.
-   Render it under Charted Next like any other warning row: reporting is not ordinary work, while acting on the fleet still waits for `bin/fm-afk-return.sh check` (`/afk`).
-
 2. **Compose the four-section chat digest from the fresh snapshot.**
    The gather step is deterministic; your judgment is scoped to ranking the command's facts by what matters right now and writing scannable captain-facing prose.
    The chat response uses the four complete sections in the chat-response contract below, in the same order, each always present.

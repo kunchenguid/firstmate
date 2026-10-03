@@ -512,7 +512,7 @@ test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
   telemetry="$tmp/telemetry.tsv"
   fm_lint_stub_shellcheck "$fakebin" "$log"
   diff_file="$tmp/diff.nul"
-  target="bin/fm-afk-launch.sh"
+  target="bin/fm-guard.sh"
   fm_lint_write_diff_file "$diff_file" "$target"
 
   out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \

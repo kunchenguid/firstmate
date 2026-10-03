@@ -28,7 +28,7 @@ This does not start or reset a branch, claim a wake, or acknowledge an outcome.
 
 | State | Meaning |
 | --- | --- |
-| `disabled` | A fresh branch observation says away mode, reset, or shutdown currently disables handling. |
+| `disabled` | A fresh branch observation says reset or shutdown currently disables handling. |
 | `idle` | The current process owns the lock and reports no pending work or latched fault; this is not proof of completed work. |
 | `processing` | A live admission is pending; the item summary distinguishes accepted-before-prompt from model/tool execution. |
 | `degraded` | A handling failure or unexpected MAIN fallback remains latched until a later durable branch result succeeds. |
@@ -64,7 +64,7 @@ A healthy working executor, unchanged wait, task with no compact progress, or ta
 An actionable gap without healthy execution is offered to the branch with the canonical task id, goal, acceptance method, current state, remaining gap and next step.
 The branch inspects current artifacts and routes an already-authorized next step through its existing owner; failure or refusal falls back to MAIN.
 Endpoint text is never substituted for task identity.
-For a no-mistakes checkpoint, the branch uses the inbox owner's idempotent continuation mode to instruct the same worker to start or continue its run; only that worker calls `no-mistakes axi run/respond` and retains branch custody.
+For a native-review checkpoint, the branch uses the inbox owner's idempotent continuation mode to instruct the same worker to run the exact-candidate review or apply an already-authorized correction; only that worker changes its branch.
 A healthy unchanged executor or wait is settled quietly in the branch session.
 Verified routine advancement is also settled quietly, and a changed executor observation admits the next bounded Branch turn without requiring MAIN to rewrite progress first.
 Only goal-ready evidence, genuine blockers and authority decisions reach MAIN through the durable sequence-bound processing and acknowledgement path; repeated unchanged or unsuccessful offers retain the bounded escalation path.
@@ -73,7 +73,7 @@ Those entries are delivery receipts only; reload and compaction recover task pro
 
 Neither monitoring nor branch admission grants authority or replaces an effect owner.
 The branch may use that owner's existing interface for one in-scope routine step; MAIN owns progress writes, final artifact review, semantic acceptance, and genuine scope/product/architecture, destructive, security, merge or cleanup decisions.
-A no-mistakes ask-user finding delivered with its exact task-local snapshot stays on the branch only when the accepted brief makes the fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
+A native-review finding delivered with its exact task-local snapshot stays on the branch only when the accepted brief makes the fix unambiguous and it adds no guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance.
 Every other decision remains MAIN-owned.
 Project-required routine confirmations use the same rule; every other decision is reported to MAIN.
 Attempted or uncertain effects retain their existing readback and no-replay contracts.
@@ -93,12 +93,12 @@ No continuation path creates a second scheduler, task store or lifecycle progres
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
   A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close stays on main except for a task-scoped iDA process result whose queue key, payload, private captured result and adapter files, remote-agent metadata, durable iDA task state, session marker, and available provider identities all match exactly.
   Malformed, path-unsafe, unresolvable, mismatched-provider, mismatched-task, and mismatched-result iDA-looking rows keep the ordinary main path, as do merge-confirmation polls, Relay mentions, credential/auth failures, and every other check class.
-  No acceptor (extension absent, legacy away daemon flag, branch broken) keeps today's wake-to-main path for the close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
+  No acceptor (extension absent or branch broken) keeps today's wake-to-main path for the close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
   A busy branch also declines a newly arrived iDA result unless its live grant already contains that exact row, so an unowned result falls back to main instead of waiting between actors.
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
   `signal_files_actionable` marks the queued payload `needs-decision:` for a newly surfaced `needs-decision` or a `captain-held` declaration surfaced through the no-verb fallback.
-  Such rows stay MAIN-owned unless every open decision for their exact canonical task is a no-mistakes ask-user record with its exact regular task-local snapshot and the task currently has an in-flight compact progress record with an actionable gap; only then may the branch claim the row to apply the bounded routine-versus-genuine decision criteria above.
-  For a stale row, `scopeForUnreadWake` folds the mapped task's status log and applies the same exact no-mistakes snapshot qualification when a `needs-decision` remains open; a current `captain-held` declaration, another decision class, or an unreadable or symlinked record stays MAIN-owned.
+  Such rows stay MAIN-owned unless every open decision for their exact canonical task is a native-review finding with its exact regular task-local snapshot and the task currently has an in-flight compact progress record with an actionable gap; only then may the branch claim the row to apply the bounded routine-versus-genuine decision criteria above.
+  For a stale row, `scopeForUnreadWake` folds the mapped task's status log and applies the same exact native-review snapshot qualification when a `needs-decision` remains open; a current `captain-held` declaration, another decision class, or an unreadable or symlinked record stays MAIN-owned.
   Task metadata contributes aliases only from one current-user-owned regular single-linked file with exactly one project field and at most one window field; task ids, status files, turn-ended files, and complete window values are opaque exact aliases.
   An alias claimed by more than one task remains unresolved and main-owned rather than inheriting filesystem iteration order.
   The dispatcher resolves trigger keys and every currently unread decision row to task identity before cross-referencing them.
@@ -175,7 +175,7 @@ No continuation path creates a second scheduler, task store or lifecycle progres
   Heartbeat keeps its own all-or-nothing recheck over the rows it can claim: it takes every branch-ownable unread row or none of them.
   A structurally valid unresolved task row is outside that claim and remains main-only; malformed or unreadable queue state still defers the whole review to main.
   A producer can still append a row in the instant between that final check and drain startup; this accepted residual follows the confused-agent-grade boundary above rather than claiming adversarial queue isolation.
-  A legacy away daemon flag and a broken branch between its bounded recovery probes keep today's wake-to-main behavior; the away-posture record alone leaves the branch active.
+  A broken branch between its bounded recovery probes keeps today's wake-to-main behavior. Preserved legacy mode records do not affect branch admission.
 
 ## Off-thread delivery
 
@@ -285,12 +285,6 @@ The branch can also run on a cheaper model and a shallower reasoning effort than
 A provider an extension registered only into main's runtime, such as pi-devin-auth's `devin`, reaches the isolated branch runtime by copying its provider config from main's captured `ModelRegistry` into the branch `ModelRuntime` at model-resolution time and in the `/supervision-model` picker, so the provider's own `streamSimple` transport and OAuth wiring are reused by reference rather than reimplemented.
 That carve-out is scoped to provider registration alone: the branch keeps its `noExtensions`, `noSkills`, and `noContextFiles` isolation, the copy is never persisted, a provider whose registration fails to compose is simply unavailable, and `tests/fm-pi-branch-extension.test.sh` pins the pin-and-fallthrough behavior.
 No caching machinery beyond this exists, deliberately: any later dynamic content in the branch prefix silently removes most of the cache benefit, which is why `bin/fm-branch-prompt.sh`'s header is the contract's single owner and `tests/fm-branch-supervision.test.sh` pins the output to byte identity.
-
-## Away mode
-
-On Pi the away daemon is no longer launched: `/afk` writes the away-posture record (`state/.afk-contract`, owned by `bin/fm-afk-contract.sh`) and never the `state/.afk` daemon flag, so the branch keeps its attended shape under the record until the posture-aware dispatch lands in a later phase.
-The branch's decline while `state/.afk` exists is retained only for a legacy flag left by an older daemon launch.
-What the branch already does for the captain is unchanged: it absorbs the routine majority that previously interrupted the captain's conversation, applying the same escalation etiquette the daemon applies on the harnesses that still run one.
 
 ## Verification
 

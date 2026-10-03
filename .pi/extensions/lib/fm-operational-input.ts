@@ -10,7 +10,6 @@ export const FIRSTMATE_CURRENT_OPERATIONAL_KINDS = [
   "session-start",
   "watcher",
   "turn-end-guard",
-  "away-supervisor",
   "launch-brief",
   "branch-outcome",
 ] as const;

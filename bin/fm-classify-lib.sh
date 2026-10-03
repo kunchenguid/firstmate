@@ -2,10 +2,7 @@
 # Shared wake classifier: the common source of truth for captain-relevant status
 # tests, declared-external-wait vocabulary, and the working/paused absorb
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
-# Sourced by BOTH the always-on watcher
-# (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
-# overlapping triage policy lives in one place instead of two copies that can
-# drift apart.
+# Sourced by the always-on watcher (bin/fm-watch.sh).
 #
 # Most functions are pure, side-effect-free reads of status files: each takes
 # what it needs as arguments and touches no globals beyond the optional
@@ -67,8 +64,7 @@ unset _fm_classify_nounset
 
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
-# absorbs them only with positive provably-working evidence, while the daemon uses
-# its away-mode classification. FM_CAPTAIN_RE overrides the whole set when a home
+# absorbs them only with positive provably-working evidence. FM_CAPTAIN_RE overrides the whole set when a home
 # needs a custom verb vocabulary; absent, this default applies.
 #
 # Free-text tokens (PR ready, checks green, ready in branch, merged) exist only for
@@ -86,9 +82,8 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # the stale path absorbs it instead of escalating a possible wedge. It is
 # deliberately NOT in the captain-relevant set above: a pause is a "stop
 # wedge-nagging this idle pane" signal, not work to keep surfacing. This constant
-# is the ONE definition of the verb; both the watcher and the daemon read it here
-# (status_is_paused) rather than hardcoding the literal, so the vocabulary cannot
-# drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
+# is the ONE definition of the verb; the watcher reads it here
+# (status_is_paused) rather than hardcoding the literal. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
 # Bounded re-surface cadence for a declared external-wait pause.
@@ -101,14 +96,12 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # names it with `until` (status_paused_until below) and is rechecked at that
 # time or this cadence bound, whichever comes first. Both consumers read
 # FM_PAUSE_RESURFACE_SECS with this default so
-# the cadence has one owner. An item held for the captain is not rechecked at all
-# while the away-posture record exists (bin/fm-watch.sh owns that rule).
-# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+# the cadence has one owner.
+# shellcheck disable=SC2034 # Read by the watcher, not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=14400
 
 # fm_utc_iso_to_epoch <YYYY-MM-DDTHH:MM[:SS]Z>: the one portable UTC ISO 8601
-# reader shared by the declared-wait vocabulary and the away-posture record
-# (bin/fm-afk-contract.sh). Prints epoch seconds; returns 1 on any other shape
+# reader for the declared-wait vocabulary. Prints epoch seconds; returns 1 on any other shape
 # so a malformed time is refused rather than read as "now".
 fm_utc_iso_to_epoch() {  # <timestamp>
   local ts=$1
@@ -199,9 +192,8 @@ status_is_captain_held() {  # <status-line>
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
-# supervisors give them one cadence: the away-mode daemon defers the wedge and
-# ages a pause marker instead, and the watcher applies its bounded pause cadence
-# once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
+# watcher gives them one cadence: it applies its bounded pause cadence once
+# pause_state_class has admitted the wait (fm-watch.sh owns which liveness
 # evidence each kind of crew must supply for that).
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
@@ -611,8 +603,7 @@ _fm_status_file_mtime() {  # <status-file>
 
 # Private scratch path for a one-shot span read, alongside the status file the
 # same way the cursor above is, and PID-scoped so concurrent readers of one log
-# (the watcher and the away-mode daemon both classify the same stream) never
-# truncate each other's chunk.
+# may classify the same stream concurrently) never truncate each other's chunk.
 _fm_status_span_scratch() {  # <status-file>
   printf '%s.span.%s' "$(_fm_open_decisions_cursor_path "$1")" "$$"
 }
@@ -1792,8 +1783,7 @@ signal_crew_provably_working() {  # <file> ...
 
 # 0 (terminal/actionable) if a stale window's last status line is
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
-# "non-terminal"; the always-on watcher then applies crew_is_provably_working,
-# while the away-mode daemon applies its persistence recheck.
+# "non-terminal"; the always-on watcher then applies crew_is_provably_working.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
   last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")

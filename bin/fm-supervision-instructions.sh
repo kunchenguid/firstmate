@@ -12,20 +12,16 @@ DOC_DIR="$REPO_ROOT/docs/supervision-protocols"
 
 HARNESS=
 READ_ONLY=0
-AFK=0
-AFK_MODE=away
 X_MODE=0
 REPAIR_LINE=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
---afk-mode only matters when --afk 1 (present); it selects the away-mode vs
-quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
 EOF
 }
 
@@ -46,19 +42,6 @@ while [ "$#" -gt 0 ]; do
     --read-only)
       [ "$#" -gt 1 ] || { echo "error: --read-only requires 0 or 1" >&2; exit 2; }
       READ_ONLY=$(bool_value "$2")
-      shift 2
-      ;;
-    --afk)
-      [ "$#" -gt 1 ] || { echo "error: --afk requires 0 or 1" >&2; exit 2; }
-      AFK=$(bool_value "$2")
-      shift 2
-      ;;
-    --afk-mode)
-      [ "$#" -gt 1 ] || { echo "error: --afk-mode requires away or quiet" >&2; exit 2; }
-      case "$2" in
-        away|quiet) AFK_MODE=$2 ;;
-        *) AFK_MODE=away ;;
-      esac
       shift 2
       ;;
     --x-mode)
@@ -130,15 +113,6 @@ repair_line() {
     printf '%s\n' 'Watcher repair belongs to the session holding the fleet lock; do not drain, arm, or repair from this read-only session.'
     return 0
   fi
-  if [ "$AFK" -eq 1 ]; then
-    if [ "$AFK_MODE" = quiet ]; then
-      printf '%s\n' 'Quiet mode owns watcher supervision; load /quiet and ensure the daemon is running instead of starting normal supervision directly.'
-    else
-      printf '%s\n' 'Away mode owns watcher supervision; load /afk and ensure the daemon is running instead of starting normal supervision directly.'
-    fi
-    return 0
-  fi
-
   prefix=
   if [ "$QUEUE_PENDING" -eq 1 ]; then
     prefix='After draining queued wakes, '
@@ -187,16 +161,7 @@ printf 'Current state:\n'
 if [ "$READ_ONLY" -eq 1 ]; then
   printf '%s\n' '- Lock: read-only; do not drain, arm, spawn, steer, merge, or repair fleet state here.'
 else
-  printf '%s\n' '- Lock: held by this session; this session owns normal supervision unless away mode says otherwise.'
-fi
-if [ "$AFK" -eq 1 ]; then
-  if [ "$AFK_MODE" = quiet ]; then
-    printf '%s\n' '- Quiet mode: active; load /quiet and keep normal harness supervision paused while the daemon owns the watcher. Ordinary captain chat does NOT exit it - only an explicit /quiet off does.'
-  else
-    printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
-  fi
-else
-  printf '%s\n' '- Away/quiet mode: inactive.'
+  printf '%s\n' '- Lock: held by this session; this session owns normal supervision.'
 fi
 if [ "$X_MODE" -eq 1 ]; then
   printf '%s%s%s\n' '- X mode: active; source ' "$x_mode_env" ' before launching any watcher process so the 30s cadence is inherited.'

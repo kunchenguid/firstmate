@@ -28,7 +28,7 @@ test_current_generic_matrix() {
   [ "$prefix_hex" = e281a346495253544d4154455f4f503a20 ] \
     || fail "current operational prefix lost the landed U+2063 FIRSTMATE_OP bytes: $prefix_hex"
 
-  for kind in session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome; do
+  for kind in session-start watcher turn-end-guard launch-brief branch-outcome; do
     body="CURRENT_BODY_FOR_${kind}"
     fm_operational_input_encode "$kind" "$body" encoded \
       || fail "could not encode current $kind fixture"
@@ -45,6 +45,10 @@ test_current_generic_matrix() {
     [ "$stripped" = "$body" ] \
       || fail "current $kind body changed during encode/parse"
   done
+  ! fm_operational_input_encode away-supervisor removed-body encoded \
+    || fail "removed away-supervisor kind is still constructible"
+  [ -z "$(printf '%s' removed-body | "$OWNER" encode away-supervisor 2>/dev/null || true)" ] \
+    || fail "CLI still advertises the removed away-supervisor kind"
   pass "operational input: every current generic envelope retains its exact structured kind"
 }
 

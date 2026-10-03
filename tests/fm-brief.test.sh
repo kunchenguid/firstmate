@@ -199,7 +199,7 @@ test_ship_modes_generate_clean_briefs() {
   home="$TMP_ROOT/ship-home"
   write_registry "$home"
 
-  for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
+  for id_mode in "brief-nomistakes-a1:review-PR" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
@@ -224,12 +224,12 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief lets an empty inbox replace goal progress"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: review-PR/direct-PR/local-only briefs generate cleanly"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
-# no-mistakes-prod-only row is the conditional registry policy: it is never a task
+# review-prod-only row is the conditional registry policy: it is never a task
 # mode, and its refusal must say to classify the task's surface first.
 test_ship_mode_is_required_and_closed_set() {
   local home id out status label flag expect
@@ -248,8 +248,8 @@ test_ship_mode_is_required_and_closed_set() {
   done <<'ROWS'
 missing --mode||ship briefs require --mode
 empty --mode value|--mode|requires a value
-unknown mode value|--mode nope|must be one of no-mistakes, direct-PR, local-only
-conditional policy is not a task mode|--mode no-mistakes-prod-only|classify this task's surface
+unknown mode value|--mode nope|must be one of review-PR, direct-PR, local-only
+conditional policy is not a task mode|--mode review-prod-only|resolve it to review-PR or direct-PR at intake
 ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
 }
@@ -261,13 +261,13 @@ test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
   write_registry "$home"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
-    || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode review-PR >/dev/null 2>&1 \
+    || fail "explicit review-PR brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
-  grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
+  grep -qx "Delivery contract: mode=review-PR" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$brief" \
-    "explicit no-mistakes brief did not render the conditional pipeline trigger"
+  assert_grep "bin/fm-native-review.sh" "$brief" \
+    "explicit review-PR brief did not render the native-review trigger"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -320,35 +320,40 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
     "local-only brief retained a personal review stacked on the selected delivery path"
   assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
-    "local-only brief must not include the no-mistakes --intent contract"
+    "local-only brief must not include the review-PR --intent contract"
   id="brief-direct-intent-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
-    "direct-PR brief must not include the no-mistakes --intent contract"
+    "direct-PR brief must not include the review-PR --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
-# Conditional no-mistakes procedure stays out of every generated brief while
-# the executable output keeps one precise trigger to its readable owner.
-test_no_mistakes_dod_wording() {
+# The generated review contract stays compact while naming its executable owner.
+test_native_review_dod_wording() {
   local home id brief bytes
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode review-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
-  assert_grep "crewmate-no-mistakes/SKILL.md\` completely" "$brief" \
-    "no-mistakes brief did not route its conditional procedure to the skill owner"
-  assert_no_grep "One drive call blocks until the next gate" "$brief" \
-    "conditional pipeline mechanics were duplicated into the generated brief"
-  assert_no_grep "Never stop, restart, or update the shared" "$brief" \
-    "conditional daemon recovery was duplicated into the generated brief"
-  bytes=$(wc -c < "$brief" | tr -d ' ')
-  [ "$bytes" -lt 7000 ] || fail "no-mistakes brief did not remain bounded: $bytes bytes"
-  assert_present "$ROOT/.agents/skills/crewmate-no-mistakes/SKILL.md" \
-    "the generated trigger points to no readable procedure owner"
-  pass "fm-brief.sh: no-mistakes brief keeps a bounded trigger to its conditional procedure"
+  assert_contains "$(cat "$brief")" "Run \`$ROOT/bin/fm-native-review.sh\`" \
+    "review-PR brief did not route review through the supervising Firstmate root"
+  assert_grep "immutable Captain intent and Firstmate acceptance" "$brief" \
+    "review-PR brief did not require the task contract in review"
+  assert_grep "At most two attempts belong to the task" "$brief" \
+    "review-PR brief did not carry the bounded review policy"
+  assert_grep "Never start a third review" "$brief" \
+    "review-PR brief did not refuse repeated review"
+  assert_grep "final head as unreviewed" "$brief" \
+    "review-PR brief did not require honest post-cap reporting"
+  # Generated commands contain the supervising checkout's absolute root. Strip
+  # that variable-length prefix before enforcing the stable wording budget.
+  bytes=$(sed "s|$ROOT|<FM_ROOT>|g" "$brief" | wc -c | tr -d ' ')
+  [ "$bytes" -lt 7000 ] || fail "review-PR brief did not remain bounded: $bytes bytes"
+  assert_present "$ROOT/bin/fm-native-review.sh" \
+    "the generated trigger points to no executable review owner"
+  pass "fm-brief.sh: review-PR brief keeps a bounded native-review contract"
 }
 
 test_ask_user_escalation_format() {
@@ -356,12 +361,12 @@ test_ask_user_escalation_format() {
   home="$TMP_ROOT/ask-user-home"
   mkdir -p "$home/data"
   id="brief-ask-user-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode review-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
 
-  assert_grep "That skill owns the conditional intent, ask-user, daemon-recovery" "$brief" \
-    "no-mistakes brief did not route ask-user handling to its single owner"
+  assert_grep "Ask-user findings are never yours to answer" "$brief" \
+    "review-PR brief did not preserve finding authority"
   assert_no_grep "nm-<run>-findings.txt" "$brief" \
     "generated brief duplicated the conditional ask-user wire format"
 
@@ -369,19 +374,19 @@ test_ask_user_escalation_format() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
   other_brief="$home/data/$other_id/brief.md"
   assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
-    "scout brief received a no-mistakes-only decision case"
+    "scout brief received a review-PR-only decision case"
 
   for mode in direct-PR local-only; do
     other_id="brief-no-ask-user-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
     other_brief="$home/data/$other_id/brief.md"
     assert_no_grep "nm-<run>-findings.txt" "$other_brief" \
-      "$mode brief received a no-mistakes-only escalation format"
+      "$mode brief received a review-PR-only escalation format"
     assert_no_grep "destructive actions, ask-user findings" "$other_brief" \
-      "$mode brief received a no-mistakes-only decision case"
+      "$mode brief received a review-PR-only decision case"
   done
 
-  pass "fm-brief.sh: no-mistakes ask-user mechanics remain behind the precise skill trigger"
+  pass "fm-brief.sh: review-PR ask-user mechanics remain behind the precise skill trigger"
 }
 
 test_ship_project_memory_wording() {
@@ -389,7 +394,7 @@ test_ship_project_memory_wording() {
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode review-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
@@ -406,7 +411,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
   id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode review-PR --herdr-lab >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -458,7 +463,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode review-PR >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
@@ -487,7 +492,7 @@ test_documented_global_replace_leaves_the_herdr_gate_intact() {
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode review-PR >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$kind brief was not scaffolded"
@@ -536,7 +541,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     case "$kind" in
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode review-PR >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -609,7 +614,7 @@ test_scout_scaffold() {
 test_worker_role_scope() {
   local kind home brief
   home="$TMP_ROOT/worker-role"
-  for kind in no-mistakes direct-PR local-only scout; do
+  for kind in review-PR direct-PR local-only scout; do
     if [ "$kind" = scout ]; then
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" arbitrary-project-name --scout >/dev/null || fail "scout scaffold failed"
     else
@@ -630,7 +635,7 @@ test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
-test_no_mistakes_dod_wording
+test_native_review_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

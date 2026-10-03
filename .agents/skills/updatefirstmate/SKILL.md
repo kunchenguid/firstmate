@@ -12,7 +12,7 @@ metadata:
 # updatefirstmate
 
 Self-update Firstmate in place.
-Firstmate is its own repository, behind the same no-mistakes gate as any project, so new tracked material reaches `main` and then waits for each running Firstmate to pull it.
+Firstmate is its own repository, behind the same intent-aware native review and forge-check path as any reviewed project, so new tracked material reaches `main` and then waits for each running Firstmate to pull it.
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running Firstmate instruction surface; public `skills/` is installer-facing and is not loaded by Firstmate.
 
 The update is fast-forward only, like fleet sync.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# review-PR|direct-PR|local-only and yolo is on|off.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -11,29 +11,30 @@
 # bin/fm-spawn.sh's advisory registry-deviation notice.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
+#   - <name> - <desc> (added <date>)                  -> review-PR off
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
 #
 # Registered modes:
-#   no-mistakes            ordinary full pipeline -> PR -> configured merge authority (default);
-#                          deployable ByteDance BITS/PPE work resolves to this task mode
-#                          and follows the lifecycle routed by AGENTS.md and owned by bits-development
+#   review-PR               implementation -> native harness review -> PR -> checks -> configured merge authority (default)
 #   direct-PR              push + PR via gh-axi, no pipeline
 #   local-only             local branch, no remote/PR, guarded local merge
-#   no-mistakes-prod-only  a conditional policy, not a task mode: firstmate
+#   review-prod-only       a conditional policy, not a task mode: firstmate
 #                          classifies each task's surface at intake (the
 #                          project-management skill owns that classification).
 #                          Mechanical output maps it to its most rigorous leg,
-#                          no-mistakes, so sync, seeding, and init treat such a
-#                          project as the remote-backed pipeline project it is.
+#                          review-PR, so sync and seeding treat such a project
+#                          as the remote-backed reviewed project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
 #   in-scope work itself (AGENTS.md section 7).
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
-# conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
+# conditional policy apart from a flat mode sees "review-prod-only" itself.
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
+# Legacy `no-mistakes` and `no-mistakes-prod-only` registry rows are read-only
+# compatibility inputs and map to their native-review replacements. Historical
+# task metadata keeps its original mode for teardown and duplicate-work safety.
+# An unknown/missing project or unknown mode falls back to "review-PR off" and warns
 # to stderr, so a typo never silently drops the gate.
 # Usage: fm-project-mode.sh [--raw] <project-name>
 set -eu
@@ -51,15 +52,15 @@ fi
 NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: no registry at $REG; defaulting $NAME to review-PR off" >&2
+  echo "review-PR off"
   exit 0
 fi
 
 # awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="review-PR"; yolo="off";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
@@ -73,21 +74,23 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  echo "warn: project \"$NAME\" not in registry; defaulting to review-PR off" >&2
+  echo "review-PR off"
   exit 0
 fi
 
 mode=${parsed%% *}
 yolo=${parsed##* }
 case "$mode" in
-  no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
-  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
+  no-mistakes) mode=review-PR ;;
+  no-mistakes-prod-only) mode=review-prod-only ;;
+  review-PR|direct-PR|local-only|review-prod-only) ;;
+  *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to review-PR off" >&2; mode=review-PR; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
 # A conditional policy is not a task mode. Mechanical callers get its most
 # rigorous leg; --raw callers get the annotation itself (see the header).
-if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
-  mode=no-mistakes
+if [ "$RAW" -eq 0 ] && [ "$mode" = review-prod-only ]; then
+  mode=review-PR
 fi
 echo "$mode $yolo"

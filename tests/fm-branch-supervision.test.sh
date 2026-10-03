@@ -58,16 +58,16 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
   case "$out_a" in
-    *"# Goal-directed acceptance"*"bounded continuation"*"existing validation phase"*"provider-terminal research whose report does not satisfy the research goal"*"explicit cancellation, archival state, or stop remains stopped"*) ;;
+    *"# Goal-directed acceptance"*"bounded continuation"*"exact-candidate native-review and correction phase"*"provider-terminal research whose report does not satisfy the research goal"*"explicit cancellation, archival state, or stop remains stopped"*) ;;
     *) fail "branch prompt lost incomplete-provider, intermediate-result, continuation, or explicit-stop handling" ;;
   esac
   case "$out_a" in
     *"candidate for MAIN final semantic acceptance"*"never accept or retire the task yourself"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
     *) fail "branch prompt lost MAIN acceptance, hard-block evidence, or delivery-authority boundaries" ;;
   esac
-  assert_contains "$out_a" "the worker alone calls \`no-mistakes axi run/respond\`" \
-    "branch prompt lost same-worker no-mistakes custody"
-  assert_contains "$out_a" "Fix is unambiguously required" \
+  assert_contains "$out_a" "The worker alone changes its branch and invokes native review for its exact committed candidate" \
+    "branch prompt lost same-worker candidate custody"
+  assert_contains "$out_a" "the correction is unambiguously required" \
     "branch prompt lost routine finding criteria"
   assert_contains "$out_a" "no new guarantee, subsystem, architecture choice, destructive effect, security-sensitive choice or risk acceptance" \
     "branch prompt lost genuine-decision boundaries"
@@ -613,7 +613,7 @@ test_main_owned_actions_refuse_the_branch_actor() {
   [ "$status" -eq 6 ] || fail "branch fm-merge-local exited $status, not 6: $out"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-new --mode review-PR --yolo off 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "branch fm-spawn exited $status, not 6: $out"
   assert_contains "$out" "new-task spawn (fm-spawn) refused" "spawn refusal lost its action label"

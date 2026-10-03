@@ -31,39 +31,15 @@ test_conditional_stanzas() {
   home="$TMP_ROOT/conditional-home"
   config="$TMP_ROOT/conditional-config"
   mkdir -p "$home/state" "$home/config" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --afk 1 --x-mode 1)
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --read-only 1 --x-mode 1)
   assert_contains "$out" "- Lock: read-only" "read-only stanza missing"
-  assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
   assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
-  pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
-}
-
-test_quiet_mode_stanzas() {
-  local home config out
-  home="$TMP_ROOT/quiet-home"
-  config="$TMP_ROOT/quiet-config"
-  mkdir -p "$home/state" "$config"
-  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness codex --afk 1 --afk-mode quiet)
-  assert_contains "$out" "- Quiet mode: active" "quiet stanza missing"
-  assert_contains "$out" "load /quiet" "quiet stanza did not name the /quiet skill"
-  assert_contains "$out" "Ordinary captain chat does NOT exit it" "quiet stanza lost the explicit-only exit rule"
-  assert_not_contains "$out" "- Away mode: active" "quiet mode incorrectly rendered as away mode"
-  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode quiet --repair-line)
-  assert_contains "$out" "Quiet mode owns watcher supervision; load /quiet" "quiet repair line did not name /quiet"
-
-  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1)
-  assert_contains "$out" "- Away mode: active" "omitting --afk-mode did not default to away (regression)"
-  assert_not_contains "$out" "Quiet mode" "omitting --afk-mode leaked quiet-mode text"
-
-  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 1 --afk-mode not-a-real-mode)
-  assert_contains "$out" "- Away mode: active" "unrecognized --afk-mode value did not fall back to away"
-
-  out=$(FM_HOME="$home" "$RENDER" --harness codex --afk 0)
-  assert_contains "$out" "- Away/quiet mode: inactive" "inactive stanza missing"
-  pass "renderer's away/quiet stanzas are mode-aware, default to away, and fall back safely on garbage input"
+  assert_not_contains "$out" "Away mode" "removed away mode was still advertised"
+  assert_not_contains "$out" "Quiet mode" "removed quiet mode was still advertised"
+  pass "renderer includes read-only and effective x-mode current-state stanzas"
 }
 
 test_repair_lines() {
@@ -125,7 +101,6 @@ test_pi_snippet_uses_effective_extension_path() {
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
-test_quiet_mode_stanzas
 test_repair_lines
 test_cross_harness_ordinary_continuation_and_repair_matrix
 test_pi_snippet_uses_effective_extension_path

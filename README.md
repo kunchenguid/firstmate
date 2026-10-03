@@ -44,7 +44,7 @@ Launching a supported harness inside it for your primary session instantiates yo
 - **A visible crew** - every crewmate works in its own Herdr tab you can watch or type into; the first mate reconciles.
 - **Disposable worktrees** - each task runs in a clean [treehouse](https://github.com/kunchenguid/treehouse) git worktree, so parallel work on one repo never collides.
 - **Two task shapes** - ship tasks deliver authorized changes; scout tasks leave standalone investigation reports when the intake contract warrants separate research.
-- **Explicit project modes** - each project ships via `no-mistakes`, `direct-PR`, or `local-only`, with an optional `+yolo` merge-autonomy flag.
+- **Explicit project modes** - each project ships via intent-aware harness-native `review-PR`, `direct-PR`, or `local-only`, with an optional `+yolo` merge-autonomy flag.
 - **Event-driven, zero-token supervision** - a bash watcher sleeps on the fleet and wakes the first mate only when something needs you; verified primary harnesses also get a turn-end backstop that blocks or follows up on a blind stop when work is under way and supervision is not live.
 - **Optional Feishu channel for Pi** - configure one protected gitignored local file to pair one allowlisted Feishu user and P2P chat automatically with the exact current persisted Pi session, receive through the official Node SDK long connection, submit durable Feishu events with native steering without intercepting TUI input, and mirror finalized Assistant text from that session to the bound chat with exact generation and persisted-entry fencing.
 - **Optional Relay** - opt in with one local `.env` pairing token so firstmate can answer your public mentions on X and Discord alike, act on normal reversible mention requests through the same lifecycle as chat requests, acknowledge spawned work, and post up to three public-safe completion follow-ups within seven days for genuine milestones and the final outcome without changing non-Relay behavior; a final reply promised in a thread becomes durable state that is reconciled from disk, so a restart or a compacted conversation cannot lose it; dry-run preview records would-be replies and dismissals locally before go-live.
@@ -144,12 +144,10 @@ Full architecture - the supervision engine, worktree isolation, dispatch profile
 ## Built-in skills
 
 Firstmate ships these user-invocable built-in skills.
-Pi uses the commands shown here; Codex invokes skills with `$`, such as `$afk`.
+Pi uses the commands shown here; Codex invokes skills with `$`, such as `$bearings`.
 
 | Skill              | What it does                                                                                                                                  |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/afk`             | Enter away-mode supervision: the sub-supervisor self-handles routine notifications in bash, escalates captain-relevant events and bounded declared-external-wait rechecks as batched digests, and actively alerts if delivery gets stuck while you step away |
-| `/quiet`           | Enter quiet supervision mode: the same token-saving sub-supervisor tradeoff as `/afk`, for a captain who is staying and chatting - ordinary messages do not exit it, only an explicit `/quiet off` does |
 | `/ahoy`            | Recap visible session events since the prior real captain message plus visibly unanswered captain decisions, then guide the captain through any open decisions one at a time in agent-judged impact order; fall back to Bearings when invoked as the session's first real captain message |
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
 | `/updatefirstmate` | Guardedly update the running firstmate - fast-forward, or reconcile a redundant post-squash-merge divergence - and restart it on the target commit |
@@ -181,7 +179,6 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/feishu-channel.md](docs/feishu-channel.md) - opt-in pairing, exact Pi session binding, supported P2P behavior, transport operation, safety boundaries, and recovery for the private Feishu channel.
 - [docs/extension-bindings.md](docs/extension-bindings.md) - maintainer architecture for the narrow trusted external `process-event-adapter/1` package, binding, handshake, and evidence boundary.
 - [docs/calm.md](docs/calm.md) - current Pi `/calm` behavior and supported presentation limits.
-- [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/herdr-backend.md](docs/herdr-backend.md) - current setup, CI coverage, safety boundaries, and limits for the Herdr backend.
 - [docs/verification/runtime-backends.md](docs/verification/runtime-backends.md) - active maintainer verification for runtime backend guarantees.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - maintainer verification for watching and merging GitLab merge requests on arbitrary instances.

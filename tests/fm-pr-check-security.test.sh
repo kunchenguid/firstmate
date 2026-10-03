@@ -2025,21 +2025,11 @@ test_gitlab_merged_poll_retires() {
 
 # --- poll-path merge authority ----------------------------------------------
 
-write_away_record() {  # <dir> [<fm-afk-contract.sh propose args>...]
-  local dir=$1
-  shift
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-afk-contract.sh" propose "$@" >/dev/null \
-    || fail "could not propose an away-posture record"
-  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
-    "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
-    || fail "could not confirm an away-posture record"
-}
-
-archive_away_record() {  # <dir>
-  FM_HOME="$1/home" FM_STATE_OVERRIDE="$1/home/state" \
-    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
-    || fail "could not archive the away-posture record"
+write_historical_away_authority() {  # <state> <task-id>
+  local state=$1 id=$2
+  printf '%s\n' fm-merge-authority-v1 github github.com o/r 1 away-grant \
+    > "$state/$id.merge-authority"
+  chmod 0600 "$state/$id.merge-authority"
 }
 
 # The durable queue is TSV (epoch, sequence, kind, key, payload).
@@ -2083,16 +2073,18 @@ test_merged_poll_row_carries_the_merge_authority() {
     write_task_meta "$dir" task-a
     if [ "$posture" = yolo ]; then
       printf 'yolo=on\n' >> "$state/task-a.meta"
-      write_away_record "$dir"
       expected=yolo
     else
-      write_away_record "$dir" --grant task-a
       expected=away-grant
     fi
     run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
       || fail "$posture: could not arm the merge poll"
     queue_merge "$dir" "$url"
-    archive_away_record "$dir"
+    if [ "$posture" = grant ]; then
+      # Fresh merges no longer create away grants. Preserve read compatibility
+      # for a historical accepted authority record until its poll is consumed.
+      write_historical_away_authority "$state" task-a
+    fi
     run_merged_poll_cycle "$dir"
     [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url $expected" ] \
       || fail "$posture: archived posture lost persisted authority: $(merged_ledger_row "$state" task-a)"
@@ -2100,7 +2092,7 @@ test_merged_poll_row_carries_the_merge_authority() {
       || fail "$posture: published merge left its authority record behind"
   done
 
-  pass "queued merges retain yolo and away-grant after captain return"
+  pass "queued merges retain active yolo and historical away-grant receipts"
 }
 
 test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
@@ -2120,11 +2112,10 @@ test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
   dir=$(make_case merged-poll-authority-external)
   state="$dir/home/state"
   write_poll_meta "$state" task-a "$url" yolo=on
-  write_away_record "$dir"
   seed_canonical_poll "$dir" task-a "$url"
   run_merged_poll_cycle "$dir"
   [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url external" ] \
-    || fail "external merge was attributed from live away posture: $(merged_ledger_row "$state" task-a)"
+    || fail "external merge was attributed without a persisted accepted authority: $(merged_ledger_row "$state" task-a)"
   assert_poll_absent "$state" task-a
 
   pass "poll distinguishes attended authorization from external landing"
@@ -2195,11 +2186,9 @@ test_teardown_cannot_race_authority_consumption() {
     'kind=ship' \
     'mode=local-only' \
     'yolo=on'
-  write_away_record "$dir"
   run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
     || fail "teardown race: could not arm the merge poll"
   queue_merge "$dir" "$url"
-  archive_away_record "$dir"
   FM_TEST_GH_STATE_STARTED="$dir/poll-started" FM_TEST_GH_STATE=MERGED \
     FM_TEST_GH_SLEEP=0.5 FM_TEST_CHECK_TIMEOUT=3 \
     run_watcher_bounded "$dir/home" "$dir/fakebin" \

@@ -208,7 +208,7 @@ Recovery still requires its retained original terminal and native PID provenance
 Ordinary message submission is now independent: missing, unreadable, oversized, malformed, or replaced transcript content cannot block an otherwise authorized native prompt, and transcript bytes are not opened anywhere in that send call chain.
 Ordinary Codex/TraeX state is independent too: the public classifier combines Herdr native status with exact worker-process liveness, including the deliberate native-unknown plus live-process-to-idle rule.
 Portable forbidden-reader coverage places a 64 MiB transcript binding beside both harnesses and proves neither public state call executes it.
-Active no-mistakes run attribution still wins.
+For a task carrying a legacy no-mistakes mode, attributed run evidence still wins.
 
 ```sh
 bin/fm-test-run.sh tests/fm-busy-state.test.sh
@@ -862,31 +862,6 @@ ok - herdr stale registration: busy_state proves a working record at process lev
 ```
 
 That case checks a shell-only foreground and a failed process read against the same working registration, and requires `unknown` for both instead of accepting the cached busy claim.
-
-### Away-mode transport
-
-The away daemon is no longer launched on Pi; the away posture there is the record `bin/fm-afk-contract.sh` owns.
-The Pi/Herdr away posture and return transport was verified on 2026-09-08 against a real Pi primary in an isolated Herdr lab session, Herdr 0.9.0 and Pi 0.82.0:
-
-```sh
-FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
-  tests/fm-afk-pi-herdr-return-e2e.test.sh
-```
-
-Relevant transport output:
-
-```text
-ok - real Pi primary: the away posture is recorded with no daemon launched
-ok - real Pi/Herdr: nothing injects into the captain pane under the away posture
-evidence: herdr=herdr 0.9.0 pi=0.82.0 target=fm-lab-fm-afk-pi-return-37189-7133:w1:p1 archived-records=2
-```
-
-Observed guarantees: `fm-afk-launch.sh start` refused on the Pi primary and `confirm` recorded the posture with no daemon pid, flag, or terminal; a pending real Pi draft was left untouched with nothing submitted into the captain pane; the unmarked return request was recognized as the return, rendered the brief health first, and opened the catch-up gate on the live blocker; resolving the blocker cleared the gate, and a clean re-entry and return left exactly one archived record per away window.
-The current catch-up reporting boundary is pinned by `tests/fm-afk-return.test.sh` and the same live entry point: Bearings continues through a pending return catch-up, projects its posture as an action-free warning outside Captain's Call, and drops that warning after the gate clears, while an active away window still refuses.
-The fixture captures submitted input through Pi's `input` extension hook, so the lab agent directory needs no provider credentials.
-The daemon's submission ordering, exact digest content, independent live-composer overwrite guard, and max-defer behavior keep real-Herdr coverage in `tests/fm-afk-inject-herdr-e2e.test.sh` for the harnesses that still run the daemon.
-Its synthetic destination intercepts the capability-selected native command at the public CLI boundary; real native prompt submission and acknowledgement are covered separately by the named Codex/TraeX lab above.
-The dedicated Herdr daemon workspace topology is covered by `tests/fm-afk-launch.test.sh` and preserves the captain tab's pane count.
 
 ## Pi supervision branch
 

@@ -3,17 +3,14 @@
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract, including the
-# precise skill trigger that keeps a promoted no-mistakes worker from missing
-# the ask-user escalation rule or the `--yes` ban.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <task-data-dir> prints the block on
+# exact native-review contract and finding-authority boundary.
+# fm_dod_block <review-PR|direct-PR|local-only> <task-id> <task-data-dir> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# `.agents/skills/crewmate-no-mistakes/SKILL.md` is the one owner of the
-# conditional no-mistakes intent, gate, recovery, and completion procedure.
-# This file keeps only the generated trigger and the authoritative captain-word
-# section that must be present before that skill is needed.
+# `bin/fm-native-review.sh` is the executable owner of exact base/candidate and
+# task-intent delivery to the selected harness's native review command.
 # bin/fm-brief.sh scaffolds those two `# Task` subsections; bin/fm-spawn.sh and
 # bin/fm-promote.sh refuse leftover `{TASK}` / `{FIRSTMATE_SPEC}` placeholders
 # and a `## Captain's intent` line opening with a Captain label or address
@@ -30,6 +27,8 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+
+FM_DOD_ROOT=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -57,7 +56,7 @@ When stopping short, report what is complete, the exact remaining gap, the attem
 EOF
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
+fm_ship_rule_one() {  # <review-PR|direct-PR|local-only> <task-id>
   local mode=$1 id=$2
   case "$mode" in
     direct-PR)
@@ -66,8 +65,8 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
       ;;
-    no-mistakes)
-      printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
+    review-PR)
+      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -185,13 +184,13 @@ fm_brief_marked_captain_words() {  # <task-body>
 fm_brief_intent_overlay() {  # <captain-intent>
   cat <<'EOF'
 
-# Current no-mistakes intent contract
-This section supersedes every earlier brief instruction about constructing `--intent`, but not later clarifications actually supplied by the captain.
-Use everything under `## Captain intent authorized for --intent` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied as `--intent`; never include Firstmate specification or other mixed Task content.
+# Current review intent contract
+This section supersedes every earlier brief instruction about constructing a review prompt, but not later clarifications actually supplied by the captain.
+Use everything under `## Captain intent authorized for review` through the end of this brief, including any nested subheadings but excluding that heading, plus any later words the captain actually supplied; never replace those words with repository guidance.
 Preserve those words without adding speaker labels or direct address.
-The generated Definition of done names the conditional skill that owns the full intent, gate, recovery, and completion procedure.
+The generated Definition of done routes review through `bin/fm-native-review.sh`, which also includes the Firstmate acceptance scope.
 
-## Captain intent authorized for --intent
+## Captain intent authorized for review
 EOF
   printf '%s\n' "$1"
 }
@@ -231,10 +230,10 @@ fm_dod_block() {  # <mode> <task-id> <task-data-dir>
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+This task ships **direct-PR**: you raise the PR yourself without a separate review pipeline.
 The implementation phase reaches its delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch.
 When that is true, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop for firstmate's semantic acceptance and the configured merge decision.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
     local-only)
@@ -248,16 +247,21 @@ When it is implemented and committed, append \`done: ready in branch fm/$id\` to
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
       ;;
-    no-mistakes)
+    review-PR)
       cat <<EOF
 # Definition of done
-Delivery contract: mode=no-mistakes
-The implementation phase reaches its first delivery checkpoint only when the brief's acceptance evidence is satisfied and the result is committed on your branch.
-When that is true, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you on the next delivery phase.
-Before starting or resuming no-mistakes, handling one of its gates, or reporting a pipeline failure, read \`$FM_ROOT/.agents/skills/crewmate-no-mistakes/SKILL.md\` completely and follow it.
+Delivery contract: mode=review-PR
+This task ships **review-PR**: implement and test, run the selected harness's native review, then push the feature branch, open a PR, and verify required forge checks.
+Review only after the acceptance evidence is satisfied and the result is committed.
+Run \`$FM_DOD_ROOT/bin/fm-native-review.sh\` with the exact task base, candidate commit, and an output path under the task data directory.
+The helper supplies the immutable Captain intent and Firstmate acceptance, scope, and exclusions to the native reviewer and requires an explicit intent-conformance conclusion.
+At most two attempts belong to the task; candidate changes, retries, compaction, and renamed evidence do not reset them.
+After first findings, make authorized corrections, test, commit, and use attempt two on the full diff.
+After attempt two, record and ignore non-serious residuals. Ask-user findings are never yours to answer; use \`needs-decision\` only for serious or authority-bearing findings.
+Never start a third review or call a non-clean result passing; identify any later corrected final head as unreviewed.
+After a pass or completed two-attempt disposition, push the feature branch, open or update its PR, and verify required forge checks.
 Task data directory: \`$task_data_dir\`.
-That skill owns the conditional intent, ask-user, daemon-recovery, BITS/PPE boundary, and CI-ready completion procedure.
+Append \`done: PR {url} checks green\` only after the reviewed or honestly reported post-cap candidate is the PR head and required checks are green.
 Never merge the PR; Firstmate owns semantic acceptance and the configured merge decision.
 EOF
       ;;

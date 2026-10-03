@@ -35,7 +35,7 @@ Both gap fields empty means MAIN has judged the requested outcome satisfied; the
 
 The Pi adapter discovers in-flight task identities through `progress-list`, reads their compact projections, and stays quiet for healthy unchanged execution or a deliberate wait.
 When a material result leaves an authorized gap without a healthy executor, it first offers one token-bound continuation to the supervision branch.
-The branch may inspect current artifacts and route the already-authorized next step through the existing owner; a no-mistakes start or ordinary gate continuation goes back to the same worker, which alone runs or responds to the pipeline.
+The branch may inspect current artifacts and route the already-authorized next step through the existing owner; an exact-candidate native review or ordinary correction goes back to the same worker, which alone changes the branch.
 A declined or failed branch offer falls back to MAIN.
 It never derives task identity from a backend endpoint label.
 A healthy unchanged wait and verified routine advancement are retained quietly in the branch session.
