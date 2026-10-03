@@ -522,9 +522,12 @@ test_relaunch_keeps_pr_poll_meta_identity_order() {
 
 # A record whose pr= line is followed by a non-tolerated line (here a
 # captain-hold attestation) no longer satisfies the PR poll identity contract.
-# When a poll is actually ARMED (state/<id>.check.sh present), the watcher WOULD
-# consult that contract, so the relaunch must fail loudly rather than publish a
-# record it knows the watcher will refuse on every sweep.
+# When a merge poll is actually ARMED (state/<id>.check.sh AND the
+# state/<id>.pr-poll-registration sidecar present, the full artifact set
+# fm-pr-check leaves behind), the watcher WOULD consult that contract, so the
+# relaunch must fail loudly rather than publish a record it knows the watcher
+# will refuse on every sweep. A lone check file is a custom check, not a
+# merge-watch, and must not trip the guard (see the rl75 reclaim test).
 test_relaunch_refuses_loudly_when_an_armed_poll_record_breaks_the_identity_contract() {
   local dir out rc state
   dir=$(new_case armed-broken-identity rl46)
@@ -535,8 +538,10 @@ test_relaunch_refuses_loudly_when_an_armed_poll_record_breaks_the_identity_contr
     printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
     printf '%s\n' 'decision_keys=nm-example-review'
   } >> "$state/rl46.meta"
-  # Arm the merge poll so the watcher would consult the identity contract.
+  # Arm the merge poll (check file plus merge-poll registration) so the
+  # watcher would consult the identity contract.
   : > "$state/rl46.check.sh"
+  : > "$state/rl46.pr-poll-registration"
   ! fm_pr_metadata_identity_parse "$state/rl46.meta" \
     || fail "the armed-poll fixture record was still identity-valid"
 

@@ -5212,14 +5212,18 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # merge poll on every sweep, so fail the relaunch loudly when the published
   # record still carries a pr= line but no longer satisfies the identity
   # contract the watcher's trusted path validates. Only refuse for a task that
-  # actually has a poll armed - the watcher consults the identity contract for
-  # exactly those records (an armed poll leaves state/<id>.check.sh or the
-  # .pr-poll-registration behind). A pr= line with no armed poll is never read
-  # by the watcher, so refusing there would make a task whose PR is long done
-  # but whose record later gained a non-tolerated line permanently
+  # actually has a merge poll armed: the guard fires only when BOTH the check
+  # file (state/<id>.check.sh) AND the merge-poll registration
+  # (state/<id>.pr-poll-registration) are present, because a real merge-watch
+  # is the full artifact set fm-pr-check leaves behind. A lone check file is a
+  # custom check validated by custom-check trust, never by the identity
+  # contract, and a lone registration is never consulted by the watcher, so
+  # neither may trip the guard. A pr= line with no armed poll is never read by
+  # the watcher either, so refusing there would make a task whose PR is long
+  # done but whose record later gained a non-tolerated line permanently
   # un-relaunchable.
   if grep -q '^pr=' "$STATE/$ID.meta" \
-    && { [ -e "$STATE/$ID.check.sh" ] || [ -e "$STATE/$ID.pr-poll-registration" ]; } \
+    && [ -e "$STATE/$ID.check.sh" ] && [ -e "$STATE/$ID.pr-poll-registration" ] \
     && ! fm_pr_metadata_identity_parse "$STATE/$ID.meta"; then
     echo "error: replacement task record for $ID breaks the PR poll metadata identity contract after publication; the armed merge poll would be refused by the watcher" >&2
     exit 1
