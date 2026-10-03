@@ -168,6 +168,8 @@ The launch brief gives every supported harness the same `pre-push`, `pre-ci`, an
 `pre-push` compares the commit diff from the merge base of `origin/<base>` and HEAD, treating rename sources and destinations as separate paths, requests an amendment for undeclared paths, checks the live branch writer fence, and publishes the current head only when that fence is live and every changed path is claimed.
 While an amendment is refused or pending, the head stays unpublished and both `pre-push` and `scope-amend` remain pending in `view`.
 `pre-ci` checks the same fence before a `ci:batch` request and warns without clearing its pending checkpoint while the worktree HEAD differs from the published head, so CI is never authorized for an older head.
+`check` returns the intent's latest central head, and the adapter refreshes its local published-head cache from it before comparing, so a lost `publish-head` reply cannot let an older worktree HEAD pass.
+`pre-ci TASK` without a worktree uses the task's recorded worktree and refuses when none is recorded; `replay` skips a pending `pre-ci` with no recorded worktree and warns.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
 

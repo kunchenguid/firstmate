@@ -630,7 +630,8 @@ def run_operation(db, op, p):
     if op in {"renew", "release", "check"}:
         claim = active_claim(db, p)
         if op == "check":
-            return {"ok": True, "claim_id": claim["claim_id"], "fence": claim["fence"], "expires_mono_ns": claim["expires_mono_ns"]}
+            latest = db.execute("SELECT head_oid FROM heads WHERE intent_id=? ORDER BY rowid DESC LIMIT 1", (claim["intent_id"],)).fetchone()
+            return {"ok": True, "claim_id": claim["claim_id"], "fence": claim["fence"], "expires_mono_ns": claim["expires_mono_ns"], "head_oid": latest[0] if latest else None}
         if op == "renew":
             ttl = p.get("ttl_seconds", 900)
             require(isinstance(ttl, int) and 1 <= ttl <= 86400, "ttl_seconds must be 1..86400")

@@ -258,6 +258,52 @@ assert not json.loads(sys.argv[1])['local_pending']
 PY
 pass 'CI checkpoint refuses a worktree HEAD that differs from the published head'
 
+adapter "$tmp/codex" pre-ci codex > /dev/null 2> "$tmp/no-wt-ci.err" || fail "pre-ci without a worktree must use the recorded worktree: $(cat "$tmp/no-wt-ci.err")"
+[ ! -s "$tmp/no-wt-ci.err" ] || fail "pre-ci with a recorded worktree must not warn: $(cat "$tmp/no-wt-ci.err")"
+if adapter "$tmp/offline" pre-ci offline > /dev/null 2> "$tmp/no-wt-refuse.err"; then fail 'pre-ci without any worktree must refuse'; fi
+case "$(cat "$tmp/no-wt-refuse.err")" in *'no recorded worktree'*) ;; *) fail "pre-ci refusal must name the missing worktree: $(cat "$tmp/no-wt-refuse.err")" ;; esac
+pass 'pre-ci TASK falls back to the recorded worktree and refuses when none is recorded'
+
+python3 - "$tmp/codex/state/fm-coord-adapter.json" <<'PY'
+import json,sys
+path=sys.argv[1]
+state=json.load(open(path))
+state['tasks']['codex'].pop('worktree')
+state['tasks']['codex']['pending_ci']=True
+json.dump(state,open(path,'w'))
+PY
+adapter "$tmp/codex" replay > /dev/null 2> "$tmp/legacy-ci.err" || fail "replay of a pending pre-ci without a worktree must complete: $(cat "$tmp/legacy-ci.err")"
+case "$(cat "$tmp/legacy-ci.err")" in *'no recorded worktree'*) ;; *) fail 'replay must warn about a pending pre-ci without a worktree' ;; esac
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2>&1 || fail 'pre-ci with a worktree must clear the legacy checkpoint'
+pass 'replay skips a legacy pending pre-ci that has no worktree'
+
+h4=$(git -C "$repo" rev-parse HEAD)
+printf 'h5\n' > "$repo/src/codex.py"
+git -C "$repo" commit -qam h5
+h5=$(git -C "$repo" rev-parse HEAD)
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'h5 push checkpoint must complete'
+python3 - "$tmp/codex/state/fm-coord-adapter.json" "$h4" "$h5" <<'PY'
+import json,sys
+path,h4,h5=sys.argv[1:]
+state=json.load(open(path))
+state['requests']['codex:head:'+h4+':'+h5].pop('reply')
+state['tasks']['codex']['published_head']=h4
+json.dump(state,open(path,'w'))
+PY
+git -C "$repo" reset -q --hard "$h4"
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/lost-head-ci.err" || fail 'stale-cache CI checkpoint stays advisory'
+case "$(cat "$tmp/lost-head-ci.err")" in *'is not the published head'*) ;; *) fail 'CI checkpoint must compare against the central published head, not a stale local cache' ;; esac
+git -C "$repo" reset -q --hard "$h5"
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'h5 republish checkpoint must complete'
+adapter "$tmp/codex" pre-ci codex "$repo" > /dev/null 2> "$tmp/h5-ci.err" || fail 'central head CI checkpoint must complete'
+python3 - "$(adapter "$tmp/codex" view)" "$h5" <<'PY' || fail "central head refresh must clear CI and the lost publish request: $(cat "$tmp/h5-ci.err")"
+import json,sys
+view=json.loads(sys.argv[1])
+assert not view['local_pending'], view['local_pending']
+assert view['local_tasks']['codex']['published_head']==sys.argv[2]
+PY
+pass 'CI checkpoint compares HEAD with the central published head after a lost publish reply'
+
 python3 - "$tmp/codex/state/fm-coord-adapter.json" <<'PY'
 import json,sys
 path=sys.argv[1]

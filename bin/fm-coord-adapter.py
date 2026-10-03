@@ -263,6 +263,10 @@ class Adapter:
                 self.reset_task(task_id)
             warn(f"{task_id}: branch writer generation cannot be checked; no grant assumed")
             return None
+        # The central head chain is authoritative; a lost publish-head reply leaves the local cache behind it.
+        if checked["head_oid"] != task.get("published_head"):
+            task["published_head"] = checked["head_oid"]
+            self.save()
         return payload
 
     def ci_ready(self, task_id, worktree):
@@ -360,9 +364,12 @@ class Adapter:
                 continue
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
                 self.scope(task_id, task["worktree"])
-            if task.get("pending_ci") and self.ci_ready(task_id, task["worktree"]):
-                task.pop("pending_ci", None)
-                self.save()
+            if task.get("pending_ci"):
+                if not task.get("worktree"):
+                    warn(f"{task_id}: pending pre-ci has no recorded worktree; rerun pre-ci TASK WORKTREE")
+                elif self.ci_ready(task_id, task["worktree"]):
+                    task.pop("pending_ci", None)
+                    self.save()
             if task.get("renew_key") and "reply" in self.state["requests"].get(task["renew_key"], {}):
                 task.pop("renew_key", None)
                 self.save()
@@ -432,13 +439,16 @@ def run(adapter, command):
         adapter.scope(sys.argv[2], sys.argv[3])
     elif command == "heartbeat" and len(sys.argv) == 3:
         adapter.heartbeat(sys.argv[2])
-    elif command == "pre-ci" and len(sys.argv) == 4:
+    elif command == "pre-ci" and len(sys.argv) in {3, 4}:
         task = adapter.state["tasks"].get(sys.argv[2])
+        worktree = sys.argv[3] if len(sys.argv) == 4 else (task or {}).get("worktree")
+        if not worktree:
+            raise ValueError(f"{sys.argv[2]}: pre-ci needs a WORKTREE argument; this task has no recorded worktree")
         if task:
-            task["worktree"] = sys.argv[3]
+            task["worktree"] = worktree
             task["pending_ci"] = True
             adapter.save()
-        if adapter.ci_ready(sys.argv[2], sys.argv[3]) and task:
+        if adapter.ci_ready(sys.argv[2], worktree) and task:
             task.pop("pending_ci", None)
             adapter.save()
     elif command == "release" and len(sys.argv) == 3:
@@ -453,7 +463,7 @@ def run(adapter, command):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "release", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK WORKTREE|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [WORKTREE]|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
