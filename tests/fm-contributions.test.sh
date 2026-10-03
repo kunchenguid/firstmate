@@ -123,6 +123,22 @@ case "$*" in
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
+  'api graphql -f query=query{repository(owner:"o",name:"r"){'*)
+    # Every queried PR shares the fixture's head, state, counts and rollup.
+    grep -o 'pullRequest(number:[0-9]*)' <<< "$*" | tr -dc '0-9\n' | jq -R . | jq -s \
+      --arg head "$(cat "$FORGE/head")" \
+      --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" \
+      --arg updated "$(cat "$FORGE/updated" 2>/dev/null || printf 2026-09-16T07:00:00Z)" \
+      --argjson mergeable "$(tr -d '[:space:]' < "$FORGE/mergeable" 2>/dev/null || printf true)" \
+      --slurpfile comments "$FORGE/comments.json" --slurpfile reviews "$FORGE/reviews.json" \
+      --slurpfile inline "$FORGE/inline.json" \
+      --arg rollup "$(cat "$FORGE/rollup" 2>/dev/null || printf SUCCESS)" '
+      {data:{repository:(map({key:("p" + .),value:{state:($state | ascii_upcase),updatedAt:$updated,
+        headRefOid:$head,isDraft:false,
+        mergeable:(if $mergeable == true then "MERGEABLE" elif $mergeable == false then "CONFLICTING" else "UNKNOWN" end),
+        comments:{totalCount:($comments[0] | length)},
+        reviews:{totalCount:(($reviews[0] | length) + ($inline[0] | length))},
+        commits:{nodes:[{commit:{statusCheckRollup:(if $rollup == "NONE" then null else {state:$rollup,contexts:{totalCount:1}} end)}}]}}}) | from_entries)}}' ;;
   'api repos/o/r/pulls/8'|'api repos/o/r/pulls/9'|'api repos/o/r/pulls/10')
     jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
       {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
@@ -653,6 +669,10 @@ case "$fault:$*" in
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  # Spend six budget seconds on the fingerprint read or on each full PR read.
+  fingerprint-clock:'api graphql '*|core-clock:'api repos/o/r/pulls/'[0-9]|core-clock:'api repos/o/r/pulls/'[0-9][0-9])
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
+  fingerprint-down:'api graphql '*) printf 'HTTP 502\n' >&2; exit 1 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -1019,6 +1039,8 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
     wrap_forge "$home"
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
+    # The fingerprint read must not tick a one-second budget past the PR read.
+    /bin/date +%s > "$home/forge/clock"
     printf 'hang\n' > "$home/forge/fault"
     if [ "$mode" = configured ]; then
       with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" arm >/dev/null \
@@ -1098,8 +1120,195 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+stamp_fingerprint() { # home task observed-at [jq update applied to the fingerprint]
+  mutate_record "$1" "$2" ".records[0] += {checked_at:\"2026-09-15T08:00:00Z\",observed_at:\"$3\",
+    fingerprint:({state:\"OPEN\",updated_at:\"2026-09-16T07:00:00Z\",head:\"$HEAD_A\",draft:false,
+      mergeable:\"MERGEABLE\",comments:0,reviews:0,checks:{state:\"SUCCESS\",contexts:1}} | ${4:-.})}"
+}
+
+rest_reads() { grep -v '^api graphql ' "$1/forge/calls" || true; }
+
+test_unchanged_prs_refresh_fresh_without_rest_reads() {
+  local home out number
+  home=$(new_home fingerprint-thirteen)
+  forge_home "$home"
+  wrap_forge "$home"
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z
+  for number in $(seq 9 20); do
+    record "$home" "open-$number" "$number" open mergeable
+    stamp_fingerprint "$home" "open-$number" 2026-09-15T07:00:00Z
+  done
+  # A signal left durable but un-notified by an interrupted poll still wakes.
+  mutate_record "$home" open-9 '.records[0].pending = [{token:"comment:1:x",type:"comment",
+    source:"https://github.com/o/r/pull/9#issuecomment-1",head:null,author:"maintainer",body:"left over"}]'
+  /bin/date +%s > "$home/forge/clock"
+  # The fingerprint read leaves less than the fifteen-second full-read reserve.
+  printf 'fingerprint-clock\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'thirteen-PR fingerprint poll failed'
+  printf '%s' "$out" | grep -Fx "contribution-wake: check: contributions open-9 $(printf '%s\n%s\n' https://github.com/o/r/pull/9 comment:1:x | shasum -a 256 | awk '{print $1}')" >/dev/null \
+    && [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || fail "an unchanged fingerprint poll did not wake only the un-notified signal: $out"
+  [ "$(grep -c '^api graphql ' "$home/forge/calls")" = 1 ] || fail 'thirteen PRs in one repository took more than one fingerprint read'
+  [ -z "$(rest_reads "$home")" ] || fail "unchanged PRs made REST reads: $(rest_reads "$home")"
+  NOW=$NOW bearings "$home" | jq -e '.contributions.known == 13 and .contributions.checked == 13
+    and .contributions.complete == true' >/dev/null || fail 'thirteen unchanged PRs did not all end fresh'
+  for number in $(seq 9 20); do
+    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .observed_at == "2026-09-15T07:00:00Z"' \
+      "$home/data/open-$number/contributions.json" >/dev/null || fail "unchanged PR $number was not refreshed as observed"
+  done
+  [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = 1 ] || fail 'an unchanged fingerprint poll did not enqueue exactly one wake'
+  pass 'thirteen unchanged open PRs end fresh in one poll with one fingerprint read and no REST reads'
+}
+
+test_backstop_reads_the_oldest_full_observation() {
+  local home
+  home=$(new_home fingerprint-backstop)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  record "$home" third 10 open mergeable
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z
+  stamp_fingerprint "$home" second 2026-09-14T07:00:00Z
+  stamp_fingerprint "$home" third 2026-09-15T06:00:00Z
+  /bin/date +%s > "$home/forge/clock"
+  # Each full read leaves less than the reserve, so leftover budget buys one.
+  printf 'core-clock\n' > "$home/forge/fault"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'backstop poll failed'
+  [ "$(rest_reads "$home" | grep -E '^api repos/o/r/pulls/[0-9]+$')" = 'api repos/o/r/pulls/9' ] \
+    || fail "leftover budget did not fully re-read the oldest observation: $(rest_reads "$home")"
+  jq -e --arg now "$NOW" '.records[0] | .observed_at == $now and .checked_at == $now and .fingerprint.head != null' \
+    "$home/data/second/contributions.json" >/dev/null || fail 'the backstop read did not record a full observation'
+  pass 'leftover budget fully re-reads the unchanged PR with the oldest full observation'
+}
+
+test_fingerprint_change_triggers_full_read() { # head|comment|checks
+  local mode=$1 home out after
+  home=$(new_home "fingerprint-$mode")
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  # The older unchanged PR already holds the new fingerprint, so only a
+  # detected change can send PR 8 ahead of the oldest-first backstop.
+  case "$mode" in
+    head) after=".head = \"$HEAD_B\""; printf '%s\n' "$HEAD_B" > "$home/forge/head"
+      mutate_record "$home" second ".records[0].observation.head = \"$HEAD_B\"" ;;
+    comment) after='.comments = 1'
+      jq -n '[{id:12,user:{login:"maintainer"},author_association:"OWNER",body:"Please clarify",
+        html_url:"https://github.com/o/r/pull/8#issuecomment-12",updated_at:"2026-09-16T08:01:00Z"}]' \
+        > "$home/forge/comments.json" ;;
+    checks) after='.checks.state = "FAILURE"'; printf 'FAILURE\n' > "$home/forge/rollup" ;;
+  esac
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z
+  stamp_fingerprint "$home" second 2026-09-14T07:00:00Z "$after"
+  /bin/date +%s > "$home/forge/clock"
+  printf 'core-clock\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "changed $mode poll failed"
+  [ "$(rest_reads "$home" | grep -E '^api repos/o/r/pulls/[0-9]+$')" = 'api repos/o/r/pulls/8' ] \
+    || fail "a changed $mode did not trigger the full read: $(rest_reads "$home")"
+  jq -e --arg now "$NOW" '.records[0] | .observed_at == $now and .checked_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail "a changed $mode was not fully observed"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .observed_at == "2026-09-14T07:00:00Z"' \
+    "$home/data/second/contributions.json" >/dev/null || fail "the unchanged PR was not refreshed beside a changed $mode"
+  if [ "$mode" = comment ]; then
+    jq -e '.records[0].pending | length == 1 and .[0].type == "comment"' \
+      "$home/data/delivery/contributions.json" >/dev/null || fail 'a changed comment count lost its pending signal'
+    [ "$(awk 'END { print NR }' "$home/state/.wake-queue")" = 1 ] || fail 'a changed comment count did not wake once'
+    printf '%s' "$out" | grep -F 'contribution-wake: check: contributions delivery' >/dev/null \
+      || fail "a changed comment count did not surface its wake: $out"
+  fi
+  pass "a changed $mode fingerprint triggers the full read and its usual signals"
+}
+
+test_fingerprint_head_change() { test_fingerprint_change_triggers_full_read head; }
+test_fingerprint_comment_change() { test_fingerprint_change_triggers_full_read comment; }
+test_fingerprint_checks_change() { test_fingerprint_change_triggers_full_read checks; }
+
+test_fingerprint_failure_falls_back_to_full_read() {
+  local home out
+  home=$(new_home fingerprint-down)
+  forge_home "$home"
+  wrap_forge "$home"
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z
+  printf 'fingerprint-down\n' > "$home/forge/fault"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed when the fingerprint read failed'
+  [ -z "$out" ] || fail "a failed fingerprint read printed: $out"
+  rest_reads "$home" | grep -Fx 'api repos/o/r/pulls/8' >/dev/null || fail 'a failed fingerprint read skipped the full read'
+  jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == $now and .observed_at == $now and .fingerprint == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a failed fingerprint read recorded an error or no full observation'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a failed fingerprint read enqueued a wake'
+  pass 'a failed fingerprint read falls back to the full read without recording an error'
+}
+
+test_old_record_without_fingerprint_still_works() {
+  local home later=2026-09-16T08:05:00Z
+  home=$(new_home fingerprint-legacy)
+  forge_home "$home"
+  wrap_forge "$home"
+  jq -e '.records[0] | has("observed_at") or has("fingerprint") | not' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'legacy fixture already carries the new fields'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'poll of a legacy record failed'
+  rest_reads "$home" | grep -Fx 'api repos/o/r/pulls/8' >/dev/null || fail 'a legacy record was not fully read'
+  jq -e --arg now "$NOW" --arg head "$HEAD_A" '.records[0] | .observed_at == $now and .fingerprint.head == $head' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a legacy record did not gain its fingerprint'
+  : > "$home/forge/calls"
+  /bin/date +%s > "$home/forge/clock"
+  printf 'fingerprint-clock\n' > "$home/forge/fault"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW="$later" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'second poll of an upgraded record failed'
+  [ -z "$(rest_reads "$home")" ] || fail "an upgraded unchanged record made REST reads: $(rest_reads "$home")"
+  jq -e --arg later "$later" --arg now "$NOW" '.records[0] | .checked_at == $later and .observed_at == $now' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'an upgraded unchanged record was not refreshed'
+  pass 'a record without the optional fields validates, gains them, and then refreshes cheaply'
+}
+
+test_unrecorded_pr_gets_its_first_full_observation() {
+  local home
+  home=$(new_home fingerprint-unrecorded)
+  forge_home "$home"
+  wrap_forge "$home"
+  record "$home" second 9 open mergeable
+  rm "$home/data/second/contributions.json"
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'poll with an unrecorded PR failed'
+  rest_reads "$home" | grep -Fx 'api repos/o/r/pulls/9' >/dev/null || fail 'an unrecorded PR was not fully read'
+  jq -e --arg now "$NOW" --arg head "$HEAD_A" '.records[0] | .observed_at == $now and .error == null
+    and .observation.head == $head and .fingerprint.head == $head' \
+    "$home/data/second/contributions.json" >/dev/null || fail 'an unrecorded PR did not gain a full observation'
+  pass 'a PR with no saved record gets its first full observation'
+}
+
+test_fingerprint_read_leaves_the_full_read_reserve() {
+  local home
+  home=$(new_home fingerprint-reserve)
+  forge_home "$home"
+  wrap_forge "$home"
+  /bin/date +%s > "$home/forge/clock"
+  # A six-second fingerprint read would leave less than the fifteen-second reserve.
+  printf 'fingerprint-clock\n' > "$home/forge/fault"
+  with_home "$home" env FM_CONTRIBUTIONS_BUDGET=15 "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'fifteen-second poll failed'
+  rest_reads "$home" | grep -Fx 'api repos/o/r/pulls/8' >/dev/null || fail 'the fingerprint read consumed the full-read reserve'
+  jq -e --arg now "$NOW" '.records[0] | .observed_at == $now and .error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a fifteen-second budget did not fully observe the PR'
+  pass 'a fifteen-second budget still gives a changed PR its full read'
+}
+
+test_partial_fingerprint_takes_the_full_path() {
+  local home
+  home=$(new_home fingerprint-partial)
+  forge_home "$home"
+  wrap_forge "$home"
+  # The same null check rollup was stored earlier and is read again now.
+  stamp_fingerprint "$home" delivery 2026-09-15T07:00:00Z '.checks = null'
+  printf 'NONE\n' > "$home/forge/rollup"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'partial fingerprint poll failed'
+  rest_reads "$home" | grep -Fx 'api repos/o/r/pulls/8' >/dev/null || fail 'a partial fingerprint counted as unchanged'
+  jq -e --arg now "$NOW" '.records[0] | .observed_at == $now and .error == null and .fingerprint == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a partial fingerprint was stored or recorded an error'
+  pass 'a fingerprint with a null field takes the full path and is never stored'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_unchanged_prs_refresh_fresh_without_rest_reads test_backstop_reads_the_oldest_full_observation test_fingerprint_head_change test_fingerprint_comment_change test_fingerprint_checks_change test_fingerprint_failure_falls_back_to_full_read test_old_record_without_fingerprint_still_works test_unrecorded_pr_gets_its_first_full_observation test_fingerprint_read_leaves_the_full_read_reserve test_partial_fingerprint_takes_the_full_path; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

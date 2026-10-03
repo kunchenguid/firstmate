@@ -41,11 +41,23 @@
 # refusal, never a forge failure. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
-# the effective budget and 15 seconds for those waves. URLs needing forge
-# reads are sorted by URL and rotated by the current five-minute epoch bucket
-# modulo their count, without stored scheduling state or freshness-based
-# reordering. Terminal URLs settle separately before the forge budget starts
-# and consume no rotation slots.
+# the effective budget and 15 seconds for those waves. First, inside the same
+# budget but never into that reserve, one batched GraphQL read per repository
+# (25 PRs per query, run in parallel) fetches every open GitHub PR's
+# fingerprint: state, updatedAt, head, draft, mergeable, comment and review
+# counts, and the head's check rollup state and context count. A record stores the fingerprint read just
+# before its last good full observation (null when the heads differ) and that
+# observation's time as observed_at; both fields are optional, so older v1
+# records validate. When every owner's record holds an error-free observation
+# with the same fingerprint, poll only refreshes checked_at, with no further
+# reads, and still publishes any pending signal not yet notified. Changed
+# PRs, PRs with no fingerprint, and issues take the full observation, sorted
+# by URL and rotated by the current five-minute epoch bucket modulo their
+# count. Leftover budget then fully re-reads unchanged PRs, oldest
+# observed_at first, to cover changes a fingerprint cannot show.
+# A failed or partial fingerprint read (any null field, such as no check
+# rollup) only sends its PRs down the full path and never records an error. Terminal URLs settle separately before
+# the forge budget starts and are never read.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # attempted at most once per poll and its observation applied to every owner.
@@ -348,6 +360,53 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   done
 }
 
+read_fingerprints() { # live TSV -> $TMP/fingerprints.json {url: fingerprint}
+  local query prefix n=0 pid
+  local -a pids=()
+  # One aliased query per repository chunk; each alias is the PR number.
+  while IFS=$'\t' read -r prefix query; do
+    n=$((n + 1))
+    printf '%s\n' "$prefix" > "$TMP/fingerprint-$n.repo"
+    FORGE_ERR="$TMP/fingerprint-$n.err" forge api graphql -f query="$query" > "$TMP/fingerprint-$n.json" &
+    pids+=("$!")
+  done < <(jq -Rnr '
+    [inputs | split("\t")[0]
+      | capture("^(?<repo>https://github.com/[^/]+/[^/]+)/pull/(?<n>[0-9]+)$")]
+    | group_by(.repo)[] as $prs
+    | ($prs[0].repo | ltrimstr("https://github.com/") | split("/")) as [$owner,$name]
+    | range(0; $prs | length; 25) as $i
+    | [$prs[0].repo,
+       ("query{repository(owner:\"" + $owner + "\",name:\"" + $name + "\"){"
+        + ([$prs[$i:$i + 25][] | "p" + .n + ":pullRequest(number:" + .n + "){...F}"] | join(" "))
+        + "}} fragment F on PullRequest{state updatedAt headRefOid isDraft mergeable"
+        + " comments{totalCount} reviews{totalCount}"
+        + " commits(last:1){nodes{commit{statusCheckRollup{state contexts{totalCount}}}}}}")]
+    | @tsv' < "$1")
+  # A failed or partial read only leaves URLs without a fingerprint; they take
+  # the full observation path, so no error is recorded here.
+  for pid in "${pids[@]+"${pids[@]}"}"; do wait "$pid" || true; done
+  printf '{}\n' > "$TMP/fingerprints.json"
+  while [ "$n" -gt 0 ]; do
+    jq --rawfile prefix "$TMP/fingerprint-$n.repo" '
+      [.data.repository // {} | to_entries[]
+        | select((.key | test("^p[0-9]+$")) and (.value | type == "object")
+          and (.value.headRefOid | type == "string" and test("^[a-fA-F0-9]{40}$")))
+        | .value as $pr
+        | {key:(($prefix | rtrimstr("\n")) + "/pull/" + .key[1:]),
+           value:{state:$pr.state,updated_at:$pr.updatedAt,head:$pr.headRefOid,draft:$pr.isDraft,
+             mergeable:$pr.mergeable,comments:$pr.comments.totalCount,reviews:$pr.reviews.totalCount,
+             checks:($pr.commits.nodes[0].commit.statusCheckRollup
+               | if . == null then null else {state,contexts:.contexts.totalCount} end)}}
+        # A fingerprint with any null field is partial and takes the full path.
+        | select([.value | .. | select(. == null)] | length == 0)]
+      | from_entries' "$TMP/fingerprint-$n.json" > "$TMP/fingerprint-$n.map" 2>/dev/null \
+      && jq -s 'add' "$TMP/fingerprints.json" "$TMP/fingerprint-$n.map" > "$TMP/fingerprints.next" \
+      && mv "$TMP/fingerprints.next" "$TMP/fingerprints.json"
+    n=$((n - 1))
+  done
+  return 0
+}
+
 poll() {
   local task url old kind error observed
   local -a row
@@ -373,11 +432,38 @@ poll() {
       (IFS=$'\t'; printf '%s\n' "${row[*]}") >> "$TMP/live.tsv"
     fi
   done < "$TMP/known.tsv"
-  jq -Rnr --argjson bucket "$((EPOCH / 300))" '
-    [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
-    | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
-  DEADLINE=$(( $(date +%s) + BUDGET ))
+  START=$(date +%s)
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  # Fingerprint reads stop short of the full-observation reserve.
+  DEADLINE=$((START + BUDGET - OBSERVATION_RESERVE))
+  read_fingerprints "$TMP/live.tsv"
+  DEADLINE=$((START + BUDGET))
+  # A URL is unchanged when every owner's last good full observation carries
+  # the fingerprint just read. Changed URLs rotate first; unchanged ones follow
+  # oldest full observation first as the backstop for fingerprint blind spots.
+  jq -Rn --slurpfile saved "$TMP/saved.json" --slurpfile fingerprints "$TMP/fingerprints.json" \
+    --argjson bucket "$((EPOCH / 300))" '
+    [inputs | split("\t") as $row | $fingerprints[0][$row[0]] as $fingerprint
+      | [$row[1:][] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $row[0])] | first] as $olds
+      | {line:($row | join("\t")),
+         unchanged:($fingerprint != null and all($olds[]; . != null and .error == null
+           and .observation != null and .fingerprint == $fingerprint)),
+         observed_at:([$olds[] | .observed_at // ""] | min)}]
+    | {unchanged:[.[] | select(.unchanged) | .line],
+       queue:(([.[] | select(.unchanged | not) | .line]
+           | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end)
+         + ([.[] | select(.unchanged)] | sort_by(.observed_at) | map(.line)))}' < "$TMP/live.tsv" > "$TMP/plan.json"
+  jq -r '.unchanged[]' "$TMP/plan.json" > "$TMP/unchanged.tsv"
+  jq -r '.queue[]' "$TMP/plan.json" > "$TMP/known.tsv"
+  while IFS=$'\t' read -r -a row; do
+    for task in "${row[@]:1}"; do
+      fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+      jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "${row[0]}" --arg now "$NOW" '
+        [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first | .checked_at = $now' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+      publish_pending "$task" "${row[0]}" "$TMP/row.json"
+    done
+  done < "$TMP/unchanged.tsv"
   while IFS=$'\t' read -r -a row; do
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
@@ -398,12 +484,16 @@ poll() {
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
       if [ "$observed" -eq 0 ]; then
-        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" \
+          --slurpfile fingerprints "$TMP/fingerprints.json" '
           $old[0] as $old | $observation[0] as $o
+          # The fingerprint was read before this observation, so a later
+          # change only forces another full read; it can never hide one.
+          | ($fingerprints[0][$old.url] | if . != null and .head == $o.head then . else null end) as $fingerprint
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
-          | $old + {checked_at:$now,error:null,
+          | $old + {checked_at:$now,observed_at:$now,fingerprint:$fingerprint,error:null,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
