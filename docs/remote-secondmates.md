@@ -114,7 +114,13 @@ As a result, retries never convoy behind abandoned work.
 
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree.
 `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way.
-It never touches a worker whose checkout still exists.
+Its default sweep never touches a worker whose checkout still exists.
+
+Worker restarts are bounded per account rather than per restart supervisor, so a worker that keeps failing cannot multiply supervisors across a host.
+Only a worker that exits with a failure is counted; a redundant start that finds a verified worker already serving exits cleanly and is not.
+When that bound is exhausted, restarts are suspended and every `fm-on.sh` call that needs a worker fails with a diagnostic that names the worker log and the recovery, while a worker that is still healthy keeps serving.
+After fixing the cause, run `bin/fm-on.sh <route> fm-remote-doctor.sh --fix`: it collapses duplicate supervisors to the one worker that owns the queue through `bin/fm-remote-job-reap-orphans.sh --duplicates`, resumes restarts, and ensures exactly one worker.
+The job library header, `bin/fm-remote-job-lib.sh`, owns the bound and the lock states a worker may reclaim.
 
 ### What the remote account must provide
 
