@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Security and regression tests for canonical PR parsing, static merge polls,
 # private atomic artifacts, authenticated custom checks, and teardown cleanup.
+# Use --template-update to run only the isolated Git-update regressions.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -3438,6 +3439,176 @@ SH
   fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released watcher did not strictly authenticate the poll"
   pass "device re-record publication waits without rewriting its registration"
 }
+
+
+# The real update entry point must migrate only polls authenticated against the
+# committed old template, retaining the watcher's strict current-byte contract.
+test_template_update_refreshes_registered_polls() {
+  local route=${1:-update} dir state id template old PR_CHECK WATCH out bad_before watch_home old_identity unique
+  dir=$(make_case "template-$route")
+  state="$dir/home/state"
+  cp -R "$ROOT/bin/." "$dir/root/bin/"
+  git -C "$dir/root" init -q
+  git -C "$dir/root" symbolic-ref HEAD refs/heads/main
+  printf '/state/\n/data/\n/config/\n/.fm-secondmate-home\n/.fm-secondmate-parent\n' > "$dir/root/.gitignore"
+  printf 'fixture\n' > "$dir/root/AGENTS.md"
+  git -C "$dir/root" add bin .gitignore AGENTS.md
+  git -C "$dir/root" commit -qm initial-template
+  git clone -q --bare "$dir/root" "$dir/origin.git"
+  git -C "$dir/root" remote add origin "$dir/origin.git"
+  git clone -q "$dir/origin.git" "$dir/upstream"
+  old=$(git -C "$dir/root" rev-parse HEAD)
+  template="$dir/root/bin/fm-pr-poll.sh"
+  PR_CHECK="$dir/root/bin/fm-pr-check.sh"
+  WATCH="$dir/root/bin/fm-watch.sh"
+  for id in good-a good-b good-c tampered unregistered swapped foreign; do
+    write_task_meta "$dir" "$id"
+    run_check_entry "$dir" "$id" https://github.com/o/r/pull/17 > "$dir/arm.out" 2> "$dir/arm.err" \
+      || fail "could not arm update fixture: $(cat "$dir/arm.err")"
+    fm_pr_poll_artifacts_valid "$state" "$id" "$template" || fail "pre-update poll was invalid"
+  done
+  printf '\nprintf tampered > "%s"\n' "$dir/executed" >> "$state/tampered.check.sh"
+  bad_before=$(fm_pr_sha256 "$state/tampered.check.sh")
+  cp "$state/swapped.check.sh" "$dir/check-copy"
+  mv "$dir/check-copy" "$state/swapped.check.sh"
+  # A valid registration for source never committed as the old template is
+  # not update provenance, even though all its own hashes and identities match.
+  cp "$template" "$dir/template-original"
+  printf '\nprintf foreign > "%s"\n' "$dir/foreign-executed" >> "$template"
+  run_check_entry "$dir" foreign https://github.com/o/r/pull/17 > "$dir/foreign.out" 2> "$dir/foreign.err" \
+    || fail "could not arm foreign-template control"
+  cp "$dir/template-original" "$template"
+  rm "$state/unregistered.pr-poll-registration"
+  if [ "$route" = update ]; then
+    old_identity=$(fm_pr_file_identity "$state/good-a.check.sh")
+    printf '\n# Uncommitted template bytes are not a trusted update.\n' >> "$template"
+    if FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" \
+      "$dir/root/bin/fm-pr-poll-refresh.sh" "$old" > "$dir/dirty.out" 2> "$dir/dirty.err"; then
+      fail "refresh accepted an uncommitted template"
+    fi
+    [ "$(fm_pr_file_identity "$state/good-a.check.sh")" = "$old_identity" ] || fail "untrusted template changed a watch"
+    cp "$dir/template-original" "$template"
+  fi
+  watch_home="$dir/home"
+  if [[ "$route" = secondmate* ]]; then
+    git clone -q "$dir/origin.git" "$dir/parent"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s/home\n' "$dir" > "$dir/root/.fm-secondmate-parent"
+    printf 'child\n' > "$dir/root/.fm-secondmate-home"
+    mv "$state" "$dir/root/state"
+    state="$dir/root/state"
+    watch_home="$dir/root"
+    mkdir "$dir/home/state"
+    printf 'parent sentinel\n' > "$dir/home/state/untouched"
+    printf -- '- child - domain supervisor (home: %s/root; scope: fixture; projects: p; added 2026-09-26)\n' "$dir" > "$dir/home/data/secondmates.md"
+  fi
+  if [ "$route" = secondmate-redundant ]; then
+    printf 'already landed\n' > "$dir/root/landed"
+    git -C "$dir/root" add landed
+    git -C "$dir/root" commit -qm redundant-local
+    old=$(git -C "$dir/root" rev-parse HEAD)
+    git -C "$dir/root" checkout -qb unique-control
+    printf 'unlanded\n' > "$dir/root/unique"
+    git -C "$dir/root" add unique
+    git -C "$dir/root" commit -qm unique-control
+    unique=$(git -C "$dir/root" rev-parse HEAD)
+    git -C "$dir/root" checkout -q main
+    cp "$dir/root/landed" "$dir/upstream/landed"
+    git -C "$dir/upstream" add landed
+  fi
+  printf '\n# Trusted repository template update.\n' >> "$dir/upstream/bin/fm-pr-poll.sh"
+  git -C "$dir/upstream" add bin/fm-pr-poll.sh
+  git -C "$dir/upstream" commit -qm update-template
+  case "$route" in
+    fleet-recover-*)
+      git -C "$dir/root" fetch -q "$dir/upstream" main
+      git -C "$dir/root" checkout -q --detach "$old"
+      git -C "$dir/root" branch -f main FETCH_HEAD
+      if [ "$route" = fleet-recover-ff ]; then
+        printf '\n# Further repository template update.\n' >> "$dir/upstream/bin/fm-pr-poll.sh"
+        git -C "$dir/upstream" add bin/fm-pr-poll.sh
+        git -C "$dir/upstream" commit -qm further-template
+      fi
+      ;;
+  esac
+  git -C "$dir/upstream" push -q origin main
+  case "$route" in
+    update)
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" PATH="$dir/fakebin:$BASE_PATH" \
+        "$dir/root/bin/fm-update.sh" > "$dir/update.out" 2> "$dir/update.err" ;;
+    fleet|fleet-recover-*)
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" PATH="$dir/fakebin:$BASE_PATH" \
+        "$dir/root/bin/fm-fleet-sync.sh" "$dir/root" > "$dir/update.out" 2> "$dir/update.err" ;;
+    secondmate|secondmate-redundant)
+      FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/parent" PATH="$dir/fakebin:$BASE_PATH" \
+        "$dir/parent/bin/fm-update.sh" > "$dir/update.out" 2> "$dir/update.err" ;;
+  esac || fail "isolated $route failed: $(cat "$dir/update.err")"
+  [ "$(git -C "$dir/root" rev-parse HEAD)" != "$old" ] || fail "fixture did not update"
+  case "$route" in
+    secondmate-redundant)
+      assert_contains "$(cat "$dir/update.out")" 'reconciled redundant divergence' 'redundant route taken'
+      if git -C "$dir/root" merge-base --is-ancestor "$old" HEAD; then fail "fixture did not diverge"; fi
+      old_identity=$(fm_pr_file_identity "$state/good-a.check.sh")
+      if FM_HOME="$watch_home" FM_ROOT_OVERRIDE="$dir/root" \
+        "$dir/root/bin/fm-pr-poll-refresh.sh" "$unique" > "$dir/unique.out" 2> "$dir/unique.err"; then
+        fail "refresh accepted nonredundant divergence"
+      fi
+      [ "$(fm_pr_file_identity "$state/good-a.check.sh")" = "$old_identity" ] || fail "refused refresh changed a watch"
+      ;;
+    fleet-recover-current)
+      assert_contains "$(cat "$dir/update.out")" 're-attached main (already current)' 'recovery without fast-forward'
+      ;;
+    fleet-recover-ff)
+      assert_contains "$(cat "$dir/update.out")" 're-attached main, synced' 'recovery with fast-forward'
+      ;;
+  esac
+  for id in good-a good-b good-c; do
+    if ! fm_pr_poll_artifacts_valid "$state" "$id" "$template"; then
+      FM_TEST_GH_LOG="$dir/gh.log" run_watcher_bounded "$watch_home" "$dir/fakebin" \
+        > "$dir/rejection.out" 2> "$dir/rejection.err" || true
+      fail "updated watch $id rejected: $(cat "$dir/rejection.out")"
+    fi
+  done
+  [ "$(fm_pr_sha256 "$state/tampered.check.sh")" = "$bad_before" ] || fail "update replaced tampered source"
+  for id in tampered unregistered swapped foreign; do
+    ! fm_pr_poll_artifacts_valid "$state" "$id" "$template" || fail "update authenticated $id"
+  done
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$watch_home" "$dir/fakebin" > "$dir/rejection.out" 2> "$dir/rejection.err" \
+    || fail "post-update watcher failed"
+  out=$(cat "$dir/rejection.out")
+  assert_contains "$out" 'rejected unauthenticated state checks:' 'unsafe watches still rejected'
+  assert_contains "$out" 'tampered.check.sh' 'tampered source still rejected'
+  assert_contains "$out" 'unregistered.check.sh' 'unregistered source still rejected'
+  assert_contains "$out" 'swapped.check.sh' 'byte-identical replacement still rejected'
+  assert_contains "$out" 'foreign.check.sh' 'foreign registered template still rejected'
+  assert_not_contains "$out" 'good-a.check.sh' 'valid watch incorrectly rejected'
+  [ ! -e "$dir/executed" ] && [ ! -e "$dir/foreign-executed" ] || fail "untrusted source executed"
+  if [[ "$route" = secondmate* ]]; then
+    [ "$(cat "$dir/home/state/untouched")" = 'parent sentinel' ] || fail "refresh touched parent state"
+    [ ! -e "$dir/home/state/good-a.check.sh" ] || fail "refresh published into parent state"
+  fi
+  # Repeating the refresh must preserve the new generation's file identities.
+  old_identity=$(fm_pr_file_identity "$state/good-a.check.sh")
+  FM_HOME="$watch_home" FM_ROOT_OVERRIDE="$dir/root" \
+    "$dir/root/bin/fm-pr-poll-refresh.sh" "$old" > "$dir/retry.out" 2> "$dir/retry.err" || true
+  [ "$(fm_pr_file_identity "$state/good-a.check.sh")" = "$old_identity" ] || fail "refresh was not idempotent"
+  ack_watcher_cycle "$state" || fail "could not acknowledge rejection control"
+  FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+    run_watcher_bounded "$watch_home" "$dir/fakebin" > "$dir/merged.out" 2> "$dir/merged.err" \
+    || fail "refreshed watch could not observe merge: $(cat "$dir/merged.err") $(cat "$dir/merged.out")"
+  assert_contains "$(cat "$dir/merged.out")" 'good-a.check.sh: merged' 'refreshed watch observes a merge'
+  [ ! -e "$state/good-a.check.sh" ] || fail "merged watch was not retired"
+  pass "$route template update refreshes several registered watches and rejects tampered or unregistered checks"
+}
+
+if [ "${1:-}" = --template-update ]; then
+  shift
+  [ "$#" -gt 0 ] || set -- update fleet secondmate secondmate-redundant fleet-recover-current fleet-recover-ff
+  for route in "$@"; do test_template_update_refreshes_registered_polls "$route"; done
+  exit 0
+fi
+
+for route in update fleet secondmate secondmate-redundant fleet-recover-current fleet-recover-ff; do test_template_update_refreshes_registered_polls "$route"; done
 
 test_parser_matrix
 test_gitlab_merge_watch
