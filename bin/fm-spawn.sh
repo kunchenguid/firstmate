@@ -2408,35 +2408,49 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
   fi
 fi
 
-# Jev Pattern 9: Pre-flight runway and token health prober
-if [ "${FM_TEST_DISABLE_JEV_PROBER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-quota-prober.sh" ]; then
+# Jev Pattern 9: pre-flight quota verdict. bin/fm-jev-quota-prober.py's header
+# owns the verdicts; quota-axi is their only source and the prober's stderr
+# (disagreement and refusal diagnostics) stays visible. Only healthy and
+# unmetered launch as requested; anything else refuses, never diverts blindly.
+# A divert target is re-probed here and must itself come back healthy, so an
+# exhausted lane cannot be launched even if a future prober path returned one.
+# The disable switch is a test seam only and is inert outside the suite.
+if ! { [ "${FM_TEST_SEAM:-}" = 1 ] && [ "${FM_TEST_DISABLE_JEV_PROBER:-0}" = 1 ]; } && [ -x "$SCRIPT_DIR/fm-jev-quota-prober.sh" ]; then
   _pre_divert_harness=$HARNESS
-  if ! "$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} >/dev/null 2>&1; then
-    _divert=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} --auto-divert 2>/dev/null || true)
-    if [ -n "$_divert" ]; then
-      eval "$_divert"
-      if [ -n "${harness:-}" ] && [ -n "${model:-}" ]; then
-        echo "jev-quota-prober: automatically diverted $HARNESS${MODEL:+:$MODEL} to viable lane $harness:$model" >&2
-        HARNESS="$harness"
-        MODEL="$model"
-        if [ "$HARNESS" != "$_pre_divert_harness" ]; then
-          # The launch template and per-harness resolution above were chosen
-          # for the original harness. A cross-harness divert must rebuild both,
-          # or the __PIBIN__ substitution below reads PI_BIN unbound under
-          # set -u and every diverted-to-pi spawn dies before launch. Divert
-          # targets are the prober's DEFAULT_SAFE lane (pi) only; another
-          # target harness needs its own resolution case added here.
-          LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
-            echo "error: no launch template for diverted harness '$HARNESS'" >&2
-            exit 1
-          }
-          case "$HARNESS" in
-          pi | pi-signed) resolve_pi_harness_launch || exit 1 ;;
-          esac
-        fi
-      fi
+  _jev_out=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$HARNESS" ${MODEL:+--model "$MODEL"} --auto-divert) || _jev_out=
+  read -r _jev_verdict _jev_harness _jev_model <<< "$_jev_out" || :
+  case "${_jev_verdict:-}" in
+  healthy | unmetered) ;;
+  diverted)
+    _jev_check=$("$SCRIPT_DIR/fm-jev-quota-prober.sh" --harness "$_jev_harness" --model "$_jev_model") || _jev_check=
+    if [ "$_jev_check" != "healthy $_jev_harness $_jev_model" ]; then
+      echo "error: jev-quota-prober divert target $_jev_harness:$_jev_model is not healthy in quota-axi (${_jev_check:-no verdict}); not launching" >&2
+      exit 1
     fi
-  fi
+    echo "jev-quota-prober: diverted $HARNESS${MODEL:+:$MODEL} to quota-axi-healthy lane $_jev_harness:$_jev_model" >&2
+    HARNESS=$_jev_harness
+    MODEL=$_jev_model
+    if [ "$HARNESS" != "$_pre_divert_harness" ]; then
+      # The launch template and per-harness resolution above were chosen
+      # for the original harness. A cross-harness divert must rebuild both,
+      # or the __PIBIN__ substitution below reads PI_BIN unbound under
+      # set -u and every diverted-to-pi spawn dies before launch. Divert
+      # targets are the prober's DIVERT_LANES (pi) only; another
+      # target harness needs its own resolution case added here.
+      LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
+        echo "error: no launch template for diverted harness '$HARNESS'" >&2
+        exit 1
+      }
+      case "$HARNESS" in
+      pi | pi-signed) resolve_pi_harness_launch || exit 1 ;;
+      esac
+    fi
+    ;;
+  *)
+    echo "error: jev-quota-prober refused $HARNESS${MODEL:+:$MODEL} (verdict: ${_jev_verdict:-none}); not launching" >&2
+    exit 1
+    ;;
+  esac
 fi
 
 # Jev Pattern 11: Auto-reconcile dormant completed babysitter seats

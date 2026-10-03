@@ -954,6 +954,81 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 
+# quota_snapshot <file> <provider>=<percent|stale:<percent>>...: a quota-axi
+# --json document for the Jev quota prober; stale rows also carry the zero
+# Codex credit balance and error the prober's own signal used to call dead.
+quota_snapshot() {
+  local file=$1 arg
+  shift
+  for arg in "$@"; do
+    jq -n --arg p "${arg%%=*}" --arg spec "${arg#*=}" '
+      ($spec | ltrimstr("stale:") | tonumber) as $pct |
+      if ($spec | startswith("stale:")) then
+        {provider: $p, windows: [{id: "weekly", percentRemaining: $pct}],
+         state: {status: "stale", stale: true, error: "Codex quota unavailable"}, credits: {remaining: 0},
+         quotaSemantics: {status: "unknown", effectiveAvailability: [{scope: "all_models", status: "unknown"}]}}
+      else
+        {provider: $p, state: {status: "fresh", stale: false}, credits: {remaining: 1},
+         quotaSemantics: {status: "known", effectiveAvailability: [{scope: "all_models", status: "known",
+           effectivePercentRemaining: $pct,
+           runway: {status: (if $pct == 0 then "exhausted_now" else "through_reset" end)}}]}}
+      end'
+  done | jq -s '{schemaVersion: 5, providers: .}' > "$file"
+}
+
+test_jev_prober_uses_quota_axi_over_inverted_codex_signal() {
+  local rec id out status
+  id=profile-jev-inverted-z1
+  rec=$(make_spawn_case jev-inverted codex "$id")
+  read_case_record "$rec"
+  quota_snapshot "$CASE_DIR/quota.json" codex=stale:89 opencode-go=0
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_QUOTA_SNAPSHOT="$CASE_DIR/quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort high 2>&1)
+  status=$?
+  expect_code 0 "$status" "codex at 89% in quota-axi should launch: $out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_contains "$(cat "$LAUNCH_LOG")" "codex --model 'gpt-5'" "codex lane was not launched as requested"
+  assert_contains "$out" "DISAGREEMENT codex:gpt-5: prober=exhausted" "spawn hid the prober disagreement"
+  assert_contains "$out" "quota-axi=healthy (weekly 89% remaining (stale reading)); using quota-axi" \
+    "spawn diagnostic did not name the quota-axi value"
+  pass "spawn launches codex at quota-axi 89% and surfaces the inverted prober signal"
+}
+
+test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target() {
+  local rec id out status
+  id=profile-jev-dry-z2
+  rec=$(make_spawn_case jev-dry codex "$id")
+  read_case_record "$rec"
+  quota_snapshot "$CASE_DIR/quota.json" codex=0 opencode-go=0
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_QUOTA_SNAPSHOT="$CASE_DIR/quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 2>&1)
+  status=$?
+  expect_code 1 "$status" "exhausted codex with an exhausted divert target must refuse: $out"
+  assert_contains "$out" "no divert lane is healthy in quota-axi" "refusal did not name the missing divert"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "opencode-go" "spawn launched the exhausted opencode-go lane"
+  assert_equals "" "$(cat "$LAUNCH_LOG")" "a refused spawn launched something"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn wrote metadata"
+  pass "spawn refuses an exhausted lane rather than diverting to an exhausted target"
+}
+
+test_jev_prober_diverts_exhausted_codex_to_healthy_pi_lane() {
+  local rec id out status
+  id=profile-jev-divert-z3
+  rec=$(make_spawn_case jev-divert codex "$id")
+  read_case_record "$rec"
+  quota_snapshot "$CASE_DIR/quota.json" codex=0 opencode-go=40
+
+  out=$(FM_TEST_DISABLE_JEV_PROBER=0 FM_TEST_QUOTA_SNAPSHOT="$CASE_DIR/quota.json" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 2>&1)
+  status=$?
+  expect_code 0 "$status" "exhausted codex should divert to the healthy pi lane: $out"
+  assert_contains "$(cat "$LAUNCH_LOG")" "--model 'opencode-go/glm-5.3-flash'" "divert did not launch the healthy pi lane"
+  assert_contains "$out" "diverted codex:gpt-5 to quota-axi-healthy lane pi:opencode-go/glm-5.3-flash" "divert was not announced"
+  pass "spawn diverts an exhausted lane only to a quota-axi-healthy target"
+}
+
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
   local harness version rec id out status launch
   for harness in pi pi-signed; do
@@ -1847,6 +1922,9 @@ test_native_pi_ultra_is_explicit_and_model_scoped
 test_batch_preserves_native_ultra
 test_pi_scout_launch_enters_recorded_worktree
 test_pi_threads_model_and_max_effort
+test_jev_prober_uses_quota_axi_over_inverted_codex_signal
+test_jev_prober_refuses_exhausted_lane_with_exhausted_divert_target
+test_jev_prober_diverts_exhausted_codex_to_healthy_pi_lane
 test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata

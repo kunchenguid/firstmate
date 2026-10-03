@@ -1,0 +1,239 @@
+{
+ "schemaVersion": 5,
+ "providers": [
+  {
+   "provider": "claude",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "codex",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "grok",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "kimi",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "cursor",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "agy",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "devin",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "zai",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "provider": "opencode-go",
+   "state": {
+    "status": "fresh",
+    "stale": false
+   },
+   "windows": [
+    {
+     "id": "weekly",
+     "percentRemaining": 100
+    }
+   ],
+   "quotaSemantics": {
+    "status": "known",
+    "effectiveAvailability": [
+     {
+      "scope": "all_models",
+      "status": "known",
+      "effectivePercentRemaining": 100,
+      "runway": {
+       "status": "through_reset"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}
