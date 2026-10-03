@@ -61,7 +61,7 @@ For a Firstmate-managed task, include an explicit status instruction:
 
 ```text
 Append supervisor-visible status lines to <absolute-firstmate-home>/state/<task-id>.status.
-Use the status states and line format the task brief defines, including its `resolved` closing line; `bin/fm-brief.sh` owns that rule.
+Use the status states and line format the task brief defines, including its `resolved` closing line.
 Follow the task brief's status-reporting rule for declaring and resolving waits; bin/fm-brief.sh owns that rule.
 Before doing substantive work, append "working: Codex Desktop thread started".
 ```
