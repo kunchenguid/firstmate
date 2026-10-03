@@ -109,7 +109,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      printf '%s\n' "${BASHPID:-$(exec /bin/sh -c 'printf "%s\n" "$PPID"')}" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +211,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      echo "${BASHPID:-$(exec /bin/sh -c '\''printf "%s\n" "$PPID"'\'')}" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -219,6 +219,8 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   ' _ "$ROOT" "$dir"
   wait_for_file "$dir/watchdog"
   watchdog=$(cat "$dir/watchdog")
+  [ -n "$watchdog" ] || fail "watchdog PID was empty (BASHPID fallback produced no PID under restricted PATH)"
+  case "$watchdog" in ''|*[!0-9]*) fail "watchdog PID '$watchdog' is not numeric" ;; esac
   started=$SECONDS
   while kill -0 "$watchdog" 2>/dev/null; do
     if [ "$((SECONDS - started))" -ge 15 ]; then
@@ -228,6 +230,32 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
     sleep 0.02
   done
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
+}
+
+test_owner_detection_swaps_to_ppid_when_bashpid_absent() {
+  local out rc=0
+  out=$(bash -c '
+    set -u
+    unset BASHPID
+    owner=$$
+    self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}
+    [ "$owner" = "$self" ] || { echo "top-level self mismatch bash: owner=$owner self=$self"; exit 1; }
+    [ "$owner" != "$self" ] || owner=$PPID
+    [ "$owner" = "$PPID" ] || { echo "swap failed bash top-level: owner=$owner PPID=$PPID self=$self"; exit 1; }
+    ( owner=$$; self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}; [ "$owner" != "$self" ] || { echo "subshell not detected bash"; exit 1; }; echo ok )
+  ') || rc=$?
+  [ "$rc" -eq 0 ] || fail "owner swap failed with unset BASHPID (bash): $out rc=$rc"
+  out=$(/bin/bash -c '
+    set -u
+    owner=$$
+    self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}
+    [ "$owner" = "$self" ] || { echo "top-level mismatch bash3.2: owner=$owner self=$self"; exit 1; }
+    [ "$owner" != "$self" ] || owner=$PPID
+    [ "$owner" = "$PPID" ] || { echo "swap failed bash3.2 top-level: owner=$owner PPID=$PPID self=$self"; exit 1; }
+    ( owner=$$; self=${BASHPID:-$(exec /bin/sh -c '\''echo "$PPID"'\'')}; [ "$owner" != "$self" ] || { echo "subshell fail bash3.2"; exit 1; }; echo ok )
+  ') || rc=$?
+  [ "$rc" -eq 0 ] || fail "owner swap failed on bash 3.2: $out rc=$rc"
+  pass "owner detection swaps to PPID when BASHPID is absent"
 }
 
 # perl is preferred whenever it exists, because only its watchdog can reap a
@@ -327,6 +355,11 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
   pass 'fm_run_timed passes a natural exit through when the bound fired after completion'
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_passes_the_command_status_and_output_through
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
@@ -337,6 +370,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_owner_detection_swaps_to_ppid_when_bashpid_absent
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
