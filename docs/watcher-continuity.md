@@ -420,6 +420,7 @@ It then simulates actionable and empty child closes against the actual Pi and Op
 - Verifies single-flight behavior.
 - Changes the session lock before close to prove ownership is rechecked.
 - Hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
+- Empties the fleet before OpenCode restoration to prove it stops cleanly with no failure message and no retry, while a successor that should have armed but never becomes ready still reports its typed failure.
 
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, plus:
 
