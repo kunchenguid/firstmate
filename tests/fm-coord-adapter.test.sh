@@ -34,7 +34,7 @@ field() { python3 -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]
 
 make_home offline
 make_brief offline base 1
-adapter "$tmp/offline" dispatch offline "$repo" "$tmp/offline.brief" branch/offline codex > "$tmp/offline.out" 2> "$tmp/offline.err" || fail 'offline dispatch must stay advisory'
+adapter "$tmp/offline" dispatch offline "$repo" "$repo" "$tmp/offline.brief" branch/offline codex > "$tmp/offline.out" 2> "$tmp/offline.err" || fail 'offline dispatch must stay advisory'
 case "$(cat "$tmp/offline.err")" in *'no claim granted'*) ;; *) fail 'offline dispatch must warn no grant' ;; esac
 python3 - "$tmp/offline/state/fm-coord-adapter.json" <<'PY' || fail 'offline request must be persisted'
 import json,sys
@@ -72,7 +72,7 @@ for harness in claude codex omp opencode; do
   if [ "$harness" = omp ]; then
     printf 'Coordination resources: [{"type":"area","name":"api-alias"}]\nCoordination issue: owner/repo#13\n' > "$tmp/omp.brief"
   fi
-  adapter "$tmp/$harness" dispatch "$harness" "$repo" "$tmp/$harness.brief" "branch/$harness" "$harness" > /dev/null 2> "$tmp/$harness.err" || fail "$harness dispatch must complete"
+  adapter "$tmp/$harness" dispatch "$harness" "$repo" "$repo" "$tmp/$harness.brief" "branch/$harness" "$harness" > /dev/null 2> "$tmp/$harness.err" || fail "$harness dispatch must complete"
   python3 - "$tmp/$harness/state/fm-coord-adapter.json" "$harness" <<'PY' || fail "$harness must use the shared intent and event protocol"
 import json,sys
 state=json.load(open(sys.argv[1]))
@@ -90,7 +90,7 @@ pass 'Claude Code, Codex, omp, and OpenCode enroll with the same protocol'
 
 make_home missing-adapter
 make_brief missing-adapter missing 100
-adapter "$tmp/missing-adapter" dispatch missing-adapter "$repo" "$tmp/missing-adapter.brief" branch/missing cursor > /dev/null 2> "$tmp/missing-adapter.err" || fail 'missing harness adapter remains advisory'
+adapter "$tmp/missing-adapter" dispatch missing-adapter "$repo" "$repo" "$tmp/missing-adapter.brief" branch/missing cursor > /dev/null 2> "$tmp/missing-adapter.err" || fail 'missing harness adapter remains advisory'
 case "$(cat "$tmp/missing-adapter.err")" in *'cursor has no coordination adapter'*) ;; *) fail 'missing harness adapter must be visible' ;; esac
 pass 'missing harness adapter fails visibly without claiming authority'
 
@@ -104,7 +104,7 @@ while [ "$#" -gt 1 ]; do shift; done
 exec /bin/bash -c "$1"
 SH
 chmod +x "$tmp/sshbin/ssh"
-PATH="$tmp/sshbin:$PATH" adapter "$tmp/remote-home" dispatch remote-home "$repo" "$tmp/remote-home.brief" branch/remote codex > /dev/null 2> "$tmp/remote.err" || fail 'remote transport must dispatch'
+PATH="$tmp/sshbin:$PATH" adapter "$tmp/remote-home" dispatch remote-home "$repo" "$repo" "$tmp/remote-home.brief" branch/remote codex > /dev/null 2> "$tmp/remote.err" || fail 'remote transport must dispatch'
 python3 - "$tmp/remote-home/state/fm-coord-adapter.json" <<'PY' || fail 'remote transport must return central claim'
 import json,sys
 assert json.load(open(sys.argv[1]))['tasks']['remote-home']['claim']['ok'] is True
@@ -117,7 +117,7 @@ printf '{"mode":"advisory","home_id":"remote-offline","repos":["owner/repo"],"re
 mkdir -p "$tmp/sshdown"
 printf '#!/usr/bin/env bash\nexit 255\n' > "$tmp/sshdown/ssh"
 chmod +x "$tmp/sshdown/ssh"
-PATH="$tmp/sshdown:$PATH" adapter "$tmp/remote-offline" dispatch remote-offline "$repo" "$tmp/remote-offline.brief" branch/offline-remote opencode > /dev/null 2> "$tmp/remote-offline.err" || fail 'offline remote dispatch remains advisory'
+PATH="$tmp/sshdown:$PATH" adapter "$tmp/remote-offline" dispatch remote-offline "$repo" "$repo" "$tmp/remote-offline.brief" branch/offline-remote opencode > /dev/null 2> "$tmp/remote-offline.err" || fail 'offline remote dispatch remains advisory'
 case "$(cat "$tmp/remote-offline.err")" in *'no claim granted'*) ;; *) fail 'offline SSH participant must warn no grant' ;; esac
 PATH="$tmp/sshbin:$PATH" adapter "$tmp/remote-offline" replay > /dev/null 2> "$tmp/remote-replay.err" || fail 'offline remote replay must complete'
 python3 - "$tmp/remote-offline/state/fm-coord-adapter.json" <<'PY' || fail 'remote replay must obtain central grant'
@@ -128,7 +128,7 @@ pass 'remote outage journals intent and replays after the authority returns'
 
 make_home challenger
 make_brief challenger base 99
-adapter "$tmp/challenger" dispatch challenger "$repo" "$tmp/challenger.brief" branch/challenger claude > /dev/null 2> "$tmp/conflict.err" || fail 'conflict remains advisory'
+adapter "$tmp/challenger" dispatch challenger "$repo" "$repo" "$tmp/challenger.brief" branch/challenger claude > /dev/null 2> "$tmp/conflict.err" || fail 'conflict remains advisory'
 case "$(cat "$tmp/conflict.err")" in *'held by offline'*) ;; *) fail 'conflict must name holder' ;; esac
 pass 'pre-dispatch conflict names current holder'
 adapter "$tmp/challenger" pre-push challenger "$repo" > /dev/null 2>&1 || fail 'refused task push checkpoint must stay advisory'
@@ -267,19 +267,43 @@ spawn_wt=$tmp/spawn-wt
 fm_test_spawn_home "$spawn_home" codex
 fm_git_worktree "$spawn_repo" "$spawn_wt" fixture-slot
 git -C "$spawn_repo" fetch -q origin
+git clone -q "$spawn_repo.origin.git" "$tmp/spawn-upstream"
+printf 'upstream\n' > "$tmp/spawn-upstream/upstream.txt"
+git -C "$tmp/spawn-upstream" add upstream.txt
+git -C "$tmp/spawn-upstream" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm upstream
+git -C "$tmp/spawn-upstream" push -q origin HEAD:main
 fm_test_spawn_brief "$spawn_home" spawned
 printf 'Coordination resources: [{"type":"file","name":"README.md"}]\n' >> "$spawn_home/data/spawned/brief.md"
 printf '{"mode":"advisory","home_id":"spawn-home","repos":["owner/repo"],"db":"%s","project_repos":{"%s":"owner/repo"}}\n' "$db" "$spawn_repo" > "$spawn_home/config/coordination.json"
 fakebin=$(fm_test_make_spawn_fakebin "$tmp/spawn-fake")
 fm_test_run_spawn "$spawn_home" "$spawn_wt" "$fakebin" spawned "$spawn_repo" --mode direct-PR --yolo off --harness codex > "$tmp/spawn.out" || fail 'configured spawn must remain operational'
-python3 - "$spawn_home/state/fm-coord-adapter.json" "$spawn_home/data/spawned/launch-brief.md" <<'PY' || fail 'spawn must submit intent and render worker checkpoints'
+python3 - "$spawn_home/state/fm-coord-adapter.json" "$spawn_home/data/spawned/launch-brief.md" "$(git -C "$spawn_wt" rev-parse HEAD)" "$(git -C "$tmp/spawn-upstream" rev-parse HEAD)" <<'PY' || fail 'spawn must submit intent and render worker checkpoints'
 import json,sys
 state=json.load(open(sys.argv[1]))
 brief=open(sys.argv[2]).read()
 assert state['tasks']['spawned']['claim']['ok'] is True
+assert state['tasks']['spawned']['base_oid']==sys.argv[3]==sys.argv[4], (state['tasks']['spawned']['base_oid'], sys.argv[3], sys.argv[4])
 assert 'pre-push' in brief and 'pre-ci' in brief and 'heartbeat' in brief
 PY
-pass 'spawn submits declared resources and projects the same adapter into worker brief'
+pass 'spawn records the refreshed worker start commit as the intent base and projects the adapter into the worker brief'
+
+abort_wt=$tmp/spawn-abort-wt
+git -C "$spawn_repo" worktree add --quiet -b abort-slot "$abort_wt"
+fm_test_spawn_brief "$spawn_home" aborted
+printf 'Coordination resources: [{"type":"file","name":"src/aborted.py"}]\n' >> "$spawn_home/data/aborted/brief.md"
+mkdir -p "$spawn_home/user-home/.claude.json"
+if fm_test_run_spawn "$spawn_home" "$abort_wt" "$fakebin" aborted "$spawn_repo" --mode direct-PR --yolo off --harness claude > "$tmp/spawn-abort.out"; then
+  fail 'spawn with unwritable Claude trust must abort'
+fi
+rmdir "$spawn_home/user-home/.claude.json"
+python3 - "$spawn_home/state/fm-coord-adapter.json" "$(coord view)" <<'PY' || fail "aborted spawn must release the claim its dispatch acquired: $(cat "$tmp/spawn-abort.out")"
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['aborted']
+view=json.loads(sys.argv[2])
+assert 'claim' not in task and not task.get('pending_dispatch'), task
+assert not any(c['intent_id'].startswith('spawn-home:owner/repo:aborted') for c in view['claims']), view['claims']
+PY
+pass 'a spawn that aborts before launch releases the claim its dispatch acquired'
 
 git -C "$repo" worktree add -q --detach "$tmp/lag-wt" main
 printf 'upstream\n' > "$tmp/lag-wt/src/upstream.py"
@@ -288,7 +312,7 @@ git -C "$tmp/lag-wt" commit -qm upstream
 git -C "$repo" update-ref refs/remotes/origin/main "$(git -C "$tmp/lag-wt" rev-parse HEAD)"
 make_home lag
 make_brief lag lag 103
-adapter "$tmp/lag" dispatch lag "$repo" "$tmp/lag.brief" branch/lag codex > /dev/null 2>&1 || fail 'lagging-main dispatch must complete'
+adapter "$tmp/lag" dispatch lag "$repo" "$tmp/lag-wt" "$tmp/lag.brief" branch/lag codex > /dev/null 2>&1 || fail 'lagging-main dispatch must complete'
 printf 'lag\n' > "$tmp/lag-wt/src/lag.py"
 git -C "$tmp/lag-wt" add src/lag.py
 git -C "$tmp/lag-wt" commit -qm lag
@@ -296,10 +320,41 @@ adapter "$tmp/lag" pre-push lag "$tmp/lag-wt" > /dev/null 2> "$tmp/lag.err" || f
 case "$(cat "$tmp/lag.err")" in *upstream.py*) fail 'upstream commits must not count as undeclared task paths' ;; esac
 pass 'scope diff starts at the origin base, not a lagging local main'
 
+make_home blocked
+make_brief blocked blocked 104
+git -C "$repo" worktree add -q --detach "$tmp/blocked-wt" origin/main
+adapter "$tmp/blocked" dispatch blocked "$repo" "$tmp/blocked-wt" "$tmp/blocked.brief" branch/blocked codex > /dev/null 2>&1 || fail 'blocked-scope dispatch must complete'
+printf 'taken\n' > "$tmp/blocked-wt/src/opencode.py"
+git -C "$tmp/blocked-wt" add src/opencode.py
+git -C "$tmp/blocked-wt" commit -qm taken
+adapter "$tmp/blocked" pre-push blocked "$tmp/blocked-wt" > /dev/null 2> "$tmp/blocked.err" || fail 'refused amendment push checkpoint must stay advisory'
+case "$(cat "$tmp/blocked.err")" in *'head not published'*) ;; *) fail "refused amendment must warn that the head is unpublished: $(cat "$tmp/blocked.err")" ;; esac
+python3 - "$db" "$(adapter "$tmp/blocked" view)" <<'PY' || fail 'a head with unclaimed changed paths must not be published centrally'
+import json,sqlite3,sys
+assert sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM heads WHERE intent_id LIKE 'blocked:%'").fetchone()[0]==0
+pending={p['operation'] for p in json.loads(sys.argv[2])['local_pending'] if p['key']=='blocked'}
+assert pending>={'pre-push','scope-amend'}, pending
+PY
+pass 'a refused scope amendment keeps the head unpublished and the unclaimed scope pending'
+
+git init -q "$tmp/nobase"
+git -C "$tmp/nobase" -c user.name=Fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m nobase
+make_home nobase
+printf '{"mode":"shadow","home_id":"nobase","repos":["owner/repo"],"db":"%s","project_repos":{"%s":"owner/repo"}}\n' "$db" "$(cd "$tmp/nobase" && pwd -P)" > "$tmp/nobase/config/coordination.json"
+make_brief nobase nobase 105
+adapter "$tmp/nobase" dispatch nobase "$tmp/nobase" "$tmp/nobase" "$tmp/nobase.brief" branch/nobase codex > /dev/null 2> "$tmp/nobase.err" || fail "missing origin base must stay advisory: $(cat "$tmp/nobase.err")"
+case "$(cat "$tmp/nobase.err")" in *'origin/main is missing'*) ;; *) fail 'missing origin base must warn' ;; esac
+python3 - "$tmp/nobase/state/fm-coord-adapter.json" <<'PY' || fail 'missing origin base must record an explicit no-base intent'
+import json,sys
+task=json.load(open(sys.argv[1]))['tasks']['nobase']
+assert task['base_oid'] is None and 'claim' not in task and not task['pending_dispatch']
+PY
+pass 'a missing origin base records an explicit unsubmitted no-base intent'
+
 make_home scaffold
 mkdir -p "$tmp/scaffold/data"
 FM_HOME="$tmp/scaffold" "$ROOT/bin/fm-brief.sh" scaffold some-proj --mode local-only > /dev/null 2>&1 || fail 'coordinated brief must scaffold'
-adapter "$tmp/scaffold" dispatch scaffold "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold.err" || fail 'empty declaration dispatch must stay advisory'
+adapter "$tmp/scaffold" dispatch scaffold "$repo" "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold.err" || fail 'empty declaration dispatch must stay advisory'
 case "$(cat "$tmp/scaffold.err")" in *'no coordination resources'*unclaimed*) ;; *) fail 'empty declaration must warn it is unclaimed' ;; esac
 python3 - "$tmp/scaffold/state/fm-coord-adapter.json" <<'PY' || fail 'empty declaration must be recorded as an unclaimed local intent'
 import json,sys
@@ -307,7 +362,7 @@ task=json.load(open(sys.argv[1]))['tasks']['scaffold']
 assert task['declared']==[] and 'claim' not in task
 PY
 sed -i.bak 's#^Coordination resources: \[\]$#Coordination resources: [{"type":"file","name":"src/scaffold.py"}]#' "$tmp/scaffold/data/scaffold/brief.md"
-adapter "$tmp/scaffold" dispatch scaffold "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold-filled.err" || fail "filled declaration must replace the unsubmitted one: $(cat "$tmp/scaffold-filled.err")"
+adapter "$tmp/scaffold" dispatch scaffold "$repo" "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold-filled.err" || fail "filled declaration must replace the unsubmitted one: $(cat "$tmp/scaffold-filled.err")"
 python3 - "$tmp/scaffold/state/fm-coord-adapter.json" <<'PY' || fail 'filled declaration must be submitted and claimed'
 import json,sys
 assert json.load(open(sys.argv[1]))['tasks']['scaffold']['claim']['ok'] is True
@@ -315,7 +370,7 @@ PY
 mkdir -p "$tmp/plain/data"
 FM_HOME="$tmp/plain" "$ROOT/bin/fm-brief.sh" plain some-proj --mode local-only > /dev/null 2>&1 || fail 'uncoordinated brief must scaffold'
 if grep -q 'Coordination resources' "$tmp/plain/data/plain/brief.md"; then fail 'uncoordinated brief must not scaffold a coordination declaration'; fi
-adapter "$tmp/plain" dispatch plain "$repo" "$tmp/plain/data/plain/brief.md" branch/plain codex > /dev/null 2> "$tmp/plain.err" || fail 'uncoordinated dispatch must be a no-op'
+adapter "$tmp/plain" dispatch plain "$repo" "$repo" "$tmp/plain/data/plain/brief.md" branch/plain codex > /dev/null 2> "$tmp/plain.err" || fail 'uncoordinated dispatch must be a no-op'
 [ ! -s "$tmp/plain.err" ] && [ ! -e "$tmp/plain/state/fm-coord-adapter.json" ] || fail 'uncoordinated dispatch must record nothing'
 pass 'coordination scaffold follows home enrollment; an empty declaration is a visible unclaimed intent'
 
@@ -338,7 +393,7 @@ db.execute("UPDATE meta SET value='previous-boot' WHERE key='boot_id'")
 db.commit()
 PY
 printf '## Firstmate spec\nCoordination resources: [{"type":"file","name":"src/claude-b.py"}]\n' > "$tmp/claude-b.brief"
-adapter "$tmp/claude" dispatch claude-b "$repo" "$tmp/claude-b.brief" branch/claude-b claude > /dev/null 2> "$tmp/reboot.err" || fail 'post-reboot dispatch must complete'
+adapter "$tmp/claude" dispatch claude-b "$repo" "$repo" "$tmp/claude-b.brief" branch/claude-b claude > /dev/null 2> "$tmp/reboot.err" || fail 'post-reboot dispatch must complete'
 adapter "$tmp/claude" pre-ci claude > /dev/null 2>&1 || fail 'post-reboot checkpoint must complete'
 adapter "$tmp/claude" pre-ci claude > /dev/null 2> "$tmp/reboot-ci.err" || fail 'recovered checkpoint must complete'
 [ ! -s "$tmp/reboot-ci.err" ] || fail "recovered writer must check cleanly: $(cat "$tmp/reboot-ci.err")"

@@ -184,6 +184,9 @@ class Adapter:
 
     def ensure_task(self, task_id):
         task = self.state["tasks"][task_id]
+        if task["base_oid"] is None:
+            warn(f"{task_id}: no base recorded; intent recorded locally as unclaimed")
+            return task
         if not task["declared"]:
             warn(f"{task_id}: brief declares no coordination resources; intent recorded locally as unclaimed")
             return task
@@ -211,7 +214,7 @@ class Adapter:
             self.save()
         return task
 
-    def dispatch(self, task_id, project, brief, branch, harness):
+    def dispatch(self, task_id, project, worktree, brief, branch, harness):
         if harness not in {"claude", "codex", "omp", "opencode"}:
             warn(f"{task_id}: {harness} has no coordination adapter; dispatch continues without a grant")
             return
@@ -220,19 +223,23 @@ class Adapter:
         if repo not in self.config["repos"]:
             raise ValueError(f"{repo} is outside coordination enrollment")
         base = self.config.get("base", "main")
-        base_oid = git(project, "rev-parse", f"origin/{base}")
-        if not OID.fullmatch(base_oid):
-            raise ValueError("base does not resolve to a full Git OID")
+        if subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "--quiet", f"origin/{base}^{{commit}}"], capture_output=True, check=False).returncode:
+            warn(f"{task_id}: origin/{base} is missing; intent has no base and is not submitted")
+            base_oid = None
+        else:
+            base_oid = git(worktree, "rev-parse", "HEAD")
+            if not OID.fullmatch(base_oid):
+                raise ValueError("worker start commit is not a full Git OID")
         key = f"{repo}:{task_id}"
         task = self.state["tasks"].get(task_id)
         if task is not None and (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue):
             if "reply" in self.state["requests"].get(f"{task_id}:submit", {}):
                 raise ValueError(f"{task_id}: coordination declaration changed after submission")
             self.reset_task(task_id)
-            task.update({"repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "declared": resources, "issue": issue, "harness": harness, "pending_dispatch": bool(resources)})
+            task.update({"repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "declared": resources, "issue": issue, "harness": harness, "pending_dispatch": bool(resources and base_oid)})
             self.save()
         if task is None:
-            task = {"intent_id": f"{self.config['home_id']}:{key}", "repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "goal": task_id, "declared": resources, "issue": issue, "harness": harness, "pending_paths": [], "pending_dispatch": bool(resources)}
+            task = {"intent_id": f"{self.config['home_id']}:{key}", "repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "goal": task_id, "declared": resources, "issue": issue, "harness": harness, "pending_paths": [], "pending_dispatch": bool(resources and base_oid)}
             self.state["tasks"][task_id] = task
             self.save()
         self.ensure_task(task_id)
@@ -287,6 +294,9 @@ class Adapter:
                 for conflict in amended["conflicts"]:
                     warn(f"{task_id}: amendment conflict held by {conflict['home_id']} intent {conflict['intent_id']}")
         if not live:
+            return
+        if task["pending_paths"]:
+            warn(f"{task_id}: head not published; changed paths have no confirmed claim: {', '.join(task['pending_paths'])}")
             return
         head = git(worktree, "rev-parse", "HEAD")
         for key, item in list(self.state["requests"].items()):
@@ -355,6 +365,19 @@ class Adapter:
             task.pop("renew_key", None)
             self.save()
 
+    def release(self, task_id):
+        task = self.state["tasks"].get(task_id)
+        if not task:
+            return
+        claim = task.get("claim")
+        if claim and self.call("release", {"request_id": str(uuid.uuid4()), "home_id": self.config["home_id"], "generation": self.state["requests"]["session"]["reply"]["generation"], "claim_id": claim["claim_id"], "fence": claim["fence"]}) is None:
+            warn(f"{task_id}: aborted spawn claim not released; it lapses at lease expiry")
+        self.reset_task(task_id)
+        for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths"):
+            task.pop(flag, None)
+        self.save()
+        self.reset = False
+
     def view(self):
         central = self.call("view", {})
         pending = [{"key": key, "operation": item["op"], "request_id": item["payload"]["request_id"]} for key, item in self.state["requests"].items() if "reply" not in item]
@@ -363,7 +386,7 @@ class Adapter:
 
 
 def run(adapter, command):
-    if command == "dispatch" and len(sys.argv) == 7:
+    if command == "dispatch" and len(sys.argv) == 8:
         adapter.dispatch(*sys.argv[2:])
     elif command == "pre-push" and len(sys.argv) == 4:
         task = adapter.state["tasks"].get(sys.argv[2])
@@ -382,6 +405,8 @@ def run(adapter, command):
         if adapter.live_claim(sys.argv[2]) and task:
             task.pop("pending_ci", None)
             adapter.save()
+    elif command == "release" and len(sys.argv) == 3:
+        adapter.release(sys.argv[2])
     elif command == "replay" and len(sys.argv) == 2:
         adapter.replay()
     elif command == "view" and len(sys.argv) == 2:
@@ -391,8 +416,8 @@ def run(adapter, command):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK|heartbeat TASK|replay|view>", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "release", "replay", "view"}:
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:
