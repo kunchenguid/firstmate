@@ -26,9 +26,9 @@ FM_OPERATIONAL_MARK=$'\xE2\x81\xA3'
 FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "
 FM_OPERATIONAL_VERSION=v1
 FM_OPERATIONAL_HEADER_PREFIX="${FM_OPERATIONAL_PREFIX}${FM_OPERATIONAL_VERSION} "
-FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome'
+FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard launch-brief branch-outcome'
 
-# Compatibility name retained for the away-mode owner and its tests.
+# Compatibility name retained for historical integrations and transcript tests.
 # shellcheck disable=SC2034 # Public source-library variable used by callers.
 FM_INJECT_MARK=$FM_OPERATIONAL_MARK
 
@@ -162,7 +162,7 @@ Usage:
   bin/fm-operational-input.sh body           # current input on stdin
 
 Current construction kinds:
-  session-start watcher turn-end-guard away-supervisor launch-brief
+  session-start watcher turn-end-guard launch-brief
   branch-outcome
 EOF
 }

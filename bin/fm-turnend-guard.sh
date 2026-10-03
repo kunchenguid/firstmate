@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turn-end supervision guard for Pi and Codex primary sessions.
 # Exit 2 requests one bounded continuation when supervision is required but
-# neither the watcher nor the authorized away daemon proves current ownership.
+# the watcher does not prove current ownership.
 # Pi supplies the passive-event continuation; Codex preserves the hook status.
 # Linked worker worktrees remain exempt under fm-primary-scope-lib.sh.
 set -u
@@ -67,31 +67,11 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
-# Away mode transfers supervision ownership from the watcher to the away-mode
-# daemon, which runs the watcher one-shot and starts its replacement after every
-# wake (bin/fm-supervise-daemon.sh). A turn boundary regularly lands in that
-# hand-off, when no watcher process holds the lock and nothing is wrong, so
-# requiring one here alarmed on healthy away-mode supervision. A live
-# identity-matched daemon holding this home is the right owner to test for.
-# The beacon half of the predicate still applies: a daemon that stops
-# restarting its watcher still blocks once the beacon passes grace, and a home
-# with no daemon and no watcher blocks exactly as before. It uses AFK_GRACE
-# (poll-cadence-derived, see the comment above) instead of the flat $GRACE
-# every other check on this page uses, so a daemon that is genuinely still
-# cycling - just slower than a fixed 300s window - is not misread as down.
-AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
-if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
-  && fm_afk_daemon_owns_supervision "$STATE"; then
-  allow_supervised_stop
-fi
-
 block_stop() {
-  local afk x_mode reason rule
-  afk=0
-  [ -e "$STATE/.afk" ] && afk=1
+  local x_mode reason rule
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
-  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
+  reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
   rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {

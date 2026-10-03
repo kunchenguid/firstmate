@@ -180,29 +180,9 @@ print_model() {  # <json-model>
   printf '%s\n' "$toon"
 }
 
-# The shared read-only away-return owner is consulted, not obeyed. An active
-# away window still refuses here: the correct answer to a bearings request then
-# is to run the return first. Return CATCH-UP is different - the captain is
-# back and asking for the picture, so the catch-up posture is reported as
-# content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
-# owns both the gate format and the branch distinction; bearings reproduces
-# neither. Acting on the fleet still waits for its `check`.
+# Removed away/quiet mode records are preserved as private historical evidence,
+# but they no longer gate a fresh Bearings snapshot.
 RETURN_CATCHUP=null
-GUARD_RC=0
-GUARD_ERR=$("$SCRIPT_DIR/fm-afk-return.sh" guard 2>&1 >/dev/null) || GUARD_RC=$?
-if [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
-  [ -z "$GUARD_ERR" ] || printf '%s\n' "$GUARD_ERR" >&2
-  exit "$GUARD_RC"
-fi
-if [ "$GUARD_RC" -eq 4 ]; then
-  CATCHUP_LINE=$("$SCRIPT_DIR/fm-afk-return.sh" catchup-summary) || CATCHUP_LINE=""
-  CATCHUP_BLOCKERS=${CATCHUP_LINE%%$'\t'*}
-  case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
-  CATCHUP_REASON=""
-  case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
-  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
-    '{pending:true,blockers:$blockers,reason:$reason}')
-fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ -n "$TASK_ID" ]; then

@@ -241,7 +241,7 @@ For ordinary Codex and TraeX state, `bin/fm-busy-lib.sh` combines Herdr's native
 `working` is busy; `idle`, `done`, `blocked`, and `waiting` are idle.
 If the native state is unrecognized but the exact worker process is alive, it is also treated as idle; an exited process is dead and inconclusive liveness is unknown.
 This is intentionally presentation-coarse: an unrecognized live UI can be reported idle.
-A matching no-mistakes run remains authoritative, and native idle never proves the task was read, handled, accepted, or completed.
+A matching no-mistakes run for a task whose recorded mode is legacy remains authoritative recovery evidence, and native idle never proves the task was read, handled, accepted, or completed.
 
 ## Composer and injection safety
 
@@ -255,13 +255,11 @@ ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
 
-A bare shell prompt is never an empty agent composer.
-Away-mode injection proceeds only on an affirmative `empty` result, never on unknown.
-This prevents a dead agent pane from receiving and possibly executing an escalation as shell input.
+A bare shell prompt is never an empty agent composer. This prevents any operational input from reaching a dead agent pane and possibly executing as shell input.
 
 The current operational envelope starts with U+2063 and `FIRSTMATE_OP: `.
 U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control separator that could erase the visible routing label.
-`bin/fm-operational-input.sh` owns current operational construction and parsing, and the AFK skill owns legacy away-input compatibility.
+`bin/fm-operational-input.sh` owns current operational construction and parsing.
 No Herdr-specific copy of that protocol exists.
 
 ## Restart and liveness behavior
@@ -304,22 +302,6 @@ There is still one watcher process; the event reader is a bounded child of that 
 
 `tests/fm-backend-herdr-eventwait-smoke.test.sh`, `tests/fm-transition-lib.test.sh`, and `tests/fm-supervision-events.test.sh` cover capability, subscribe-then-reconcile ordering, dedupe, exemptions, and polling fallback.
 
-## Away-mode supervisor support
-
-The away daemon supports Herdr supervisor panes only.
-It refuses every retired or unknown supervisor backend rather than applying the wrong transport.
-For Herdr, target existence, native state, capture, composer state, and native prompt submission all route through the shared backend dispatcher and the explicit named-session CLI owner.
-The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
-
-Harnesses with native tracked background execution can run the daemon in their terminal.
-Pi no longer launches the away daemon; their ordinary supervision session continues under the posture record.
-For another harness without native tracked background execution, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
-It never splits the captain's active tab and never uses shell `&`.
-Recovery reconciles only the recorded exact id.
-
-On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
-A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
-
 ## Destructive lab safety
 
 Never use ambient `herdr server stop` for Firstmate verification.
@@ -339,7 +321,6 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
-- Only Herdr hosts the away-mode supervisor terminal.
 
 ## Regression entry points
 
@@ -358,8 +339,6 @@ tests/fm-control-herdr-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh
 tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
-tests/fm-afk-inject-herdr-e2e.test.sh
-tests/fm-afk-pi-herdr-return-e2e.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

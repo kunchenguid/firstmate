@@ -2073,9 +2073,9 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "(none)" "empty fleet did not report (none) for in-flight tasks"
-  assert_contains "$out" "absent" "empty fleet's AFK section did not report absent"
+  assert_contains "$out" "Legacy mode records" "empty fleet omitted the compatibility record section"
 
-  pass "an empty fleet reports (none) for in-flight tasks and an absent AFK flag"
+  pass "an empty fleet reports no in-flight tasks and no legacy mode records"
 }
 
 test_next_step_sources_x_mode_cadence() {
@@ -2099,67 +2099,57 @@ EOF
   pass "session start emits X-mode cadence guidance in the harness supervision block"
 }
 
-test_next_step_afk_delegates_to_daemon() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-afk)
+test_legacy_mode_records_are_inactive() {
+  local rec root home fakebin out rc legacy_pid legacy_identity ambiguous_pid
+  rec=$(new_world legacy-mode-records)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_pi "$fakebin"
   : > "$home/state/.afk"
+  printf '{}\n' > "$home/state/.afk-contract"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "away-mode supervision is active" "AFK digest did not report away mode"
-  assert_contains "$out" "Away mode is active" "next step did not switch to AFK guidance"
-  assert_contains "$out" "daemon owns the watcher" "next step did not delegate watcher ownership to the daemon"
-  assert_contains "$out" "- Away mode: active" "supervision block did not include active AFK state"
-  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
+  assert_contains "$out" "preserved but inactive" "legacy records were not reported as inactive evidence"
+  assert_contains "$out" "ordinary supervision remains authoritative" "legacy records displaced ordinary supervision"
+  assert_contains "$out" "bin/fm-watch" "ordinary watcher instructions were not emitted"
+  assert_not_contains "$out" "load /afk" "removed away skill was still advertised"
+  assert_not_contains "$out" "load /quiet" "removed quiet skill was still advertised"
 
-  pass "next step delegates watcher ownership to the AFK daemon"
-}
+  rm -f "$home/state/.afk" "$home/state/.afk-contract"
+  sleep 300 &
+  legacy_pid=$!
+  mkdir -p "$home/state/.supervise-daemon.lock"
+  printf '%s\n' "$legacy_pid" > "$home/state/.supervise-daemon.pid"
+  legacy_identity=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '. "$1/bin/fm-wake-lib.sh"; fm_pid_identity "$2"' fixture "$ROOT" "$legacy_pid")
+  printf '%s\n' "$legacy_identity" > "$home/state/.supervise-daemon.lock/pid-identity"
+  rc=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || rc=$?
+  kill "$legacy_pid" 2>/dev/null || true
+  wait "$legacy_pid" 2>/dev/null || true
+  expect_code 2 "$rc" "a live legacy daemon must make session start fail actionably"
+  assert_contains "$out" "LEGACY_DAEMON_ACTIVE: pid $legacy_pid" "live legacy daemon diagnostic omitted its exact process"
+  assert_contains "$out" "will not stop it automatically" "legacy daemon diagnostic did not preserve the no-auto-stop boundary"
+  assert_not_contains "$out" "ordinary supervision remains authoritative" "live legacy daemon was falsely reported inactive"
 
-test_next_step_quiet_mode_delegates_to_daemon() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-quiet)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  rm -f "$home/state/.supervise-daemon.lock/pid-identity"
+  sleep 300 &
+  ambiguous_pid=$!
+  printf '%s\n' "$ambiguous_pid" > "$home/state/.supervise-daemon.pid"
+  rc=0
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || rc=$?
+  kill "$ambiguous_pid" 2>/dev/null || true
+  wait "$ambiguous_pid" 2>/dev/null || true
+  expect_code 2 "$rc" "a live legacy daemon without recorded identity must fail closed"
+  assert_contains "$out" "LEGACY_DAEMON_AMBIGUOUS: live pid $ambiguous_pid" "missing-identity diagnostic omitted the live legacy process"
+  assert_contains "$out" "pid-identity is absent" "missing-identity refusal did not explain its ambiguity"
+  assert_contains "$out" "will not stop it automatically" "missing-identity refusal crossed the no-auto-stop boundary"
+  assert_not_contains "$out" "ordinary supervision remains authoritative" "ambiguous live legacy daemon was falsely reported inactive"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "quiet-mode supervision is active" "AFK digest did not report quiet mode for a quiet-content flag"
-  assert_contains "$out" "only an explicit /quiet off exits it" "AFK digest lost the explicit-only exit rule"
-  assert_contains "$out" "Quiet mode is active" "next step did not switch to quiet-mode guidance"
-  assert_contains "$out" "load /quiet" "next step did not name the /quiet skill"
-  assert_contains "$out" "- Quiet mode: active" "supervision block did not include active quiet state"
-  assert_not_contains "$out" "Away mode is active" "quiet-mode flag was misreported as away mode"
-  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "quiet next step still told the agent to arm the watcher directly"
-
-  pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
-}
-
-test_next_step_afk_legacy_empty_flag_defaults_away() {
-  local rec root home fakebin out
-  rec=$(new_world next-step-afk-legacy)
-  IFS='|' read -r root home fakebin <<EOF
-$rec
-EOF
-  make_fake_toolchain "$fakebin"
-  make_fake_ps_pi "$fakebin"
-  : > "$home/state/.afk"
-
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-
-  assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
-  assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
-  assert_not_contains "$out" "Quiet mode" "a legacy empty .afk flag leaked quiet-mode text"
-
-  pass "a legacy empty .afk flag (written before mode existed) still reads as away mode"
+  pass "legacy mode records are preserved but cannot reactivate removed modes"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2322,9 +2312,7 @@ test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
-test_next_step_afk_delegates_to_daemon
-test_next_step_quiet_mode_delegates_to_daemon
-test_next_step_afk_legacy_empty_flag_defaults_away
+test_legacy_mode_records_are_inactive
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker

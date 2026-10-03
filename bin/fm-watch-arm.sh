@@ -2,9 +2,8 @@
 # Safe, home-scoped (re-)arm of the firstmate watcher, with honest verification.
 #
 # The watcher (bin/fm-watch.sh) blocks until it has an actionable wake to
-# surface, then prints one reason line and exits. While state/.afk exists the
-# daemon owns triage and the watcher exits on every wake for the daemon to
-# classify. Reliability depends on arming through a mechanism that SURVIVES the
+# surface, then prints one reason line and exits. Reliability depends on arming
+# through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
 # supported supervision protocol: Pi's owned extension or Codex's bounded
 # foreground checkpoints. See docs/supervision-protocols/.

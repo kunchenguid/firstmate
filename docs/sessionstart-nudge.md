@@ -99,6 +99,6 @@ The same suite proves all supported harness digests render durable remote-task s
 It verifies context-preserving reopen sources for those adapters and context-reset delivery wherever their tracked TUI surface is reachable.
 Its separate `FM_PI_SESSIONSTART_RACE_LIVE_E2E=1` mode uses real Pi with an offline deterministic provider and a barrier-controlled `/new` digest, proving both an immediate prompt and a completed-before-prompt control make their first provider call with exactly one native startup context and no manual execution.
 `tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh` is the separate opt-in real-Pi guard for a post-start AGENTS.md update followed by compaction.
-`tests/fm-turnend-guard.test.sh`, `tests/fm-pi-watch-extension.test.sh`, and `tests/fm-daemon.test.sh` cover marked guard, monitoring, and away-mode delivery.
+`tests/fm-turnend-guard.test.sh` and `tests/fm-pi-watch-extension.test.sh` cover marked guard and monitoring behavior.
 
 [`verification/supervision.md`](verification/supervision.md#native-session-start-delivery) records the active version-scoped transport evidence.

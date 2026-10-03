@@ -293,9 +293,9 @@ family_for_basename() {
     fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
-    fm-daemon.test.sh|fm-feishu-channel.test.sh|fm-feishu-processed-cleanup.test.sh|fm-guard-stale-banner.test.sh|fm-periodic-stow.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-feishu-channel.test.sh|fm-feishu-processed-cleanup.test.sh|fm-guard-stale-banner.test.sh|fm-periodic-stow.test.sh|fm-pi-watch-extension.test.sh|\
     fm-session-lock-ancestry.test.sh|\
-    fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
+    fm-supervision-events.test.sh|fm-turnend-guard.test.sh|\
     fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
@@ -303,7 +303,7 @@ family_for_basename() {
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
       printf '%s\n' watcher-wake-lock
       ;;
-    fm-afk-inject-herdr-e2e.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-launch.test.sh|fm-backend-autodetect-smoke.test.sh|\
+    fm-backend-autodetect-smoke.test.sh|\
     fm-backend-herdr-eventwait-smoke.test.sh|fm-backend-herdr-presentation-e2e.test.sh|\
     fm-backend-herdr-launcher-workspace-e2e.test.sh|\
     fm-backend-herdr-prune-safety-e2e.test.sh|fm-backend-herdr-respawn-idem-e2e.test.sh|\
@@ -321,7 +321,6 @@ family_for_basename() {
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-busy-transcript-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
     fm-composer-codex-idle-live-e2e.test.sh|\
@@ -354,9 +353,6 @@ family_for_basename() {
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
-    fm-afk-contract.test.sh|fm-afk-return.test.sh)
-      printf '%s\n' afk
-      ;;
     fm-bearings-snapshot.test.sh|\
     fm-fleet-snapshot-view.test.sh)
       printf '%s\n' snapshot-bearings
@@ -364,7 +360,7 @@ family_for_basename() {
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
-    fm-no-mistakes-required.test.sh|fm-pi-branch-extension.test.sh|\
+    fm-pi-branch-extension.test.sh|\
     fm-procevent-when.test.sh|fm-procevent.test.sh|\
     fm-live-gate.test.sh|\
     fm-public-followup.test.sh|\
@@ -398,7 +394,6 @@ session-bootstrap
 live-harness-optin
 backend-dispatch
 pr-forge
-afk
 snapshot-bearings
 standalone
 unclassified
@@ -585,7 +580,7 @@ is_proven_isolated_script() {
 }
 
 # The portable serial remainder: every tests/*.test.sh that is neither
-# proven-isolated nor real-herdr-gated. Watcher, lock, AFK, daemon, bootstrap,
+# proven-isolated nor real-herdr-gated. Watcher, lock, bootstrap,
 # the live-harness-optin family, and other unproven work
 # stays here. Derived rather than enumerated so a newly added test
 # lands here by default instead of falling out of every lane.
@@ -616,10 +611,6 @@ list_portable_serial() {
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-agent-process.test.sh 296
-tests/fm-afk-contract.test.sh 3000
-tests/fm-afk-inject-e2e.test.sh 35792
-tests/fm-afk-pi-herdr-return-e2e.test.sh 100
-tests/fm-afk-return.test.sh 1837
 tests/fm-ask-user-authority.test.sh 128
 tests/fm-backend.test.sh 20061
 tests/fm-backlog-atomicity.test.sh 161989
@@ -636,7 +627,6 @@ tests/fm-codex-continuity-live-e2e.test.sh 21
 tests/fm-composer-matrix-live-e2e.test.sh 23
 tests/fm-control-relaunch.test.sh 48210
 tests/fm-control.test.sh 54301
-tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-feishu-channel.test.sh 3500
 tests/fm-feishu-processed-cleanup.test.sh 1000
@@ -656,10 +646,10 @@ tests/fm-herdr-session-cleanup.test.sh 6704
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-inactive-reconcile.test.sh 74399
 tests/fm-jsonl-viewer-browser-live-e2e.test.sh 3539
+tests/fm-native-review.test.sh 100
 tests/fm-jsonl-viewer.test.sh 682
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
-tests/fm-no-mistakes-required.test.sh 370
 tests/fm-operational-input.test.sh 231
 tests/fm-pi-branch-extension.test.sh 22239
 tests/fm-pi-branch-live-e2e.test.sh 56
@@ -1283,18 +1273,8 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       ;;
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
-      ;;
-    bin/fm-afk*)
-      printf '%s\n' afk
-      printf '%s\n' real-herdr-gated
-      ;;
-    bin/fm-supervisor-target-lib.sh)
-      printf '%s\n' watcher-wake-lock
-      printf '%s\n' real-herdr-gated
-      printf '%s\n' live-harness-optin
-      printf '%s\n' afk
       ;;
     bin/fm-startup-memory-budget.sh|bin/fm-startup-memory-budget-lib.sh)
       printf '%s\n' session-bootstrap
@@ -1477,7 +1457,7 @@ families_for_changed_path() {
     .agents/skills/*/SKILL.md)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/workflows/ci.yml|.no-mistakes.yaml)
+    .github/workflows/ci.yml)
       printf '%s\n' pure-contract-unit
       printf '%s\n' real-herdr-gated
       ;;

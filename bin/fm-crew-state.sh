@@ -139,6 +139,7 @@ meta_value() {  # <key>
 
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
+MODE=$(meta_value mode)
 HARNESS=$(meta_value harness)
 # Retired records remain visible without probing or reclassifying their runtime.
 # shellcheck source=bin/fm-control-lib.sh
@@ -147,6 +148,7 @@ if fm_control_harness_removed "$HARNESS"; then
   emit unknown none "historical harness $HARNESS is unsupported; record and work preserved; explicit migration required"
 fi
 [ -n "$KIND" ] || KIND=ship
+[ -n "$MODE" ] || MODE=no-mistakes
 [ "$KIND" != secondmate ] || emit unknown record "historical secondmate record (unsupported)"
 
 # A torn-down (or never-created) worktree has no current state to read. A
@@ -521,9 +523,10 @@ HAVE_RUN=0
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 COARSE_STATUS=""
-# Scouts never drive a no-mistakes validation of their own worktree, so skip
-# the lookup for them and read state from pane/log directly.
-if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
+# Only legacy task records can own a no-mistakes validation. Fresh review-PR
+# tasks use their harness-native review and never probe the retired dependency.
+if [ "$KIND" = ship ] && { [ "$MODE" = no-mistakes ] || [ "$MODE" = no-mistakes-prod-only ]; } \
+  && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/null 2>&1; then
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")

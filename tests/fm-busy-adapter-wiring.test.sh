@@ -37,7 +37,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   local home=$1 wt=$2 fakebin=$3
   shift 3
   CODEX_HOME="$home/codex-home" TRAE_HOME="$home/traex-home" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode review-PR --yolo off
 }
 
 read_case_record() {

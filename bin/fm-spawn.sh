@@ -5,7 +5,7 @@
 #   fm-spawn.sh <task-id> [<project-directory>] [--scout]
 #     [--harness <pi|codex|traex|launch-command>] [--model <name>]
 #     [--effort <level>] [--backend <name>]
-#     [--mode <no-mistakes|direct-PR|local-only>] [--yolo <on|off>]
+#     [--mode <review-PR|direct-PR|local-only>] [--yolo <on|off>]
 #   fm-spawn.sh --relaunch <task-id> [--harness <name>] [--model <name>]
 #     [--effort <level>]
 #
@@ -301,7 +301,7 @@ else
   # and record no delivery posture.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <review-PR|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -309,13 +309,13 @@ else
       exit 1
     }
     case "$MODE" in
-    no-mistakes | direct-PR | local-only) ;;
-    no-mistakes-prod-only)
-      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
+    review-PR | direct-PR | local-only) ;;
+    review-prod-only | no-mistakes | no-mistakes-prod-only)
+      echo "error: legacy or conditional delivery posture '$MODE' is not a task mode; resolve it to review-PR or direct-PR at intake" >&2
       exit 1
       ;;
     *)
-      echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2
+      echo "error: --mode must be one of review-PR, direct-PR, local-only (got '$MODE')" >&2
       exit 1
       ;;
     esac
@@ -741,6 +741,14 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$KIND" = ship ]; then
+    case "$MODE" in
+      review-prod-only | no-mistakes | no-mistakes-prod-only)
+        echo "error: task $ID records legacy delivery mode '$MODE'; migrate it explicitly to review-PR or direct-PR before relaunch" >&2
+        exit 1
+        ;;
+    esac
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1004,14 +1012,14 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  if [ "$KIND" = ship ] && [ "$MODE" = review-PR ]; then
     if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
       CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
     else
       LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
       CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
       if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
+        echo "error: legacy mixed # Task brief has no provenance-marked captain words for native review; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
     fi
@@ -1025,7 +1033,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+      if [ "$KIND" = ship ] && [ "$MODE" = review-PR ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
   } >"$BRIEF_TMP" || {
@@ -1042,7 +1050,7 @@ fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
-  no-mistakes) echo 3 ;;
+  review-PR) echo 3 ;;
   direct-PR) echo 2 ;;
   local-only) echo 1 ;;
   *) echo 0 ;;
@@ -1064,11 +1072,11 @@ if [ "$KIND" = ship ]; then
   fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
-  # unregistered project resolves to the same no-mistakes standing default, which
+  # unregistered project resolves to the same review-PR standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
+  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != review-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
@@ -1817,7 +1825,7 @@ fi
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a scout records none at all, because its
 # deliverable is a report rather than a merge
-# (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-promote.sh
+# (fm-teardown.sh treats absent legacy mode conservatively, and fm-promote.sh
 # requires an explicit mode when a scout is promoted to a ship task).
 if [ "$KIND" = scout ]; then
   MODE=

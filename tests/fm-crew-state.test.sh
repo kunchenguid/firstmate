@@ -77,6 +77,7 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+[ -z "${FM_FAKE_NM_CALLED:-}" ] || : > "$FM_FAKE_NM_CALLED"
 case "${1:-}" in
   axi)
     shift
@@ -1525,6 +1526,28 @@ test_codex_active_validation_outranks_native_idle() {
   pass "active no-mistakes attribution stays authoritative over ordinary native state"
 }
 
+test_review_pr_never_probes_legacy_no_mistakes() {
+  command -v jq >/dev/null 2>&1 || { pass "review-PR legacy-probe test skipped without jq"; return; }
+  reset_fakes
+  local d id marker out
+  id=review-pr-native-only
+  d=$(new_case "$id")
+  marker="$d/no-mistakes-called"
+  make_repo_on_branch "$d/wt" "fm/$id"
+  make_fakebin "$d" >/dev/null
+  write_crew_meta "$d/state/$id.meta" "window=default:w1:p2" "worktree=$d/wt" \
+    "kind=ship" "mode=review-PR" "backend=herdr" "harness=traex"
+  printf 'working: native review in progress\n' > "$d/state/$id.status"
+  FM_FAKE_AXI_STATUS="$(run_running "fm/$id")"
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  export FM_FAKE_NM_CALLED="$marker"
+  out=$(run_crew_state "$d" "$id")
+  unset FM_FAKE_NM_CALLED
+  assert_absent "$marker" "fresh review-PR state invoked the legacy no-mistakes executable"
+  assert_contains "$out" "source: status-log" "fresh review-PR did not use native state/status fallback"
+  pass "fresh review-PR state never invokes the legacy no-mistakes executable"
+}
+
 # Regression (2026-09 G7 stale-claim incident): a herdr CLI that errors or
 # stalls under load made pane_readable's capture fail, and the fallback read
 # that single failure as "backend target gone" - text the stale sweep matches
@@ -2461,6 +2484,7 @@ test_no_run_herdr_unknown_uses_backend_capture
 test_codex_traex_native_state_avoids_transcript_reader
 test_codex_traex_process_exit_and_unproven_liveness
 test_codex_active_validation_outranks_native_idle
+test_review_pr_never_probes_legacy_no_mistakes
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone
 test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone

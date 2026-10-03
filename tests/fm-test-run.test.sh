@@ -102,19 +102,17 @@ init_changed_fixture_repo() {
     fm-test-run.test.sh \
     fm-test-fixtures.test.sh \
     fm-cd-pretool-check.test.sh \
-    fm-daemon.test.sh \
     fm-harness-adapter-instructions-live-e2e.test.sh \
     fm-harness-adapter-references.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-control.test.sh \
     fm-session-start.test.sh \
-    fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
     fm-profile-array-dispatch-live-e2e.test.sh \
     fm-pi-watch-extension.test.sh \
+    fm-guard-stale-banner.test.sh \
     fm-pi-windows-shell-invocation.test.sh \
-    fm-afk-return.test.sh \
     fm-bearings-snapshot.test.sh \
     fm-control-herdr-smoke.test.sh \
     fm-unclassified-serial.test.sh; do
@@ -123,7 +121,6 @@ init_changed_fixture_repo() {
   done
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
-  : >"$repo/bin/fm-supervisor-target-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/unmapped-source.sh"
@@ -144,6 +141,9 @@ init_changed_fixture_repo() {
   # every real-Herdr E2E.
   : >"$repo/bin/shared-probe-lib.sh"
   printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-backend-herdr-smoke.test.sh"
+  printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
+  printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-guard-stale-banner.test.sh"
+  printf '# shared-probe-lib.sh\n' >>"$repo/tests/fm-control.test.sh"
   # shellcheck disable=SC2016  # literal fixture text: the reference must reach
   # the file verbatim so the changed-file scan can find it, not expand here.
   printf '. "$ROOT/bin/shared-probe-lib.sh"\n' >"$repo/bin/fm-watch-probe.sh"
@@ -328,13 +328,6 @@ test_changed_dependency_selection_and_unmapped_failure() {
   git -C "$repo" add tests/fm-backend-herdr-eventwait.test.py
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm eventwait-change
 
-  printf '\n' >>"$repo/bin/fm-supervisor-target-lib.sh"
-  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
-  assert_contains "$listed" "tests/fm-daemon.test.sh" "supervisor target selects daemon coverage"
-  assert_contains "$listed" "tests/fm-afk-return.test.sh" "supervisor target selects afk coverage"
-  git -C "$repo" add bin/fm-supervisor-target-lib.sh
-  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm supervisor-change
-
   printf '\n' >>"$repo/.agents/skills/example/SKILL.md"
   printf '\n' >>"$repo/.claude/settings.json"
   printf '\n' >>"$repo/.pi/extensions/fm-primary-pi-watch.ts"
@@ -416,8 +409,6 @@ test_changed_bin_reference_selects_per_script_not_per_family() {
       ;;
   esac
   # The curated consumer keeps its family-level coupling.
-  assert_contains "$listed" "tests/fm-daemon.test.sh" \
-    "a curated consumer of the helper must still select its whole family"
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" \
     "a curated consumer of the helper must still select its whole family"
 
@@ -433,7 +424,7 @@ test_changed_uses_bounded_automatic_concurrency() {
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
-  for script in fm-backend-herdr-smoke.test.sh fm-daemon.test.sh fm-pi-watch-extension.test.sh; do
+  for script in fm-backend-herdr-smoke.test.sh fm-pi-watch-extension.test.sh fm-guard-stale-banner.test.sh fm-control.test.sh; do
     cat >"$repo/tests/$script" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1190,7 +1181,7 @@ test_jobs_requires_proven_isolated() {
   grep -Fq 'not in the proven-isolated set' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
   set +e
-  "$RUNNER" --jobs 2 tests/fm-afk-inject-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
+  "$RUNNER" --jobs 2 tests/fm-pi-primary-live-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs on a family with no recorded proof must refuse, got $rc"

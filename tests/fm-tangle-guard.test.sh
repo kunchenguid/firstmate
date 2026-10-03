@@ -128,7 +128,7 @@ test_brief_assertion_precedes_branch() {
   local home brief iso br
   home="$TMP_ROOT/brief-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" tangle-brief-cc3 alpha --mode review-PR >/dev/null 2>&1
   brief="$home/data/tangle-brief-cc3/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "blocked: launched in primary checkout, not an isolated worktree" "$brief" \
@@ -155,7 +155,7 @@ run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
   fm_test_spawn_brief "$home" "$id" brief
   fm_test_run_spawn "$home" "$pane" "$fakebin" \
-    "$id" "$proj" codex --mode no-mistakes --yolo off
+    "$id" "$proj" codex --mode review-PR --yolo off
 }
 
 test_spawn_isolation_abort() {
@@ -232,7 +232,7 @@ test_spawn_herdr_identity_construction() {
   git -C "$proj" worktree add -q --detach "$wt" >/dev/null 2>&1
   fm_test_spawn_brief "$home" rec-win-gg7 brief
   out=$(FM_HERDR_REC="$rec" fm_test_run_spawn "$home" "$wt" "$fakebin" \
-    rec-win-gg7 "$proj" codex --mode no-mistakes --yolo off); status=$?
+    rec-win-gg7 "$proj" codex --mode review-PR --yolo off); status=$?
   expect_code 0 "$status" "spawn into a genuine worktree should succeed"
   pane=$(sed -n 's/^herdr_pane_id=//p' "$home/state/rec-win-gg7.meta")
   [ -n "$pane" ] || fail "spawn did not record a stable pane identity"

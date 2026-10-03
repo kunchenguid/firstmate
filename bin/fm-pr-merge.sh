@@ -23,8 +23,7 @@
 # state is recorded. An attended --allow-red <check-name> may be passed once,
 # with the name as a separate argument; it waives only checks with that exact
 # name, still requires every other check green, and still binds the head. It is
-# refused while the away-posture record exists, and it never applies on GitLab
-# or Codebase, where every check remains mandatory. After gh returns success,
+# never applies on GitLab or Codebase, where every check remains mandatory. After gh returns success,
 # GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
@@ -33,9 +32,7 @@
 # gh-axi view could not prove the outcome either.
 # If the pull request remains open and the base branch has an effective
 # merge_queue rule, an attended refusal names the queue's configured merge
-# method and exact --attended-override -- --auto --<method> retry flags. While
-# the away-posture record exists, asynchronous merge requests are refused and
-# queue retry flags are not offered because they would outlive away authority.
+# method and exact --attended-override -- --auto --<method> retry flags.
 # An attended caller that already passed the configured method with --auto is
 # told instead that the accepted request has not entered the queue and its queue
 # state has to be re-checked.
@@ -74,7 +71,7 @@
 # empty) check-run set at that head. bytedcli's supported merge operation binds
 # the request identity but has no source-head condition, so this path does not
 # claim GitHub/GitLab's atomic candidate guarantee. It holds the ordinary task
-# and away-authority locks across the immediate preflight and synchronous merge,
+# and accepted-authority locks across the immediate preflight and synchronous merge,
 # then independently reads the MR back. Only an exact identity, the same source
 # head observed again, merged status, and merge commit reaches the landed-outcome
 # owner; a concurrent source change or ambiguous readback is reported without
@@ -84,19 +81,10 @@
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
 # recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists, a merge for this task also proceeds only if its
-# meta yolo=on or its id is in that record's merge-grant list; otherwise it is
-# held for the captain return. An unreadable record refuses rather than being
-# skipped. Neither posture releases a captain hold, and the grant lapses when
-# the record is archived.
-# The authority read and synchronous forge command share the away record's
-# cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
-# live-owner TOCTOU; failure to take it refuses before the forge call. Async and
-# queued paths are refused while away. Two confused-agent-grade limitations are
-# accepted rather than hidden: queue or base changes after GitHub's preflight can
-# still enqueue, and killing this shell can orphan a forge child after stale-lock
-# recovery. docs/architecture.md owns those away-merge limits, while
-# docs/captain-hold-lifecycle.md owns the separate merge-to-cleanup residual.
+# Neither merge posture releases a captain hold.
+# Queue or base changes after GitHub's preflight can still enqueue, and killing
+# this shell can orphan a forge child after stale-lock recovery.
+# docs/captain-hold-lifecycle.md owns the merge-to-cleanup residual.
 # A failed forge command releases the lock after it returns. A successful one
 # retains the lock until the accepted merge authority is persisted against the
 # still-matching task metadata.
@@ -113,7 +101,7 @@
 # --remove-source-branch) are refused by default; --attended-override, parsed
 # before the optional -- separator, re-enables those forge flags for an
 # explicit captain instruction and never skips the live green check, the
-# away-grant check, or a captain hold.
+# accepted-authority check, or a captain hold.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
@@ -139,8 +127,6 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # shellcheck source=bin/fm-merge-authority-lib.sh
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
-# shellcheck source=bin/fm-afk-contract.sh
-. "$SCRIPT_DIR/fm-afk-contract.sh"
 
 if [ "$#" -lt 2 ]; then
   echo "error: invalid PR merge request" >&2
@@ -392,7 +378,6 @@ merge_control_cleanup() {
   fm_short_owner_release || true
   fm_lease_guard_release || true
   [ -z "$MERGE_META_LOCK" ] || fm_lock_release "$MERGE_META_LOCK" || true
-  fm_afk_contract_lock_release || true
   [ -z "$MERGE_CONTROL_LOCK" ] || fm_lock_release "$MERGE_CONTROL_LOCK" || true
 }
 trap merge_control_cleanup EXIT
@@ -1114,61 +1099,17 @@ require_released_captain_hold() {
 
 FM_PR_MERGE_AUTHORITY=
 # The gate on top of the shared authority read. bin/fm-merge-authority-lib.sh
-# owns what the away-posture record and the task's recorded yolo posture say;
+# owns what the task's recorded yolo posture says;
 # this function owns what a merge run may do about it, so the answer the merge
 # poll later tags its ledger row with is the same answer gated here.
-require_away_merge_grant() {
+require_merge_authority() {
   FM_PR_MERGE_AUTHORITY=
   if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$META" "$ID"; then
     FM_PR_MERGE_AUTHORITY=$FM_MERGE_AUTHORITY
     return 0
   fi
-  case "$FM_MERGE_AUTHORITY_REASON" in
-    record-unreadable)
-      echo "error: PR merge refused - the away-posture record could not be read; nothing was merged" >&2
-      ;;
-    grants-unreadable)
-      echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
-      ;;
-    *)
-      echo "error: task $ID is held for the captain return" >&2
-      ;;
-  esac
+  echo "error: PR merge authority could not be resolved for task $ID" >&2
   return 1
-}
-
-# Take the away record's own lock (bin/fm-afk-contract.sh owns it) so that
-# record cannot be published, replaced, or archived between the authority read
-# below and the forge command that acts on it. Refuses without the lock: a merge
-# on authority nothing is holding still is exactly what this closes. This is the
-# only path that holds both the per-task control lock and the away-record lock,
-# and it always takes them in that order; the away-record side takes only its own
-# lock, so the pair cannot deadlock.
-hold_away_record_for_merge() {
-  fm_afk_contract_lock_hold "$STATE" && return 0
-  echo "error: PR merge refused - the away-posture record could not be locked for the merge; nothing was merged" >&2
-  return 1
-}
-
-require_current_away_authority() {
-  FM_PR_AWAY_POSTURE=false
-  if fm_afk_contract_present "$STATE"; then
-    FM_PR_AWAY_POSTURE=true
-    if [ "$PROVIDER" = github ] && [ "$FM_PR_GITHUB_AUTO_REQUESTED" = true ]; then
-      echo "error: --auto is attended-only; while the away-posture record exists only a synchronous merge may run under its authority lock" >&2
-      return 2
-    fi
-    if [ "$PROVIDER" = gitlab ] \
-      && { [ "$FM_PR_GITLAB_ASYNC_REQUESTED" = true ] || [ "$FM_PR_GITLAB_ASYNC_CONFIGURED" = true ]; }; then
-      echo "error: GitLab auto-merge is attended-only; while the away-posture record exists only an immediate merge may run under its authority lock" >&2
-      return 2
-    fi
-  fi
-  require_away_merge_grant || return 1
-  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
-    echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
-    return 2
-  fi
 }
 
 persist_accepted_merge_authority() {
@@ -1188,28 +1129,6 @@ persist_accepted_merge_authority() {
   return 1
 }
 
-# While away, a merge proceeds only when the base branch's rules prove no
-# merge queue, because a queued merge can land after its away authority
-# lapses; this holds regardless of which away authority (a named merge grant
-# or a standing yolo=on posture) let the merge run at all. A repository whose
-# plan does not expose branch rules at all (GitHub's "Upgrade to GitHub Pro or
-# make this repository public" 403) proves that on its own, since such a
-# repository cannot have a merge_queue rule either; see
-# github_read_queue_method, which resolves that specific 403 to status=none.
-# Every other failure to read the queue state (auth, rate limit, network, a
-# 404, or an unrelated 403) stays unreadable and refuses the merge. The merge
-# stays synchronous (--auto is refused earlier) and every other gate still
-# applies.
-refuse_github_queue_while_away() {
-  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
-  # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
-  # oversight: a queue rule or PR base change after this preflight can still
-  # enqueue the merge, which can land after its away grant lapses.
-  github_read_queue_method
-  [ "$FM_PR_GITHUB_QUEUE_STATUS" = none ] && return 0
-  echo "error: GitHub merge refused while away because the base branch's merge-queue state does not prove an immediate merge; nothing was handed to the forge" >&2
-  return 2
-}
 
 require_recorded_pr_identity() {
   local existing
@@ -1263,10 +1182,6 @@ github_caller_method_is() {
 
 github_report_queue_rules() {
   local queue_method methods_display
-  if [ "$FM_PR_AWAY_POSTURE" = true ]; then
-    printf 'error: the direct merge did not land while the away-posture record exists; merge-queue retry flags are unavailable because a queued merge would outlive its authority\n' >&2
-    return 0
-  fi
   github_read_queue_method
   case "$FM_PR_GITHUB_QUEUE_STATUS" in
     single)
@@ -1319,12 +1234,8 @@ github_report_unmerged_outcome() {
     fi
   fi
   if [ "$FM_PR_GITHUB_QUEUE_OBSERVED" != true ]; then
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
-      printf 'error: the synchronous merge did not land while the away-posture record exists; no asynchronous merge or queue retry is available under away authority\n' >&2
-    else
-      printf 'error: the merge queue could not be observed for %s because the queue-aware read was unavailable, so a pull request already in the merge queue cannot be told apart from one that never entered it; re-check the pull request'"'"'s merge queue state before retrying\n' \
-        "$URL" >&2
-    fi
+    printf 'error: the merge queue could not be observed for %s because the queue-aware read was unavailable, so a pull request already in the merge queue cannot be told apart from one that never entered it; re-check the pull request'"'"'s merge queue state before retrying\n' \
+      "$URL" >&2
     return 0
   fi
   github_report_queue_rules
@@ -1359,9 +1270,7 @@ codebase_confirm_merged() {
 # Record before either forge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
-away_status=0
-require_current_away_authority || away_status=$?
-[ "$away_status" -eq 0 ] || exit "$away_status"
+require_merge_authority || exit 1
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
 require_released_captain_hold || exit 1
@@ -1369,7 +1278,7 @@ require_released_captain_hold || exit 1
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its forge child lives,
 # stale-owner recovery can release the record for archive or replacement and
-# the orphaned forge child can still merge on the lapsed away authority.
+# the orphaned forge child can still merge on a lapsed accepted authority.
 FM_PR_MERGE_OUTCOME_ORIGIN=self
 case "$PROVIDER" in
   github)
@@ -1380,13 +1289,8 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
-    # The away record is locked first, so this last presence and authority read
+    # The task authority record is locked first, so this last authority read
     # and the forge command below share one live-owner critical section.
-    hold_away_record_for_merge || exit 1
-    away_status=0
-    require_current_away_authority || away_status=$?
-    [ "$away_status" -eq 0 ] || exit "$away_status"
-    refuse_github_queue_while_away || exit 2
     merge_status=0
     fm_short_owner_effect || exit 1
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
@@ -1395,11 +1299,9 @@ case "$PROVIDER" in
     if [ "$merge_status" -eq 0 ]; then
       FM_PR_GITHUB_MERGE_ACCEPTED=true
       persist_accepted_merge_authority || exit 1
-      fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
     else
-      fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
       [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
@@ -1436,28 +1338,19 @@ case "$PROVIDER" in
     # in between is refused by GitLab instead of merged unverified. --yes only
     # skips the interactive confirmation, which no supervised run can answer;
     # the conditions above are what authorize the merge.
-    # The away record is locked first, so this last presence and authority read
+    # The task authority record is locked first, so this last authority read
     # and the forge command below share one live-owner critical section.
-    hold_away_record_for_merge || exit 1
-    away_status=0
-    require_current_away_authority || away_status=$?
-    [ "$away_status" -eq 0 ] || exit "$away_status"
     merge_status=0
     gitlab_merge_args=()
-    if [ "$FM_PR_AWAY_POSTURE" = true ]; then
-      gitlab_merge_args=(--auto-merge=false)
-    fi
     fm_short_owner_effect || exit 1
     GITLAB_HOST="$FM_PR_HOST" glab mr merge "$PR_NUMBER" -R "$PROJECT_URL" \
       --sha "$FM_PR_MERGE_HEAD" --yes "$@" "${gitlab_merge_args[@]+"${gitlab_merge_args[@]}"}" || merge_status=$?
     if [ "$merge_status" -ne 0 ]; then
-      fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
       exit "$merge_status"
     fi
     persist_accepted_merge_authority || exit 1
-    fm_afk_contract_lock_release || true
     fm_lock_release "$MERGE_CONTROL_LOCK" || true
     MERGE_CONTROL_LOCK=
     gitlab_confirm_rc=0
@@ -1488,16 +1381,11 @@ case "$PROVIDER" in
       # bytedcli binds this write to the canonical MR identity but exposes no
       # supported source-head condition. The independent readback below is what
       # prevents a changed candidate from being attributed to this preflight.
-      hold_away_record_for_merge || exit 1
-      away_status=0
-      require_current_away_authority || away_status=$?
-      [ "$away_status" -eq 0 ] || exit "$away_status"
       merge_status=0
       fm_short_owner_effect || exit 1
       merge_output=$(bytedcli --json codebase mr merge "$PR_NUMBER" -R "$PR_PATH" "$@" 2>&1) \
         || merge_status=$?
       if [ "$merge_status" -ne 0 ]; then
-        fm_afk_contract_lock_release || true
         fm_lock_release "$MERGE_CONTROL_LOCK" || true
         MERGE_CONTROL_LOCK=
         [ -z "$merge_output" ] || printf '%s\n' "$merge_output" >&2
@@ -1507,7 +1395,6 @@ case "$PROVIDER" in
         exit "$merge_status"
       fi
       persist_accepted_merge_authority || exit 1
-      fm_afk_contract_lock_release || true
       fm_lock_release "$MERGE_CONTROL_LOCK" || true
       MERGE_CONTROL_LOCK=
       codebase_confirm_rc=0

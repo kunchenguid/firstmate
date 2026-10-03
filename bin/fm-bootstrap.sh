@@ -157,7 +157,6 @@ install_cmd() {
     node|git|gh|curl|jq) echo "brew install $1  # or the platform's package manager" ;;
     python3) echo "brew install python  # or install Python 3.9+ with the platform package manager" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
-    no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
     tasks-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
@@ -185,7 +184,7 @@ missing_tool_diagnostic() {
 # fm_backend_required_tools (bin/fm-backend.sh). Retired configuration refuses
 # instead of installing an old terminal. A backend value with
 # no verified dependency set is reported before the universal checks continue.
-COMMON_TOOLS="node git gh no-mistakes gh-axi chrome-devtools-axi tasks-axi python3 jq"
+COMMON_TOOLS="node git gh gh-axi chrome-devtools-axi tasks-axi python3 jq"
 if command -v python3 >/dev/null 2>&1 && ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))'; then
   echo 'INCOMPATIBLE: python3 (Firstmate requires Python 3.9 or newer)'
 fi
@@ -196,7 +195,6 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
-NO_MISTAKES_MIN=1.46.0
 # Agent-facing wrappers are discovered through their installed help at use time.
 # Presence is sufficient here, as for chrome-devtools-axi; actual operations
 # retain their exit-status and authoritative readback requirements.
@@ -718,9 +716,6 @@ detect_local_tools() {
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"
-  fi
-  if command -v no-mistakes >/dev/null 2>&1 && ! tool_version_at_least no-mistakes "$NO_MISTAKES_MIN"; then
-    echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
   fi
   if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
     echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"

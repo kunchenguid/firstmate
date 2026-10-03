@@ -14,17 +14,16 @@ test_worker_instruction_generation() {
   mkdir -p "$home/data"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
+    "$BRIEF" authority-worker sample --mode review-PR >/dev/null 2>&1
   ship="$home/data/authority-worker/brief.md"
-  assert_grep 'ask-user findings are never yours to answer' "$ship" \
+  assert_grep 'Ask-user findings are never yours to answer' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
-  assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
+  assert_grep "Firstmate applies \`ask-user-authority\`" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
-  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'NEVER pass `--yes` (or `-y`) to `no-mistakes axi run` or `no-mistakes axi respond`' "$ship" \
-    "generated implementation brief does not prohibit silent ask-user auto-resolution"
-  assert_grep 'It auto-resolves every gate including ask-user findings with no escalation' "$ship" \
-    "generated implementation brief does not explain the ask-user authority bypass"
+  assert_grep "append \`needs-decision\` and stop" "$ship" \
+    "generated implementation brief does not stop at an authority-bearing finding"
+  assert_grep 'Never merge the PR' "$ship" \
+    "generated implementation brief let native review alter merge authority"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
   pass "generated worker instructions preserve the ask-user authority rule"

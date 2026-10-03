@@ -1193,6 +1193,7 @@ task_status_is_run_not_found() {  # <status-error> <run-id>
 conclude_task_no_mistakes_run() {  # <worktree>
   local wt=$1 out run_id
   [ "$KIND" = ship ] || return 0
+  case "$MODE" in no-mistakes|no-mistakes-prod-only) ;; *) return 0 ;; esac
   [ -d "$wt" ] || return 0
   command -v no-mistakes >/dev/null 2>&1 || return 0
   task_run_is_own_parked_run "$wt" || return 0

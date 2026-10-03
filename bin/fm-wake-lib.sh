@@ -274,57 +274,6 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
   fm_pid_alive "$session_pid"
 }
 
-# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
-# (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
-# one-shot, so the watcher exits on EVERY wake and the daemon starts its
-# replacement. Between those cycles no watcher process holds the watch lock,
-# with nothing at all wrong - the supervisor is the daemon, and the watcher is
-# its restarting child.
-#
-# fm_afk_daemon_owns_supervision <state>
-# True when away mode is active AND a live, identity-matched daemon holds this
-# home's singleton daemon lock. The identity match is the same discipline the
-# watcher lock uses (fm_watcher_lock_matches_pid): a recycled pid, a lock left
-# by a killed daemon, or a daemon that never recorded its identity all fail it,
-# so only a daemon process that is genuinely still running counts as ownership.
-# This proves an OWNER, never freshness: callers keep their own beacon test, so
-# a daemon that stops restarting its watcher still fails supervision once the
-# beacon passes grace.
-fm_afk_daemon_owns_supervision() {
-  local state=$1 lockdir pid recorded current
-  [ -e "$state/.afk" ] || return 1
-  lockdir="$state/.supervise-daemon.lock"
-  pid=$(cat "$lockdir/pid" 2>/dev/null) || return 1
-  fm_pid_alive "$pid" || return 1
-  recorded=$(cat "$lockdir/pid-identity" 2>/dev/null) || return 1
-  [ -n "$recorded" ] || return 1
-  current=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$current" ] || return 1
-  [ "$current" = "$recorded" ]
-}
-
-# fm_afk_mode <state>
-# The single owner of reading state/.afk's declared mode. Always prints
-# exactly one of "away" or "quiet" and always succeeds - every caller gets a
-# definitive answer, never an error to handle. Presence/liveness stays owned
-# by fm_afk_daemon_owns_supervision and the raw `-e "$state/.afk"` checks
-# throughout the tree; this is the mode of an ALREADY-present flag.
-# "away" (today's return-on-any-unmarked-message behavior) is the safe
-# default: missing, empty, unreadable, or unrecognized content, and the
-# legacy bare-epoch-timestamp content written before mode existed, all read
-# as "away". Only an exact first-line "quiet" ever reads as "quiet" -
-# kunchenguid/firstmate#2356's standing captain-present quiet mode, entered
-# only through /quiet and exited only through an explicit /quiet off
-# (AGENTS.md section 8's away-mode stub).
-fm_afk_mode() {
-  local state=$1 mode
-  mode=$(head -n 1 "$state/.afk" 2>/dev/null) || { printf '%s\n' away; return 0; }
-  case "$mode" in
-    quiet) printf '%s\n' quiet ;;
-    *) printf '%s\n' away ;;
-  esac
-}
-
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
 # guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:

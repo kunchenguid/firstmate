@@ -17,25 +17,25 @@ fm_remote_execution_receipt_record() { # <data-dir> <task> <executor> <provider>
     return $?
   fi
   tmp=$(umask 077; mktemp "$dir/.remote-execution.XXXXXX") || return 1
-  printf '%s\n' "$current" >"$tmp" && chmod 0600 "$tmp" && mv "$tmp" "$path" || {
+  if ! printf '%s\n' "$current" >"$tmp" || ! chmod 0600 "$tmp" || ! mv "$tmp" "$path"; then
     rm -f "$tmp"
     return 1
-  }
+  fi
 }
 
 fm_remote_execution_receipt_guard() { # <data-dir> <task>
   local path="$1/$2/remote-execution.json"
   [ -e "$path" ] || [ -L "$path" ] || return 0
-  [ -f "$path" ] && [ ! -L "$path" ] \
+  if ! { [ -f "$path" ] && [ ! -L "$path" ] \
     && jq -e --arg task "$2" '
       .schema == "fm-remote-execution-receipt.v1" and .task_id == $task and
       (.executor | type == "string" and length > 0) and
       (.provider | type == "string" and length > 0) and
       (.execution_generation | type == "string" and length > 0)
-    ' "$path" >/dev/null 2>&1 || {
-      echo "REFUSED: task $2 has unsafe retained remote execution identity" >&2
-      return 6
-    }
+    ' "$path" >/dev/null 2>&1; }; then
+    echo "REFUSED: task $2 has unsafe retained remote execution identity" >&2
+    return 6
+  fi
   echo "REFUSED: task $2 already has a retained remote execution identity; use a separately authorized new task" >&2
   return 6
 }

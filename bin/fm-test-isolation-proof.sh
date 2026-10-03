@@ -9,7 +9,7 @@
 #
 # It does NOT compose production CI shard membership; fm-test-run.sh owns that
 # partition. The default portable pool excludes real Herdr, watcher lock races,
-# AFK, live harnesses, and other stateful surfaces. A named family pool instead
+# live harnesses, and other stateful surfaces. A named family pool instead
 # runs that family's exact membership and inherits its prerequisites.
 #
 # Usage:
@@ -115,17 +115,12 @@ exclusion_reason() {
     fm-herdr-session-cleanup.test.sh)
       printf '%s\n' 'session-start task/presentation lock matrix; keep serial until dedicated concurrent proof'
       ;;
-    fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
-    fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
+    fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
+    fm-supervision-events.test.sh|fm-turnend-guard.test.sh|\
     fm-wake-queue.test.sh|fm-watch-checkpoint.test.sh|fm-watch-triage.test.sh|\
     fm-watcher-lock.test.sh)
       printf '%s\n' 'watcher/wake/lock family; intentional process locks and daemon races'
       ;;
-    fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh|fm-afk-inject-herdr-e2e.test.sh|\
-    fm-afk-launch.test.sh)
-      printf '%s\n' 'AFK lifecycle / inject path; exclusive daemon and pane control'
-      ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|\
     fm-profile-array-dispatch-live-e2e.test.sh|\
@@ -198,7 +193,6 @@ fm-pr-check-security.test.sh
 fm-teardown.test.sh
 fm-watcher-lock.test.sh
 fm-wake-queue.test.sh
-fm-afk-inject-e2e.test.sh
 fm-backend-herdr-smoke.test.sh
 fm-pi-primary-live-e2e.test.sh
 fm-profile-array-dispatch-live-e2e.test.sh
