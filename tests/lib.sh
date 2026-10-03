@@ -659,6 +659,20 @@ fm_write_meta() {
   done
 }
 
+# fm_test_pushed_branch_project <repo> <branch>: make <repo> a git repository
+# whose <branch> is already on a remote-tracking ref, with no remote to reach.
+# fm-teardown proves a ship's work pushed from that recorded branch when the
+# task has no copy of its own to inspect, so a fixture whose worktree= is absent
+# records project=<repo> and branch=<branch> to stay on its landed path.
+fm_test_pushed_branch_project() {
+  local repo=$1 branch=$2
+  [ -d "$repo/.git" ] || git init -q "$repo"
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm "fixture: $branch"
+  git -C "$repo" branch -f "$branch"
+  git -C "$repo" update-ref "refs/remotes/fork/$branch" "refs/heads/$branch"
+}
+
 # fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the
 # standard kind=secondmate meta block used across the secondmate suites. Window
 # defaults to firstmate:fm-<id>, projects defaults to alpha, and harness defaults

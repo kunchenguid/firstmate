@@ -1307,6 +1307,10 @@ test_windowless_legacy_record_with_gone_worktree_tears_down() {
   local case_dir out
   case_dir=$(make_case windowless-gone)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  # With no copy of its own to inspect, the leftover proves its work landed from
+  # the record: here its recorded PR is merged.
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf 'pr=https://github.com/example/repo/pull/7\n' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
 
   out=$(run_teardown "$case_dir") \
@@ -1326,6 +1330,8 @@ test_windowless_legacy_record_tears_down_with_the_legacy_flag() {
   local case_dir out
   case_dir=$(make_case windowless-flag)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf 'pr=https://github.com/example/repo/pull/7\n' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
 
   out=$(run_teardown "$case_dir" --legacy-record) \
@@ -1434,7 +1440,10 @@ test_windowless_leftover_retries_its_retained_legacy_stamp_without_the_flag() {
   local case_dir rc out
   case_dir=$(make_case windowless-retry)
   write_windowless_legacy_meta "$case_dir" no-mistakes ship "$case_dir/missing-wt"
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
+  # The recorded branch is on a remote, so the leftover's work is proven pushed
+  # without consulting the deliberately invalid pr= below.
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' 'branch=fm/task-x1' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
   add_failing_truncate_perl "$case_dir"
 
@@ -2023,6 +2032,118 @@ test_local_only_force_overrides_unpushed() {
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+}
+
+# A ship record that names no worktree: its copy is removed from the project
+# (the branch stays in the project repository) and the record keeps its branch
+# and any extra lines. Args: case_dir worktree-line [extra meta lines...]
+write_absent_worktree_meta() {
+  local case_dir=$1 worktree_line=$2
+  shift 2
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    ${worktree_line:+"$worktree_line"} \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "branch=fm/task-x1" \
+    "spawn_gen=teardown-test-task-x1" \
+    "$@"
+}
+
+test_absent_worktree_merged_pr_retires() {
+  local case_dir rc pr_head
+  case_dir=$(make_case absent-wt-merged-pr)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  write_absent_worktree_meta "$case_dir" "" "pr=https://github.com/example/repo/pull/7"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-wt-merged-pr: teardown should retire a record whose merged PR holds its branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "absent-wt-merged-pr: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "absent-wt-merged-pr: the task record was not removed"
+  pass "a record naming no worktree whose PR merged retires records-only"
+}
+
+test_absent_worktree_open_pr_pushed_branch_retires() {
+  local case_dir rc
+  case_dir=$(make_case absent-wt-open-pr-pushed)
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_fork_with_pushed_branch "$case_dir"
+  cat > "$case_dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view") printf '%s\t%s\t%s\n' OPEN 0000000000000000000000000000000000000000 https://github.com/example/repo/pull/7 ; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/gh"
+  write_absent_worktree_meta "$case_dir" "worktree=" "pr=https://github.com/example/repo/pull/7"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-wt-open-pr-pushed: teardown should retire a record whose branch is on a remote"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "absent-wt-open-pr-pushed: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" "absent-wt-open-pr-pushed: the task record was not removed"
+  pass "a record naming no worktree whose branch is pushed retires with its PR still open"
+}
+
+test_absent_worktree_unpushed_branch_refuses_unless_forced() {
+  local case_dir rc
+  case_dir=$(make_case absent-wt-unpushed)
+  wt_commit_file "$case_dir" feature.txt hello "unlanded feature"
+  write_absent_worktree_meta "$case_dir" ""
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "absent-wt-unpushed: teardown should refuse unlanded branch commits"
+  assert_grep "REFUSED: task task-x1 has no worktree of its own to inspect" "$case_dir/stderr" \
+    "absent-wt-unpushed: the refusal should name the task"
+  assert_grep "unlanded feature" "$case_dir/stderr" \
+    "absent-wt-unpushed: the refusal should list the unpushed commit"
+  assert_present "$case_dir/state/task-x1.meta" "absent-wt-unpushed: the refusal removed the task record"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-wt-unpushed: --force should override the refusal"
+  assert_absent "$case_dir/state/task-x1.meta" "absent-wt-unpushed: --force left the task record"
+  pass "a record naming no worktree refuses unpushed branch commits, and --force overrides"
+}
+
+test_absent_worktree_local_only_merged_to_local_main_retires() {
+  local case_dir rc meta
+  case_dir=$(make_case absent-wt-local-main)
+  wt_commit_file "$case_dir" feature.txt hello "merged feature"
+  git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  write_absent_worktree_meta "$case_dir" ""
+  meta="$case_dir/state/task-x1.meta"
+  sed 's/^mode=no-mistakes$/mode=local-only/' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "absent-wt-local-main: teardown should retire local-only work merged into local main"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "absent-wt-local-main: teardown printed a REFUSED line"
+  assert_absent "$meta" "absent-wt-local-main: the task record was not removed"
+  pass "a local-only record naming no worktree whose branch is merged into local main retires without --force"
 }
 
 # Mark the case's home as a secondmate home bound to a parent: teardown and
@@ -4304,6 +4425,10 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_absent_worktree_merged_pr_retires
+test_absent_worktree_open_pr_pushed_branch_retires
+test_absent_worktree_unpushed_branch_refuses_unless_forced
+test_absent_worktree_local_only_merged_to_local_main_retires
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
