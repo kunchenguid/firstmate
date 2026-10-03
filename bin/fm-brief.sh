@@ -566,6 +566,16 @@ IFS= read -r -d '' SHARED_INFRA_RULE <<'EOF' || true
 EOF
 SHARED_INFRA_RULE=${SHARED_INFRA_RULE%$'\n'}
 
+# One shared string keeps the ship and scout process-kill rule identical.
+IFS= read -r -d '' SHARED_KILL_RULE <<'EOF' || true
+8. Never stop processes by name or pattern (`pkill`, `killall`, `pgrep ... | xargs kill`): a pattern
+   also matches sibling agents and the operator's shells and apps, and BSD `pkill -f PAT -f` reads
+   the trailing `-f` as a second pattern that matches every command line containing `-f`. Kill only
+   PIDs you started and saved, or the listener from `lsof -ti tcp:<port> -sTCP:LISTEN` on a port
+   your own command started; if anything else holds the port, do not kill it - report a blocker.
+EOF
+SHARED_KILL_RULE=${SHARED_KILL_RULE%$'\n'}
+
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
   LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
@@ -606,6 +616,7 @@ $CREWMATE_PAUSE_INSTRUCTIONS
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_KILL_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 
@@ -684,6 +695,7 @@ $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
    Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 $SHARED_INFRA_RULE
+$SHARED_KILL_RULE
 
 $WAIT_BLOCK$INBOX_SECTION
 

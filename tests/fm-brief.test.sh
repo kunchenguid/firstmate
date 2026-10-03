@@ -1395,6 +1395,45 @@ test_crewmate_scaffolds_forbid_pool_administration() {
   pass "fm-brief.sh: every crewmate scaffold forbids administering the shared worktree pool"
 }
 
+test_crewmate_scaffolds_forbid_pattern_kills() {
+  local home mode brief ship_rule scout_rule
+  home="$TMP_ROOT/pattern-kill-home"
+  mkdir -p "$home/data"
+
+  for mode in no-mistakes direct-PR local-only; do
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-kill-$mode" alpha --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh --mode $mode exited non-zero"
+    brief="$home/data/brief-kill-$mode/brief.md"
+    assert_grep "Never stop processes by name or pattern" "$brief" \
+      "$mode ship brief did not forbid pattern kills"
+    # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+    assert_grep '`pkill`, `killall`, `pgrep ... | xargs kill`' "$brief" \
+      "$mode ship brief did not name pkill, killall, and pgrep | xargs kill"
+    # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+    assert_grep 'pkill -f PAT -f' "$brief" "$mode ship brief did not name the BSD trailing-option trap"
+    # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+    assert_grep 'lsof -ti tcp:<port> -sTCP:LISTEN' "$brief" \
+      "$mode ship brief gave no safe way to stop a listener"
+    assert_grep 'if anything else holds the port, do not kill it - report a blocker' "$brief" \
+      "$mode ship brief allowed killing a listener the worker did not start"
+  done
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-kill-scout alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh --scout exited non-zero"
+  brief="$home/data/brief-kill-scout/brief.md"
+  assert_grep "Never stop processes by name or pattern" "$brief" "scout brief did not forbid pattern kills"
+  # shellcheck disable=SC2016 # Literal command text must remain unexpanded.
+  assert_grep '`pkill`, `killall`, `pgrep ... | xargs kill`' "$brief" \
+    "scout brief did not name pkill, killall, and pgrep | xargs kill"
+
+  ship_rule=$(awk '/^8\. Never stop processes/,/^$/' "$home/data/brief-kill-no-mistakes/brief.md")
+  scout_rule=$(awk '/^8\. Never stop processes/,/^$/' "$brief")
+  [ -n "$ship_rule" ] || fail "ship brief emitted no pattern-kill rule to compare"
+  [ "$ship_rule" = "$scout_rule" ] || fail "ship and scout pattern-kill rules have drifted apart"
+
+  pass "fm-brief.sh: every crewmate scaffold forbids pattern kills"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -1431,3 +1470,4 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+test_crewmate_scaffolds_forbid_pattern_kills
