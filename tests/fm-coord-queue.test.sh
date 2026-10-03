@@ -524,12 +524,15 @@ if FM_COORD_QUIET_SECONDS=0 not_landed remote-unattested > "$tmp/unexpected" 2> 
   fail 'a remote wrapper without attested exit must keep the slot outcome-unknown'
 fi
 still_unknown 'missing remote exit attestation must retain the slot'
-exit_payload() { printf '{"request_id":"exit-remote","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$1" "$slot" "$2" "$remote_pid" "$remote_start"; }
-reject queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id")" 'the participant must refuse to report an exit while its exact wrapper process remains'
+unattested_payload() { printf '{"request_id":"exit-unattested","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start"; }
+exit_payload() { printf '{"request_id":"exit-remote","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s","exit_verified_host_id":"remote-test-host"}' "$1" "$slot" "$2" "$remote_pid" "$remote_start"; }
+reject queue-wrapper-exited "$(unattested_payload)" 'a remote exit without the participant host attestation must be refused while the wrapper runs'
 kill "$remote_pid"
 wait "$remote_pid" 2> /dev/null || true
-reject queue-wrapper-exited "$(printf '{"request_id":"exit-other","intent_id":"a","home_id":"other","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$other_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")" 'another participant must not attest a remote wrapper exit'
-reject queue-wrapper-exited "$(printf '{"request_id":"exit-wrong-start","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"wrong-start"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid")" 'remote exit attestation must match the exact wrapper start time'
+reject queue-wrapper-exited "$(unattested_payload)" 'a remote PID absent on the coordinator must not substitute for the participant host attestation'
+reject queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id" | sed 's/"exit_verified_host_id":"remote-test-host"/"exit_verified_host_id":"other-test-host"/')" 'an attestation from another host must be refused'
+reject queue-wrapper-exited "$(printf '{"request_id":"exit-other","intent_id":"a","home_id":"other","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s","exit_verified_host_id":"other-test-host"}' "$other_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")" 'another participant must not attest a remote wrapper exit'
+reject queue-wrapper-exited "$(printf '{"request_id":"exit-wrong-start","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"wrong-start","exit_verified_host_id":"remote-test-host"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid")" 'remote exit attestation must match the exact wrapper start time'
 remote_exit=$(coord queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id")")
 [ "$(field "$remote_exit" state)" = outcome-unknown ] || fail 'attested exit must retain the slot until forge non-landing proof'
 stale_generation=$remote_generation

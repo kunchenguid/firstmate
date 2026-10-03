@@ -25,12 +25,28 @@ ROOT = Path(__file__).resolve().parent
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
 
 
-def machine_host_id():
+def coord_module():
     spec = importlib.util.spec_from_file_location("fm_coord", ROOT / "fm-coord.py")
     coord = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(coord)
+    return coord
+
+
+def machine_host_id():
+    coord = coord_module()
     try:
         return coord.local_host_id()
+    except coord.Refusal as exc:
+        raise ValueError(str(exc))
+
+
+def process_start(pid):
+    """Start time of a process on this host, using the coordinator's own reader."""
+    coord = coord_module()
+    if type(pid) is not int or pid <= 0:
+        raise ValueError("wrapper_pid must be a positive integer")
+    try:
+        return coord.process_start(pid)
     except coord.Refusal as exc:
         raise ValueError(str(exc))
 
@@ -120,7 +136,7 @@ class Adapter:
                 if time.monotonic() > deadline:
                     raise ValueError("adapter journal is busy; checkpoint skipped, no grant assumed")
                 time.sleep(0.1)
-        self.reset = False
+        self.reset = self.reenrolled = False
         self.state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"requests": {}, "tasks": {}}
 
     def save(self):
@@ -142,6 +158,11 @@ class Adapter:
             if result.returncode:
                 if "expired session generation" in result.stderr:
                     self.reset_session()
+                elif "participant host_id must be enrolled" in result.stderr and not self.reenrolled:
+                    # A migration can clear a cached enrollment's host binding; enroll again once and retry the command.
+                    self.state["requests"].pop("enroll", None)
+                    self.reenrolled = self.reset = True
+                    self.save()
                 self.last_error = result.stderr
                 warn(f"central {op} unavailable or refused: {result.stderr.strip() or result.returncode}; request remains local")
                 return None
@@ -379,7 +400,7 @@ class Adapter:
         for key, item in list(self.state["requests"].items()):
             if self.reset:
                 return
-            if "reply" not in item and item["op"] not in {"publish-head", "release"}:
+            if "reply" not in item and item["op"] not in {"publish-head", "release", "queue-attempt"}:
                 self.send(key, item["op"], {k: v for k, v in item["payload"].items() if k != "request_id"})
         for task_id, task in list(self.state["tasks"].items()):
             if self.reset:
@@ -447,6 +468,35 @@ class Adapter:
             self.save()
         return True
 
+    def attempt(self, task_id, fields):
+        live = self.live_claim(task_id)
+        if not live:
+            return
+        start = process_start(fields.get("wrapper_pid"))
+        if start is None:
+            raise ValueError(f"{task_id}: wrapper process is not running on this host")
+        payload = {**fields, **live, "intent_id": self.state["tasks"][task_id]["intent_id"], "wrapper_start": start}
+        reply = self.send(f"{task_id}:attempt:{fields.get('slot_generation')}:{fields['wrapper_pid']}", "queue-attempt", payload)
+        if reply:
+            print(json.dumps(reply, sort_keys=True))
+
+    def wrapper_exited(self, task_id, fields):
+        task = self.state["tasks"].get(task_id)
+        if task is None:
+            warn(f"{task_id}: no local intent record; wrapper exit not reported")
+            return
+        # Attest only after this host proves the exact wrapper process is gone.
+        if process_start(fields.get("wrapper_pid")) == fields.get("wrapper_start"):
+            raise ValueError(f"{task_id}: wrapper process is still running")
+        generation = self.setup()
+        if generation is None:
+            warn(f"{task_id}: wrapper exit pending; slot stays outcome-unknown")
+            return
+        payload = {**fields, "intent_id": task["intent_id"], "home_id": self.config["home_id"], "generation": generation, "exit_verified_host_id": self.state["requests"]["enroll"]["payload"].get("host_id")}
+        reply = self.send(f"{task_id}:exit:{fields.get('attempt_event_id')}", "queue-wrapper-exited", payload)
+        if reply:
+            print(json.dumps(reply, sort_keys=True))
+
     def view(self):
         central = self.call("view", {})
         pending = [{"key": key, "operation": item["op"], "request_id": item["payload"]["request_id"]} for key, item in self.state["requests"].items() if "reply" not in item]
@@ -478,6 +528,11 @@ def run(adapter, command):
         if adapter.ci_ready(sys.argv[2], worktree) and task:
             task.pop("pending_ci", None)
             adapter.save()
+    elif command in {"attempt", "wrapper-exited"} and len(sys.argv) == 4:
+        fields = json.loads(sys.argv[3])
+        if not isinstance(fields, dict):
+            raise ValueError(f"{command} fields must be a JSON object")
+        (adapter.attempt if command == "attempt" else adapter.wrapper_exited)(sys.argv[2], fields)
     elif command == "release" and len(sys.argv) == 3:
         adapter.release(sys.argv[2])
     elif command == "replay" and len(sys.argv) == 2:
@@ -489,8 +544,8 @@ def run(adapter, command):
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "release", "replay", "view"}:
-        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [WORKTREE]|heartbeat TASK|release TASK|replay|view>", file=sys.stderr)
+    if len(sys.argv) < 2 or sys.argv[1] not in {"dispatch", "pre-push", "pre-ci", "heartbeat", "attempt", "wrapper-exited", "release", "replay", "view"}:
+        print("usage: fm-coord-adapter.py <dispatch TASK PROJECT WORKTREE BRIEF BRANCH HARNESS|pre-push TASK WORKTREE|pre-ci TASK [WORKTREE]|heartbeat TASK|attempt TASK JSON|wrapper-exited TASK JSON|release TASK|replay|view>", file=sys.stderr)
         return 2
     home = os.environ.get("FM_HOME")
     if not home:

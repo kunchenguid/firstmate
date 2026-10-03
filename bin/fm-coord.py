@@ -814,10 +814,13 @@ def main():
         if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
             if op == "queue-wrapper-exited":
-                participant(db, payload)
-                # Participant-side check: the invoking adapter runs on the wrapper's host and refuses while that exact process remains.
+                host_id = participant(db, payload)["host_id"]
                 require(type(payload.get("wrapper_pid")) is int and payload["wrapper_pid"] > 0, "wrapper_pid must be a positive integer")
-                require(process_start(payload["wrapper_pid"]) != payload.get("wrapper_start"), "wrapper process is still running")
+                if host_id == local_host_id():
+                    require(process_start(payload["wrapper_pid"]) != payload.get("wrapper_start"), "wrapper process is still running")
+                else:
+                    # A foreign PID is never checked here; only the participant adapter's check on its own host counts.
+                    require(host_id is not None and payload.get("exit_verified_host_id") == host_id, "remote wrapper exit requires the participant adapter's host attestation")
             actor = authority_actor(db, payload) if op == "queue-operator-abort" else payload.get("home_id", "@authority")
             if op == "queue-operator-abort":
                 payload["_authority_actor"] = actor

@@ -530,3 +530,68 @@ assert tasks['claude-b']['claim']['ok'] is True
 assert tasks['claude']['claim']['ok'] is True
 PY
 pass 'coordinator reboot starts a fresh session and resubmits local intents'
+
+db=$tmp/central/attempt.sqlite3
+coord init > /dev/null
+coord manifest-set '{"request_id":"manifest-attempt","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+head=$(git -C "$repo" rev-parse HEAD)
+# Prepare TASK in HOME up to awaiting-checks with the adapter's own claim, PR number $3; prints the slot generation.
+prepare_slot() {
+  local state claim generation base_oid common slot
+  state=$tmp/$1/state/fm-coord-adapter.json
+  claim=$(python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); t=s["tasks"][sys.argv[2]]; print("\"intent_id\":\"%s\",\"home_id\":\"%s\",\"generation\":%s,\"claim_id\":\"%s\",\"fence\":%s" % (t["intent_id"], sys.argv[2], s["requests"]["session"]["reply"]["generation"], t["claim"]["claim_id"], t["claim"]["fence"]))' "$state" "$1")
+  base_oid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][sys.argv[2]]["base_oid"])' "$state" "$1")
+  coord attach-pr "{\"request_id\":\"pr-$1\",$claim,\"pr_url\":\"https://github.com/owner/repo/pull/$2\"}" > /dev/null
+  coord publish-head "{\"request_id\":\"head-$1\",$claim,\"head_oid\":\"$head\",\"expected_previous_oid\":null}" > /dev/null
+  coord queue-ready "{\"request_id\":\"ready-$1\",$claim,\"head_oid\":\"$head\",\"priority\":0}" > /dev/null
+  slot=$(field "$(coord queue-next "{\"request_id\":\"next-$1\",\"repo\":\"owner/repo\",\"base\":\"main\"}")" generation)
+  common="$claim,\"slot_generation\":$slot,\"current_head_oid\":\"$head\",\"current_base_oid\":\"$base_oid\""
+  coord queue-synced "{\"request_id\":\"sync-$1\",$common,\"head_contains_base\":true}" > /dev/null
+  coord queue-validated "{\"request_id\":\"validate-$1\",$common,\"validation_passed\":true,\"validation_id\":\"v-$1\"}" > /dev/null
+  coord queue-checks "{\"request_id\":\"checks-$1\",$common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head\",\"conclusion\":\"success\"}]}" > /dev/null
+  printf '{"slot_generation":%s,"current_head_oid":"%s","current_base_oid":"%s","head_contains_base":true,"captain_hold_released":true,"away_merge_allowed":true,"merge_authorized":true' "$slot" "$head" "$base_oid"
+}
+host_of() { coord inspect '{}' | python3 -c 'import json,sys; print({p["home_id"]: p["host_id"] for p in json.load(sys.stdin)["participants"]}[sys.argv[1]])' "$1"; }
+
+make_home upgraded
+make_brief upgraded upgraded 201
+adapter "$tmp/upgraded" dispatch upgraded "$repo" "$repo" "$tmp/upgraded.brief" branch/upgraded claude > /dev/null 2>&1 || fail 'pre-migration dispatch must complete'
+gates=$(prepare_slot upgraded 201)
+# Simulate a v4 database whose binding is not the coordinator hostname, then upgrade it: migration 005 clears that host ID.
+sqlite3 "$db" "UPDATE participants SET host_id='pre-migration-hostname' WHERE home_id='upgraded'; PRAGMA user_version=4;"
+coord init > /dev/null
+[ "$(host_of upgraded)" = None ] || fail 'migration must keep treating a non-hostname v4 binding as untrusted'
+sleep 600 &
+wrapper=$!
+attempted=$(adapter "$tmp/upgraded" attempt upgraded "$gates,\"wrapper_pid\":$wrapper}" 2> "$tmp/upgraded-attempt.err") || fail "upgraded attempt must complete: $(cat "$tmp/upgraded-attempt.err")"
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+[ "$(field "$attempted" state)" = attempting ] || fail "a home with cached enrollment must re-enroll once and record its attempt after migration: $(cat "$tmp/upgraded-attempt.err")"
+case "$(host_of upgraded)" in machine:*) ;; *) fail 'the retried enrollment must bind the home machine identity' ;; esac
+pass 'a cached enrollment cleared by migration re-enrolls once and retries the merge attempt'
+
+db=$tmp/central/far.sqlite3
+coord init > /dev/null
+coord manifest-set '{"request_id":"manifest-far","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+make_home far
+make_brief far far 202
+# The journaled enrollment stands in for a home on another machine.
+printf '{"requests":{"enroll":{"op":"enroll","payload":{"home_id":"far","repos":["owner/repo"],"host_id":"far-test-host","request_id":"enroll-far"}}},"tasks":{}}\n' > "$tmp/far/state/fm-coord-adapter.json"
+adapter "$tmp/far" dispatch far "$repo" "$repo" "$tmp/far.brief" branch/far codex > /dev/null 2>&1 || fail 'remote-host dispatch must complete'
+gates=$(prepare_slot far 202)
+sleep 600 &
+wrapper=$!
+attempted=$(adapter "$tmp/far" attempt far "$gates,\"wrapper_pid\":$wrapper}") || fail 'remote-host attempt must complete'
+attempt_id=$(field "$attempted" attempt_event_id)
+start=$(coord inspect '{}' | python3 -c 'import json,sys; print([q for q in json.load(sys.stdin)["queue"] if q["intent_id"]=="far:owner/repo:far"][0]["wrapper_start"])')
+slot=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["slot_generation"])' "$gates}")
+coord queue-result "{\"request_id\":\"result-far\",\"intent_id\":\"far:owner/repo:far\",\"generation\":$slot,\"outcome\":\"unknown\"}" > /dev/null
+exit_fields="{\"slot_generation\":$slot,\"attempt_event_id\":\"$attempt_id\",\"wrapper_host_id\":\"far-test-host\",\"wrapper_pid\":$wrapper,\"wrapper_start\":\"$start\"}"
+if adapter "$tmp/far" wrapper-exited far "$exit_fields" > /dev/null 2> "$tmp/far-exit.err"; then fail 'the adapter must refuse to attest while its wrapper process runs'; fi
+case "$(cat "$tmp/far-exit.err")" in *'still running'*) ;; *) fail 'a running wrapper refusal must say so' ;; esac
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+exited=$(adapter "$tmp/far" wrapper-exited far "$exit_fields" 2> "$tmp/far-exit.err") || fail "the adapter must attest an exited wrapper: $(cat "$tmp/far-exit.err")"
+[ "$(field "$exited" state)" = outcome-unknown ] || fail 'an attested exit must still wait for forge non-landing proof'
+coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="wrapper-exit-attested" and e["payload"]["host_id"]=="far-test-host" for e in json.load(sys.stdin)["events"])' || fail 'the exit attestation must be recorded for the remote host'
+pass 'remote wrapper exit is attested by the participant adapter after its own host check'

@@ -102,7 +102,8 @@ A remote wrapper needs a `queue-wrapper-exited` event from its owning participan
 The exit event must match the recorded attempt, home, host ID, PID, and start time, and the later forge read must still prove non-landing.
 Without the attestation or an authority-only operator abort, a remote attempt remains `outcome-unknown`.
 The shadow command verifies the enrolled participant session for the exit event; an authenticated transport adapter must bind the remote caller to that home before forwarding it in step 3.
-The exit report is an attestation from the enrolled participant adapter, the only party able to check its own process: `queue-wrapper-exited` runs on the wrapper's host and refuses while a process with that exact PID and start time remains.
+The exit report is an attestation from the enrolled participant adapter, the only party able to check its own process: the adapter's `wrapper-exited` command refuses while a process with that exact PID and start time remains on its host, then sends `exit_verified_host_id` set to its enrolled host ID.
+The coordinator checks the PID itself only when the participant's enrolled host is the coordinator's own machine; otherwise it refuses an exit report without an `exit_verified_host_id` that equals the enrolled host, so a PID absent on the coordinator proves nothing.
 A lying enrolled participant is outside the threat model; the coordinator still requires the attestation, the quiet period, and live forge proof of non-landing.
 A lost exit reply replays its original receipt with the same `request_id` from the owning home's current session, because the replay key covers the attempt and exact wrapper identity rather than the participant generation; a stale session or a different attempt or wrapper identity is refused.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
@@ -130,7 +131,7 @@ Version 4 binds participant homes to host IDs and records whether a wrapper was 
 Earlier active attempts are classified as local because all prior attempts required a coordinator-local PID.
 Existing participants without a host ID must bind one through `enroll` before a new attempt; a bound host ID cannot change.
 Version 5 replaces the hostname with a durable machine identity, a 32-character lowercase hexadecimal `/etc/machine-id` on Linux or `IOPlatformUUID` on macOS, so a hostname change cannot turn a same-host home remote; the coordinator refuses to initialize or enroll a same-host home when that identity is missing, empty, `uninitialized`, malformed, or unreadable through `ioreg`.
-The migration rebinds a participant whose version-4 host ID equals the coordinator's current hostname to the machine identity and clears every other host ID, so each such home must bind again once through `enroll` before its next attempt.
+The migration rebinds a participant whose version-4 host ID equals the coordinator's current hostname to the machine identity and clears every other host ID, so each such home must bind again once through `enroll` before its next attempt; the adapter's `attempt` command does this itself when the coordinator refuses for a missing host ID, enrolling again once and retrying the attempt once.
 It leaves recorded attempts, including their local or remote classification and host ID, unchanged.
 A future schema change must add a numbered migration and preserve earlier receipts and allocation identities.
 The command refuses a database with a newer or uninitialized schema.
@@ -165,7 +166,7 @@ Payload fields starting with `_` are reserved for those forge observations and a
 `queue-operator-abort` includes the integration `generation` and `reason`; its actor comes from the enrolled authority credential rather than the payload.
 `queue-attempt` requires `wrapper_pid` and records the enrolled participant home and host ID; for a same-host home it reads the live process start time before returning the existing `bin/fm-pr-merge.sh` command.
 For a remote home, the authenticated adapter supplies `wrapper_start` along with `wrapper_pid`, and the coordinator records that identity without inspecting the PID locally.
-`queue-wrapper-exited` includes `request_id`, `intent_id`, `home_id`, participant `generation`, `slot_generation`, `attempt_event_id`, `wrapper_host_id`, `wrapper_pid`, and `wrapper_start` from that remote attempt.
+`queue-wrapper-exited` includes `request_id`, `intent_id`, `home_id`, participant `generation`, `slot_generation`, `attempt_event_id`, `wrapper_host_id`, `wrapper_pid`, and `wrapper_start` from that remote attempt, plus `exit_verified_host_id` from the participant adapter.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
 `view` projects active intents, active claims, recent scope conflicts, the integration queue, and pending central outbox events as one JSON object.
@@ -193,6 +194,8 @@ While an amendment is refused or pending, the head stays unpublished and both `p
 `check` returns the intent's latest central head, and the adapter refreshes its local published-head cache from it before comparing, so a lost `publish-head` reply cannot let an older worktree HEAD pass.
 `pre-ci TASK` without a worktree uses the task's recorded worktree and refuses when none is recorded; `replay` skips a pending `pre-ci` with no recorded worktree and warns.
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
+`attempt TASK JSON` adds the live claim, intent, and the wrapper start time read on this host to the caller's `queue-attempt` slot and gate fields, and prints the central reply; it is not resent by `replay`, because an attempt is bound to a live wrapper.
+`wrapper-exited TASK JSON` takes the `queue-wrapper-exited` attempt and wrapper fields, refuses while that wrapper process still runs on this host, then reports the exit with this home's host attestation and prints the central reply.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
 
 Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage; it submits and claims only tasks whose dispatch is still pending and resumes checkpoints only for tasks that already hold a claim, so refused or finished tasks never reclaim resources, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
