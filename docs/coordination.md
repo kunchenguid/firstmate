@@ -116,7 +116,7 @@ An inbox acknowledgment by a future transport means delivery, not a grant.
 The database is authoritative; unrestricted status prose and notification cursors are projections.
 
 Schema versions 1 through 3 live in the corresponding numbered files under `bin/fm-coord-migrations/` and are applied transactionally through SQLite `user_version`.
-The tables are `meta` for boot identity; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
+The tables are `meta` for boot identity and the authority credential digest; `participants` for scoped sessions; `areas` and `area_aliases` for registry names; `intents` for versioned submissions; `claims`, `claim_resources`, and `branch_owners` for leases and fencing; `allocation_counters` and `allocations` for persistent migration identities; `heads` for immutable head submissions; `requests` for replay receipts; and `events` plus `outbox` for notifications.
 Version 2 adds required-check manifests, queue items, one-slot records, integration generations, and unique terminal outcomes.
 Version 3 adds recorded wrapper identity and attempt time to queue items.
 It also recognizes the complete set of those columns in previously patched version-2 databases, while refusing a partial or incompatible set for manual repair.
