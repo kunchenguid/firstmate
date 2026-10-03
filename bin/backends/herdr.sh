@@ -3067,6 +3067,38 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
+# Prepare a newly created shell before sending a one-shot command. A pane's
+# existence and echoed input do not prove execution: startup programs can eat
+# input before the shell reaches its prompt. Retry only a harmless file-ack
+# probe, never the preparation command (which may allocate a worktree).
+# A private, fresh directory binds the acknowledgement to this invocation;
+# late probes become no-ops after cleanup. This subshell owns its cleanup trap
+# without replacing the spawn's abort trap. FM_HERDR_SHELL_READY_POLLS bounds
+# the attempts (default 100, 0.1 seconds between unsuccessful probes).
+fm_backend_herdr_prepare_shell() ( # <target> <command>
+  local target=$1 command=$2 probe_dir quoted attempt=0
+  local polls=${FM_HERDR_SHELL_READY_POLLS:-100}
+  case "$polls" in ''|*[!0-9]*|0) return 1 ;; esac
+  probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-ready.XXXXXXXX") || return 1
+  trap 'rm -rf -- "$probe_dir"' EXIT
+  trap 'exit 1' HUP INT TERM
+  quoted=${probe_dir//\'/\'\\\'\'}
+  while [ "$attempt" -lt "$polls" ]; do
+    fm_backend_herdr_send_text_line "$target" \
+      "test ! -d '$quoted' || : > '$quoted/ready'" || return 1
+    # The CLI may return before the shell executes the input. Observe the ack
+    # after a bounded poll interval rather than treating that return as ready.
+    sleep 0.1
+    if [ -f "$probe_dir/ready" ]; then
+      fm_backend_herdr_send_text_line "$target" "$command"
+      return $?
+    fi
+    attempt=$((attempt + 1))
+  done
+  echo "error: herdr shell $target did not acknowledge readiness after $polls probes; refusing preparation" >&2
+  return 1
+)
+
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the
 # caller sends Enter separately. Mirrors tmux's `send-keys -t T -l text`.
 # Verified: `pane send-text` does NOT auto-submit (contrary to the addendum's
