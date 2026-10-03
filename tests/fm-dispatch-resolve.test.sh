@@ -315,6 +315,10 @@ printf '%s\n' 'acme-ledger' > "$NEVER_SEND"
 bash -c '. "$1" && propagate_inheritable_config "$2" "$3"' _ \
   "$ROOT/bin/fm-config-inherit-lib.sh" "$HOME_DIR/config" "$SECOND_HOME/config" \
   || fail "inheritance into the secondmate home failed"
+[ ! -e "$SECOND_HOME/config/crew-dispatch.json" ] \
+  || fail "the primary's crew-dispatch.json was inherited into the secondmate home"
+# Dispatch rules are home-owned, so the secondmate home keeps its own copy.
+cp "$RULES" "$SECOND_HOME/config/crew-dispatch.json"
 PRIMARY_HOME=$HOME_DIR
 HOME_DIR=$SECOND_HOME
 reset_log
