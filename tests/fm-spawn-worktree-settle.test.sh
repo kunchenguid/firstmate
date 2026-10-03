@@ -258,6 +258,17 @@ SH
 set -u
 case "${1:-}" in
   status)
+    if [ -n "${FM_ALLOC_STATUS_HANG:-}" ]; then
+      n=$(cat "$FM_ALLOC_STATUS_HANG/count" 2>/dev/null || printf 0)
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$FM_ALLOC_STATUS_HANG/count"
+      if [ "$n" -ge "${FM_ALLOC_STATUS_HANG_FROM:-1}" ]; then
+        printf '%s\n' "$$" >> "$FM_ALLOC_STATUS_HANG/parents"
+        trap '' TERM
+        bash -c 'trap "" TERM; echo $$ >> "$1/children"; touch "$1/ready"; while :; do sleep 1; done' _ "$FM_ALLOC_STATUS_HANG" &
+        wait
+      fi
+    fi
     if [ -f "${FM_ALLOC_LEASE_STATE:-}" ]; then cat "$FM_ALLOC_LEASE_STATE"; else printf '[]\n'; fi
     exit 0
     ;;
@@ -316,7 +327,7 @@ allocator_pid_running() {
 }
 
 test_allocator_bound() {
-  local behavior=$1 rec id out status parent child unrelated i result
+  local behavior=$1 rec id out status parent child unrelated result
   id="allocator-$behavior"
   rec=$(make_primary_case "$id" "$id" 100000)
   read_settle_record "$rec"
@@ -345,7 +356,7 @@ test_allocator_bound() {
   assert_contains "$out" "within 6s" "spawn did not retain its isolation deadline"
   parent=$(cat "$HOME_DIR/allocator.pid")
   child=$(cat "$HOME_DIR/child.pid")
-  for i in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     if ! allocator_pid_running "$parent" && ! allocator_pid_running "$child"; then break; fi
     sleep 0.1
   done
@@ -462,7 +473,8 @@ test_allocator_lease_recovery_guards() {
       dirty) printf 'keep\n' > "$WT_DIR/unlanded" ;;
       ignored)
         printf 'keep\n' > "$WT_DIR/ignored"
-        printf 'ignored\n' >> "$HOME_DIR/primary/.git/info/exclude"
+        printf 'ignored\n' >> "$STALE_DIR/.git/info/exclude"
+        git -C "$WT_DIR" check-ignore -q ignored || fail "ignored-work fixture did not ignore its file"
         ;;
       unlanded)
         git -C "$WT_DIR" -c user.name=test -c user.email=test@example.com commit --quiet --allow-empty -m unlanded
@@ -503,6 +515,85 @@ test_allocator_lease_recovery_guards() {
   pass "recovery requires dead ownership, landed work, and an unchanged unambiguous lease"
 }
 
+# Exercise both recovery callers through spawn. A concurrent return contender
+# uses the public project-lock interface, and can acquire only after the hung
+# probe has been bounded. The saved lease is the public status contract.
+test_hanging_allocator_recovery() {
+  local phase=$1 rec id from probe contender status pid attempt home_key lock
+  id="status-hang-$phase"
+  rec=$(make_primary_case "$id" "$id" 0)
+  read_settle_record "$rec"
+  make_allocator_fakebin
+  mkdir -p "$HOME_DIR/status-probe"
+  home_key=$(printf '%s' "$HOME_DIR" | git hash-object --stdin)
+  jq -n --arg path "$WT_DIR" --arg holder "fm-allocator:$home_key:$id:99999999" \
+    '[{path:$path,status:"leased",lease_id:"preserved-generation",lease_holder:$holder,processes:[]}]' \
+    > "$HOME_DIR/leases.json"
+  from=1
+  if [ "$phase" = pre ]; then
+    rm "$HOME_DIR/data/$id/brief.md"
+  else
+    from=2
+  fi
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-timeout-lib.sh"
+    export FM_SPAWN_ALLOCATOR_TIMEOUT=2 FM_SPAWN_ISOLATION_TIMEOUT=6
+    export FM_ALLOC_PROJECT="$PROJ_DIR" FM_ALLOC_WORKTREE="$WT_DIR" FM_ALLOC_CASE=refuse
+    export FM_ALLOC_CWD="$HOME_DIR/cwd" FM_ALLOC_TIMEOUT_LIB="$ROOT/bin/fm-timeout-lib.sh"
+    export FM_ALLOC_COMPLETED="$HOME_DIR/completed" FM_ALLOC_RESULT="$HOME_DIR/result"
+    export FM_ALLOC_PID="$HOME_DIR/allocator.pid" FM_ALLOC_KEEP_STATE=1
+    export FM_ALLOC_LEASE_STATE="$HOME_DIR/leases.json" FM_ALLOC_RETURNS="$HOME_DIR/returns"
+    export FM_ALLOC_STATUS_HANG="$HOME_DIR/status-probe" FM_ALLOC_STATUS_HANG_FROM="$from"
+    export -f run_settle_spawn
+    export ROOT SPAWN HOME_DIR PROJ_DIR WT_DIR STALE_DIR FAKEBIN_DIR COUNTFILE STALE_READS
+    # shellcheck disable=SC2016 # The fixture child expands its positional argument.
+    fm_run_timed 25 bash -c 'run_settle_spawn "$1"' _ "$id"
+  ) > "$HOME_DIR/spawn.out" 2>&1 &
+  probe=$!
+  attempt=0
+  while [ ! -e "$HOME_DIR/status-probe/ready" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ -e "$HOME_DIR/status-probe/ready" ] || fail "$phase recovery never probed status"
+  (
+    export FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    lock=$(fm_treehouse_project_lock_path "$PROJ_DIR") || exit 1
+    # First prove that the probe is still holding the shared project lock.
+    if fm_lock_try_acquire "$lock"; then
+      fm_lock_release "$lock"
+      exit 1
+    fi
+    attempt=0
+    while [ "$attempt" -lt 200 ]; do
+      if fm_lock_try_acquire "$lock"; then
+        touch "$HOME_DIR/contender-acquired"
+        fm_lock_release "$lock"
+        exit 0
+      fi
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    exit 1
+  ) &
+  contender=$!
+  if wait "$probe"; then status=0; else status=$?; fi
+  wait "$contender" || fail "$phase recovery did not release the project lock to a concurrent contender"
+  [ "$status" -ne 0 ] && [ "$status" -ne 124 ] || fail "$phase recovery exceeded the fixture watchdog"
+  [ -e "$HOME_DIR/contender-acquired" ] || fail "contender never acquired the released lock"
+  while IFS= read -r pid; do
+    ! allocator_pid_running "$pid" || fail "$phase timed-out status probe left its child tree alive"
+  done < <(cat "$HOME_DIR/status-probe/parents" "$HOME_DIR/status-probe/children")
+  [ "$(cat "$HOME_DIR/status-probe/count")" = 2 ] || fail "both recovery callers were not exercised"
+  jq -e 'length == 1 and .[0].lease_id == "preserved-generation"' "$HOME_DIR/leases.json" >/dev/null \
+    || fail "$phase timed-out recovery changed an ambiguous lease"
+  [ ! -e "$HOME_DIR/returns" ] || fail "$phase timed-out recovery returned an ambiguous lease"
+  pass "$phase recovery bounds status and its children, preserves leases, and releases the shared lock"
+}
+
 # Fail the eager sequence producer without constructing its enormous output.
 # The successful executable spawn must reach its settled path immediately even
 # with the largest accepted bound. Other fixed, small seq callers still work.
@@ -536,6 +627,8 @@ test_large_isolation_timeout_polls_immediately
 test_stranded_allocator_lease stall
 test_stranded_allocator_lease refuse
 test_allocator_lease_recovery_guards
+test_hanging_allocator_recovery pre
+test_hanging_allocator_recovery abort
 test_allocator_success_with_unset_defaults
 test_timeout_ordering_refuses_before_allocation
 test_allocator_bound stall

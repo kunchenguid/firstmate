@@ -1255,7 +1255,7 @@ parse_orca_worktree_result() {
 spawn_recover_allocator_leases() {  # <project> <state> <home>
   local project=$1 state=$2 home=$3 home_key listing rows path lease holder id pid pids dirty landed
   home_key=$(printf '%s' "$home" | git hash-object --stdin) || return 1
-  listing=$(cd "$project" && treehouse status --json 2>/dev/null) || return 0
+  listing=$(cd "$project" && fm_exec_timed 5 1 treehouse status --json 2>/dev/null < /dev/null) || return 0
   rows=$(printf '%s' "$listing" | jq -er --arg prefix "fm-allocator:$home_key:" '
     if type != "array" then error("invalid status") else .[] end
     | select(.status == "leased" and .processes == [] and .recovery_reason == null)
@@ -4315,6 +4315,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   allocator_home=$(printf '%s' "$FM_HOME" | git hash-object --stdin) || exit 1
   # The bounded child's PID is the lease owner, including when no path reaches
   # stdout. exec keeps that identity on Treehouse rather than a short-lived shell.
+  # shellcheck disable=SC2016 # The bounded child shell expands its own arguments and PID.
   allocator_exec='exec treehouse get --lease --lease-holder "$1:$$"'
   allocator_command=". $(shell_quote "$SCRIPT_DIR/fm-timeout-lib.sh"); fm_run_timed $FM_SPAWN_ALLOCATOR_TIMEOUT bash -c $(shell_quote "$allocator_exec") _ $(shell_quote "fm-allocator:$allocator_home:$ID") < /dev/null"
   spawn_send_text_line "$WT_TARGET" "fm_allocated=\$(bash -c $(shell_quote "$allocator_command")) && cd -- \"\$fm_allocated\""
