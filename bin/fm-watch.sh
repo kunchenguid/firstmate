@@ -57,7 +57,15 @@
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict escalates unchanged. After those probes, Jev
+#                          classifies the candidate as pipeline_wait, true_wedge,
+#                          or healthy_idle (bin/fm-jev-wake-triage.sh); only
+#                          true_wedge, or Jev unavailable, still escalates.
+#                          pipeline_wait and healthy_idle suppress the wake and
+#                          restart the idle timer, up to a capped streak per
+#                          unchanged status line. The gate is off unless
+#                          config/jev-wake-triage or FM_JEV_WAKE_TRIAGE turns
+#                          it on.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -490,7 +498,7 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .jev-suppress-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -804,7 +812,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" "$STATE/.jev-suppress-$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1497,6 +1505,67 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# Last gate before a possible-wedge wake: Jev classifies pipeline_wait vs
+# true_wedge vs healthy_idle. Escalate only on true_wedge, or when Jev is
+# unavailable (fail-open to today's wake). pipeline_wait and healthy_idle
+# suppress the wake, restart the idle timer, and leave the escalation
+# counter untouched. Consecutive suppressions are capped per window at
+# FM_WEDGE_DEMAND_INSPECT_COUNT while the last status line is unchanged: at the
+# cap the gate escalates without a model call, so the counter climbs to the
+# demand-deep-inspection page on schedule. .jev-suppress-<key> holds the
+# status-line fingerprint and streak; a new line or any non-suppress answer
+# restarts it. bin/fm-jev-wake-triage.sh owns the request, telemetry,
+# and calibration log. Default off with no override. A non-empty
+# FM_JEV_WAKE_TRIAGE beats config/jev-wake-triage's first line; either is on
+# only for on/1/true/yes (any case), and off, empty, or any other value is off.
+wedge_jev_enabled() {
+  local v
+  if [ -n "${FM_JEV_WAKE_TRIAGE-}" ]; then
+    v=$FM_JEV_WAKE_TRIAGE
+  elif [ -f "$CONFIG/jev-wake-triage" ]; then
+    v=$(head -n 1 "$CONFIG/jev-wake-triage" 2>/dev/null || true)
+  else
+    return 1
+  fi
+  v=$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  case "$v" in
+    on|1|true|yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+wedge_jev_triage() {  # <window> <task> <age> <escalation-count> <since-file> <triage-label>
+  # 0 = suppress; 1 = escalate (including fail-open).
+  local win=$1 task=$2 age=$3 n=$4 since_file=$5 label=$6 kind bin out action choice streak fp prev='' count=''
+  wedge_jev_enabled || return 1
+  bin=${FM_JEV_WAKE_TRIAGE_BIN:-$SCRIPT_DIR/fm-jev-wake-triage.sh}
+  [ -e "$bin" ] || return 1
+  streak="$STATE/.jev-suppress-$(window_key "$win")"
+  fp=$(printf '%s' "$(tail -n 1 "$STATE/$task.status" 2>/dev/null || true)" | hash_pane)
+  { read -r prev count < "$streak"; } 2>/dev/null || true
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  [ "$prev" = "$fp" ] || count=0
+  [ "$count" -lt "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] || return 1
+  kind=$(window_kind "$win")
+  case "$kind" in ship|scout|secondmate) ;; *) kind=unknown ;; esac
+  out=$(bash "$bin" --class "$kind" --age "$age" --escalation-count "$n" \
+    --task "$task" --status-file "$STATE/$task.status" 2>/dev/null) || out='action=unavailable'
+  action=$(printf '%s\n' "$out" | awk -F= '/^action=/{print $2; exit}')
+  case "$action" in
+    suppress)
+      printf '%s %s\n' "$fp" "$(( count + 1 ))" > "$streak"
+      date +%s > "$since_file"
+      choice=$(printf '%s\n' "$out" | awk -F= '/^choice=/{print $2; exit}')
+      [ -n "$choice" ] || choice=jev
+      triage_log "absorbed $label (jev $choice, idle ${age}s): $win"
+      return 0
+      ;;
+    *) rm -f "$streak"; return 1 ;;
+  esac
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1516,6 +1585,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
+# Jev (wedge_jev_triage) runs after those three, still inside this at-threshold
+# branch, so a candidate that already has a cheaper deferral never pays for a
+# model call. Fail-open: a disabled, missing, or unavailable Jev keeps today's
+# escalate path.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1542,7 +1615,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        if wedge_jev_triage "$win" "$task" "$age" "$n" "$since_file" "$label"; then
+          return 0
+        fi
+        n=$(( n + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -1592,7 +1670,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.jev-suppress-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
@@ -1715,7 +1793,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-    "$STATE/.waiting-resurfaced-$key"
+    "$STATE/.jev-suppress-$key" "$STATE/.waiting-resurfaced-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
