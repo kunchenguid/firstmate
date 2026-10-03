@@ -2459,13 +2459,17 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 
 ## Busy inbox escalation
 
-Verified 2026-10-03 with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
+Verified at `2026-10-03T19:20:07Z` on commit `23b0232908a5adc7fbf7339ef48c34a091a7a799` with Claude Code `2.1.288 (Claude Code)` on Herdr `0.9.1`, protocol `22`, in a named isolated lab session through `bin/fm-herdr-lab.sh`.
 `bin/fm-task-inbox-lib.sh` owns the durable busy-deferral budget.
 
-A real Claude worker with Firstmate's `UserPromptSubmit`/`Stop` busy hooks opened an `AskUserQuestion` panel.
-Four due inbox checks on the unchanged watcher each read `busy=yes` and added zero wakes.
-With `FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2`, two separate watcher processes calling `inbox_steer_check` against that same pane produced one wake containing `stuck-busy after 2 consecutive busy-deferred due doorbells`; the question panel remained open and the steer remained unhandled.
+A real Claude worker opened an `AskUserQuestion` panel, and Firstmate's `UserPromptSubmit` hook reported busy.
+Four due inbox checks using the original `origin/main` watcher at `1f3e769616fdf9f31f85f4c3e6a9f71606634238` against that live pane each read `busy=yes` and added zero wakes.
+With `FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_BUSY_MAX=2`, two distinct processes sourcing the fixed watcher and calling `inbox_steer_check` against the same pane produced one wake containing `stuck-busy after 2 consecutive busy-deferred due doorbells`.
+A third check left exactly one wake total; the question panel remained open and the instruction remained unhandled.
+Lab teardown completed with exit `0`, including the default-session tripwire.
 The zero grace accelerates only the experiment; the normal grace remains unchanged.
 Without Firstmate's hooks, Herdr reported the question panel as `blocked`, which did not classify as busy; that is a different path and does not establish this regression.
 
-Repeat the hooked-worker check above after a busy-signal integration change; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
+This live proof covers the watcher and queue boundary; it does not establish live daemon-consumer delivery.
+`bin/fm-test-run.sh tests/fm-daemon.test.sh` exercises that consumer routing separately with portable regressions for busy escalation and busy-bookkeeping failures in away and quiet mode.
+Repeat the hooked-worker check above before publication if watcher or task-inbox busy code changes; `bin/fm-test-run.sh tests/fm-task-inbox.test.sh` refreshes the portable ladder regressions.
