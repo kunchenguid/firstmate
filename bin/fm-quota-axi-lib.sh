@@ -7,8 +7,8 @@
 # constants in bin/fm-bootstrap.sh.
 #
 # This file is the single owner of that version number. bin/fm-bootstrap.sh
-# turns a failing check into the operator-facing MISSING diagnostic, which is
-# what keeps an older build from reaching a dispatch intake at all.
+# turns a failing check into the operator-facing MISSING diagnostic, and the
+# dispatch resolver enforces the same floor before reading a snapshot.
 #
 # Snapshot schemas: fm_quota_json_valid accepts quota-axi schema 5 (one row per
 # provider, no accountKey) and schema 6 (every row carries accountKey, unique on
@@ -17,7 +17,7 @@
 # quota-axi keeps working unchanged. FM_QUOTA_ROW_JQ is the one join used to
 # bind a candidate to its row under either schema.
 
-FM_QUOTA_AXI_MIN=0.1.51
+FM_QUOTA_AXI_MIN=0.1.55
 FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
 # The eligibility section of .agents/skills/quota-array-dispatch/SKILL.md
@@ -142,7 +142,7 @@ fm_quota_single_provider_table() {
     'kimi kimi' \
     'cursor cursor' \
     'agy agy' \
-    'muse meta'
+    'muse muse'
 }
 
 # Reads the whole table before answering: leaving the loop early closes the
@@ -173,7 +173,7 @@ fm_quota_provider_for_harness() {
     grok)         printf 'grok\n' ;;
     kimi)         printf 'kimi\n' ;;
     cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
+    muse)         printf 'muse\n' ;;
     *)            return 1 ;;
   esac
 }
