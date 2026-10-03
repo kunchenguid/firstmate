@@ -2020,11 +2020,15 @@ launch_template() {
     printf '%s' '__MODELFLAG____EFFORTFLAG____BRIEFDOORBELL__'
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
-  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
+  # lifecycle-hook layer off for CREWMATE and SCOUT launches only by default.
   # Without it a crewmate launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
-  # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
+  # and Ctrl-C with no arrow navigation, so the selection cannot be moved.
+  # The local config/codex-crew-hooks=on opt-in omits that flag only after the
+  # operator has trusted the project's hooks interactively in Codex; it never
+  # answers or bypasses the trust modal, which still parks a launch if hooks are
+  # untrusted. Firstmate never writes Codex's trust store or uses the bypass.
   # pre-accepting the prompt by writing codex's own trust store would manufacture
   # an operator consent that was never given. The hooks it asks about are the
   # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
@@ -2045,7 +2049,7 @@ launch_template() {
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __CODEXHOOKS__-c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}__EFFORTFLAG__}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -4890,12 +4894,29 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx codex_hooks", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
   ' "$RELAUNCH_META"
 }
+
+# Codex hook trust is operator-owned. Resolve this home-local opt-in at every
+# crew/scout launch, including relaunch, and fail closed to hooks off.
+CODEX_HOOKS=off
+CODEX_HOOKS_FLAG=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  if [ -e "$CONFIG/codex-crew-hooks" ] || [ -L "$CONFIG/codex-crew-hooks" ]; then
+    if [ -f "$CONFIG/codex-crew-hooks" ] && [ -r "$CONFIG/codex-crew-hooks" ] &&
+      CODEX_HOOKS=$(awk 'NR == 1 && ($0 == "on" || $0 == "off") { value = $0; next } { bad = 1 } END { if (NR != 1 || bad) exit 1; print value }' "$CONFIG/codex-crew-hooks"); then
+      :
+    else
+      CODEX_HOOKS=off
+      echo "BOOTSTRAP: invalid config/codex-crew-hooks - expected one line containing on or off" >&2
+    fi
+  fi
+  [ "$CODEX_HOOKS" = on ] || CODEX_HOOKS_FLAG='--disable hooks '
+fi
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -4909,6 +4930,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$HARNESS" != codex ] || [ "$KIND" = secondmate ] || echo "codex_hooks=$CODEX_HOOKS"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
@@ -5054,6 +5076,7 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+LAUNCH=${LAUNCH//__CODEXHOOKS__/$CODEX_HOOKS_FLAG}
 # Relaunch session continuity. Computed here, where the adopted endpoint (T) is
 # known, and substituted only into the Pi-family template's `__PIRESUME__`
 # placeholder; an empty value leaves every other launch byte-identical.

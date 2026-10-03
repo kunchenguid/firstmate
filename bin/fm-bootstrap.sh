@@ -10,6 +10,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "BOOTSTRAP: invalid config/codex-crew-hooks - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -1181,6 +1182,15 @@ crew_dispatch_validate() {
   fi
 }
 
+codex_crew_hooks_validate() {
+  local file="$CONFIG/codex-crew-hooks"
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  if [ ! -f "$file" ] || [ ! -r "$file" ] ||
+    ! awk 'NR == 1 && ($0 == "on" || $0 == "off") { next } { bad = 1 } END { if (NR != 1 || bad) exit 1 }' "$file"; then
+    echo "BOOTSTRAP: invalid config/codex-crew-hooks - expected one line containing on or off"
+  fi
+}
+
 # Same-home record reconciliation. Every ordinary dispatch and completion now
 # moves the backlog row inside the script that moves the task's record
 # (bin/fm-backlog-transition-lib.sh), so remaining recovery cases include a
@@ -1467,6 +1477,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  codex_crew_hooks_validate
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"

@@ -56,6 +56,7 @@ Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible 
 `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts continue to come from their tracked code root.
 Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
 `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
+`config/codex-crew-hooks` optionally keeps Codex lifecycle hooks enabled for crewmate and scout launches; [`docs/configuration.md`](docs/configuration.md#codex-crew-hooks) owns its contract.
 
 Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
 
