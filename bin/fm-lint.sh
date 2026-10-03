@@ -19,6 +19,13 @@
 # The default (no explicit-path) path also runs bin/fm-lint-workflows.sh so a
 # malformed GitHub workflow, including a self-broken ci.yml, fails locally
 # before merge instead of only failing to run as CI.
+# Every run also enforces one interface boundary over the production shell
+# roots it lints: firstmate reaches its backlog through tasks-axi and never
+# through the beads CLI directly (see fm_lint_run_backend_purity). The
+# check's roots are the production bin/ and bin/backends/ scripts, so test
+# scripts are out of scope by construction: a beads-backed test fixture must
+# bootstrap its scratch graph with `bd` before tasks-axi can operate on it at
+# all, as tests/fm-captain-hold-lifecycle.test.sh documents.
 #
 # With no explicit paths, the file set and source-following posture depend
 # on context:
@@ -59,7 +66,7 @@
 # process runs under an enforced envelope: a wall deadline
 # (FM_LINT_ROOT_SECONDS, default 1200), a terminate-then-kill cleanup grace
 # (FM_LINT_ROOT_GRACE, default 5), and a per-process address-space limit
-# (FM_LINT_ROOT_MEMORY_KIB, default 12582912 = 12 GiB of virtual address
+# (FM_LINT_ROOT_MEMORY_KIB, default 14680064 = 14 GiB of virtual address
 # space per analysis process). The sizing rationale and RSS reduction threshold
 # live beside ROOT_MEMORY_KIB below. This is not a resident-memory ceiling;
 # check aggregate runner RSS in CI. The watchdog uses the shared
@@ -479,6 +486,12 @@ fm_lint_run_workflows() {
 # Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
 # out of firstmate's core scripts so every configured backend follows the same
 # lifecycle path.
+# KNOWN, TRACKED GAP - NOT AN OVERSIGHT: a wrapper (sudo, time, timeout, xargs,
+# nohup, command, exec, eval) is stripped only when the command follows it
+# immediately, so a form with arguments in between - `timeout 5 bd close <id>`,
+# `sudo -n bd list` - passes this check silently, and an `eval` whose whole body
+# is one quoted string - `eval "bd close"` - never puts `bd` in command position
+# here. Do not read a clean verdict as proof that the boundary held.
 fm_lint_run_backend_purity() {
   local findings path canonical
   local -a purity_roots
@@ -523,7 +536,7 @@ fm_lint_run_backend_purity() {
         previous=segment
         sub(/^(if|then|elif|else|while|until|do)[[:space:]]+/, "", segment)
         sub(/^![[:space:]]+/, "", segment)
-        sub(/^(command|exec)[[:space:]]+/, "", segment)
+        sub(/^(command|exec|sudo|time|xargs|nohup|timeout|eval)[[:space:]]+/, "", segment)
         sub(/^[[:alpha:]_][[:alnum:]_]*=[^[:space:]]+[[:space:]]+/, "", segment)
         if (segment ~ /^env[[:space:]]+/) {
           sub(/^env[[:space:]]+/, "", segment)
@@ -957,22 +970,22 @@ fi
 # ShellCheck process, unbounded, for local developer lint.
 ROOT_SECONDS=${FM_LINT_ROOT_SECONDS:-1200}
 ROOT_GRACE=${FM_LINT_ROOT_GRACE:-5}
-# 12 GiB of virtual address space per analysis process. ulimit -v caps
+# 14 GiB of virtual address space per analysis process. ulimit -v caps
 # address space, not resident memory; ShellCheck's GHC runtime reserves about
-# a third of that space, leaving ~8 GiB usable heap per root. Measured x86_64
-# demand for the heaviest roots is near 5.5-6 GiB: the 8 GiB address-space
-# cap's ~5.33 GiB wall caught bin/fm-spawn.sh, bin/fm-teardown.sh,
-# tests/fm-pending-reply.test.sh, and
+# a third of that space, leaving ~9.33 GiB usable heap per root. Measured
+# x86_64 demand for bin/fm-teardown.sh is ~8.4 GiB and outgrew the 12 GiB
+# cap's 8 GiB heap wall; earlier, the 8 GiB cap's ~5.33 GiB wall caught
+# bin/fm-spawn.sh, bin/fm-teardown.sh, tests/fm-pending-reply.test.sh, and
 # tests/fm-launch-prompt-signals-live-e2e.test.sh. CI runs one root per
-# lint job, so worst-case resident demand is ~8 GiB plus runner overhead,
+# lint job, so worst-case resident demand is ~9.33 GiB plus runner overhead,
 # inside the 16 GiB runner. Local lint defaults to two workers; two such
-# caps allow ~16 GiB resident plus host overhead, so use FM_LINT_JOBS=1 on
+# caps allow ~18.7 GiB resident plus host overhead, so use FM_LINT_JOBS=1 on
 # smaller local machines. A root that exceeds its cap fails by name.
 # Never disable, narrow, or redirect source-following to fit a root under
 # the cap. The roots sidecar records each root's peak RSS; roots peaking
 # above about 3 GiB resident are reduction candidates,
 # bin/fm-pending-reply-lib.sh first (its separate dedup fix is PR 5753).
-ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-12582912}
+ROOT_MEMORY_KIB=${FM_LINT_ROOT_MEMORY_KIB:-14680064}
 for bound_pair in \
   "FM_LINT_ROOT_SECONDS=$ROOT_SECONDS" \
   "FM_LINT_ROOT_GRACE=$ROOT_GRACE" \
@@ -1404,5 +1417,4 @@ fi
 if [ -s "$ROOTS_LOG" ]; then
   printf 'meta\t%s\t%s\n' 'result_exit' "$overall_rc" >> "$ROOTS_LOG"
 fi
-
 exit "$overall_rc"

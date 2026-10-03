@@ -727,6 +727,141 @@ test_teardown_closes_the_backlog_item_itself() {
   pass "teardown closes its own backlog item before reporting success"
 }
 
+# The close teardown stages takes its reason from the record's kind (a scout
+# closes against its report) while the close gates read the row's kind, so a
+# row that disagrees is refused while the record and worktree are untouched,
+# and the named repair makes the same teardown pass.
+test_teardown_refuses_a_row_whose_kind_differs_from_the_record() {
+  local case_dir out rc=0
+  case_dir=$(make_case kind-mismatch)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir" scout
+
+  out=$(run_teardown "$case_dir" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown closed a row whose kind differs from the record's"
+  assert_contains "$out" "bin/fm-tasks-axi.sh update task-x1 --kind ship" \
+    "the kind refusal did not name the repair"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "a kind-refused teardown removed the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "a kind-refused teardown still moved the backlog row"
+
+  tasks-axi update task-x1 --kind ship --file "$case_dir/data/backlog.md" >/dev/null \
+    || fail "the row's kind could not be repaired"
+  out=$(run_teardown "$case_dir" 2>&1) \
+    || fail "teardown failed after the row's kind was repaired: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "the repaired row was not closed by teardown: $out"
+  pass "teardown refuses a row whose kind differs from the record and closes it once repaired"
+}
+
+# A row that cannot be read before the destructive sequence refuses early with
+# its own reason - never the mismatch wording - and stays retryable.
+test_teardown_refuses_an_unverifiable_row_before_destruction() {
+  local case_dir out rc=0 real
+  case_dir=$(make_case unverifiable-row)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  seed_backlog_in_flight "$case_dir"
+  real=$(command -v tasks-axi)
+  # The captain-open gate reads the row first; this read must succeed and the
+  # kind check's own read must be the one that fails.
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show ]; then
+  count=\$(cat "$case_dir/show-count" 2>/dev/null || printf '0')
+  count=\$((count + 1))
+  printf '%s\n' "\$count" > "$case_dir/show-count"
+  [ "\$count" -le 1 ] || sleep 5
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(FM_BACKLOG_ROW_TIMEOUT_SECS=1 run_teardown "$case_dir" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown continued on a row it could not read"
+  assert_contains "$out" "could not verify the row" \
+    "the unreadable-row refusal did not carry its distinct reason"
+  assert_not_contains "$out" "repair with: bin/fm-tasks-axi.sh update" \
+    "a failed read was reported as a kind mismatch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "an unverifiable-row refusal removed the task record"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "an unverifiable-row refusal staged a close"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "an unverifiable-row refusal still moved the backlog row"
+
+  rm -f "$case_dir/fakebin/tasks-axi"
+  out=$(run_teardown "$case_dir" 2>&1) \
+    || fail "teardown failed after the read recovered: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "teardown did not close the row after the read recovered: $out"
+  pass "teardown refuses an unverifiable row before destruction and retries once reads recover"
+}
+
+# A row this home never had is not an unverifiable read: teardown proceeds as
+# it always did and the close itself reports the missing row.
+test_teardown_proceeds_when_the_row_is_absent() {
+  local case_dir out rc=0
+  case_dir=$(make_case kind-check-absent-row)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$case_dir/data/backlog.md"
+
+  out=$(run_teardown "$case_dir" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown reported success for a row it could not close"
+  assert_not_contains "$out" "could not verify the row" \
+    "a missing row was refused as an unverifiable read"
+  assert_not_contains "$out" "repair with: bin/fm-tasks-axi.sh update" \
+    "a missing row was refused as a kind mismatch"
+  assert_present "$case_dir/state/task-x1.backlog-close" \
+    "a missing row stopped teardown before it staged the close"
+  pass "teardown proceeds past an absent row instead of refusing it"
+}
+
+# A scout record behind an unreadable row must never reach its staged report:
+# the refusal is early, carries the read's own reason, and destroys nothing.
+# --force skips only the scout inventory gate that runs before this check and is
+# not what this case verifies.
+test_teardown_never_reaches_a_report_close_behind_an_unverifiable_row() {
+  local case_dir out rc=0 real
+  case_dir=$(make_case scout-record-unverifiable)
+  write_meta "$case_dir" no-mistakes scout
+  seed_backlog_in_flight "$case_dir" ship
+  real=$(command -v tasks-axi)
+  # Same read split as above: the captain-open gate's read succeeds, the kind
+  # check's own read is the one that fails.
+  cat > "$case_dir/fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = show ]; then
+  count=\$(cat "$case_dir/show-count" 2>/dev/null || printf '0')
+  count=\$((count + 1))
+  printf '%s\n' "\$count" > "$case_dir/show-count"
+  [ "\$count" -le 1 ] || sleep 5
+fi
+exec "$real" "\$@"
+SH
+  chmod +x "$case_dir/fakebin/tasks-axi"
+
+  out=$(FM_BACKLOG_ROW_TIMEOUT_SECS=1 run_teardown "$case_dir" --force 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown continued behind a scout record it could not verify"
+  assert_contains "$out" "could not verify the row" \
+    "the scout-record refusal did not carry the read's own reason"
+  assert_not_contains "$out" "report completion is for scout rows" \
+    "teardown reached the post-destruction report gate behind an unreadable row"
+  assert_not_contains "$out" "repair with: bin/fm-tasks-axi.sh update" \
+    "an unreadable row was reported as a kind mismatch"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "an unverifiable scout record was destroyed"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "an unverifiable scout record staged a report close"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "an unverifiable scout record still moved the backlog row"
+  pass "teardown never reaches a scout report close behind an unverifiable row"
+}
+
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
   local case_dir out real_tasks_axi gerrit_url=https://gerrit.example.com/c/project/+/12345
   case_dir=$(make_case tasks-axi-close-gerrit)
@@ -4297,6 +4432,10 @@ test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
+test_teardown_refuses_a_row_whose_kind_differs_from_the_record
+test_teardown_refuses_an_unverifiable_row_before_destruction
+test_teardown_proceeds_when_the_row_is_absent
+test_teardown_never_reaches_a_report_close_behind_an_unverifiable_row
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

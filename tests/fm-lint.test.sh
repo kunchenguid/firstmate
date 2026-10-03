@@ -150,6 +150,7 @@ pinned_ready() {
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
 }
 
+# --- tasks-axi interface boundary -------------------------------------------
 test_help_reports_the_complete_interface() {
   local help
   help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
@@ -1185,7 +1186,15 @@ SH
     '$"bd" close fm-example' \
     "\$'\\x62\\x64' close fm-example" \
     "\$'\\142\\144' close fm-example" \
-    "b\$'\\x64' close fm-example"
+    "b\$'\\x64' close fm-example" \
+    'sudo bd close fm-example' \
+    'time bd list' \
+    'xargs bd show fm-example' \
+    'nohup bd ready --json' \
+    'timeout bd close fm-example' \
+    'ready) bd ready --json ;;' \
+    'exec bd show fm-example' \
+    'eval bd list'
   do
     printf '#!/usr/bin/env bash\n%s\n' "$invocation" > "$tmp/repo/bin/direct-beads.sh"
     rc=0
@@ -1859,7 +1868,7 @@ test_pinned_shellcheck_memory_limit() {
   [ "$rc" -eq 0 ] || fail "pinned ShellCheck did not lint under the default memory limit"$'\n'"$out"
   grep -q $'^meta\tbounds_enforced\t1$' "$roots_log" \
     || fail "the sidecar did not record enforced bounds"
-  grep -q $'^meta\troot_memory_limit_kib\t12582912$' "$roots_log" \
+  grep -q $'^meta\troot_memory_limit_kib\t14680064$' "$roots_log" \
     || fail "the sidecar did not record the applied memory limit"
   awk -F '\t' '$1 == "end" && $3 ~ /small\.sh$/ && $10 == "ok" { found=1 } END { exit !found }' \
     "$roots_log" || fail "the pinned root did not complete ok under the memory limit"

@@ -18,6 +18,20 @@
 # through bin/fm-hold-reason-lib.sh, which owns the field-only decoding contract.
 # Decoded reasons use quoted strings so embedded line breaks remain intact.
 #
+# `done` (and its `close` alias) runs through the guarded backlog close owned by
+# bin/fm-backlog-transition-lib.sh rather than reaching tasks-axi bare: a close
+# records exactly one done-class reason - --pr <url>, --note "local main",
+# --report <path> (scout rows only), --note "superseded by <id>",
+# --note "cancelled: <word>", or --note "answered: <word>" - and a
+# repo-carrying ship or scout row closes only while a worker record still
+# proves a worker existed for it, or under the captain's own word.
+# tasks-axi's own `done` flags outside that contract
+# (`--keep`, `--no-prune`, `--json`) are not reasons and are refused with it.
+# Where that gate deliberately skips a home (a manual backend, or a markdown
+# home keeping no backlog file), `done` passes through to tasks-axi unchanged,
+# and a direct tasks-axi invocation outside this command stays out of reach by
+# design.
+#
 # Why it exists: a bare `tasks-axi` resolves the tracked `.tasks.toml` paths
 # against its working directory, so from the code root it forks the queue
 # whenever the home lives elsewhere; docs/configuration.md ("Backlog backend")
@@ -49,15 +63,23 @@
 #     cannot be read (bin/fm-tasks-axi-lib.sh owns that diagnostic);
 #   - a markdown `<data>/backlog.md` that is itself a symlink, because the
 #     first write would replace the link with a private copy, exactly the fork
-#     this command exists to prevent. Lifecycle transitions refuse the same file.
-# Otherwise the exit status is tasks-axi's own, unless decoding a read fails;
-# in that case the decoder's nonzero status is returned.
+#     this command exists to prevent. Lifecycle transitions refuse the same file;
+#   - `done` (or `close`) the guarded close refuses - a reason outside the
+#     done-class contract, a `--report` on a row that is not a scout, a project
+#     row holding no worker record, a row the close could not read, or a backlog
+#     the transition gate cannot address - reported with the reason
+#     bin/fm-backlog-transition-lib.sh names.
+# Otherwise the exit status is tasks-axi's own, unless decoding a read fails
+# (the decoder's nonzero status is returned) or the guarded `done` cannot
+# complete (this command's exit 2).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -92,6 +114,30 @@ absolute_from_caller() {  # <path-value>
     ''|-|/*) printf '%s' "$1" ;;
     *) printf '%s/%s' "$CALLER_DIR" "$1" ;;
   esac
+}
+
+# Run this command's `done` through the guarded backlog close, so a close here
+# records the same done-class reason and worker record every programmatic close
+# records. The gate takes a task kind from the callers that hold a task record;
+# this command addresses a backlog row and passes none, so the secondmate
+# carve-out (persistent agents are never backlog items) has no kind to match.
+# Returning to the caller means the gate deliberately skips this home, and the
+# row is handed to tasks-axi unchanged.
+run_guarded_close() {  # <command> <id> [flag...]
+  local cmd=$1 id=$2 gate_status
+  shift 2
+  if fm_backlog_transition_applies "$CONFIG" "$DATA" ''; then
+    [ "$#" -gt 0 ] || fail "refusing to close $id: this close carries no done-class reason; a close records one - --pr <url>, --note 'local main', --report <path>, --note 'superseded by <id>', --note 'cancelled: <captain word>', or --note 'answered: <captain word>'"
+    fm_backlog_done "$DATA" "$id" "$STATE" "$@" \
+      || fail "${FM_BACKLOG_TRANSITION_ERROR:-tasks-axi $cmd $id failed}"
+    [ -z "$FM_BACKLOG_MUTATE_OUTPUT" ] || printf '%s\n' "$FM_BACKLOG_MUTATE_OUTPUT"
+    exit 0
+  else
+    gate_status=$?
+  fi
+  if [ "$gate_status" -ne 1 ]; then
+    fail "${FM_BACKLOG_TRANSITION_ERROR:-backlog transitions cannot run against $DATA}"
+  fi
 }
 
 ARGS=()
@@ -142,6 +188,13 @@ if [ -n "$FM_BACKLOG_AXI_FILE" ]; then
 else
   unset TASKS_AXI_FILE
 fi
+
+case "${ARGS[0]:-}" in
+  done|close)
+    # Without an id there is no row to guard; tasks-axi reports its own usage error.
+    [ "${#ARGS[@]}" -lt 2 ] || run_guarded_close "${ARGS[@]}"
+    ;;
+esac
 
 cd "$FM_BACKLOG_AXI_ROOT" || fail "cannot enter the backlog root $FM_BACKLOG_AXI_ROOT"
 case "${1:-}" in

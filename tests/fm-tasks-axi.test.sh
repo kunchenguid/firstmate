@@ -12,6 +12,11 @@
 # that the command refuses addressing it cannot keep correct, and that bootstrap
 # reports any code-root copy that is not this home's own file while staying
 # silent for a link into the home, an absent copy, and the single-home layout.
+# It also pins `done` reaching this home's guarded close: a bare close, a reason
+# outside the done-class contract, a `--report` on a row that is not a scout, and
+# a project row with no worker record are refused with the row untouched, a
+# done-class close carrying a worker record passes and prints tasks-axi's own
+# success line, and a home the transition gate skips keeps the raw pass-through.
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -141,7 +146,7 @@ test_wrapper_writes_through_to_home() {
   for i in 1 2; do
     wrapper_from_code "$dir" add "ship-$i" "ship $i" >/dev/null || fail "add ship-$i failed"
     wrapper_from_code "$dir" start "ship-$i" >/dev/null || fail "start ship-$i failed"
-    wrapper_from_code "$dir" "done" "ship-$i" >/dev/null || fail "done ship-$i failed"
+    wrapper_from_code "$dir" "done" "ship-$i" --note "local main" >/dev/null || fail "done ship-$i failed"
   done
   wrapper_from_code "$dir" add call-1 "captain call" >/dev/null || fail "add call-1 failed"
   wrapper_from_code "$dir" hold call-1 --reason "awaiting the captain" --kind captain >/dev/null \
@@ -239,6 +244,115 @@ test_wrapper_single_home() {
   pass "fm-tasks-axi.sh keeps the single-home layout addressing its own code-root backlog"
 }
 
+# `done` through the wrapper is the guarded close: a bare close and a reason
+# outside the done-class contract are refused with the expected shape in the
+# message, and project work no worker record ever proved was worked is refused
+# too - each leaving the row untouched on refusal.
+test_wrapper_done_is_guarded() {
+  local dir out rc
+  dir=$(make_split wrapper-done-guard)
+  wrapper_from_code "$dir" add plain-1 "ordinary work" >/dev/null || fail "add plain-1 failed"
+  wrapper_from_code "$dir" add proj-1 "project work" --kind ship --repo firstmate >/dev/null \
+    || fail "add proj-1 failed"
+  wrapper_from_code "$dir" start proj-1 >/dev/null || fail "start proj-1 failed"
+
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" plain-1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a bare done closed an ordinary row with no done-class reason"
+  assert_contains "$out" "done-class reason" "the ordinary-row bare refusal did not name the done-class rule"
+  assert_contains "$(wrapper_from_code "$dir" show plain-1)" "state: queued" \
+    "a refused bare close still moved an ordinary row"
+
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" proj-1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a bare done closed a row with no done-class reason"
+  assert_contains "$out" "done-class reason" "the bare-done refusal did not name the done-class rule"
+  assert_contains "$out" "local main" "the bare-done refusal did not name the expected reason shape"
+  assert_contains "$(wrapper_from_code "$dir" show proj-1)" "state: in_flight" \
+    "a refused bare close still moved the row"
+
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" proj-1 --note "Closed" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "free prose closed a project row through the wrapper"
+  assert_contains "$out" "done-class reason" "the free-prose refusal did not name the done-class rule"
+  assert_contains "$(wrapper_from_code "$dir" show proj-1)" "state: in_flight" \
+    "a refused free-prose close still moved the row"
+
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" proj-1 --note "local main" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a project row with no worker record closed through the wrapper"
+  assert_contains "$out" "no worker record" "the worker-record refusal did not name its reason"
+  assert_contains "$(wrapper_from_code "$dir" show proj-1)" "state: in_flight" \
+    "a refused unworked close still moved the row"
+
+  rc=0
+  out=$(wrapper_from_code "$dir" close proj-1 --note "Closed" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the close alias bypassed the guarded close"
+  assert_contains "$(wrapper_from_code "$dir" show proj-1)" "state: in_flight" \
+    "a refused close-alias close still moved the row"
+  pass "fm-tasks-axi.sh refuses a bare, free-prose, or unworked close on done and close"
+}
+
+# The same guarded close accepts a done-class reason once a worker record proves
+# the project row was worked.
+test_wrapper_done_closes_with_a_done_class_reason() {
+  local dir out rc=0
+  dir=$(make_split wrapper-done-valid)
+  wrapper_from_code "$dir" add proj-2 "project work" --kind ship --repo firstmate >/dev/null \
+    || fail "add proj-2 failed"
+  wrapper_from_code "$dir" start proj-2 >/dev/null || fail "start proj-2 failed"
+  printf 'spawn_gen=1\n' > "$dir/home/state/proj-2.meta"
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" proj-2 --note "local main" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a done-class close carrying a worker record was refused: $out"
+  assert_contains "$out" "ok: done proj-2 -> Done" \
+    "the guarded close did not print tasks-axi's success line"
+  assert_contains "$(wrapper_from_code "$dir" show proj-2)" "state: done" \
+    "the guarded close did not mark the row done"
+  pass "fm-tasks-axi.sh closes a worked project row for a done-class reason"
+}
+
+# A manual-backend home opts out of the transition gate, so its `done` keeps the
+# raw pass-through the carve-out exists for.
+test_wrapper_done_passes_through_on_a_manual_backend() {
+  local dir rc=0 bare_rc=0
+  dir=$(make_split wrapper-done-manual)
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  wrapper_from_code "$dir" add proj-3 "project work" --kind ship --repo firstmate >/dev/null \
+    || fail "add proj-3 failed"
+  wrapper_from_code "$dir" start proj-3 >/dev/null || fail "start proj-3 failed"
+  wrapper_from_code "$dir" "done" proj-3 --note "Closed" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "a manual-backend home's done did not pass through to tasks-axi"
+  assert_contains "$(wrapper_from_code "$dir" show proj-3)" "state: done" \
+    "the manual-backend pass-through did not close the row"
+
+  wrapper_from_code "$dir" add proj-4 "project work" --kind ship --repo firstmate >/dev/null \
+    || fail "add proj-4 failed"
+  wrapper_from_code "$dir" start proj-4 >/dev/null || fail "start proj-4 failed"
+  wrapper_from_code "$dir" "done" proj-4 >/dev/null 2>&1 || bare_rc=$?
+  [ "$bare_rc" -eq 0 ] || fail "a bare done was refused on a manual-backend home"
+  assert_contains "$(wrapper_from_code "$dir" show proj-4)" "state: done" \
+    "a bare manual-backend pass-through did not close the row"
+  pass "fm-tasks-axi.sh passes done through unchanged on a manual-backend home"
+}
+
+# `--report` records a scout's own deliverable, so the guarded close refuses it
+# on a row that is not a scout instead of closing under a fact nobody can check.
+test_wrapper_done_refuses_a_report_on_a_non_scout_row() {
+  local dir out rc=0
+  dir=$(make_split wrapper-done-report)
+  wrapper_from_code "$dir" add report-1 "ordinary work" --kind ship >/dev/null \
+    || fail "add report-1 failed"
+  rc=0
+  out=$(wrapper_from_code "$dir" "done" report-1 --report data/report-1/report.md 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-scout row was closed against a scout deliverable"
+  assert_contains "$out" "report completion is for scout rows" \
+    "the non-scout report refusal did not name its rule"
+  assert_contains "$(wrapper_from_code "$dir" show report-1)" "state: queued" \
+    "a refused report close still moved the row"
+  pass "fm-tasks-axi.sh refuses a report close on a row that is not a scout"
+}
+
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
@@ -249,6 +363,10 @@ if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_wrapper_refusals
   test_wrapper_refuses_add_start
   test_wrapper_single_home
+  test_wrapper_done_is_guarded
+  test_wrapper_done_closes_with_a_done_class_reason
+  test_wrapper_done_passes_through_on_a_manual_backend
+  test_wrapper_done_refuses_a_report_on_a_non_scout_row
 else
   echo "skip: tasks-axi not found; home-addressing cases not run"
 fi
