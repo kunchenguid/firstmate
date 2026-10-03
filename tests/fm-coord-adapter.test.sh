@@ -595,3 +595,42 @@ exited=$(adapter "$tmp/far" wrapper-exited far "$exit_fields" 2> "$tmp/far-exit.
 [ "$(field "$exited" state)" = outcome-unknown ] || fail 'an attested exit must still wait for forge non-landing proof'
 coord outbox '{"limit":1000}' | python3 -c 'import json,sys; assert any(e["type"]=="wrapper-exit-attested" and e["payload"]["host_id"]=="far-test-host" for e in json.load(sys.stdin)["events"])' || fail 'the exit attestation must be recorded for the remote host'
 pass 'remote wrapper exit is attested by the participant adapter after its own host check'
+
+db=$tmp/central/restarted.sqlite3
+coord init > /dev/null
+coord manifest-set '{"request_id":"manifest-restarted","repo":"owner/repo","base":"main","checks":["Lint"]}' > /dev/null
+make_home restarted
+make_brief restarted restarted 203
+printf '{"requests":{"enroll":{"op":"enroll","payload":{"home_id":"restarted","repos":["owner/repo"],"host_id":"restarted-test-host","request_id":"enroll-restarted"}}},"tasks":{}}\n' > "$tmp/restarted/state/fm-coord-adapter.json"
+adapter "$tmp/restarted" dispatch restarted "$repo" "$repo" "$tmp/restarted.brief" branch/restarted codex > /dev/null 2>&1 || fail 'restart-case dispatch must complete'
+gates=$(prepare_slot restarted 203)
+sleep 600 &
+wrapper=$!
+attempted=$(adapter "$tmp/restarted" attempt restarted "$gates,\"wrapper_pid\":$wrapper}") || fail 'restart-case attempt must complete'
+attempt_id=$(field "$attempted" attempt_event_id)
+start=$(coord inspect '{}' | python3 -c 'import json,sys; print([q for q in json.load(sys.stdin)["queue"] if q["intent_id"]=="restarted:owner/repo:restarted"][0]["wrapper_start"])')
+slot=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["slot_generation"])' "$gates}")
+coord queue-result "{\"request_id\":\"result-restarted\",\"intent_id\":\"restarted:owner/repo:restarted\",\"generation\":$slot,\"outcome\":\"unknown\"}" > /dev/null
+sqlite3 "$db" "UPDATE meta SET value='previous-boot' WHERE key='boot_id'"
+adapter "$tmp/restarted" heartbeat restarted > /dev/null 2>&1 || fail 'a checkpoint after the restart must complete'
+kill "$wrapper"
+wait "$wrapper" 2> /dev/null || true
+exit_fields="{\"slot_generation\":$slot,\"attempt_event_id\":\"$attempt_id\",\"wrapper_host_id\":\"restarted-test-host\",\"wrapper_pid\":$wrapper,\"wrapper_start\":\"$start\"}"
+exited=$(adapter "$tmp/restarted" wrapper-exited restarted "$exit_fields" 2> "$tmp/restarted-exit.err") || fail "a restarted coordinator must accept the exit of the unsettled attempt: $(cat "$tmp/restarted-exit.err")"
+[ "$(field "$exited" state)" = outcome-unknown ] || fail "the exit must be reported against the recorded attempt: $(cat "$tmp/restarted-exit.err")"
+mkdir -p "$tmp/forge"
+cat > "$tmp/forge/gh-axi" <<'GH'
+#!/usr/bin/env bash
+case "$3" in
+  */pulls/*) printf 'api_response:\n  body: "https://github.com/owner/repo/pull/%s|open|false|%s|main|null"\n  truncated: false\n' "${3##*/}" "$FM_TEST_HEAD" ;;
+  graphql) printf 'api_response:\n  body: false|none\n  truncated: false\n' ;;
+  */git/ref/heads/main) printf 'api_response:\n  body: %s\n  truncated: false\n' "$FM_TEST_BASE_OID" ;;
+  */compare/*) printf 'api_response:\n  body: ahead\n  truncated: false\n' ;;
+  *) exit 1 ;;
+esac
+GH
+chmod +x "$tmp/forge/gh-axi"
+settled=$(PATH="$tmp/forge:$PATH" FM_COORD_QUIET_SECONDS=0 FM_TEST_HEAD="$head" FM_TEST_BASE_OID="$(printf 'b%.0s' $(seq 40))" coord queue-reconcile "{\"request_id\":\"reconcile-restarted\",\"intent_id\":\"restarted:owner/repo:restarted\",\"generation\":$slot,\"pr_url\":\"https://github.com/owner/repo/pull/203\",\"base\":\"main\",\"head_oid\":\"$head\"}") || fail 'the attested exit must let reconciliation settle the slot'
+[ "$(field "$settled" state)" = refused ] || fail 'a not-landed attempt must settle without an operator step'
+coord inspect '{}' | python3 -c 'import json,sys; assert not json.load(sys.stdin)["slots"]' || fail 'the settled attempt must release the integration slot'
+pass 'a coordinator restart during a remote attempt keeps its identity so the exit settles the slot'

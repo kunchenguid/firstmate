@@ -173,12 +173,15 @@ class Adapter:
 
     def reset_task(self, task_id):
         task = self.state["tasks"][task_id]
-        for key in [k for k in self.state["requests"] if k.startswith(f"{task_id}:")]:
+        # An unsettled remote merge attempt pins its intent, so the wrapper exit is still reported against that attempt.
+        held = (f"{task_id}:submit", f"{task_id}:exit:") if task.get("attempt") else ()
+        for key in [k for k in self.state["requests"] if k.startswith(f"{task_id}:") and not k.startswith(held)]:
             del self.state["requests"][key]
-        for field in ("claim", "version", "resources", "published_head", "renew_key"):
+        for field in ("claim", "published_head", "renew_key") + (() if held else ("version", "resources")):
             task.pop(field, None)
-        task["epoch"] = task.get("epoch", 0) + 1
-        task["intent_id"] = f"{self.config['home_id']}:{task['repo']}:{task_id}#{task['epoch']}"
+        if not held:
+            task["epoch"] = task.get("epoch", 0) + 1
+            task["intent_id"] = f"{self.config['home_id']}:{task['repo']}:{task_id}#{task['epoch']}"
         self.reset = True
         self.save()
 
@@ -250,7 +253,9 @@ class Adapter:
         if submitted is None:
             warn(f"{task_id}: intent pending; no claim granted")
             return task
-        claim = self.send(f"{task_id}:claim", "claim", {**common, "version": submitted["version"]})
+        # A claim journaled earlier keeps its version; an intent pinned by an unsettled attempt reclaims at its amended version.
+        version = submitted["version"] if "claim" in task else task.get("version", submitted["version"])
+        claim = self.send(f"{task_id}:claim", "claim", {**common, "version": version})
         if claim is not None and task.pop("pending_dispatch", None):
             self.save()
         if claim is None:
@@ -260,8 +265,8 @@ class Adapter:
                 warn(f"{task_id}: scope conflict held by {conflict['home_id']} intent {conflict['intent_id']} on {conflict['resource']}")
         elif "claim" not in task:
             task["claim"] = claim
-            task["version"] = submitted["version"]
-            task["resources"] = submitted["resources"]
+            task.setdefault("version", submitted["version"])
+            task.setdefault("resources", submitted["resources"])
             self.save()
         return task
 
@@ -400,7 +405,7 @@ class Adapter:
         for key, item in list(self.state["requests"].items()):
             if self.reset:
                 return
-            if "reply" not in item and item["op"] not in {"publish-head", "release", "queue-attempt"}:
+            if "reply" not in item and item["op"] not in {"publish-head", "release", "queue-attempt", "queue-wrapper-exited"}:
                 self.send(key, item["op"], {k: v for k, v in item["payload"].items() if k != "request_id"})
         for task_id, task in list(self.state["tasks"].items()):
             if self.reset:
@@ -477,6 +482,10 @@ class Adapter:
             raise ValueError(f"{task_id}: wrapper process is not running on this host")
         payload = {**fields, **live, "intent_id": self.state["tasks"][task_id]["intent_id"], "wrapper_start": start}
         reply = self.send(f"{task_id}:attempt:{fields.get('slot_generation')}:{fields['wrapper_pid']}", "queue-attempt", payload)
+        if reply and self.state["requests"]["enroll"]["payload"].get("host_id"):
+            # Only this adapter can report a remote wrapper's exit; keep the attempt identity until it does.
+            self.state["tasks"][task_id]["attempt"] = {"attempt_event_id": reply["attempt_event_id"], "wrapper_pid": fields["wrapper_pid"], "wrapper_start": start}
+            self.save()
         if reply:
             print(json.dumps(reply, sort_keys=True))
 
@@ -493,7 +502,14 @@ class Adapter:
             warn(f"{task_id}: wrapper exit pending; slot stays outcome-unknown")
             return
         payload = {**fields, "intent_id": task["intent_id"], "home_id": self.config["home_id"], "generation": generation, "exit_verified_host_id": self.state["requests"]["enroll"]["payload"].get("host_id")}
-        reply = self.send(f"{task_id}:exit:{fields.get('attempt_event_id')}", "queue-wrapper-exited", payload)
+        key = f"{task_id}:exit:{fields.get('attempt_event_id')}"
+        if key in self.state["requests"] and "reply" not in self.state["requests"][key]:
+            # The coordinator keys this receipt to the attempt, not the session, so a new session reuses the request ID.
+            self.state["requests"][key]["payload"]["generation"] = generation
+        reply = self.send(key, "queue-wrapper-exited", payload)
+        if reply and task.get("attempt", {}).get("attempt_event_id") == fields.get("attempt_event_id"):
+            task.pop("attempt")
+            self.save()
         if reply:
             print(json.dumps(reply, sort_keys=True))
 
