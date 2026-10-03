@@ -35,7 +35,7 @@ Natural-language summary and `scope:` text may contain parentheses and semicolon
 The `home:` path points to the seeded home containing `data/charter.md`; no extra registry pointer field is needed.
 For a remote route, `host:` is an OpenSSH config alias and `root:` is that host's separate tracked Firstmate code root.
 A remote second-mate agent always runs on the Herdr backend and every seed, launch, and liveness relaunch first gates its host on `bin/fm-remote-doctor.sh` readiness, so an unready host refuses with that doctor's own gap text rather than half-creating a route; the workers that second mate supervises keep the home's ordinary backend selection.
-This release places whole secondmate homes remotely and never individual workers.
+Remote placement covers whole secondmate homes only, never individual workers.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md) owns current operator setup and transport behavior.
 The home-seeded `data/charter.md` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts, so point to that charter rather than restating those contracts in the registry entry.
 The `scope:` field is used during intake.
@@ -88,7 +88,7 @@ It also writes the gitignored `.fm-secondmate-parent` durable binding before the
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
-A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
+A bare `<harness>` line such as `claude` selects the harness only, with no model or effort flag.
 `bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
 For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
@@ -97,7 +97,7 @@ When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` f
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
-This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
+This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 1 and 4 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.
 The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
 That no-fetch path is a purely local fast-forward or redundant-divergence reconcile of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.

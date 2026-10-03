@@ -145,7 +145,7 @@ Only the exact answer value `merge` authorizes a merge; an answer carrying a fre
 ## Chat-response contract
 
 This skill is the one owner of the `/bearings` chat-response format; the snapshot and classifier own the data that feeds it, and no other file restates this contract.
-Every `/bearings` chat response renders EXACTLY these four sections, in THIS order, and nothing else structural (there is no At Anchor section):
+Every `/bearings` chat response renders exactly these four sections, in this order, and nothing else structural:
 
 1. **Captain's Call** - ONLY unsuppressed items that need the captain's own action now: a decision to make, a PR to approve or merge, a credential or login to provide, or a blocker only the captain can clear.
    Deferred or aged holds follow the presentation safety rule above instead.
