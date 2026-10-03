@@ -67,6 +67,34 @@ SH
   printf '%s\n' "$fb"
 }
 
+# add_jq16_empty_input_emulator: drops a `jq` shim into fakebin dir <fb>
+# (already first on PATH via make_zellij_fakebin) that reproduces jq 1.6's
+# documented behavior for `-e` given wholly empty stdin - exit 0 - rather
+# than jq >=1.7's exit 4 ("no valid result"). Any other call (no -e, or
+# non-empty stdin) passes through unchanged to the real jq resolved at
+# creation time. This pins the empty-input regression tests to jq 1.6's
+# actual semantics regardless of which jq is installed on the machine
+# running the tests, so a reverted guard (back to a bare `... | jq -e` pipe)
+# is caught even on a runner whose real jq is 1.7+, where a bare pipe on
+# empty input already happens to exit nonzero and would otherwise mask the
+# regression.
+add_jq16_empty_input_emulator() {  # <fb>
+  local fb=$1 real_jq
+  real_jq=$(command -v jq) || fail "jq not found on PATH to build the jq16 emulator"
+  cat > "$fb/jq" <<SH
+#!/usr/bin/env bash
+set -u
+input=\$(cat)
+has_dash_e=0
+for a in "\$@"; do [ "\$a" = "-e" ] && has_dash_e=1 && break; done
+if [ -z "\$input" ] && [ "\$has_dash_e" -eq 1 ]; then
+  exit 0
+fi
+printf '%s' "\$input" | "$real_jq" "\$@"
+SH
+  chmod +x "$fb/jq"
+}
+
 zellij_pane_response() {
   local dir=$1 n=$2 pane=${3:-7} tab=${4:-3}
   printf '[{"id":%s,"tab_id":%s,"is_plugin":false}]\n' "$pane" "$tab" > "$dir/responses/$n.out"
@@ -521,6 +549,43 @@ test_create_task_no_restore_when_new_tab_was_already_active() {
 }
 
 # --- capture / send_key / send_literal / current_path / kill -----------------
+
+test_pane_exists_fails_on_empty_list_panes_output() {
+  local dir fb status
+  dir="$TMP_ROOT/pane-exists-empty-output"; mkdir -p "$dir/responses"
+  # 1: list-panes --json -> succeeds with wholly empty stdout (a missing
+  # response file means "succeed with empty stdout"), the case jq 1.6 and jq
+  # >=1.7 disagree on for a bare `jq -e` pipe. The jq16 emulator pins that
+  # disagreement to jq 1.6's actual exit-0-on-empty-input behavior so this
+  # test still catches a reverted guard even when the real jq installed here
+  # is >=1.7 (whose bare-pipe exit code on empty input is already nonzero and
+  # would otherwise mask the regression).
+  fb=$(make_zellij_fakebin "$dir")
+  add_jq16_empty_input_emulator "$fb"
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_pane_exists firstmate 7' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "pane_exists should fail on wholly empty list-panes output, not read it as present"
+  pass "fm_backend_zellij_pane_exists: fails on wholly empty list-panes output under jq 1.6 empty-input semantics"
+}
+
+test_tab_matches_label_fails_on_empty_list_tabs_output() {
+  local dir fb status
+  dir="$TMP_ROOT/tab-matches-label-empty-output"; mkdir -p "$dir/responses"
+  # 1: list-tabs --json -> succeeds with wholly empty stdout (a missing
+  # response file means "succeed with empty stdout"), the same jq 1.6 vs
+  # >=1.7 disagreement test_pane_exists_fails_on_empty_list_panes_output
+  # covers for list-panes, pinned the same way via the jq16 emulator.
+  fb=$(make_zellij_fakebin "$dir")
+  add_jq16_empty_input_emulator "$fb"
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_tab_matches_label firstmate 3 fm-task' "$ROOT"
+  status=$?
+  [ "$status" -ne 0 ] || fail "tab_matches_label should fail on wholly empty list-tabs output, not read it as a match"
+  pass "fm_backend_zellij_tab_matches_label: fails on wholly empty list-tabs output under jq 1.6 empty-input semantics"
+}
 
 test_capture_small_reads_use_viewport_and_trim() {
   local dir fb out
@@ -1321,6 +1386,8 @@ test_create_task_refuses_duplicate_label
 test_create_task_creates_and_parses_ids
 test_create_task_restores_previously_active_tab
 test_create_task_no_restore_when_new_tab_was_already_active
+test_pane_exists_fails_on_empty_list_panes_output
+test_tab_matches_label_fails_on_empty_list_tabs_output
 test_capture_small_reads_use_viewport_and_trim
 test_capture_large_reads_use_full_scrollback_and_trim
 test_capture_fails_when_pane_absent

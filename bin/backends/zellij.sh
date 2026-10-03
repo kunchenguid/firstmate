@@ -281,9 +281,16 @@ fm_backend_zellij_tab_for_pane() {  # <session> <pane_id>
 }
 
 fm_backend_zellij_pane_exists() {  # <session> <pane_id>
-  local session=$1 pane_id=$2
-  fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null \
-    | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
+  local session=$1 pane_id=$2 panes
+  # Capture and check the CLI call's own exit status and output first, rather
+  # than piping it straight into `jq -e`: on a failed or targetless call that
+  # prints nothing, jq's --exit-status only started reporting that as a
+  # distinct nonzero (4, "no valid result") from jq 1.7 onward - jq 1.6
+  # (still shipped by e.g. Debian bookworm) exits 0 on wholly empty input,
+  # which would read a genuinely absent pane as present.
+  panes=$(fm_backend_zellij_cli "$session" action list-panes --json 2>/dev/null) || return 1
+  [ -n "$panes" ] || return 1
+  printf '%s' "$panes" | jq -e --argjson p "$pane_id" '[.[]? | select(.id == $p and .is_plugin == false)] | length > 0' >/dev/null 2>&1
 }
 
 # fm_backend_zellij_tab_matches_label: does <tab_id> in <session> carry the
@@ -304,7 +311,8 @@ fm_backend_zellij_pane_exists() {  # <session> <pane_id>
 fm_backend_zellij_tab_matches_label() {  # <session> <tab_id> <label>
   local session=$1 tab_id=$2 label=$3 scoped tabs count
   scoped=$(fm_backend_zellij_scoped_title "$label")
-  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null)
+  tabs=$(fm_backend_zellij_cli "$session" action list-tabs --json 2>/dev/null) || return 1
+  [ -n "$tabs" ] || return 1
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$scoped" \
     '[.[]? | select(.tab_id == $t and .name == $want)] | length > 0' >/dev/null 2>&1 && return 0
   printf '%s' "$tabs" | jq -e --argjson t "$tab_id" --arg want "$label" \
