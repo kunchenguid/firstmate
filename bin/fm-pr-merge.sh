@@ -37,7 +37,23 @@
 # source fails, so known missing checks and all read errors are reported together.
 # github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
 # exception; every other unreadable required source refuses.
-# Every failing condition is reported, not just the first.
+# These live forge checks report every failing condition, not just the first.
+# Before merging, the forge's headRefName must also be readable and valid.
+# If that branch exists in the worker copy, its tip must equal or be an ancestor
+# of the head selected by github_verify_mergeable after any retries. A later
+# unpushed HEAD on another local branch does not block this merge, but commits
+# on the PR branch missing from that verified head do, even when another remote
+# branch contains them. This applies in both direct-PR and no-mistakes mode.
+# bin/fm-dod-lib.sh's fm_dod_pr_branch_pushed fetches a missing verified head
+# from origin, using the upstream PR ref if a raw-SHA fetch is refused, without
+# switching branches or moving local or remote-tracking refs. The ancestry
+# check still uses the verified head; failure to prove containment refuses.
+# If the local PR branch is absent, direct-PR falls back to
+# fm_dod_accept_ship_done; no-mistakes keeps the verified forge head as its named
+# head. Ordinary PR-ready registration still follows bin/fm-dod-lib.sh's contract.
+# GitHub merge-time registration follows the publication check, so a refusal
+# cannot record readiness or arm a new merge poll.
+# tests/fm-pr-check-security.test.sh covers these merge-time publication guards.
 # The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
@@ -152,6 +168,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-merge-outcome-lib.sh
@@ -1326,14 +1344,16 @@ gitlab_confirm_merged() {
   [ "$state" = merged ]
 }
 
-# Record before either forge call. This arms the merge poll without claiming a
+# Record before either forge merge call. This arms the merge poll without claiming a
 # landed outcome, so even a provider read failure after a real merge cannot
 # leave teardown without the PR identity it needs to verify the result.
 away_status=0
 require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
-record_pr_metadata || exit 1
+if [ "$PROVIDER" != github ]; then
+  record_pr_metadata || exit 1
+fi
 require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
@@ -1384,6 +1404,29 @@ case "$PROVIDER" in
     require_current_away_authority || away_status=$?
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
+    WT=$(fm_dod_meta_value "$META" worktree)
+    if ! PR_BRANCH=$(cd "$WT" && gh pr view "$URL" --json headRefName -q .headRefName 2>/dev/null) \
+      || ! git check-ref-format --branch "$PR_BRANCH" >/dev/null 2>&1; then
+      echo "error: pull request head branch could not be verified" >&2
+      exit 1
+    fi
+    if PR_BRANCH_TIP=$(git -C "$WT" rev-parse --verify --quiet "refs/heads/$PR_BRANCH^{commit}" 2>/dev/null); then
+      if ! fm_dod_pr_branch_pushed "$WT" "$PR_BRANCH" "$FM_PR_MERGE_HEAD" "$PR_NUMBER"; then
+        echo "error: named head $PR_BRANCH_TIP could not be verified in pull request head $FM_PR_MERGE_HEAD" >&2
+        exit 1
+      fi
+    else
+      MODE=$(fm_dod_meta_value "$META" mode)
+      if ! fm_dod_forge_head_is_named_head "$MODE"; then
+        KIND=$(fm_dod_meta_value "$META" kind)
+        PROJECT=$(fm_dod_meta_value "$META" project)
+        if ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "done: PR $URL" "$STATE" "$ID" "$META"); then
+          echo "error: $GATE_REASON" >&2
+          exit 1
+        fi
+      fi
+    fi
+    record_pr_metadata || exit 1
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \

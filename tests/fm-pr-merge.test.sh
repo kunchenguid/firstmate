@@ -196,6 +196,10 @@ case "${1:-} ${2:-}" in
         fi
         exit 0
         ;;
+      *headRefName*)
+        printf '%s\n' 'fm/task-x1'
+        exit 0
+        ;;
       *headRefOid*)
         cat "$FM_TEST_GH_HEAD"
         exit 0
@@ -2617,7 +2621,7 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
 }
 
 # A draft cannot be merged, and neither can a pull request whose draft state the
-# forge did not report as a boolean; both refuse before any merge call.
+# forge did not report as a boolean; both refuse before registration or merging.
 test_github_draft_or_unreadable_draft_state_refuses() {
   local case_dir rc head label filter
   head=dddddddddddddddddddddddddddddddddddddddd
@@ -2644,8 +2648,10 @@ test_github_draft_or_unreadable_draft_state_refuses() {
       "github-$label: gh pr merge ran without a non-draft reading"
     assert_no_grep 'declare a wait instead of done' "$case_dir/stderr" \
       "github-$label: the arm-time draft refusal preempted the merge refusal"
-    grep -qxF 'pr=https://github.com/example/repo/pull/82' "$case_dir/state/task-x1.meta" \
-      || fail "github-$label: pr= was not recorded before the merge refusal"
+    assert_no_grep '^pr=' "$case_dir/state/task-x1.meta" \
+      "github-$label: a refused merge registered readiness"
+    assert_absent "$case_dir/state/task-x1.check.sh" \
+      "github-$label: a refused merge armed a poll"
   done
   pass "fm-pr-merge refuses a draft pull request and one with no boolean draft state"
 }
