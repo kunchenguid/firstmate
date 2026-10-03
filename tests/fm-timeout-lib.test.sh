@@ -6,6 +6,9 @@
 # bound. Most cases pin the perl watchdog, the preferred mechanism and the only
 # one a stock macOS host has, under a PATH that holds no timeout variant; the
 # GNU fallback case runs only where a real timeout exists.
+# The suite itself must also run on a stock macOS host's bash 3.2, so every
+# frame-pid read uses the library's BASHPID fallback, and one regression runs
+# the whole call under set -u with the oldest bash on the machine.
 # shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
@@ -14,11 +17,12 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 
-# A PATH with perl and the shell tools the bounded commands use, and no
-# timeout variant: fm_exec_timed must take its perl watchdog here.
+# A PATH with perl and the shell tools the bounded commands and the exec-sh
+# BASHPID fallback use, and no timeout variant: fm_exec_timed must take its
+# perl watchdog here.
 PERL_ONLY="$TMP_ROOT/perl-only-bin"
 mkdir -p "$PERL_ONLY"
-for tool in perl bash sleep; do
+for tool in perl sh bash sleep; do
   ln -s "$(command -v "$tool")" "$PERL_ONLY/$tool"
 done
 
@@ -109,7 +113,9 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      # BASHPID is bash 4+; the exec-sh fallback keeps this suite runnable on
+      # a stock macOS host's bash 3.2, which does not define it under set -u.
+      printf '%s\n' "${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')}" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +217,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      echo "${BASHPID:-$(exec sh -c '\''printf "%s\n" "$PPID"'\'')}" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -230,13 +236,83 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   pass "fm_exec_timed ends the command when its owner dies during watchdog startup"
 }
 
+# The 2026-10-01 regression: fm_exec_timed compared the owner against a bare
+# $BASHPID, which the stock bash 3.2 of a macOS host does not define, so under
+# set -u every dispatch on that host died with "unbound variable" (127) before
+# the bounded command could run. This regression drives the whole call end to
+# end under set -u with the oldest bash on the machine - subshell, top level,
+# and the named-owner override - and pins the statuses the contract promises.
+# The driver unsets BASHPID, so the call takes the library's fallback branch
+# even where the interpreter defines it, and a reintroduced bare read dies on
+# every host, CI's bash 5 included.
+test_the_call_runs_under_set_u_with_the_oldest_bash() {
+  local dir driver oldest candidate major minor score version
+  local rc=0 started elapsed gone
+  dir="$TMP_ROOT/oldest-bash"
+  mkdir -p "$dir"
+  driver="$dir/call.sh"
+  oldest=
+  score=999999999
+  for candidate in "$BASH" /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do
+    [ -n "$candidate" ] || continue
+    [ -x "$candidate" ] || continue
+    major=$("$candidate" -c 'printf "%s" "${BASH_VERSINFO[0]}"' 2>/dev/null) || continue
+    minor=$("$candidate" -c 'printf "%s" "${BASH_VERSINFO[1]}"' 2>/dev/null) || continue
+    if [ $((major * 100000 + minor)) -lt "$score" ]; then
+      score=$((major * 100000 + minor))
+      oldest=$candidate
+    fi
+  done
+  [ -n "$oldest" ] || fail "no bash interpreter was found to exercise fm_exec_timed with"
+  version=$("$oldest" -c 'printf "%s" "$BASH_VERSION"')
+  cat >"$driver" <<'DRIVER'
+#!/usr/bin/env bash
+# One bounded fm_exec_timed call under set -u with BASHPID unset, the view a
+# stock macOS bash 3.2 has of every call: subshell, override, or top level;
+# the harness asserts the statuses and the silence from outside.
+set -u
+. "$1/bin/fm-timeout-lib.sh"
+unset BASHPID
+PATH=$2
+case $3 in
+  subshell)
+    ( fm_exec_timed 5 1 sh -c 'exit 7' )
+    ;;
+  override)
+    ( FM_EXEC_TIMED_OWNER_PID=$4 fm_exec_timed 60 1 sh -c 'exec sleep 300' )
+    ;;
+  toplevel)
+    fm_exec_timed 5 1 sh -c 'exit 9'
+    ;;
+esac
+DRIVER
+  "$oldest" "$driver" "$ROOT" "$PERL_ONLY" subshell 2>"$dir/subshell.err" || rc=$?
+  [ "$rc" -eq 7 ] || fail "the subshell call under $oldest reported $rc, not the command's own 7"
+  [ ! -s "$dir/subshell.err" ] || fail "the subshell call under $oldest leaked stderr: $(cat "$dir/subshell.err")"
+  sleep 0 &
+  gone=$!
+  wait "$gone" 2>/dev/null || true
+  started=$SECONDS
+  rc=0
+  "$oldest" "$driver" "$ROOT" "$PERL_ONLY" override "$gone" >/dev/null 2>"$dir/override.err" || rc=$?
+  elapsed=$((SECONDS - started))
+  [ "$rc" -ne 0 ] || fail "the named-owner override under $oldest let the command report success"
+  [ "$elapsed" -lt 30 ] || fail "an owner long gone did not end the command under $oldest (${elapsed}s of a 60s bound)"
+  [ ! -s "$dir/override.err" ] || fail "the override call under $oldest leaked stderr: $(cat "$dir/override.err")"
+  rc=0
+  "$oldest" "$driver" "$ROOT" "$PERL_ONLY" toplevel 2>"$dir/toplevel.err" || rc=$?
+  [ "$rc" -eq 9 ] || fail "the top-level call under $oldest reported $rc, not the replaced shell's 9"
+  [ ! -s "$dir/toplevel.err" ] || fail "the top-level call under $oldest leaked stderr: $(cat "$dir/toplevel.err")"
+  pass "fm_exec_timed runs under set -u with BASHPID unset (bash $version, the oldest here): subshell, top level, and named-owner override"
+}
+
 # perl is preferred whenever it exists, because only its watchdog can reap a
 # leftover descendant after replacing the caller.
 test_perl_is_preferred_over_timeout() {
   local dir out
   dir="$TMP_ROOT/prefer"
   mkdir -p "$dir/bin"
-  for tool in perl bash; do
+  for tool in perl sh bash; do
     ln -s "$(command -v "$tool")" "$dir/bin/$tool"
   done
   printf '#!/bin/sh\necho timeout-used > "%s"\nexit 99\n' "$dir/timeout-used" > "$dir/bin/timeout"
@@ -251,7 +327,9 @@ test_refuses_rather_than_running_unbounded() {
   local dir out rc=0
   dir="$TMP_ROOT/unboundable"
   mkdir -p "$dir/bin"
-  ln -s "$(command -v bash)" "$dir/bin/bash"
+  for tool in sh bash; do
+    ln -s "$(command -v "$tool")" "$dir/bin/$tool"
+  done
   out=$(exec_timed "$dir/bin" 5 1 bash -c ': > "$1"' _ "$dir/ran" 2>&1) || rc=$?
   [ "$rc" -eq 127 ] || fail "fm_exec_timed ran with nothing to bound it (rc=$rc)"
   assert_contains "$out" "cannot bound bash within 5s" "the refusal did not say what it could not bound"
@@ -287,7 +365,7 @@ test_gnu_timeout_kills_a_term_ignoring_command_after_the_grace() {
   fb="$dir/bin"
   mkdir -p "$fb"
   # No perl here, so the call falls back to GNU timeout.
-  for tool in timeout bash sleep; do
+  for tool in timeout sh bash sleep; do
     ln -s "$(command -v "$tool")" "$fb/$tool"
   done
   started=$SECONDS
@@ -337,6 +415,7 @@ test_a_descendant_holding_the_output_cannot_outlast_the_bound
 test_a_signal_to_the_bounding_process_reaches_the_command
 test_a_named_owner_that_is_gone_ends_the_command
 test_an_owner_that_dies_during_startup_ends_the_command
+test_the_call_runs_under_set_u_with_the_oldest_bash
 test_perl_is_preferred_over_timeout
 test_refuses_rather_than_running_unbounded
 test_rejects_malformed_bounds_before_running_anything
