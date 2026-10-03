@@ -117,9 +117,10 @@
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
 # A home may carry standing worker instructions without editing this tracked
-# script: when config/brief-include.md exists under the active home, ship and
-# scout scaffolds append its text verbatim as their last section, "# Home brief
-# additions", which defers to every other section of the brief. It goes last
+# script: when config/brief-include-shared.md or config/brief-include.md exists
+# under the active home, ship and scout scaffolds append their text verbatim,
+# shared first, as their last section, "# Home brief additions", which defers
+# to every other section of the brief. It goes last
 # because the machine-read `# Task` heading resolves to its first match, so
 # appended text can never shadow it; a later scout promotion appends its ship
 # contract below it, which that position-free deference already covers. An
@@ -318,20 +319,23 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
-# The optional home-local include is read before anything is written, so an
-# unusable file never leaves a partial scaffold behind.
-BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
+# Read both optional includes before writing, so an unusable file never
+# leaves a partial scaffold behind. Shared instructions precede home-local ones.
 BRIEF_INCLUDE_BODY=
-if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
-  { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
-    echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
-    exit 1
-  }
-  if printf '%s\n' "$BRIEF_INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
-    echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
-    exit 1
-  fi
-  [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
+if [ "$KIND" != secondmate ]; then
+  for BRIEF_INCLUDE_FILE in "$CONFIG/brief-include-shared.md" "$CONFIG/brief-include.md"; do
+    { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; } || continue
+    { [ -f "$BRIEF_INCLUDE_FILE" ] && INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
+      echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
+      exit 1
+    }
+    if printf '%s\n' "$INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
+      echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
+      exit 1
+    fi
+    [ -n "$(printf '%s' "$INCLUDE_BODY" | tr -d '[:space:]')" ] || continue
+    BRIEF_INCLUDE_BODY="${BRIEF_INCLUDE_BODY}${BRIEF_INCLUDE_BODY:+$'\n'}$INCLUDE_BODY"
+  done
 fi
 
 # Append the include as the last section of a ship or scout scaffold.
