@@ -85,6 +85,8 @@ done > "$DENSE_SHORT_DIR/journal.jsonl"
 cat > "$SUPERVISOR_DIR/session-one.jsonl" <<'JSONL'
 {"type":"session","version":3,"id":"session-one","timestamp":"2026-09-30T00:00:00.000Z","cwd":"/redacted"}
 {"type":"custom_message","id":"custom-1","parentId":null,"timestamp":"2026-09-30T00:00:01.000Z","customType":"fm-main-mirror","content":"captain request"}
+{"type":"custom_message","id":"native-response","parentId":"custom-1","timestamp":"2026-09-30T00:00:01.500Z","customType":"openai-codex-compat-native-response","content":"hidden native response"}
+{"type":"message","id":"ordinary-text","parentId":"native-response","timestamp":"2026-09-30T00:00:01.750Z","message":{"role":"user","content":[{"type":"text","text":"ordinary text mentions openai-codex-compat-native-response"}]}}
 {"type":"message","id":"message-1","parentId":"custom-1","timestamp":"2026-09-30T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"bounded reasoning"},{"type":"toolCall","name":"bash","arguments":{"command":"true"}}]}}
 JSONL
 {
@@ -358,6 +360,8 @@ jq -e '(.events | length) == 2 and .eof == true and .events[0].value.timestamp =
   || fail "wide tail-crossing record prevented the actual newest record from loading"
 
 supervisor_identity=$(curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=session-one.jsonl&cursor=0" | jq -r '.identity')
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=session-one.jsonl&cursor=0" > "$TMP_ROOT/supervisor-native-response.json"
+jq -e '(.events | any(.value.customType == "openai-codex-compat-native-response")) and (.events | any(.value.message.content[0].text == "ordinary text mentions openai-codex-compat-native-response"))' "$TMP_ROOT/supervisor-native-response.json" >/dev/null || fail "supervisor API did not preserve the native response and neighboring ordinary text"
 mv "$SUPERVISOR_DIR/session-one.jsonl" "$SUPERVISOR_DIR/session-one.old"
 printf '{"type":"session","id":"replacement"}\n' > "$SUPERVISOR_DIR/session-one.jsonl"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=session-one.jsonl&cursor=1&identity=$supervisor_identity" > "$TMP_ROOT/rotated.json"

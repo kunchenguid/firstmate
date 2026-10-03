@@ -27,6 +27,7 @@ HOME_FIXTURE="$TMP_ROOT/home"
 FIRST_SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_ID=short-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 DENSE_SHORT_ID=short-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+SUPERVISOR_ID=supervisor-native-response.jsonl
 FIRST_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$FIRST_SHORT_ID"
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
 DENSE_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$DENSE_SHORT_ID"
@@ -107,6 +108,17 @@ JSONL
 for index in $(seq 1 201); do
   printf '{"type":"message_end","message":{"role":"assistant","timestamp":%s,"content":[{"type":"text","text":"dense-browser-event-%s"}]}}\n' "$((1780001000000 + index))" "$index"
 done > "$DENSE_SHORT_DIR/journal.jsonl"
+{
+  printf '%s\n' '{"type":"message","timestamp":1780000000000,"message":{"role":"user","content":[{"type":"text","text":"ordinary text mentions openai-codex-compat-native-response"}]}}'
+  for index in $(seq 1 204); do
+    if [ "$index" -eq 50 ] || [ "$index" -eq 150 ]; then
+      printf '{"type":"custom_message","timestamp":%s,"customType":"openai-codex-compat-native-response","content":"hidden supervisor event %s"}\n' "$((1780000000000 + index))" "$index"
+    else
+      printf '{"type":"message","timestamp":%s,"message":{"role":"assistant","content":[{"type":"text","text":"supervisor record %s"}]}}\n' "$((1780000000000 + index))" "$index"
+    fi
+  done
+  printf '%s\n' '{"type":"message","timestamp":1780000005000,"message":{"role":"user","content":[{"type":"text","text":"ordinary text mentions openai-codex-compat-native-response"}]}}'
+} > "$HOME_FIXTURE/state/branch-session/$SUPERVISOR_ID"
 
 FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN="$TOKEN" FM_JSONL_VIEWER_PORT=0 \
   node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
@@ -128,7 +140,7 @@ done
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
   NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   PLAYWRIGHT_ROOT="$PLAYWRIGHT_ROOT" CDP_URL="$CDP_URL" VIEWER_URL="http://127.0.0.1:$PORT" \
-  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_DENSE_SHORT_ID="$DENSE_SHORT_ID" \
+  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_DENSE_SHORT_ID="$DENSE_SHORT_ID" VIEWER_SUPERVISOR_ID="$SUPERVISOR_ID" \
   VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_BRIEF_ID="$BRIEF_ID" VIEWER_TOKEN="$TOKEN" \
   node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
@@ -323,6 +335,29 @@ try {
   if (!literal.includes("<img id=unsafe")) throw new Error("log markup was not shown literally");
   if (await page.locator("#unsafe").count()) throw new Error("log markup executed as HTML");
   if (!await page.getByText("Tool call: read_material").count()) throw new Error("tool call was not expandable");
+  await page.locator("#source").selectOption("supervisor");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SUPERVISOR_ID.replace(/\.jsonl$/, "") }).click();
+  await page.getByText("ordinary text mentions openai-codex-compat-native-response", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("hidden supervisor event 150", { exact: true }).count()) throw new Error("supervisor native response was rendered on initial load");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await page.locator("#connect").click();
+  await page.locator("#source").selectOption("supervisor");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SUPERVISOR_ID.replace(/\.jsonl$/, "") }).click();
+  await page.getByText("ordinary text mentions openai-codex-compat-native-response", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("hidden supervisor event 150", { exact: true }).count()) throw new Error("supervisor native response was rendered after page reload");
+  await page.locator("#from-start").click();
+  await page.getByText("supervisor record 1", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("hidden supervisor event 50", { exact: true }).count()) throw new Error("supervisor native response was rendered after reload from start");
+  await page.locator("#load-more").click();
+  await page.getByText("supervisor record 204", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("hidden supervisor event 50", { exact: true }).count() || await page.getByText("hidden supervisor event 150", { exact: true }).count()) throw new Error("supervisor native response was rendered during pagination");
+  const supervisorJournal = `${process.env.VIEWER_HOME}/state/branch-session/${process.env.VIEWER_SUPERVISOR_ID}`;
+  fs.appendFileSync(supervisorJournal, '{"type":"custom_message","timestamp":1780000003000,"customType":"openai-codex-compat-native-response","content":"hidden live supervisor event"}\n');
+  fs.appendFileSync(supervisorJournal, '{"type":"message","timestamp":1780000003001,"message":{"role":"assistant","content":[{"type":"text","text":"visible live supervisor record"}]}}\n');
+  await page.getByText("visible live supervisor record", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.getByText("hidden live supervisor event", { exact: true }).count()) throw new Error("supervisor native response was rendered during live append");
+  await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_DENSE_SHORT_ID }).click();
   await page.getByText("dense-browser-event-201", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
   const denseInitialOrder = await page.locator(".event-content").allInnerTexts();
