@@ -102,6 +102,9 @@ A remote wrapper needs a `queue-wrapper-exited` event from its owning participan
 The exit event must match the recorded attempt, home, host ID, PID, and start time, and the later forge read must still prove non-landing.
 Without the attestation or an authority-only operator abort, a remote attempt remains `outcome-unknown`.
 The shadow command verifies the enrolled participant session for the exit event; an authenticated transport adapter must bind the remote caller to that home before forwarding it in step 3.
+The exit report is an attestation from the enrolled participant adapter, the only party able to check its own process: `queue-wrapper-exited` runs on the wrapper's host and refuses while a process with that exact PID and start time remains.
+A lying enrolled participant is outside the threat model; the coordinator still requires the attestation, the quiet period, and live forge proof of non-landing.
+A lost exit reply replays its original receipt with the same `request_id` from the owning home's current session, because the replay key covers the attempt and exact wrapper identity rather than the participant generation; a stale session or a different attempt or wrapper identity is refused.
 Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 `queue-operator-abort` is the only other way out of `outcome-unknown`: the enrolled authority actor records a reason in a `slot-operator-aborted` event and moves the item to `repair-needed` without a terminal outcome.
 The command requires the authority credential before looking up a replay receipt, refuses participant identities and caller-supplied operator names, and records the process's authenticated local account and effective UID as `@authority:<account>:<uid>`.

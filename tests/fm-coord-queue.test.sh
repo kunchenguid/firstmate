@@ -13,6 +13,19 @@ reject() {
     fail "$3"
   fi
 }
+# Mirrors the coordinator's account fallback for an effective UID without a passwd entry.
+authority_identity() {
+  python3 -c 'import os,pwd
+uid = os.geteuid()
+try:
+    account = pwd.getpwuid(uid).pw_name
+except KeyError:
+    account = "uid"
+print(f"@authority:{account}:{uid}")'
+}
+# PYTHONPATH="$tmp/nopasswd" simulates an effective UID with no passwd entry.
+mkdir -p "$tmp/nopasswd"
+printf 'import pwd\n\ndef _missing(uid):\n    raise KeyError(uid)\n\npwd.getpwuid = _missing\n' > "$tmp/nopasswd/sitecustomize.py"
 base=0000000000000000000000000000000000000000
 head_a=1111111111111111111111111111111111111111
 head_b=2222222222222222222222222222222222222222
@@ -318,7 +331,7 @@ reject queue-operator-abort "$abort_payload" 'operator abort must require the en
 aborted=$(FM_COORD_AUTHORITY_TOKEN="$authority_token" coord queue-operator-abort "$abort_payload")
 [ "$(field "$aborted" state)" = repair-needed ] || fail 'operator abort must release the slot to repair-needed'
 reject queue-operator-abort "$abort_payload" 'an unauthenticated replay must not return the authority receipt'
-operator_identity=$(python3 -c 'import os,pwd; uid=os.geteuid(); print(f"@authority:{pwd.getpwuid(uid).pw_name}:{uid}")')
+operator_identity=$(authority_identity)
 field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="slot-operator-aborted" and e["payload"]["operator"]==sys.argv[1] and e["payload"]["reason"]=="wrapper lost" for e in ast.literal_eval(sys.stdin.read()))' "$operator_identity" || fail 'operator abort must record its authenticated local account and reason'
 kill "$live_wrapper"
 wait "$live_wrapper" 2> /dev/null || true
@@ -376,8 +389,11 @@ pass 'refusal on a database without a token reconciles to a released slot'
 
 enrolled_events() { coord outbox '{"limit":1000}' | python3 -c 'import json,sys; print(sum(e["type"]=="authority-enrolled" for e in json.load(sys.stdin)["events"]))'; }
 [ "$(enrolled_events)" = 0 ] || fail 'init without a token must not record an enrollment'
-FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
+PYTHONPATH="$tmp/nopasswd" FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
 [ "$(enrolled_events)" = 1 ] || fail 'first token on an initialized v3 database must enroll with one event'
+nopasswd_identity=$(PYTHONPATH="$tmp/nopasswd" authority_identity)
+[ "$nopasswd_identity" = "@authority:uid:$(id -u)" ] || fail 'a UID without a passwd entry must fall back to the uid account name'
+field "$(coord outbox '{"limit":1000}')" events | python3 -c 'import ast,sys; assert any(e["type"]=="authority-enrolled" and e["payload"]["actor"]==sys.argv[1] for e in ast.literal_eval(sys.stdin.read()))' "$nopasswd_identity" || fail 'enrollment without a passwd entry must record the numeric-UID authority identity'
 FM_COORD_AUTHORITY_TOKEN="$authority_token" coord init > /dev/null
 [ "$(enrolled_events)" = 1 ] || fail 'repeating enrollment with the same token must be idempotent'
 FM_COORD_AUTHORITY_TOKEN=other-authority-credential-0123456789abcdef reject init '{}' 'init must never replace an enrolled token'
@@ -492,8 +508,13 @@ remote_common=$(printf '"intent_id":"a","home_id":"remote","generation":%s,"clai
 coord queue-synced "{\"request_id\":\"sync-remote\",$remote_common,\"head_contains_base\":true}" > /dev/null
 coord queue-validated "{\"request_id\":\"validate-remote\",$remote_common,\"validation_passed\":true,\"validation_id\":\"v-remote\"}" > /dev/null
 coord queue-checks "{\"request_id\":\"checks-remote\",$remote_common,\"protection_available\":false,\"checks\":[{\"name\":\"Lint\",\"head_oid\":\"$head_a\",\"conclusion\":\"success\"}]}" > /dev/null
-remote_pid=2147483000
-remote_start=remote-start-1
+sleep 600 &
+remote_pid=$!
+if [ -r /proc/self/stat ]; then
+  remote_start=$(python3 -c 'import sys; print(open(f"/proc/{sys.argv[1]}/stat").read().rsplit(")", 1)[1].split()[19])' "$remote_pid")
+else
+  remote_start=$(ps -o lstart= -p "$remote_pid" | sed 's/^ *//; s/ *$//')
+fi
 remote_attempt=$(coord queue-attempt "{\"request_id\":\"attempt-remote\",$remote_common,\"head_contains_base\":true,\"captain_hold_released\":true,\"away_merge_allowed\":true,\"merge_authorized\":true,\"wrapper_pid\":$remote_pid,\"wrapper_start\":\"$remote_start\"}")
 remote_attempt_id=$(field "$remote_attempt" attempt_event_id)
 [ "$(field "$remote_attempt" state)" = attempting ] || fail 'remote wrapper PID must not be checked on the coordinator host'
@@ -503,13 +524,19 @@ if FM_COORD_QUIET_SECONDS=0 not_landed remote-unattested > "$tmp/unexpected" 2> 
   fail 'a remote wrapper without attested exit must keep the slot outcome-unknown'
 fi
 still_unknown 'missing remote exit attestation must retain the slot'
+exit_payload() { printf '{"request_id":"exit-remote","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$1" "$slot" "$2" "$remote_pid" "$remote_start"; }
+reject queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id")" 'the participant must refuse to report an exit while its exact wrapper process remains'
+kill "$remote_pid"
+wait "$remote_pid" 2> /dev/null || true
 reject queue-wrapper-exited "$(printf '{"request_id":"exit-other","intent_id":"a","home_id":"other","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$other_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")" 'another participant must not attest a remote wrapper exit'
 reject queue-wrapper-exited "$(printf '{"request_id":"exit-wrong-start","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"wrong-start"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid")" 'remote exit attestation must match the exact wrapper start time'
-remote_exit_payload=$(printf '{"request_id":"exit-remote","intent_id":"a","home_id":"remote","generation":%s,"slot_generation":%s,"attempt_event_id":"%s","wrapper_host_id":"remote-test-host","wrapper_pid":%s,"wrapper_start":"%s"}' "$remote_generation" "$slot" "$remote_attempt_id" "$remote_pid" "$remote_start")
-remote_exit=$(coord queue-wrapper-exited "$remote_exit_payload")
+remote_exit=$(coord queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id")")
 [ "$(field "$remote_exit" state)" = outcome-unknown ] || fail 'attested exit must retain the slot until forge non-landing proof'
-coord session '{"request_id":"session-remote-new","home_id":"remote"}' > /dev/null
-reject queue-wrapper-exited "$remote_exit_payload" 'a stale participant session must not replay an authenticated exit receipt'
+stale_generation=$remote_generation
+remote_generation=$(field "$(coord session '{"request_id":"session-remote-new","home_id":"remote"}')" generation)
+reject queue-wrapper-exited "$(exit_payload "$stale_generation" "$remote_attempt_id")" 'a stale participant session must not replay an authenticated exit receipt'
+[ "$(coord queue-wrapper-exited "$(exit_payload "$remote_generation" "$remote_attempt_id")")" = "$remote_exit" ] || fail 'a lost exit reply must replay its original receipt from a new participant session'
+reject queue-wrapper-exited "$(exit_payload "$remote_generation" forged-attempt)" 'an exit replay must not accept a different attempt identity'
 if not_landed remote-before-quiet > "$tmp/unexpected" 2> "$tmp/error"; then
   fail 'remote exit attestation must still observe the quiet period'
 fi

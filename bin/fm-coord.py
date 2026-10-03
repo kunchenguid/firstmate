@@ -807,12 +807,19 @@ def main():
             request_id = token(payload.get("request_id"), "request_id")
             if op == "queue-wrapper-exited":
                 participant(db, payload)
+                # Participant-side check: the invoking adapter runs on the wrapper's host and refuses while that exact process remains.
+                require(type(payload.get("wrapper_pid")) is int and payload["wrapper_pid"] > 0, "wrapper_pid must be a positive integer")
+                require(process_start(payload["wrapper_pid"]) != payload.get("wrapper_start"), "wrapper process is still running")
             actor = authority_actor(db, payload) if op == "queue-operator-abort" else payload.get("home_id", "@authority")
             if op == "queue-operator-abort":
                 payload["_authority_actor"] = actor
             token(actor, "actor")
             require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
-            digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
+            keyed = json.loads(request_payload)
+            if op == "queue-wrapper-exited":
+                # Replay is keyed to the attempt and exact wrapper identity, so a lost reply survives a new session.
+                keyed.pop("generation", None)
+            digest = hashlib.sha256(compact({"operation": op, "payload": keyed}).encode()).hexdigest()
         if op == "queue-reconcile":
             prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
             if prior:
