@@ -26,17 +26,21 @@ TMP_ROOT=$(fm_test_tmproot fm-jsonl-viewer-browser)
 HOME_FIXTURE="$TMP_ROOT/home"
 FIRST_SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_ID=short-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+DENSE_SHORT_ID=short-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 FIRST_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$FIRST_SHORT_ID"
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
+DENSE_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$DENSE_SHORT_ID"
 FIRST_REPORT_ID=report-one
 REPORT_ID=report-two
 BRIEF_ID=brief-only
+ARCHIVED_ID=archived-task
 FIRST_REPORT_DIR="$HOME_FIXTURE/data/$FIRST_REPORT_ID"
 REPORT_DIR="$HOME_FIXTURE/data/$REPORT_ID"
 BRIEF_DIR="$HOME_FIXTURE/data/$BRIEF_ID"
+ARCHIVED_DIR="$HOME_FIXTURE/data/$ARCHIVED_ID"
 TOKEN=browser-fixture-token-value
 SERVER_LOG="$TMP_ROOT/server.log"
-mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR" "$BRIEF_DIR"
+mkdir -p "$FIRST_SHORT_DIR" "$SHORT_DIR" "$DENSE_SHORT_DIR" "$HOME_FIXTURE/state/branch-session" "$FIRST_REPORT_DIR" "$REPORT_DIR" "$BRIEF_DIR" "$ARCHIVED_DIR"
 cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
 backend = "markdown"
 
@@ -94,9 +98,15 @@ const literal = "<img id=code-unsafe src=x>";
 MARKDOWN
 printf '# Superseded task brief\n\nThis must not replace the report.\n' > "$REPORT_DIR/brief.md"
 printf '# Brief-only instructions\n\nVisible task instructions.\n' > "$BRIEF_DIR/brief.md"
+printf '# Archived task brief\n\nVisible archived instructions.\n' > "$ARCHIVED_DIR/brief.md"
 cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
+{"type":"message_end","message":{"role":"assistant","timestamp":1779999999000,"content":[{"type":"text","text":"oldest ordered record"}]}}
+{"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"first tied record"}]}}
 {"type":"message_end","message":{"role":"assistant","timestamp":1780000000000,"content":[{"type":"text","text":"<img id=unsafe src=x onerror=alert(1)>"},{"type":"toolCall","name":"read_material","arguments":{"material":"m1"}}]}}
 JSONL
+for index in $(seq 1 201); do
+  printf '{"type":"message_end","message":{"role":"assistant","timestamp":%s,"content":[{"type":"text","text":"dense-browser-event-%s"}]}}\n' "$((1780001000000 + index))" "$index"
+done > "$DENSE_SHORT_DIR/journal.jsonl"
 
 FM_HOME="$HOME_FIXTURE" FM_JSONL_VIEWER_TOKEN="$TOKEN" FM_JSONL_VIEWER_PORT=0 \
   node "$ROOT/bin/fm-jsonl-viewer.mjs" > "$SERVER_LOG" 2>&1 &
@@ -118,7 +128,7 @@ done
 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
   NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost \
   PLAYWRIGHT_ROOT="$PLAYWRIGHT_ROOT" CDP_URL="$CDP_URL" VIEWER_URL="http://127.0.0.1:$PORT" \
-  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" \
+  VIEWER_HOME="$HOME_FIXTURE" VIEWER_FIRST_SHORT_ID="$FIRST_SHORT_ID" VIEWER_SHORT_ID="$SHORT_ID" VIEWER_DENSE_SHORT_ID="$DENSE_SHORT_ID" \
   VIEWER_FIRST_REPORT_ID="$FIRST_REPORT_ID" VIEWER_REPORT_ID="$REPORT_ID" VIEWER_BRIEF_ID="$BRIEF_ID" VIEWER_TOKEN="$TOKEN" \
   node --input-type=module <<'NODE'
 import { createRequire } from "node:module";
@@ -205,7 +215,7 @@ try {
   await page.locator("#connect").click();
   await page.locator("#task-status").filter({ hasText: "task overview is temporarily unavailable" }).waitFor({ state: "visible", timeout: 3000 });
   if (!(await page.locator("#sessions .empty").textContent()).startsWith("Task loading failed:")) throw new Error("left task list presented a loading error as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 4 && nodes.every(node => node.textContent.startsWith("Task loading failed:")))) throw new Error("task groups presented a loading error as empty categories");
+  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent.startsWith("Task loading failed:")))) throw new Error("task groups presented a loading error as empty categories");
   await captureEvidence("viewer-task-error-state");
   const initialTaskDelay = delayNextTaskRequest();
   await page.locator("#connect").click();
@@ -213,7 +223,7 @@ try {
   if (await page.locator("#task-status").textContent() !== "Loading task status…") throw new Error("initial task loading state was not explicit");
   if (await page.locator("#task-counts strong").evaluateAll(nodes => nodes.some(node => node.textContent === "0"))) throw new Error("unloaded task counts were presented as authoritative zeros");
   if (await page.locator("#sessions .empty").textContent() !== "Loading task status…") throw new Error("left task list presented loading as an empty result");
-  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 4 && nodes.every(node => node.textContent === "Loading task status…"))) throw new Error("task groups presented loading as empty categories");
+  if (!await page.locator("#task-groups .empty").evaluateAll(nodes => nodes.length === 3 && nodes.every(node => node.textContent === "Loading task status…"))) throw new Error("task groups presented loading as empty categories");
   await captureEvidence("viewer-task-loading-state");
   await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
@@ -223,20 +233,30 @@ try {
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
   if (!(await page.locator("#task-status").textContent()).includes("UTC+8")) throw new Error("task refresh time was not labelled UTC+8");
   if (await page.locator('#task-groups .task-card[data-category="processing"]').count() !== 2) throw new Error("processing task category was not rendered");
-  if (await page.locator('#task-groups .task-card[data-category="completed"]').count() !== 1) throw new Error("completed task category was not rendered");
+  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task dashboard section was rendered");
+  if (await page.locator('#task-counts').getByText("Completed", { exact: true }).count()) throw new Error("completed task counter was rendered");
   if (await page.locator('#task-groups .task-card[data-category="held"]').count() !== 2) throw new Error("held task category was not rendered separately");
   if (await page.locator('#task-groups .task-card[data-category="history"]').count() !== 1) throw new Error("archived task category was not rendered");
+  await page.locator('#task-groups .task-card[data-category="history"]').first().click();
+  await page.getByRole("heading", { name: "Archived task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!await page.locator("#task-document-report").isDisabled()) throw new Error("archived brief-only task did not show its unavailable report");
   await captureEvidence("viewer-task-dashboard-loaded");
   const refreshTaskDelay = delayNextTaskRequest();
   await page.locator("#task-follow").check();
   await refreshTaskDelay.started;
   if (await page.locator("#task-status").textContent() !== "Refreshing task status…") throw new Error("background task refresh state was not explicit");
-  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "2,2,1,1") throw new Error("background task refresh did not preserve loaded counts");
+  if (await page.locator('#task-counts strong').evaluateAll(nodes => nodes.map(node => node.textContent).join(",")) !== "2,2,1") throw new Error("background task refresh did not preserve loaded counts");
   refreshTaskDelay.release();
   await page.locator("#task-status").filter({ hasText: "UTC+8" }).waitFor({ state: "visible", timeout: 5000 });
   await page.getByRole("button", { name: /Dashboard processing task/ }).first().click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task report" }).waitFor({ state: "visible", timeout: 3000 });
+  if (await page.locator("#task-document-brief").isDisabled() || await page.locator("#task-document-report").isDisabled()) throw new Error("both-document task did not expose both document selectors");
+  await page.locator("#task-document-brief").click();
+  await page.getByRole("heading", { name: "Superseded task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  await page.locator("#task-document-report").click();
+  await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
   await captureEvidence("viewer-task-detail-canonical-report");
   await page.locator("#open-task-report").click();
   await page.getByRole("heading", { name: "Rendered report" }).waitFor({ state: "visible", timeout: 3000 });
@@ -247,6 +267,7 @@ try {
   await page.getByRole("button", { name: /Held with task instructions/ }).first().click();
   await page.getByRole("heading", { name: "Brief-only instructions" }).waitFor({ state: "visible", timeout: 3000 });
   await page.locator("#task-document-type").filter({ hasText: "Task brief" }).waitFor({ state: "visible", timeout: 3000 });
+  if (!await page.locator("#task-document-report").isDisabled() || await page.locator("#task-document-report").textContent() !== "Report unavailable") throw new Error("brief-only task did not make its missing report explicit");
   fs.writeFileSync(`${process.env.VIEWER_HOME}/data/${process.env.VIEWER_BRIEF_ID}/report.md`, "# Newly available report\n\nCanonical report discovered after connection.\n");
   await page.locator("#open-task-report").waitFor({ state: "visible", timeout: 5000 });
   await page.locator("#open-task-report").click();
@@ -269,7 +290,8 @@ try {
 
   const backlog = `${process.env.VIEWER_HOME}/data/backlog.md`;
   fs.writeFileSync(backlog, `## In flight\n- [ ] ${process.env.VIEWER_FIRST_REPORT_ID} - Delayed report task (repo: viewer) (kind: scout)\n\n## Queued\n- [ ] ${process.env.VIEWER_BRIEF_ID} - Held with task instructions blocked-by: upstream (repo: viewer) (kind: ship)\n- [ ] no-document - Held without document blocked-by: upstream (repo: viewer) (kind: ship)\n\n## Done\n- [x] completed-task - Dashboard completed task (repo: viewer) (kind: ship)\n- [x] ${process.env.VIEWER_REPORT_ID} - Dashboard processing task (repo: viewer) (kind: ship)\n`);
-  await page.locator('.task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
+  await page.locator('#sessions .task-card[data-category="completed"]').filter({ hasText: "Dashboard processing task" }).first().waitFor({ state: "visible", timeout: 5000 });
+  if (await page.locator('#task-groups [data-category="completed"]').count()) throw new Error("completed task reappeared as a dedicated dashboard group after refresh");
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.getByText("Dashboard processing task", { exact: true }).first().waitFor({ state: "visible", timeout: 5000 });
@@ -292,11 +314,28 @@ try {
   await page.locator("#connect").click();
   await page.locator("#source").selectOption("short");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
-  await page.locator(".event-card").waitFor({ state: "visible", timeout: 3000 });
-  const literal = await page.locator(".event-content").textContent();
+  await page.locator(".event-card").first().waitFor({ state: "visible", timeout: 3000 });
+  const initialOrder = await page.locator(".event-content").allInnerTexts();
+  if (initialOrder[0] !== "first tied record" || !initialOrder[1]?.startsWith("<img id=unsafe src=x onerror=alert(1)>") || initialOrder[2] !== "oldest ordered record") throw new Error(`initial records were not newest-first with stable ties: ${initialOrder.join("|")}`);
+  const unsafeContentParts = await page.locator(".event-content").filter({ hasText: "<img id=unsafe" }).locator(":scope > *").allInnerTexts();
+  if (!unsafeContentParts[0]?.includes("<img id=unsafe") || !unsafeContentParts[1]?.includes("Tool call: read_material")) throw new Error("newest-first rendering changed within-record content order");
+  const literal = await page.locator(".event-content").filter({ hasText: "<img id=unsafe" }).textContent();
   if (!literal.includes("<img id=unsafe")) throw new Error("log markup was not shown literally");
   if (await page.locator("#unsafe").count()) throw new Error("log markup executed as HTML");
   if (!await page.getByText("Tool call: read_material").count()) throw new Error("tool call was not expandable");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_DENSE_SHORT_ID }).click();
+  await page.getByText("dense-browser-event-201", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  const denseInitialOrder = await page.locator(".event-content").allInnerTexts();
+  if (denseInitialOrder[0] !== "dense-browser-event-201" || denseInitialOrder.at(-1) !== "dense-browser-event-2" || denseInitialOrder.includes("dense-browser-event-1")) throw new Error("dense initial load did not show the actual newest 200 records");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator("#token").fill(process.env.VIEWER_TOKEN);
+  await page.locator("#connect").click();
+  await page.locator("#source").selectOption("short");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_DENSE_SHORT_ID }).click();
+  await page.getByText("dense-browser-event-201", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  if ((await page.locator(".event-content").allInnerTexts())[0] !== "dense-browser-event-201") throw new Error("dense reload did not keep the actual newest record first");
+  await page.locator(".session-button").filter({ hasText: process.env.VIEWER_SHORT_ID }).click();
+  await page.getByText("<img id=unsafe src=x onerror=alert(1)>", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
   delayFirst = true;
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_FIRST_SHORT_ID }).click();
   await firstRequestStarted;
@@ -309,14 +348,39 @@ try {
   await page.waitForTimeout(100);
   if (await page.getByText("delayed first session", { exact: true }).count()) throw new Error("stale session content was rendered after its delayed response");
   const journal = `${process.env.VIEWER_HOME}/state/short-agents/${process.env.VIEWER_SHORT_ID}/journal.jsonl`;
+  const retainedDetails = page.locator(".event-content").filter({ hasText: "<img id=unsafe" }).locator("details").first();
+  await retainedDetails.locator("summary").click();
+  if (!await retainedDetails.evaluate(element => element.open)) throw new Error("tool details did not open before live append");
+  const retainedRecord = page.getByText("oldest ordered record", { exact: true });
+  await retainedRecord.scrollIntoViewIfNeeded();
+  const retainedTop = (await retainedRecord.boundingBox())?.y;
   fs.appendFileSync(journal, '{"type":"message_end","message":{"role":"toolResult","timestamp":1780000001000,"toolName":"read_material","content":[{"type":"text","text":"partial live');
   await page.locator("#notice").filter({ hasText: "Waiting for a newline" }).waitFor({ state: "visible", timeout: 3000 });
   fs.appendFileSync(journal, ' append"}]}}\n');
   await page.getByText("partial live append", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  const appendedOrder = await page.locator(".event-content").allInnerTexts();
+  if (appendedOrder[0] !== "partial live append" || appendedOrder.at(-1) !== "oldest ordered record") throw new Error(`live append was not placed newest-first: ${appendedOrder.join("|")}`);
+  if (!await retainedDetails.evaluate(element => element.open)) throw new Error("live append collapsed an expanded record");
+  const retainedTopAfterAppend = (await retainedRecord.boundingBox())?.y;
+  if (retainedTop === undefined || retainedTopAfterAppend === undefined || Math.abs(retainedTopAfterAppend - retainedTop) > 2) throw new Error("live append moved the record being read out of position");
+  await page.locator("#role-filter").selectOption("assistant");
+  const filteredRetainedTop = (await retainedRecord.boundingBox())?.y;
+  fs.appendFileSync(journal, '{"type":"message_end","message":{"role":"toolResult","timestamp":1780000001001,"content":[{"type":"text","text":"filtered live append"}]}}\n');
+  await page.getByText("filtered live append", { exact: true }).waitFor({ state: "attached", timeout: 3000 });
+  if (await page.getByText("filtered live append", { exact: true }).isVisible()) throw new Error("role filter exposed a nonmatching live record");
+  const filteredRetainedTopAfterAppend = (await retainedRecord.boundingBox())?.y;
+  if (filteredRetainedTop === undefined || filteredRetainedTopAfterAppend === undefined || Math.abs(filteredRetainedTopAfterAppend - filteredRetainedTop) > 2) throw new Error("filtered live append moved the record being read out of position");
+  await page.locator("#role-filter").selectOption("all");
   await page.locator("#event-search").fill("no-event-can-match-this");
   if (await page.locator(".event-card:visible").count()) throw new Error("search did not filter rendered events");
   await page.locator("#event-search").fill("");
-  if (await page.locator(".event-card:visible").count() !== 2) throw new Error("live append did not preserve both events");
+  if (await page.locator(".event-card:visible").count() !== 5) throw new Error("live append did not preserve all events");
+  fs.renameSync(journal, `${journal}.rotated`);
+  fs.writeFileSync(journal, Array.from({ length: 201 }, (_, index) => JSON.stringify({ type: "message_end", message: { role: "assistant", timestamp: 1780000002000 + index, content: [{ type: "text", text: `replacement generation record ${index + 1}` }] } })).join("\n") + "\n");
+  await page.getByText("replacement generation record 201", { exact: true }).waitFor({ state: "visible", timeout: 3000 });
+  const generationOrder = await page.locator("#events > *").evaluateAll(nodes => nodes.map(node => node.classList.contains("boundary") ? `boundary:${node.textContent}` : node.querySelector(".event-content")?.textContent || ""));
+  if (generationOrder[0] !== "replacement generation record 201" || generationOrder[199] !== "replacement generation record 2" || !generationOrder[200]?.startsWith("boundary:The journal was rotated.") || !generationOrder.slice(201).some(value => value.includes("oldest ordered record"))) throw new Error(`dense rotation boundary did not separate the newest replacement tail from the prior generation: ${generationOrder.join("|")}`);
+  if (!await retainedDetails.evaluate(element => element.open)) throw new Error("journal rotation collapsed retained record details");
   if (!await page.locator("#journal-filters").isVisible() || !await page.locator("#journal-actions").isVisible() || !await page.locator("#events").isVisible()) throw new Error("journal controls were hidden in journal mode");
   await page.locator("#source").selectOption("report");
   await page.locator(".session-button").filter({ hasText: process.env.VIEWER_REPORT_ID }).click();

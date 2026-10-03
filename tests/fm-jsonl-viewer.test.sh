@@ -11,6 +11,8 @@ TMP_ROOT=$(fm_test_tmproot fm-jsonl-viewer)
 HOME_FIXTURE="$TMP_ROOT/home"
 SHORT_ID=short-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 SHORT_DIR="$HOME_FIXTURE/state/short-agents/$SHORT_ID"
+DENSE_SHORT_ID=short-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+DENSE_SHORT_DIR="$HOME_FIXTURE/state/short-agents/$DENSE_SHORT_ID"
 SUPERVISOR_DIR="$HOME_FIXTURE/state/branch-session"
 REPORT_DIR="$HOME_FIXTURE/data/task-one"
 PREFIXED_REPORT_DIR="$HOME_FIXTURE/data/_task-two"
@@ -30,7 +32,7 @@ cleanup() {
   fm_test_cleanup
 }
 trap cleanup EXIT INT TERM
-mkdir -p "$SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR" "$BRIEF_DIR"
+mkdir -p "$SHORT_DIR" "$DENSE_SHORT_DIR" "$SUPERVISOR_DIR" "$REPORT_DIR" "$PREFIXED_REPORT_DIR" "$BRIEF_DIR"
 cat > "$HOME_FIXTURE/.tasks.toml" <<'TOML'
 backend = "markdown"
 
@@ -76,12 +78,22 @@ cat > "$SHORT_DIR/journal.jsonl" <<'JSONL'
 not-json
 JSONL
 printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial' >> "$SHORT_DIR/journal.jsonl"
+for index in $(seq 1 201); do
+  printf '{"type":"message_end","message":{"role":"assistant","timestamp":%s,"content":[{"type":"text","text":"dense-event-%s"}]}}\n' "$((1780001000000 + index))" "$index"
+done > "$DENSE_SHORT_DIR/journal.jsonl"
 
 cat > "$SUPERVISOR_DIR/session-one.jsonl" <<'JSONL'
 {"type":"session","version":3,"id":"session-one","timestamp":"2026-09-30T00:00:00.000Z","cwd":"/redacted"}
 {"type":"custom_message","id":"custom-1","parentId":null,"timestamp":"2026-09-30T00:00:01.000Z","customType":"fm-main-mirror","content":"captain request"}
 {"type":"message","id":"message-1","parentId":"custom-1","timestamp":"2026-09-30T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"bounded reasoning"},{"type":"toolCall","name":"bash","arguments":{"command":"true"}}]}}
 JSONL
+{
+  printf '{"type":"message","timestamp":1,"content":"old"}\n'
+  printf '{"type":"message","timestamp":2,"content":"'
+  head -c 2000000 /dev/zero | tr '\0' x
+  printf '"}\n'
+  printf '{"type":"message","timestamp":3,"content":"newest"}\n'
+} > "$SUPERVISOR_DIR/wide-tail.jsonl"
 ln -s "$TMP_ROOT/outside.jsonl" "$SUPERVISOR_DIR/escaped.jsonl"
 printf '{"secret":true}\n' > "$TMP_ROOT/outside.jsonl"
 cat > "$REPORT_DIR/report.md" <<'MARKDOWN'
@@ -261,13 +273,13 @@ jq -e '.reports | all(.id != "escaped" and .id != "linked-task")' "$TMP_ROOT/ses
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks.json"
 # Keep a lifecycle-only task visible while the viewer reads lifecycle records without spawning one state reader per data directory.
 jq -e '
-  (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report"))
-    and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null))
-    and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief"))
+  (.tasks | any(.id == "task-one" and .category == "processing" and .status == "Processing" and .hasDocument == true and .documentType == "report" and .documentTypes == ["report","brief"]))
+    and (.tasks | any(.id == "completed-task" and .category == "completed" and .status == "Completed" and .hasDocument == false and .documentType == null and .documentTypes == []))
+    and (.tasks | any(.id == "held-task" and .category == "held" and (.wait | contains("upstream-task")) and .hasDocument == true and .documentType == "brief" and .documentTypes == ["brief"]))
     and (.tasks | any(.id == "archived-task" and .category == "history" and .status == "Archived"))
     and (.tasks | any(.id == "cancelled-task" and .category == "history" and .status == "Cancelled"))
     and (.tasks | any(.id == "invalid-lifecycle-task" and .category == "held" and .status == "Needs reconciliation"))
-    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","hasDocument","id","kind","project","status","title","wait","warning"]))
+    and (.tasks | all((keys | sort) == ["category","documentModifiedAt","documentType","documentTypes","hasDocument","id","kind","project","status","title","wait","warning"]))
 ' "$TMP_ROOT/tasks.json" >/dev/null || fail "task overview did not preserve authoritative processing, completed, held, archived, and document states"
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/tasks" > "$TMP_ROOT/tasks-cached.json"
@@ -299,6 +311,10 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/report?id=_task-two" > "$T
 jq -e '.source == "report" and .id == "_task-two" and (.content | contains("Prefixed task report"))' "$TMP_ROOT/prefixed-report.json" >/dev/null || fail "canonical report for a valid prefixed task id was not read intact"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one" > "$TMP_ROOT/task-report-document.json"
 jq -e '.source == "report" and (.content | contains("Visible report body.")) and (.content | contains("Superseded task brief") | not)' "$TMP_ROOT/task-report-document.json" >/dev/null || fail "task document did not prefer the canonical report"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one&type=brief" > "$TMP_ROOT/task-explicit-brief-document.json"
+jq -e '.source == "brief" and (.content | contains("Superseded task brief")) and (.content | contains("Visible report body.") | not)' "$TMP_ROOT/task-explicit-brief-document.json" >/dev/null || fail "explicit task brief selection did not read the allowlisted brief"
+status=$(curl -sS -o "$TMP_ROOT/task-document-invalid-type.json" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=task-one&type=secret")
+[ "$status" = 404 ] || fail "non-allowlisted task document type returned HTTP $status"
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/task-document?id=held-task" > "$TMP_ROOT/task-brief-document.json"
 jq -e '.source == "brief" and .id == "held-task" and (.content | contains("Visible brief body."))' "$TMP_ROOT/task-brief-document.json" >/dev/null || fail "task document did not fall back to the canonical brief"
 printf '\nChanged report body.\n' >> "$REPORT_DIR/report.md"
@@ -317,6 +333,17 @@ jq -e '.events | any(.value.message.role == "toolResult")' "$TMP_ROOT/short-page
 jq -e '.events | any(.value.type == "future_event")' "$TMP_ROOT/short-page.json" >/dev/null || fail "unknown event type was not preserved"
 jq -e '.events | any(.error == "malformed_json")' "$TMP_ROOT/short-page.json" >/dev/null || fail "malformed line was not surfaced"
 jq -e '.partialBytes > 0 and .eof == false' "$TMP_ROOT/short-page.json" >/dev/null || fail "partial final line was presented as complete"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$DENSE_SHORT_ID&cursor=tail" > "$TMP_ROOT/dense-tail.json"
+jq -e '(.events | length) == 200 and .eof == true and .events[0].value.message.content[0].text == "dense-event-2" and .events[-1].value.message.content[0].text == "dense-event-201"' "$TMP_ROOT/dense-tail.json" >/dev/null \
+  || fail "dense tail did not return the actual newest records"
+printf '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"dense-partial' >> "$DENSE_SHORT_DIR/journal.jsonl"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$DENSE_SHORT_ID&cursor=tail" > "$TMP_ROOT/dense-partial-tail.json"
+jq -e '(.events | length) == 200 and .eof == false and .partialBytes > 0 and .events[0].value.message.content[0].text == "dense-event-2" and .events[-1].value.message.content[0].text == "dense-event-201"' "$TMP_ROOT/dense-partial-tail.json" >/dev/null \
+  || fail "dense tail charged an incomplete line against the newest record quota"
+head -c 600000 /dev/zero | tr '\0' x >> "$DENSE_SHORT_DIR/journal.jsonl"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=short&id=$DENSE_SHORT_ID&cursor=tail" > "$TMP_ROOT/dense-large-partial-tail.json"
+jq -e '(.events | length) == 200 and .eof == false and .partialBytes > 600000 and .events[0].value.message.content[0].text == "dense-event-2" and .events[-1].value.message.content[0].text == "dense-event-201"' "$TMP_ROOT/dense-large-partial-tail.json" >/dev/null \
+  || fail "large incomplete append displaced the actual newest complete records"
 cursor=$(jq -r '.nextCursor' "$TMP_ROOT/short-page.json")
 identity=$(jq -r '.identity' "$TMP_ROOT/short-page.json")
 
@@ -326,6 +353,9 @@ jq -e '(.events | length) == 1 and .events[0].value.message.content[0].text == "
 
 curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=long.jsonl&cursor=0" > "$TMP_ROOT/long.json"
 jq -e '(.events | length) == 1 and .events[0].bytes > 1000000 and .events[0].value.message.role == "user"' "$TMP_ROOT/long.json" >/dev/null || fail "long valid line was clipped or omitted"
+curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=wide-tail.jsonl&cursor=tail" > "$TMP_ROOT/wide-tail.json"
+jq -e '(.events | length) == 2 and .eof == true and .events[0].value.timestamp == 2 and (.events[0].value.content | length) == 2000000 and .events[1].value.timestamp == 3 and .events[1].value.content == "newest"' "$TMP_ROOT/wide-tail.json" >/dev/null \
+  || fail "wide tail-crossing record prevented the actual newest record from loading"
 
 supervisor_identity=$(curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/api/events?source=supervisor&id=session-one.jsonl&cursor=0" | jq -r '.identity')
 mv "$SUPERVISOR_DIR/session-one.jsonl" "$SUPERVISOR_DIR/session-one.old"

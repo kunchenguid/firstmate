@@ -79,7 +79,7 @@ pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45re
 .task-dashboard-heading, .task-detail-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
 .task-dashboard h2, .task-detail h2 { margin: 0; color: #f2f7fd; }
 .task-dashboard-heading > label { color: #a9bdd3; font-size: 0.85rem; }
-.task-counts { display: grid; grid-template-columns: repeat(4, minmax(8rem, 1fr)); gap: 0.75rem; }
+.task-counts { display: grid; grid-template-columns: repeat(3, minmax(8rem, 1fr)); gap: 0.75rem; }
 .task-count { padding: 0.9rem 1rem; border: 1px solid #2b4665; border-radius: 0.65rem; background: rgba(12, 25, 43, 0.9); }
 .task-count strong { display: block; margin-top: 0.2rem; font-size: 1.55rem; }
 .task-groups { display: grid; grid-template-columns: repeat(2, minmax(16rem, 1fr)); gap: 1rem; }
@@ -99,6 +99,8 @@ pre { max-height: 30rem; overflow: auto; padding: 0.75rem; border-radius: 0.45re
 .task-detail { padding: 1.2rem 1.4rem; border: 1px solid #345577; border-radius: 0.7rem; background: rgba(12, 25, 43, 0.94); }
 .task-wait { padding: 0.55rem 0.7rem; border-radius: 0.45rem; background: #2b2514; color: #f4d88a; }
 .task-document { margin-top: 1.2rem; padding-top: 1rem; border-top: 1px solid #304965; }
+.task-document-tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.task-document-tabs button[aria-selected="true"] { border-color: #72a7ff; color: #dceaff; }
 
 @media (max-width: 850px) {
   header, .toolbar { align-items: stretch; flex-direction: column; }
