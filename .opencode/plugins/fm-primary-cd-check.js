@@ -1,10 +1,7 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
-
-// The OpenCode shell tool is `bash` on the v1 hook API and `shell` on the v2
-// hook API; the same command-guard owner handles both.
-const SHELL_TOOL_NAMES = new Set(["bash", "shell"]);
+import { SHELL_TOOL_NAMES, installV2ToolHook } from "./lib/fm-opencode-v2-adapter.js";
 
 // PreToolUse seatbelt for OpenCode: block a stray persistent top-level `cd` in
 // the primary firstmate checkout before the agent's bash tool relocates the
@@ -67,15 +64,12 @@ export const FmPrimaryCdCheck = async ({ directory, worktree }) => {
   };
 };
 
-// OpenCode v2 default export: the loader requires `{ id, setup(ctx) }` and the
-// v2 `ctx.tool.hook("execute.before", event)` event carrying `event.tool` and
-// `event.input`, so it is adapted onto the shared v1 hook object above.
+// OpenCode v2 default export: the loader requires `{ id, setup(ctx) }`, and
+// `installV2ToolHook` adapts v2 onto the shared v1 hook object above.
 export default {
   id: "fm-primary-cd-check",
   async setup(ctx) {
     const hooks = await FmPrimaryCdCheck({ directory: ctx.location?.directory });
-    await ctx.tool.hook("execute.before", (event) =>
-      hooks["tool.execute.before"]({ tool: event?.tool }, { args: event?.input ?? {} }),
-    );
+    await installV2ToolHook(ctx, hooks);
   },
 };

@@ -28,3 +28,16 @@ export function v1Event(event) {
   if (V2_TURN_END.includes(event.type)) return { type: "session.idle", properties };
   return { type: event.type, properties };
 }
+
+// The OpenCode shell tool is `bash` on the v1 hook API and `shell` on the v2
+// hook API; the same command-guard owner handles both.
+export const SHELL_TOOL_NAMES = new Set(["bash", "shell"]);
+
+// v2 installs a tool hook through `ctx.tool.hook("execute.before", event)`,
+// where the event carries `event.tool` and `event.input`; adapt it onto the
+// v1 `tool.execute.before(input, output)` hook.
+export function installV2ToolHook(ctx, hooks) {
+  return ctx.tool.hook("execute.before", (event) =>
+    hooks["tool.execute.before"]({ tool: event?.tool }, { args: event?.input ?? {} }),
+  );
+}
