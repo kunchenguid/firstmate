@@ -154,7 +154,7 @@ test_secondmate_second_reraise_escalates_to_parent_once() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   rm -f "$fakebin/mv"
-  grep -F 'open-decision fold incomplete' "$state/.watch-triage.log" >/dev/null \
+  grep -F 'decision-age: keeping .decision-age-' "$state/.watch-triage.log" >/dev/null \
     || fail "the cursor persistence failure did not reach the decision-age tick: $(cat "$out")"
   ! grep -F 'resolved [key=decision-unanswered-' "$channel" >/dev/null \
     || fail "an incomplete fold closed the parent escalation of a still-open decision"
@@ -165,8 +165,16 @@ test_secondmate_second_reraise_escalates_to_parent_once() {
   [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a later re-raise duplicated the parent escalation"
   ack_wake "$state" || fail "third re-raise could not be acknowledged"
 
+  # An unrelated task whose open-decision cursor cannot be persisted must not
+  # hold the answered child's parent escalation open.
+  # shellcheck disable=SC2016 # The fake mv expands its own arguments.
+  printf '#!/usr/bin/env bash\ncase "${*: -1}" in */.other.open-decisions-cursor) exit 1 ;; esac\nexec %s "$@"\n' "$real_mv" > "$fakebin/mv"
+  chmod +x "$fakebin/mv"
+  printf 'kind=ship\n' > "$state/other.meta"
+  printf 'needs-decision [key=fresh] [at=%s]: not yet aged\n' "$(( $(date +%s) + 3600 ))" > "$state/other.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/other.status"
   printf 'resolved [key=dlp-clean] [at=%s]: yes, clean it\n' "$(date +%s)" >> "$state/docs.status"
-  prime_status_seen "$state" "$state/docs.status"
+  PATH="$fakebin:$PATH" prime_status_seen "$state" "$state/docs.status"
   sleep 8
   watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
   sleep 3
@@ -176,13 +184,14 @@ test_secondmate_second_reraise_escalates_to_parent_once() {
   [ "$(grep -c 'decision unanswered' "$channel")" = 1 ] || fail "a resolved decision escalated again"
   ! ls "$state"/.decision-age-* >/dev/null 2>&1 || fail "the resolved decision kept its age marker"
   [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
-    || fail "the parent escalation was not closed exactly once: $(cat "$channel")"
+    || fail "the parent escalation was not closed exactly once beside an unrelated failing fold: $(cat "$channel")"
   [ -z "$(bash -c '. "$1" && status_open_decisions "$2" secondmate' _ "$ROOT/bin/fm-classify-lib.sh" "$channel")" ] \
     || fail "the parent still holds an open decision after the child's was answered: $(cat "$channel")"
   watch_bg "$state" "$fakebin" "$out" "$mate"; pid=$!
   sleep 3
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  rm -f "$fakebin/mv"
   [ "$(grep -c '^resolved \[key=decision-unanswered-' "$channel")" = 1 ] \
     || fail "the parent escalation closure was duplicated"
   pass "the second unanswered re-raise escalates to the parent once and resolution closes it there once"

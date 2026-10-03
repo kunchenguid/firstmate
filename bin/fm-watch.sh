@@ -1067,15 +1067,35 @@ EOF
 # twice. In a secondmate home the second re-raise of one opener also goes to
 # the parent channel once: its age is the due time, so a retry after a lost
 # marker write repeats the same line and the channel's append-once drops it.
-# Markers for keys no longer open on a live task are removed every tick, after
-# the parent escalation they carried, if any, is closed with a matching
-# resolution; a failure on one key is logged and skipped so supervision keeps
-# running. A tick in which any status log failed to fold has no evidence that
-# a missing key was answered, so it removes no marker and closes nothing.
+# A marker whose key is missing from the incremental open set is confirmed
+# against that task's whole status log before it is treated as answered: a
+# task whose incremental fold failed, or whose log cannot be read safely, keeps
+# its marker and parent escalation, while every other task's answered keys
+# close normally. Closing removes the marker after the parent escalation it
+# carried, if any, gets a matching resolution; a failure on one key is logged
+# and skipped so supervision keeps running.
+decision_age_marker_open() { # <marker>
+  local marker=$1 task key status current_key current_verb
+  [ ! -L "$marker" ] || return 1
+  read -r _ _ _ _ task key < "$marker" 2>/dev/null || return 1
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -n "$key" ] || return 1
+  [ -f "$STATE/$task.meta" ] && [ ! -L "$STATE/$task.meta" ] || return 1
+  status="$STATE/$task.status"
+  [ -e "$status" ] || [ -L "$status" ] || return 1
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 0
+  while IFS=$'\t' read -r current_key current_verb _; do
+    [ "$current_key" = "$key" ] && [ "$current_verb" = needs-decision ] && return 0
+  done <<EOF
+$(status_open_decisions "$status")
+EOF
+  return 1
+}
+
 decision_age_close_escalation() { # <marker>
   local marker=$1 identity count rc=0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
-  read -r identity _ _ count < "$marker" 2>/dev/null || return 0
+  read -r identity _ _ count _ < "$marker" 2>/dev/null || return 0
   case "$count" in ''|*[!0-9]*) return 0 ;; esac
   [ "$count" -ge 2 ] || return 0
   fm_parent_channel_report "$FM_HOME" "$STATE" \
@@ -1088,20 +1108,11 @@ decision_age_close_escalation() { # <marker>
 decision_age_tick() {
   local now threshold cap open task key verb note origin epoch position age meta generation identity marker queue_key
   local recorded next interval next_interval count queued tmp current current_key current_verb still_open
-  local live=' ' f rc complete=1
+  local live=' ' f rc
   now=$(date +%s)
   threshold=$(fm_decision_age_threshold)
   cap=$((threshold * 4))
-  rc=0
-  open=$(scan_open_decisions_incremental "$STATE" --strict) || rc=$?
-  case "$rc" in
-    0) ;;
-    3)
-      complete=0
-      triage_log "decision-age: open-decision fold incomplete; keeping markers and parent escalations this tick"
-      ;;
-    *) return 1 ;;
-  esac
+  open=$(scan_open_decisions_incremental "$STATE") || return 1
   while IFS=$'\t' read -r task key verb note; do
     [ "$verb" = needs-decision ] || continue
     case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
@@ -1110,12 +1121,15 @@ decision_age_tick() {
   done <<EOF
 $open
 EOF
-  if [ "$complete" -eq 1 ]; then
-    for f in "$STATE"/.decision-age-*; do
-      [ -e "$f" ] || [ -L "$f" ] || continue
-      case "$live" in *" ${f##*/} "*) ;; *) decision_age_close_escalation "$f" && rm -f "$f" ;; esac
-    done
-  fi
+  for f in "$STATE"/.decision-age-*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    case "$live" in *" ${f##*/} "*) continue ;; esac
+    if decision_age_marker_open "$f"; then
+      triage_log "decision-age: keeping ${f##*/}: its key is still open or its status log could not be folded"
+    else
+      decision_age_close_escalation "$f" && rm -f "$f"
+    fi
+  done
   while IFS=$'\t' read -r task key verb note; do
     marker="$STATE/.decision-age-$(printf '%s' "$task|$key" | hash_pane)"
     case "$live" in *" ${marker##*/} "*) ;; *) continue ;; esac
@@ -1141,7 +1155,7 @@ EOF
     interval=$((threshold * 2))
     count=0
     if [ "${recorded%% *}" = "$identity" ]; then
-      read -r _ next interval count <<EOF
+      read -r _ next interval count _ <<EOF
 $recorded
 EOF
       case "$next:$interval:$count" in *[!0-9:]*|:*|*::*|*:) next=0; interval=$((threshold * 2)); count=0 ;; esac
@@ -1183,7 +1197,7 @@ EOF
     [ "$next_interval" -le "$cap" ] || next_interval=$cap
     tmp=
     if ! tmp=$(mktemp "$STATE/.decision-age.XXXXXX") \
-      || ! printf '%s %s %s %s\n' "$identity" "$((now + interval))" "$next_interval" "$count" > "$tmp" \
+      || ! printf '%s %s %s %s %s %s\n' "$identity" "$((now + interval))" "$next_interval" "$count" "$task" "$key" > "$tmp" \
       || ! mv -f "$tmp" "$marker"; then
       [ -z "$tmp" ] || rm -f "$tmp"
       triage_log "decision-age: could not record the re-raise marker for $task $key"
