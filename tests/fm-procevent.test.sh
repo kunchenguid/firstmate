@@ -3306,6 +3306,144 @@ assert_not_contains "$out" $'\nprompt:\n' \
   "a choice row gained a freeform comment field"
 pass "read does not present choice context as a comment"
 
+# A choice the captain annotated carries a typed note, both inline after the
+# label and in the Context data note field. The note is the captain's words
+# and must be presented, even when it quotes the words `Context data: {`; the
+# Context data itself still must not be.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[5]{uid,prompt,selector,tag,text}:
+  "5","Q1 hosting: Option A - note: sample note, with a comma?\n second line.\n\nContext data:\n{\n  \"question\": \"Q1-hosting\",\n  \"answer\": \"Option A\",\n  \"note\": \"sample note, with a comma?\\n second line.\"\n}","section#decisions > form:nth-of-type(1)",choice,"Q1 hosting: Option A"
+  "7","Q3 language: Spanish - note: ¿Por qué? Está bien.\n\nContext data:\n{\n  \"question\": \"Q3-language\",\n  \"answer\": \"Spanish\",\n  \"note\": \"¿Por qué? Está bien.\"\n}","section#decisions > form:nth-of-type(3)",choice,"Q3 language: Spanish"
+  "8","Q4 rollout: Later - note: first → then\n\nContext data:\n{\n  \"question\": \"Q4-rollout\",\n  \"answer\": \"Later\",\n  \"note\": \"first → then\"\n}","section#decisions > form:nth-of-type(4)",choice,"Q4 rollout: Later"
+  "6","Q2 zones: Option B\n\nContext data:\n{\n  \"question\": \"Q2-zones\",\n  \"answer\": \"Option B\",\n  \"note\": \"\"\n}","section#decisions > form:nth-of-type(2)",choice,"Q2 zones: Option B"
+  "9","Q5 login: Cognito - note: Keep it. Context data: {\"note\": \"x\"} was my own wording.\n\nContext data:\n{\n  \"question\": \"Q5-login\",\n  \"answer\": \"Cognito\",\n  \"note\": \"Keep it. Context data: {\\\"note\\\": \\\"x\\\"} was my own wording.\"\n}","section#decisions > form:nth-of-type(5)",choice,"Q5 login: Cognito"
+EOF
+out=$(read_out 2>&1) || fail "read failed on a tabular capture of annotated choices"
+assert_contains "$out" "presented_items: 5" "an annotated choice row was not presented"
+assert_contains "$out" $'| Q1 hosting: Option A\nnote:\n| sample note, with a comma?\n|  second line.\nANNOTATION 2 of 5' \
+  "a choice's typed note was dropped"
+assert_contains "$out" $'| Q3 language: Spanish\nnote:\n| ¿Por qué? Está bien.\nANNOTATION 3 of 5' \
+  "a choice's accented typed note was not kept as UTF-8"
+assert_contains "$out" $'| Q4 rollout: Later\nnote:\n| first → then\nANNOTATION 4 of 5' \
+  "a choice's typed note beyond Latin-1 was not kept as UTF-8"
+assert_not_contains "$out" "Wide character" "a choice's typed note was printed as wide characters"
+assert_contains "$out" $'| Q2 zones: Option B\nANNOTATION 5 of 5' \
+  "a choice with an empty note invented a note field"
+assert_contains "$out" $'| Q5 login: Cognito\nnote:\n| Keep it. Context data: {"note": "x"} was my own wording.\nEND ANNOTATIONS' \
+  "a choice's typed note quoting Context data was dropped"
+assert_not_contains "$out" $'\n| Context data:' "a choice note surfaced the machine-generated context"
+assert_not_contains "$out" $'\nprompt:\n' "a choice note was presented as a freeform comment"
+pass "read presents a choice's typed note"
+
+# A board-generated choice prompt whose Context data has no note is not a
+# captain note, even when its prose differs from the element text.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]{uid,prompt,selector,tag,text}:
+  "9","Dispatch order - start this queued work now: task-a, task-b\n\nContext data:\n{\n  \"question\": \"dispatch.charted\",\n  \"answer\": \"task-a,task-b\"\n}","div#dispatch-bar",choice,"Dispatch: task-a, task-b"
+  "10","Captain's Call answer - Pick host: opt-a - go\n\nContext data:\n{\n  \"question\": \"pick-host\",\n  \"answer\": \"opt-a\"\n}","section#call > form",choice,"Pick host: opt-a"
+EOF
+out=$(read_out) || fail "read failed on choices whose Context data has no note"
+assert_contains "$out" "presented_items: 2" "a choice without a note was not presented"
+assert_contains "$out" $'| Dispatch: task-a, task-b\nANNOTATION 2 of 2' \
+  "a board-generated dispatch prompt was presented as a typed note"
+assert_contains "$out" $'| Pick host: opt-a\nEND ANNOTATIONS' \
+  "a legacy choice prompt was presented as a typed note"
+assert_not_contains "$out" $'\nnote:\n' "a choice without a Context note invented a note field"
+pass "read presents no note for a choice whose Context data has none"
+
+# Lavish can also frame queued items as an expanded list of objects rather
+# than tabular rows; an element annotation may nest a `target` object.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[3]:
+  - uid: "3"
+    prompt: Why is this split in two?
+    selector: div#split > div
+    tag: div
+    text: "Split card: two parts, one each"
+  - uid: "4"
+    prompt: "Is one enough? Yes: \"maybe\"."
+    selector: "tr#row-one > td:nth-of-type(1)"
+    tag: td
+    text: One of them
+    target:
+      type: table-cell
+      selector: "tr#row-one > td:nth-of-type(1)"
+      rowLabel: One of them
+      columnLabel: Saving
+      text: Nested target text
+  - uid: "18"
+    prompt: "Q3 timing: Later - note: explain this first.\n\nContext data:\n{\n  \"question\": \"Q3-timing\",\n  \"answer\": \"Later\",\n  \"note\": \"explain this first.\"\n}"
+    selector: "section#decisions > form:nth-of-type(3)"
+    tag: choice
+    text: "Q3 timing: Later"
+next_step: "Apply the requested changes."
+EOF
+out=$(read_out) || fail "read failed on an expanded-list capture"
+assert_contains "$out" "declared_items: 3" "an expanded-list capture lost its declared count"
+assert_contains "$out" "presented_items: 3" "expanded-list items were not presented"
+assert_contains "$out" "complete: yes" "a complete expanded-list capture was not marked complete"
+assert_contains "$out" "annotation_count: 3" "expanded-list annotations were not counted"
+assert_contains "$out" $'element_uid: 3\nelement_selector: div#split > div\ntag: div\ntext:\n| Split card: two parts, one each\nprompt:\n| Why is this split in two?' \
+  "an expanded-list annotation lost a field"
+assert_contains "$out" $'element_selector: tr#row-one > td:nth-of-type(1)\ntag: td\ntext:\n| One of them\nprompt:\n| Is one enough? Yes: "maybe".' \
+  "an expanded-list annotation with a nested target lost a field"
+assert_not_contains "$out" "Nested target text" "a nested target field replaced the item's own field"
+assert_contains "$out" $'| Q3 timing: Later\nnote:\n| explain this first.' \
+  "an expanded-list choice lost its typed note"
+assert_not_contains "$out" "Apply the requested changes" "a top-level field was read as an item"
+pass "read presents every item of an expanded-list capture"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: "3"
+    prompt: Only one arrived
+    selector: div#a
+    tag: div
+    text: Element A
+EOF
+out=$(read_out) || fail "read failed on a short expanded-list capture"
+assert_contains "$out" "declared_items: 2" "a short expanded-list capture lost its declared count"
+assert_contains "$out" "presented_items: 1" "a short expanded-list capture miscounted its items"
+assert_contains "$out" "malformed_items: 0" "a short expanded-list capture counted a missing item as malformed"
+assert_contains "$out" "complete: no" "a short expanded-list capture was certified as complete"
+pass "read never certifies a short expanded-list capture as complete"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  - uid: "3"
+    prompt: ""
+    selector: div#a
+    tag: div
+    text: Element A
+  - uid: "4"
+    prompt: Cut off before its text
+    selector: div#b
+    tag: div
+EOF
+out=$(read_out) || fail "read failed on an expanded-list capture with a truncated item"
+assert_contains "$out" "declared_items: 2" "a truncated expanded-list capture lost its declared count"
+assert_contains "$out" "presented_items: 1" "an expanded-list item missing its text was presented"
+assert_contains "$out" "malformed_items: 1" "an expanded-list item missing its text was not malformed"
+assert_contains "$out" "complete: no" "an expanded-list item missing its text was certified as complete"
+assert_contains "$out" $'element_uid: 3\nelement_selector: div#a\ntag: div\ntext:\n| Element A\nEND ANNOTATIONS' \
+  "an explicitly empty expanded-list field was treated as missing"
+pass "read never certifies an expanded-list item missing a declared field"
+
 cat > "$READ" <<'EOF'
 session:
   file: /review.html
@@ -4895,7 +5033,7 @@ done
 [ ! -e "$drain_claim" ] || fail "the first generation of the draining fixture never exited"
 # Stand the first generation's claim back up on a live process so the re-arm
 # meets it still held, then release it partway through the confirm window.
-setsid sleep 60 &
+perl -MPOSIX=setsid -e 'setsid() >= 0 or exit 1; exec @ARGV' sleep 60 &
 drain_holder=$!
 # Read the identity only once the holder has exec'd sleep: mid-exec its cmdline
 # can read empty, and a pre-exec identity would never match the live holder.

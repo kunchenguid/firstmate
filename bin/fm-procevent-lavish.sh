@@ -24,11 +24,15 @@
 #            annotations; it is labeled SESSION-ENDING MESSAGE only when the
 #            session ended. Declared and presented item counts,
 #            plus a completeness verdict, follow before all annotations so a
-#            partial read is obvious. Each annotation retains its element uid,
-#            selector, tag, and text. A non-choice freeform comment (`prompt`)
-#            is printed as its own field even when a selector is also present
-#            and even when that comment matches the element text, so typed
-#            words are never dropped. Choice Context data is not a comment.
+#            partial read is obvious. Items are read from either published
+#            framing: the tabular `prompts[N]{fields}:` rows or the expanded
+#            `prompts[N]:` list of `- key: value` objects. Each annotation
+#            retains its element uid, selector, tag, and text. A non-choice
+#            freeform comment (`prompt`) is printed as its own field even when
+#            a selector is also present and even when that comment matches the
+#            element text, so typed words are never dropped. Choice Context
+#            data is not a comment, but its `note` field, the captain's typed
+#            note, is printed as its own `note` field.
 #            Captain-supplied body lines are visibly prefixed so they cannot
 #            forge structural labels. Empty message and annotation sections
 #            are reported explicitly.
@@ -711,26 +715,75 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
+  perl -MJSON::PP -e '
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
+    my (@fields, $want, $shape, @rows, @items);
     while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
+      if (!defined $shape) {
+        if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
+          ($shape, $want, @fields) = ("table", $1, split /,/, $2);
+        } elsif ($line =~ /^(?:prompts|feedback)\[(\d+)\]:\s*$/) {
+          # A list header declares no fields; its items carry the ones the
+          # tabular header declares, so an item missing any is malformed.
+          ($shape, $want, @fields) = ("list", $1, qw(uid prompt selector tag text));
+        }
         next;
       }
       last unless $line =~ /^\s/;
-      last if defined($want) && @rows >= $want;
       chomp $line;
-      push @rows, $line;
+      if ($shape eq "table") {
+        last if @rows >= $want;
+        push @rows, $line;
+        next;
+      }
+      # Expanded list form: each item opens with `- `, and its own fields sit
+      # at the indentation just past that marker. Deeper lines belong to a
+      # nested object such as `target:` and are not item fields.
+      if ($line =~ /^(\s*)- (.*)$/) {
+        push @items, { indent => length($1) + 2, lines => [$2] };
+      } elsif (@items) {
+        push @{ $items[-1]{lines} }, $line;
+      }
     }
     close $fh;
     $want = 0 unless defined $want;
+    sub unescape {
+      my ($v) = @_;
+      $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+      return $v;
+    }
     my @parsed;
     my $malformed = 0;
+    for my $item (@items) {
+      my ($first, @rest) = @{ $item->{lines} };
+      my %f;
+      my $ok = 1;
+      for my $entry ([$first, 1], map { [$_, 0] } @rest) {
+        my ($l, $lead) = @$entry;
+        unless ($lead) {
+          next unless $l =~ s/^ {$item->{indent}}(?=\S)//;
+        }
+        if ($l =~ /^([A-Za-z_][A-Za-z0-9_]*):(?: (.*))?$/) {
+          my ($k, $v) = ($1, defined $2 ? $2 : "");
+          next unless length $v;
+          if ($v =~ /^"((?:[^"\\]|\\.)*)"$/) {
+            $v = unescape($1);
+          } elsif ($v =~ /^"/) {
+            $ok = 0;
+          }
+          $f{$k} = $v;
+        } else {
+          $ok = 0;
+        }
+      }
+      if (!$ok || grep { !exists $f{$_} } @fields) {
+        $malformed++;
+        next;
+      }
+      push @parsed, \%f;
+    }
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;
@@ -756,7 +809,7 @@ cmd_read() {
         $malformed++;
         next;
       }
-      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+      $_ = unescape($_) for @vals;
       my %f;
       $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
       push @parsed, \%f;
@@ -782,6 +835,22 @@ cmd_read() {
       pop @lines if @lines && $lines[-1] eq "";
       return if !@lines || (@lines == 1 && $lines[0] eq "");
       print "| $_\n" for @lines;
+    }
+    # A choice prompt ends in Context data; the typed note of the captain is
+    # only its `note` field. The prose before it is board-generated, never a note.
+    # The prose may echo a note that itself says `Context data: {`, so the block
+    # is the first occurrence whose remainder decodes as an object.
+    sub choice_note {
+      my ($prompt) = @_;
+      while ($prompt =~ /Context data:\s*(?=(\{.*\})\s*\z)/gs) {
+        my $data = eval { JSON::PP::decode_json($1) };
+        next unless ref($data) eq "HASH";
+        return "" unless defined $data->{note} && !ref $data->{note};
+        my $note = $data->{note};
+        utf8::encode($note);
+        return $note;
+      }
+      return "";
     }
     if (@messages) {
       my $message_label = $session_ended =~ /^(?:true|True|TRUE)$/
@@ -828,6 +897,12 @@ cmd_read() {
         if ($tag ne "choice" && length $comment) {
           print "prompt:\n";
           emit_body($comment);
+        } elsif ($tag eq "choice") {
+          my $note = choice_note($comment);
+          if (length $note) {
+            print "note:\n";
+            emit_body($note);
+          }
         }
       }
       print "END ANNOTATIONS\n";
