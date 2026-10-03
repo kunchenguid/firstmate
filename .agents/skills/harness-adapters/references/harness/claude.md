@@ -6,7 +6,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 
 | Fact | Value |
 |---|---|
-| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
+| Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; a manual interrupt emits no closing hook or cancellation acknowledgement, so Firstmate-controlled Claude interrupt paths use the guarded `idle`/`fm-interrupt` correction owned by `fm_busy_record_manual_interrupt` in `bin/fm-busy-lib.sh`, while [`docs/agent-control.md`](../../../../../docs/agent-control.md) owns the control-plane contract. |
 | Exit | `/exit`. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
