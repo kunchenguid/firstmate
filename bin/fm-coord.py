@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 import uuid
 from datetime import datetime, timezone
 
@@ -20,6 +20,7 @@ MUTATIONS = {"enroll", "session", "area-set", "migration-seed", "submit", "claim
 PATH_KINDS = {"file", "directory", "dependency-manifest", "generated-output"}
 NAMED_KINDS = {"issue", "schema-object", "migration-sequence", "integration"}
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+PR_URL = re.compile(r"https://github\.com/([^/]+/[^/]+)/pull/([1-9][0-9]*)\Z")
 
 
 class Refusal(Exception):
@@ -63,10 +64,9 @@ def path(value):
 
 
 def pr_url(value, repo):
-    token(value, "pr_url")
-    parsed = urlsplit(value)
-    require(parsed.scheme == "https" and parsed.hostname and parsed.path and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and " " not in value, "pr_url must be a canonical full HTTPS URL")
-    require(parsed.path.split("/")[1:3] == repo.split("/"), "pr_url must belong to the intent repository")
+    match = PR_URL.fullmatch(token(value, "pr_url"))
+    require(match is not None, "pr_url must be https://github.com/<owner>/<repo>/pull/<number>")
+    require(match.group(1) == repo, "pr_url must belong to the intent repository")
     return value
 
 
@@ -238,19 +238,20 @@ def terminal_outcome(db, item, request_id, outcome, p):
     require(prior is None, "merge attempt already has a terminal outcome")
     observed_base = oid(p.get("observed_base_oid"), "observed_base_oid")
     merge_oid = None
+    forge = p.get("_forge_outcome")
+    if forge is not None:
+        require(forge == outcome and p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
     if outcome == "merged":
-        require(p.get("_forge_landing") is True and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
-        require(p.get("pr_url") == db.execute("SELECT pr_url FROM intents WHERE intent_id=?", (item["intent_id"],)).fetchone()[0] and p.get("base") == item["base_ref"], "forge observation is for a different PR or base")
+        require(forge == "merged" and p.get("merged_head_oid") == item["head_oid"], "live forge read must prove the exact head landed")
         merge_oid = oid(p.get("merge_oid"), "merge_oid")
         require(observed_base != item["base_oid"], "merged base must advance")
+    elif forge == "refused":
+        require(p.get("_unlanded_head_oid") == item["head_oid"], "live forge read must prove the attempted head is not on base")
     else:
         require(p.get("wrapper_refused") is True and p.get("pr_merged") is False, "refusal needs a definitive wrapper and forge result")
     db.execute("INSERT INTO merge_outcomes(attempt_event_id,intent_id,outcome,merge_oid,observed_base_oid,recorded_at) VALUES(?,?,?,?,?,?)", (attempt, item["intent_id"], outcome, merge_oid, observed_base, stamp()))
     db.execute("DELETE FROM integration_slots WHERE repo=? AND base_ref=? AND intent_id=?", (item["repo"], item["base_ref"], item["intent_id"]))
     db.execute("UPDATE queue_items SET state=?,updated_at=? WHERE intent_id=?", (outcome, stamp(), item["intent_id"]))
-    if outcome == "merged":
-        for other in db.execute("SELECT * FROM queue_items WHERE repo=? AND base_ref=? AND intent_id<>? AND state='ready'", (item["repo"], item["base_ref"], item["intent_id"])).fetchall():
-            invalidate(db, other, request_id, "base advanced after predecessor merge")
     event_id = emit(db, "merge-" + outcome, request_id, {"intent_id": item["intent_id"], "attempt_event_id": attempt, "merge_oid": merge_oid, "observed_base_oid": observed_base})
     return {"ok": True, "state": outcome, "attempt_event_id": attempt, "event_id": event_id}
 
@@ -282,6 +283,7 @@ def queue_operation(db, op, p):
         intent_id = token(p.get("intent_id"), "intent_id")
         intent = db.execute("SELECT * FROM intents WHERE intent_id=?", (intent_id,)).fetchone()
         require(intent is not None and intent["state"] == "claimed" and intent["pr_url"], "intent needs a live claim and attached PR")
+        pr_url(intent["pr_url"], intent["repo"])
         participant(db, p, intent["repo"])
         require(intent["home_id"] == p["home_id"] and intent["generation"] == p["generation"], "intent holder or generation mismatch")
         active_claim(db, p, intent)
@@ -389,17 +391,16 @@ def queue_operation(db, op, p):
         require(p.get("outcome") == "refused", "merged outcome requires live queue-reconcile")
         return terminal_outcome(db, item, request_id, p["outcome"], p)
     if op == "queue-reconcile":
-        require(item["state"] == "outcome-unknown" and p.get("outcome") == "merged", "unknown outcome requires proven landing")
-        return terminal_outcome(db, item, request_id, "merged", p)
+        require(item["state"] == "outcome-unknown", "slot outcome is not unknown")
+        return terminal_outcome(db, item, request_id, p["_forge_outcome"], p)
     raise Refusal("unknown queue operation")
 
 
 def forge_landing(p):
     """Read only, before entering the state transition transaction."""
-    url = urlsplit(token(p.get("pr_url"), "pr_url"))
-    parts = url.path.strip("/").split("/")
-    require(url.scheme == "https" and url.netloc == "github.com" and len(parts) == 4 and parts[2] == "pull" and parts[3].isdigit(), "queue-reconcile requires a GitHub PR URL")
-    repo = "/".join(parts[:2])
+    match = PR_URL.fullmatch(token(p.get("pr_url"), "pr_url"))
+    require(match is not None, "queue-reconcile requires a GitHub PR URL")
+    repo, number = match.groups()
     base = token(p.get("base"), "base")
     def read(path, template):
         result = subprocess.run(["gh-axi", "api", "GET", path, "--template", template, "--full"], capture_output=True, text=True, timeout=30, check=True)
@@ -409,14 +410,22 @@ def forge_landing(p):
         body = json.loads(raw_body) if raw_body.startswith('"') else raw_body
         require(isinstance(body, str), "forge response body is unreadable")
         return body
-    pull = read(f"repos/{repo}/pulls/{parts[3]}", "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}")
+    pull = read(f"repos/{repo}/pulls/{number}", "{{.html_url}}|{{.state}}|{{.merged}}|{{.head.sha}}|{{.base.ref}}|{{.merge_commit_sha}}")
     fields = pull.split("|")
-    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[1] == "closed" and fields[2] == "true" and fields[4] == base, "forge does not prove this PR landed on this base")
-    observed_base = read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}")
-    p["_forge_landing"] = True
-    p["merged_head_oid"] = oid(fields[3], "forge head")
-    p["merge_oid"] = oid(fields[5], "forge merge commit")
-    p["observed_base_oid"] = oid(observed_base, "current forge base")
+    require(len(fields) == 6 and fields[0] == p["pr_url"] and fields[4] == base, "forge observation is for a different PR or base")
+    observed_base = oid(read(f"repos/{repo}/git/ref/heads/{quote(base, safe='/')}", "{{.object.sha}}"), "current forge base")
+    p["observed_base_oid"] = observed_base
+    if fields[1] == "closed" and fields[2] == "true":
+        p["_forge_outcome"] = "merged"
+        p["merged_head_oid"] = oid(fields[3], "forge head")
+        p["merge_oid"] = oid(fields[5], "forge merge commit")
+        return
+    require(fields[1] in {"open", "closed"} and fields[2] == "false", "forge does not prove whether this PR landed")
+    head = oid(p.get("head_oid"), "head_oid")
+    status = read(f"repos/{repo}/compare/{observed_base}...{head}", "{{.status}}")
+    require(status in {"ahead", "diverged"}, "forge does not prove the attempted head is off base")
+    p["_forge_outcome"] = "refused"
+    p["_unlanded_head_oid"] = head
 
 
 def run_operation(db, op, p):
@@ -602,6 +611,7 @@ def main():
     try:
         payload = json.loads(raw)
         require(isinstance(payload, dict), "JSON payload must be an object")
+        require(not any(key.startswith("_") for key in payload), "payload fields starting with _ are reserved")
         request_payload = compact(payload)
         if op == "init":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -639,10 +649,14 @@ def main():
         except Exception:
             db.execute("ROLLBACK")
             raise
-        if op == "queue-reconcile":
+        if op in MUTATIONS:
             request_id = token(payload.get("request_id"), "request_id")
+            actor = payload.get("home_id", "@authority")
+            token(actor, "actor")
+            require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
             digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
-            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor='@authority' AND request_id=?", (request_id,)).fetchone()
+        if op == "queue-reconcile":
+            prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
             if prior:
                 require(prior["digest"] == digest, "idempotency key reused with different request")
                 print(prior["result_json"])
@@ -651,11 +665,6 @@ def main():
         db.execute("BEGIN IMMEDIATE")
         try:
             if op in MUTATIONS:
-                request_id = token(payload.get("request_id"), "request_id")
-                actor = payload.get("home_id", "@authority")
-                token(actor, "actor")
-                require("home_id" not in payload or not actor.startswith("@"), "home_id cannot use the reserved administrative @ namespace")
-                digest = hashlib.sha256(compact({"operation": op, "payload": json.loads(request_payload)}).encode()).hexdigest()
                 prior = db.execute("SELECT digest,result_json FROM requests WHERE actor=? AND request_id=?", (actor, request_id)).fetchone()
                 if prior:
                     require(prior["digest"] == digest, "idempotency key reused with different request")

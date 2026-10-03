@@ -88,8 +88,10 @@ The attestations here are advisory until the step-4 dispatch and merge boundarie
 A successful wrapper result can be confirmed with `queue-reconcile`; a definitive wrapper refusal can be recorded with `queue-result`.
 A refused candidate may re-enter `queue-ready` after its owner repairs the issue, creating a new attempt event without changing the prior terminal record.
 A timeout or lost reply goes to `outcome-unknown`, retaining the slot across process restarts.
-`queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to verify that the exact GitHub PR is merged at the recorded head and to read the current base OID.
-Only that proved landing releases an unknown slot, and the attempt event ID is unique in the terminal-outcome table.
+`queue-reconcile` uses read-only `gh-axi api` calls outside the SQLite transaction to read the exact GitHub PR and the current base OID.
+A merged PR at the recorded head releases an unknown slot as `merged`.
+An open or closed-unmerged PR releases it as `refused` only when the forge compare of the current base with the recorded head reports `ahead` or `diverged`, so the attempted head is not on base.
+Any other observation keeps the slot `outcome-unknown`, and the attempt event ID is unique in the terminal-outcome table.
 Replaying the same reconciliation request returns its stored receipt without another forge read.
 This increment's live outcome reconciliation supports GitHub PRs; other forges need an equivalent read adapter before they can leave `outcome-unknown`.
 The forge read and database transition are separate, so a direct external base update can still race this advisory decision until step-4 enforcement and repository protection are active.
@@ -125,11 +127,13 @@ Its `claim` payload includes `request_id`, `intent_id`, `home_id`, `generation`,
 `renew`, `release`, and `check` include `home_id`, `generation`, `claim_id`, and `fence`; mutating forms also include `request_id`.
 `amend`, `reserve`, `publish-head`, and `attach-pr` additionally include `intent_id`.
 `attach-pr` includes `pr_url` and the live `claim_id` and `fence`.
+`submit` and `attach-pr` accept only an exact `https://github.com/<owner>/<repo>/pull/<number>` URL for the intent repository, and `queue-ready` refuses any other stored URL.
 `migration-seed` includes `repo`, `namespace`, `next_number`, and `request_id`; `reserve` adds `namespace` and requires that namespace in the intent's resources.
 `queue-ready` includes the writer identity, claim, fence, intent ID, and published head OID.
 `queue-next` includes the repository and base; `queue-synced`, `queue-validated`, `queue-checks`, and `queue-attempt` add the returned `slot_generation` plus current head and base OIDs.
 `queue-result` and `queue-reconcile` use the returned integration `generation` because they reconcile an already attempted forge operation after an owner may go offline.
-`queue-reconcile` also includes the exact `pr_url` and `base`, which are checked against the immutable intent before accepting the live forge observation.
+`queue-reconcile` also includes the exact `pr_url` and `base`, plus the recorded `head_oid` to prove a non-landing; each is checked against the intent and queue item before accepting the live forge observation.
+Payload fields starting with `_` are reserved for those forge observations and are refused.
 `queue-abort` includes the slot generation and a reason, and is limited to the pre-attempt phases.
 `outbox` accepts optional `after_seq` and `limit`; `ack` accepts `request_id` and `event_id`.
 `inspect` gives a small state summary for operators.
