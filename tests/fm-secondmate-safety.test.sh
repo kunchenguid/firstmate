@@ -874,27 +874,150 @@ test_home_seed_refuses_missing_projects_without_signal() {
   pass "home seeding fails loudly on accidental project omission and rejects mixed --no-projects"
 }
 
-test_home_seed_refuses_local_only_project() {
-  local home subhome err
+# A local-only project's landed work lives only on the main home's local
+# default branch: bin/fm-merge-local.sh never pushes and fleet sync skips the
+# clone, so its origin is stale after every landing. Seeding must therefore
+# clone from the main home's clone, not from that origin.
+test_home_seed_accepts_local_only_project() {
+  local home subhome err remote source_tip seeded_tip origin_url
   home="$TMP_ROOT/local-only-seed-home"
   subhome="$TMP_ROOT/local-only-seed-subhome"
   err="$TMP_ROOT/local-only-seed.err"
+  remote="$TMP_ROOT/local-only-alpha-remote.git"
   mkdir -p "$home/projects" "$home/data" "$home/state"
   fm_git_init_commit "$home/projects/alpha"
+  git clone --quiet --bare "$home/projects/alpha" "$remote"
+  git -C "$home/projects/alpha" remote add origin "$remote"
+  printf 'landed\n' > "$home/projects/alpha/landed.txt"
+  git -C "$home/projects/alpha" add landed.txt
+  git -C "$home/projects/alpha" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'landed locally, never pushed'
+  source_tip=$(git -C "$home/projects/alpha" rev-parse HEAD)
+  git -C "$home/projects/alpha" checkout -q -b hotfix
+  printf 'hotfix\n' > "$home/projects/alpha/hotfix.txt"
+  git -C "$home/projects/alpha" add hotfix.txt
+  git -C "$home/projects/alpha" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'work on a branch the main home happens to have checked out'
   printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
 
-  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed allowed a local-only project into a secondmate home"
+  if ! FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed refused a local-only project: $(cat "$err")"
   fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
-    || fail "seed did not explain local-only project rejection"
-  [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
-  pass "home seeding refuses local-only projects"
+  [ -d "$subhome/projects/alpha/.git" ] || fail "seed did not clone the local-only project into the secondmate home"
+  [ "$(git -C "$subhome/projects/alpha" symbolic-ref --short HEAD)" = main ] \
+    || fail "seed checked the local-only clone out on the source's checked-out branch instead of its default branch"
+  seeded_tip=$(git -C "$subhome/projects/alpha" rev-parse refs/heads/main)
+  [ "$seeded_tip" = "$source_tip" ] \
+    || fail "seed cloned the local-only project from its stale origin instead of the main home's clone"
+  [ "$(git -C "$subhome/projects/alpha" symbolic-ref refs/remotes/origin/HEAD)" = refs/remotes/origin/main ] \
+    || fail "seed left the local-only clone's origin/HEAD off the default branch"
+  origin_url=$(git -C "$subhome/projects/alpha" remote get-url origin)
+  [ "$origin_url" = "$(cd "$remote" && pwd -P)" ] \
+    || fail "seed did not carry the source clone's origin over to the local-only clone: $origin_url"
+  grep -F 'projects: alpha' "$home/data/secondmates.md" >/dev/null \
+    || fail "seed did not register the local-only project route"
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err" \
+    || fail "reseed refused an up-to-date existing local-only clone: $(cat "$err")"
+  pass "home seeding clones a local-only project from the main home's clone and keeps its origin"
+}
+
+test_home_seed_accepts_remoteless_local_only_project() {
+  local home subhome err source_tip seeded_tip
+  home="$TMP_ROOT/remoteless-local-only-home"
+  subhome="$TMP_ROOT/remoteless-local-only-subhome"
+  err="$TMP_ROOT/remoteless-local-only.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  source_tip=$(git -C "$home/projects/alpha" rev-parse HEAD)
+  git -C "$home/projects/alpha" checkout -q -b hotfix
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if ! FM_HOME="$home" FM_SECONDMATE_CHARTER='design domain' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed refused a remoteless local-only project: $(cat "$err")"
+  fi
+  [ -d "$subhome/projects/alpha/.git" ] || fail "seed did not clone the remoteless local-only project"
+  [ "$(git -C "$subhome/projects/alpha" symbolic-ref --short HEAD)" = main ] \
+    || fail "seed checked the remoteless local-only clone out on the source's checked-out branch instead of main"
+  seeded_tip=$(git -C "$subhome/projects/alpha" rev-parse refs/heads/main)
+  [ "$seeded_tip" = "$source_tip" ] || fail "seed did not clone the remoteless local-only project at the main home's tip"
+  if git -C "$subhome/projects/alpha" remote get-url origin >/dev/null 2>&1; then
+    fail "seed left the remoteless local-only clone pointing at an origin the source does not have"
+  fi
+  pass "home seeding accepts a remoteless local-only project"
+}
+
+test_home_seed_refuses_stale_existing_local_only_clone() {
+  local home subhome subhome_abs err
+  home="$TMP_ROOT/stale-local-only-home"
+  subhome="$TMP_ROOT/stale-local-only-subhome"
+  err="$TMP_ROOT/stale-local-only.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  git clone --quiet "$ROOT" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  mkdir -p "$subhome/projects"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  printf 'landed\n' > "$home/projects/alpha/landed.txt"
+  git -C "$home/projects/alpha" add landed.txt
+  git -C "$home/projects/alpha" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'landed after the secondmate clone was made'
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for stale local-only seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an existing local-only clone that lacks the main home's default tip"
+  fi
+  grep -F "seeded project alpha at $subhome_abs/projects/alpha is behind $home/projects/alpha" "$err" >/dev/null \
+    || fail "seed did not explain the stale local-only clone refusal: $(cat "$err")"
+  [ -d "$subhome/projects/alpha/.git" ] || fail "stale local-only refusal removed the existing clone"
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "stale local-only refusal left a subhome marker"
+
+  git -C "$subhome/projects/alpha" pull --quiet --ff-only origin main
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err" \
+    || fail "seed refused the local-only clone after it caught up with the main home: $(cat "$err")"
+  [ -f "$subhome/.fm-secondmate-home" ] || fail "seed did not complete after the local-only clone caught up"
+  pass "home seeding refuses an existing local-only clone until it contains the main home's default tip"
+}
+
+# bin/fm-merge-local.sh lands on the clone's default branch as it resolves it
+# (origin/HEAD, else main, else master), so an existing local-only clone whose
+# origin/HEAD names another branch would take approved work there even though
+# its main already contains the main home's tip.
+test_home_seed_refuses_existing_local_only_clone_on_another_default() {
+  local home subhome subhome_abs err
+  home="$TMP_ROOT/off-default-local-only-home"
+  subhome="$TMP_ROOT/off-default-local-only-subhome"
+  err="$TMP_ROOT/off-default-local-only.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  git -C "$home/projects/alpha" branch hotfix
+  git clone --quiet "$ROOT" "$subhome"
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  mkdir -p "$subhome/projects"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  git -C "$subhome/projects/alpha" remote set-head origin hotfix
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for off-default local-only seed test"
+
+  if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed accepted an existing local-only clone whose origin/HEAD names another branch"
+  fi
+  grep -F "seeded project alpha at $subhome_abs/projects/alpha resolves its default branch to 'hotfix'" "$err" >/dev/null \
+    || fail "seed did not explain the off-default local-only clone refusal: $(cat "$err")"
+  [ ! -e "$subhome/.fm-secondmate-home" ] || fail "off-default local-only refusal left a subhome marker"
+
+  git -C "$subhome/projects/alpha" remote set-head origin main
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err" \
+    || fail "seed refused the local-only clone after its origin/HEAD named main: $(cat "$err")"
+  [ -f "$subhome/.fm-secondmate-home" ] || fail "seed did not complete after the local-only clone named main"
+  pass "home seeding refuses an existing local-only clone whose default branch is not the main home's"
 }
 
 # A registry entry whose forge token the parser cannot resolve yields no posture
 # at all. Reading that refusal as an empty mode would walk straight past the
-# local-only routing refusal above and clone the project into a secondmate home,
+# delivery-mode check above and clone the project into a secondmate home,
 # so the seed must stop instead.
 test_home_seed_refuses_an_unresolvable_registry_posture() {
   local home subhome err
@@ -1954,6 +2077,100 @@ EOF
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta for plain-clone home"
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "teardown did not remove plain-clone registry route"
   pass "secondmate teardown raw-removes plain-clone homes, including a leaked read-only strip dir"
+}
+
+# Landed local-only work is never pushed and fleet sync skips the clone, so a
+# secondmate home's local-only clone can hold the only copy of commits the
+# parent home's clone lacks. Normal retirement must refuse until they are
+# carried back; the printed bundle carry-back is what the captain runs.
+test_secondmate_teardown_refuses_unlanded_local_only_clone() {
+  local home subhome fakebin log err carry
+  home="$TMP_ROOT/local-only-teardown-home"
+  subhome="$TMP_ROOT/local-only-teardown-subhome"
+  err="$TMP_ROOT/local-only-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$subhome/state" "$subhome/data" "$subhome/projects"
+  mark_firstmate_home "$subhome"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_init_commit "$home/projects/alpha"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  cp "$home/data/projects.md" "$subhome/data/projects.md"
+  printf 'landed\n' > "$subhome/projects/alpha/landed.txt"
+  git -C "$subhome/projects/alpha" add landed.txt
+  git -C "$subhome/projects/alpha" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'landed in the secondmate home'
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/local-only-teardown-fake")
+  log="$TMP_ROOT/local-only-teardown-fake/tmux.log"
+
+  if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+      FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/local-only-teardown-fake/pane.txt" TMPDIR="$TMP_ROOT" \
+      "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+    fail "teardown retired a secondmate home whose local-only clone held the only copy of landed work"
+  fi
+  grep -F 'still holds landed local-only work' "$err" >/dev/null \
+    || fail "teardown did not explain the local-only refusal: $(cat "$err")"
+  grep -F 'project alpha: 1 commit(s) on main' "$err" >/dev/null \
+    || fail "teardown did not name the branch and commit count: $(cat "$err")"
+  [ -d "$subhome/projects/alpha/.git" ] || fail "the refused retirement removed the secondmate home"
+  [ -e "$home/state/domain.meta" ] || fail "the refused retirement removed the secondmate record"
+  grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null || fail "the refused retirement removed the registry route"
+  grep -F 'kill-window' "$log" >/dev/null && fail "the refused retirement killed the secondmate endpoint"
+
+  carry=$(sed -n 's/^Carry them back first: //p' "$err")
+  [ -n "$carry" ] || fail "teardown did not print the bundle carry-back: $(cat "$err")"
+  bash -c "$carry" >/dev/null 2>&1 || fail "the printed bundle carry-back failed: $carry"
+  git -C "$home/projects/alpha" rev-parse --verify --quiet refs/heads/secondmate/domain/main >/dev/null \
+    || fail "the printed carry-back did not bring the landed work into the parent clone"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/local-only-teardown-fake/pane.txt" TMPDIR="$TMP_ROOT" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err" \
+    || fail "teardown refused after the local-only work was carried back: $(cat "$err")"
+  [ ! -d "$subhome" ] || fail "teardown did not remove the secondmate home once the parent clone held its work"
+  [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta after carry-back"
+  pass "secondmate teardown refuses to discard landed local-only work until the parent clone holds it"
+}
+
+# The registry parser falls back to "no-mistakes off" for a missing entry or an
+# unknown mode. Normal retirement must not read that fallback as a remote-backed
+# posture and remove a clone that may hold the only copy of landed work.
+test_secondmate_teardown_refuses_clone_without_registered_posture() {
+  local home subhome fakebin log err entry
+  home="$TMP_ROOT/unregistered-teardown-home"
+  subhome="$TMP_ROOT/unregistered-teardown-subhome"
+  err="$TMP_ROOT/unregistered-teardown.err"
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$subhome/state" "$subhome/data" "$subhome/projects"
+  mark_firstmate_home "$subhome"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_init_commit "$home/projects/alpha"
+  git clone --quiet "$home/projects/alpha" "$subhome/projects/alpha"
+  printf '%s\n' '- alpha [local-only] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  printf 'landed\n' > "$subhome/projects/alpha/landed.txt"
+  git -C "$subhome/projects/alpha" add landed.txt
+  git -C "$subhome/projects/alpha" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'landed in the secondmate home'
+  fm_write_secondmate_meta "$home/state/domain.meta" "$subhome"
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-teardown-fake")
+  log="$TMP_ROOT/unregistered-teardown-fake/tmux.log"
+
+  for entry in '- beta [local-only] - another project (added 2026-06-22)' \
+    '- alpha [locl-only] - alpha project (added 2026-06-22)'; do
+    printf '%s\n' "$entry" > "$subhome/data/projects.md"
+    if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+        FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-teardown-fake/pane.txt" TMPDIR="$TMP_ROOT" \
+        "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"; then
+      fail "teardown retired a secondmate home whose clone has no registered posture ($entry)"
+    fi
+    grep -F 'project alpha in secondmate home' "$err" | grep -F 'does not resolve to a registered delivery posture' >/dev/null \
+      || fail "teardown did not explain the unresolved-posture refusal ($entry): $(cat "$err")"
+    [ -d "$subhome/projects/alpha/.git" ] || fail "the refused retirement removed the secondmate home ($entry)"
+    [ -e "$home/state/domain.meta" ] || fail "the refused retirement removed the secondmate record ($entry)"
+    grep -F 'kill-window' "$log" >/dev/null && fail "the refused retirement killed the secondmate endpoint ($entry)"
+  done
+  pass "secondmate teardown refuses a project clone whose registered posture does not resolve"
 }
 
 test_secondmate_force_teardown_discards_child_work() {
@@ -3022,6 +3239,165 @@ EOF
   pass "fm-backlog-handoff refuses Done items under whitespace section headings and unsafe homes"
 }
 
+# Hand <keys> off to local secondmate `design` behind a live fake receiver, so a
+# successful move also wakes it and the handoff exits 0.
+handoff_to_live_design() { # <main-home> <sub-home-abs> <key>...
+  local home=$1 sub=$2 fake="$1.fake" fakebin
+  shift 2
+  fakebin=$(make_fake_tmux "$fake")
+  cat > "$home/state/design.meta" <<EOF
+window=firstmate:fm-design
+kind=secondmate
+harness=claude
+backend=tmux
+home=$sub
+worktree=$sub
+EOF
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW='firstmate:fm-design' \
+    FM_FAKE_TMUX_LOG="$fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$fake/pane.txt" \
+    FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 FM_SEND_RETRIES=1 \
+    "$ROOT/bin/fm-backlog-handoff.sh" design "$@"
+}
+
+test_backlog_handoff_refuses_local_only_item_without_clone() {
+  local home subhome subhome_abs before_main out
+  home="$TMP_ROOT/handoff-local-only-main"
+  subhome="$TMP_ROOT/handoff-local-only-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" design
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  printf -- '- design - feature work (home: %s; scope: feature work; projects: beta; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
+  printf -- '- ios - iOS work (host: remote-mac; root: %s/remote-root; home: %s/remote-home; scope: iOS work; projects: alpha; added 2026-06-22)\n' "$TMP_ROOT" "$TMP_ROOT" >> "$home/data/secondmates.md"
+  cat > "$home/data/projects.md" <<'EOF'
+- alpha [local-only] - local project (added 2026-06-22)
+- beta [no-mistakes] - forge project (added 2026-06-22)
+EOF
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] beta-task - forge work (repo: beta)
+- [ ] alpha-task - local work (repo: alpha, priority: high)
+
+## Done
+EOF
+  before_main="$TMP_ROOT/handoff-local-only-main.before"
+  cp "$home/data/backlog.md" "$before_main"
+
+  # A local-only item bound for a home without its clone is refused before
+  # anything moves, even when it shares the batch with an acceptable item.
+  if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design beta-task alpha-task 2>&1); then
+    fail "handoff accepted a local-only item for a home without its clone"
+  fi
+  printf '%s\n' "$out" | grep -F "refusing to hand off alpha-task: local-only project alpha has no clone at $subhome_abs/projects/alpha" >/dev/null \
+    || fail "local-only refusal did not name the item, project, and missing clone path: $out"
+  printf '%s\n' "$out" | grep -F 'beta-task' >/dev/null \
+    && fail "local-only refusal also blamed the no-mistakes item: $out"
+  cmp -s "$before_main" "$home/data/backlog.md" \
+    || fail "local-only refusal mutated the main backlog"
+  [ ! -e "$subhome/data/backlog.md" ] || ! grep -F 'alpha-task' "$subhome/data/backlog.md" >/dev/null \
+    || fail "local-only refusal copied the item into the secondmate backlog"
+
+  # A remote route can never hold the clone, so it refuses before staging.
+  if command -v tasks-axi >/dev/null 2>&1; then
+    if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" ios beta-task alpha-task 2>&1); then
+      fail "remote handoff accepted a local-only item"
+    fi
+    printf '%s\n' "$out" | grep -F 'refusing to hand off alpha-task: local-only project alpha cannot be cloned into remote secondmate ios' >/dev/null \
+      || fail "remote local-only refusal did not name the item, project, and secondmate: $out"
+    printf '%s\n' "$out" | grep -F 'beta-task' >/dev/null \
+      && fail "remote local-only refusal also blamed the no-mistakes item: $out"
+    cmp -s "$before_main" "$home/data/backlog.md" \
+      || fail "remote local-only refusal mutated the main backlog"
+    [ ! -e "$home/data/handoff/ios.outbox.md" ] || ! grep -F 'task' "$home/data/handoff/ios.outbox.md" >/dev/null \
+      || fail "remote local-only refusal staged items into the outbox"
+  fi
+
+  # Once the home holds the project's clone, the item moves.
+  fm_git_init_commit "$subhome/projects/alpha"
+  if command -v tasks-axi >/dev/null 2>&1; then
+    out=$(handoff_to_live_design "$home" "$subhome_abs" alpha-task 2>&1) \
+      || fail "handoff failed for a local-only item after its clone was seeded: $out"
+    assert_grep 'alpha-task' "$subhome/data/backlog.md" "local-only item did not reach the secondmate backlog"
+    assert_no_grep 'alpha-task' "$home/data/backlog.md" "local-only item stayed in the main backlog"
+  fi
+  pass "fm-backlog-handoff refuses a local-only item for a home without its clone"
+}
+
+test_backlog_handoff_refuses_symlinked_local_only_clone() {
+  local home subhome subhome_abs before_main target out
+  home="$TMP_ROOT/handoff-local-only-linked-main"
+  subhome="$TMP_ROOT/handoff-local-only-linked-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" design
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  mkdir -p "$subhome/projects"
+  fm_git_init_commit "$subhome/project-store/alpha"
+  fm_git_init_commit "$TMP_ROOT/handoff-local-only-linked-outside/alpha"
+  printf -- '- design - feature work (home: %s; scope: feature work; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
+  printf -- '- alpha [local-only] - local project (added 2026-06-22)\n' > "$home/data/projects.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-task - local work (repo: alpha)
+
+## Done
+EOF
+  before_main="$TMP_ROOT/handoff-local-only-linked-main.before"
+  cp "$home/data/backlog.md" "$before_main"
+
+  # A projects/<repo> symlink is refused whether its clone sits elsewhere in the
+  # home, where retirement never checks it, or outside the home entirely.
+  for target in "$subhome_abs/project-store/alpha" "$TMP_ROOT/handoff-local-only-linked-outside/alpha"; do
+    rm -f "$subhome/projects/alpha"
+    ln -s "$target" "$subhome/projects/alpha"
+    if out=$(FM_HOME="$home" "$ROOT/bin/fm-backlog-handoff.sh" design alpha-task 2>&1); then
+      fail "handoff accepted a local-only item whose projects/alpha is a symlink to $target"
+    fi
+    printf '%s\n' "$out" | grep -F "refusing to hand off alpha-task: local-only project alpha has no clone at $subhome_abs/projects/alpha" >/dev/null \
+      || fail "symlinked-clone refusal did not name the item, project, and clone path: $out"
+    cmp -s "$before_main" "$home/data/backlog.md" \
+      || fail "symlinked-clone refusal mutated the main backlog"
+    [ ! -e "$subhome/data/backlog.md" ] || ! grep -F 'alpha-task' "$subhome/data/backlog.md" >/dev/null \
+      || fail "symlinked-clone refusal copied the item into the secondmate backlog"
+  done
+  pass "fm-backlog-handoff refuses a local-only item whose projects/<repo> entry is a symlink"
+}
+
+test_backlog_handoff_accepts_local_only_clone_behind_projects_symlink() {
+  local home subhome subhome_abs out
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    echo "skip: tasks-axi not found (backlog handoff delegates to it)"
+    return 0
+  fi
+  home="$TMP_ROOT/handoff-local-only-symlink-main"
+  subhome="$TMP_ROOT/handoff-local-only-symlink-sub"
+  mkdir -p "$home/data" "$home/state"
+  seed_secondmate_home_marker "$subhome" design
+  subhome_abs=$(cd "$subhome" && pwd -P)
+  # projects/ is a symlink to a directory inside the home, a layout seeding allows.
+  mkdir -p "$subhome/project-store"
+  ln -s project-store "$subhome/projects"
+  fm_git_init_commit "$subhome/project-store/alpha"
+  printf -- '- design - feature work (home: %s; scope: feature work; projects: alpha; added 2026-06-22)\n' "$subhome_abs" > "$home/data/secondmates.md"
+  printf -- '- alpha [local-only] - local project (added 2026-06-22)\n' > "$home/data/projects.md"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] alpha-task - local work (repo: alpha)
+
+## Done
+EOF
+
+  out=$(handoff_to_live_design "$home" "$subhome_abs" alpha-task 2>&1) \
+    || fail "handoff failed for a local-only clone reached through a projects/ symlink inside the home: $out"
+  assert_grep 'alpha-task' "$subhome/data/backlog.md" "local-only item behind a projects/ symlink did not reach the secondmate backlog"
+  assert_no_grep 'alpha-task' "$home/data/backlog.md" "local-only item behind a projects/ symlink stayed in the main backlog"
+  pass "fm-backlog-handoff accepts a local-only clone behind a projects/ symlink inside the home"
+}
+
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
@@ -3049,7 +3425,10 @@ test_home_seed_refuses_projectless_home_with_symlinked_projects
 test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
-test_home_seed_refuses_local_only_project
+test_home_seed_accepts_local_only_project
+test_home_seed_accepts_remoteless_local_only_project
+test_home_seed_refuses_stale_existing_local_only_clone
+test_home_seed_refuses_existing_local_only_clone_on_another_default
 test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
@@ -3079,6 +3458,8 @@ test_secondmate_force_teardown_sweeps_nested_homes
 test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
+test_secondmate_teardown_refuses_unlanded_local_only_clone
+test_secondmate_teardown_refuses_clone_without_registered_posture
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
@@ -3101,3 +3482,6 @@ test_secondmate_idle_pane_is_not_stale
 test_secondmate_charter_brief_is_idle_by_default
 test_backlog_handoff_aborts_safely
 test_backlog_handoff_refuses_done_items_and_non_secondmate_homes
+test_backlog_handoff_refuses_local_only_item_without_clone
+test_backlog_handoff_refuses_symlinked_local_only_clone
+test_backlog_handoff_accepts_local_only_clone_behind_projects_symlink
