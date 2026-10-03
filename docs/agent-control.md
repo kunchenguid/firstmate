@@ -56,9 +56,10 @@ The clear is refused before anything is sent when the recorded backend cannot de
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
-It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, pi, pi-signed, omp, kimi, and agy have no verified general pane-resume contract.
+It is not deterministic across the verified adapters: codex, grok, gemini, and devin resume only from a session id printed at exit, opencode continues the most recent session for the cwd, and claude, omp, kimi, and agy have no verified general pane-resume contract.
+Pi and pi-signed are the exception: a ship or scout spawned on them runs a persistent session of its own (`--session-id <task-id>.<spawn-gen>`, incarnation-scoped, recorded as `pi_session_id=` in the task record) whenever the resolved executable advertises that flag, so a later relaunch resumes exactly the session that record names - but it is delivered through `relaunch`, not a verb.
 `relaunch` uses the brief on disk - not a harness-private session - as the durable instruction when the backend can prove the old agent stopped and the composer is empty; Devin on Herdr currently fails that composer check and refuses.
-A relaunch does take one session reference when the endpoint's own runtime recorded it - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
+A relaunch also carries one session reference: the endpoint runtime's own bound session when it recorded one, otherwise the task's recorded `pi_session_id`, and the republished record names whichever of the two it ran - see [the relaunch transaction](#transactional-relaunch) - but that is a relaunch input, not a caller-facing verb.
 
 ## Transactional relaunch
 
@@ -76,13 +77,15 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
    A secondmate's own crewmates run in their own endpoints and outlive its relaunch; the relaunched secondmate reconciles them from its home's durable records at startup.
 3. **Record the note.**
-   A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the conversation; the note is appended to the instructions it reads.
+   A ship or scout relaunch requires `--note`, because the replacement inherits the local copy but none of the worker's unsaid context; the note is appended to the instructions it reads.
+   On pi/pi-signed, when the resolved executable advertises `--session-id`, the replacement also resumes the task's recorded session, so the conversation itself continues; the note still carries the new instruction.
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which reuses the recorded worktree instead of creating one, adopts the recorded endpoint when it still exists, clears the previous harness's per-task wiring, and arms a fresh busy generation.
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Preserve runtime-bound status authority where supported.**
-   The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume, and otherwise launches the ordinary fresh session.
+   The endpoint's runtime may bind pane status to one session identity; the launch owner preserves it only when that runtime records a reference the replacement adapter can consume.
+   Whenever the endpoint's runtime reports no readable session - every non-Herdr backend, and a Herdr pane whose registration is gone, unreadable, or foreign - a pi/pi-signed ship or scout replacement instead resumes the task's recorded `pi_session_id`, provided the resolved executable advertises `--session-id`; a secondmate, an unprobed flag, and every other case launch the ordinary fresh session.
    This reference is a launch input, never authority to send, close, or act on the pane.
    [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and measured behavior.
 
@@ -190,4 +193,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
+  It also pins the Pi session resume: the recorded `pi_session_id` used on a rebound or agent-free endpoint, a still-bound runtime reference outranking it, an inconclusive `--session-id` probe keeping the recorded id without passing it, and the harness switch that drops the field and re-derives it.
+- `tests/fm-spawn-pi-session.test.sh` - the fresh-spawn half of that contract: the incarnation-scoped `--session-id` a pi or pi-signed ship or scout launches with and records, a secondmate taking neither, and a re-spawned task id opening a new session rather than the torn-down attempt's.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

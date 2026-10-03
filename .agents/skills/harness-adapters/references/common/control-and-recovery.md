@@ -40,7 +40,7 @@ The tool reference records repeat, acknowledgement, and clearing behavior, while
 Native resume availability and form belong solely to the selected tool reference.
 Use native resume only when both that reference and the recovery procedure call for it.
 Deterministic relaunch instead trusts instructions on disk, not a private session, and never needs a session id printed at exit.
-One relaunch-time exception is the runtime's own recorded session identity, used only to keep that runtime's status authority valid across the replacement - `../../../docs/agent-control.md` "Transactional relaunch" owns it.
+Two relaunch-time exceptions carry a session reference: the runtime's own recorded session identity, used only to keep that runtime's status authority valid across the replacement, and - for a pi or pi-signed ship or scout - the task record's own persistent Pi session id, used when that runtime reports no readable session; `../../../docs/agent-control.md` "Transactional relaunch" owns both.
 
 `../stuck-crewmate-recovery/SKILL.md` owns worker recovery and `../secondmate-provisioning/SKILL.md` owns secondmate recovery; both preserve recorded work.
 The router's recovery scenarios select the additional common references for replacement profiles and secondmates.
