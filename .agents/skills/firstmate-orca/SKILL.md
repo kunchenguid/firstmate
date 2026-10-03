@@ -44,7 +44,7 @@ After spawn, check the task with firstmate helpers:
 - `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
 - `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
 - `bin/fm-crew-state.sh <id>` when the current run state matters.
-- `bin/fm-watch.sh` whenever there are tasks in flight and this session owns supervision.
+- the supervision cycle from the emitted session-start protocol, kept live whenever tasks are in flight; do not launch `bin/fm-watch.sh` by hand.
 
 Do not manually create the Orca worktree or terminal for a normal firstmate task.
 Do not manually patch metadata to make an externally-created Orca terminal look like a firstmate task.
