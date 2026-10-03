@@ -145,9 +145,9 @@ PY
     # which follows up with fm-discord-send.sh; a failed callback only
     # logs, it never drops the wake.
     if [ "$sub" = status ]; then
-      cb_content="Firstmate: connected and listening; run fm-discord-setup.sh status on the host for full status."
+      cb_content="Checking live status now - full answer follows."
     else
-      cb_content="Firstmate received your request and is working on it."
+      cb_content="Working on your question now - full answer follows."
     fi
     itoken=$(jq -r '.token // empty' "$file")
     case "$itoken" in ''|*[$'\n\r']*) echo "fm-discord-commands: interaction has no callback token; wake only" >&2 ;; *)
