@@ -1578,19 +1578,19 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local repo=${1:-$WT} work_ref=${2:-HEAD} name ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    git -C "$repo" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$repo" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$repo" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$repo" merge-tree --write-tree "$ref" "$work_ref" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -3592,6 +3592,9 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 TEARDOWN_BRANCH_TO_DELETE=
+if [ "$TEARDOWN_SLOT_REASSIGNED" = 1 ] && [ "$KIND" = ship ]; then
+  TEARDOWN_BRANCH_TO_DELETE=$(fm_meta_get "$META" branch)
+fi
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3859,7 +3862,17 @@ else
     exit 1
   fi
 fi
-if [ -n "$TEARDOWN_BRANCH_TO_DELETE" ]; then
+# A reassigned slot cannot supply HEAD for the ordinary path. Use only the
+# recorded ref in the separate clone, and prune it only when its content is
+# already in the current default branch. A failed record removal never gets here.
+if [ "$TEARDOWN_SLOT_REASSIGNED" = 1 ] && [ "$KIND" = ship ]; then
+  branch=$TEARDOWN_BRANCH_TO_DELETE
+  default_name=$(default_branch || true)
+  if [ "$branch" != "$default_name" ] \
+    && content_in_default "$PROJ" "refs/heads/$branch"; then
+    git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1 || true
+  fi
+elif [ -n "$TEARDOWN_BRANCH_TO_DELETE" ]; then
   git -C "$PROJ" branch -D "$TEARDOWN_BRANCH_TO_DELETE" >/dev/null 2>&1 || true
 fi
 fm_lock_release "$META_LOCK"

@@ -1055,8 +1055,8 @@ test_stale_record_on_claimed_slot_retires_then_claimant_tears_down() {
   assert_reassigned_slot_left_alone "$dir" "$id" "$other" "stale record beside the claimant's record"
   assert_present "$dir/worktree/sentinel" "records-only teardown reset the claimant's slot"
   assert_present "$dir/home/state/$other.meta" "records-only teardown removed the claimant's record"
-  git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
-    || fail "records-only teardown removed the stale task's preserved branch"
+  ! git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "records-only teardown left the stale task's landed branch"
 
   : > "$dir/runtime.log"
   run_case "$dir" "$other" > "$dir/stdout" 2> "$dir/stderr" \
@@ -1105,6 +1105,14 @@ test_ship_retry_after_return_and_failed_record_removal() {
   dir=$(make_case ship-return-interrupted)
   mark_case_as_treehouse_pool "$dir"
   git -C "$dir/worktree" switch -q -c "fm/$id"
+  printf 'landed through squash\n' > "$dir/worktree/landed.txt"
+  git -C "$dir/worktree" add landed.txt
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm ship-work
+  printf 'landed through squash\n' > "$dir/project/landed.txt"
+  git -C "$dir/project" add landed.txt
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm squash-merge
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=firstmate:fm-$id" "endpoint_task_id=$id" \
     "worktree=$dir/worktree" "project=$dir/project" \
@@ -1137,6 +1145,8 @@ SH
     "window=firstmate:fm-$other" "endpoint_task_id=$other" \
     "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
   claim_pool_slot "$dir" "$other"
+  git -C "$dir/project" branch "fm/$other"
+  git -C "$dir/worktree" switch -q "fm/$other"
   : > "$dir/worktree/claimant-sentinel"
   : > "$dir/runtime.log"
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
@@ -1145,6 +1155,10 @@ SH
   assert_present "$dir/home/state/$other.meta" "retry removed the claimant record"
   assert_present "$dir/worktree/claimant-sentinel" "retry reset the claimant slot"
   assert_present "$dir/pool/1/.fm-slot-owner" "retry removed the claimant claim"
+  git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$other" \
+    || fail "retry deleted the claimant branch"
+  ! git -C "$dir/project" show-ref --verify --quiet "refs/heads/fm/$id" \
+    || fail "retry left the stale task's landed branch"
   ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "retry returned the claimant slot: $(cat "$dir/runtime.log")"
   pass "fm-teardown: interrupted ship cleanup retains branch custody for a reassigned retry"
