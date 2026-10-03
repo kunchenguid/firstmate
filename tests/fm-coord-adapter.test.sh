@@ -101,15 +101,35 @@ mkdir -p "$tmp/sshbin"
 cat > "$tmp/sshbin/ssh" <<'SH'
 #!/usr/bin/env bash
 while [ "$#" -gt 1 ]; do shift; done
+printf '%s\n' "$1" >> "${SSH_LOG:-/dev/null}"
 exec /bin/bash -c "$1"
 SH
 chmod +x "$tmp/sshbin/ssh"
-PATH="$tmp/sshbin:$PATH" adapter "$tmp/remote-home" dispatch remote-home "$repo" "$repo" "$tmp/remote-home.brief" branch/remote codex > /dev/null 2> "$tmp/remote.err" || fail 'remote transport must dispatch'
+SSH_LOG="$tmp/remote-ssh.log" PATH="$tmp/sshbin:$PATH" adapter "$tmp/remote-home" dispatch remote-home "$repo" "$repo" "$tmp/remote-home.brief" branch/remote codex > /dev/null 2> "$tmp/remote.err" || fail 'remote transport must dispatch'
 python3 - "$tmp/remote-home/state/fm-coord-adapter.json" <<'PY' || fail 'remote transport must return central claim'
 import json,sys
 assert json.load(open(sys.argv[1]))['tasks']['remote-home']['claim']['ok'] is True
 PY
+python3 - "$tmp/remote-ssh.log" "$(coord inspect '{}')" <<'PY' || fail 'remote enrollment must bind the home machine identity it sent'
+import json,shlex,sys
+enroll = [json.loads(shlex.split(line)[-1]) for line in open(sys.argv[1]) if shlex.split(line)[-2] == 'enroll']
+assert len(enroll) == 1 and enroll[0]['host_id'].startswith('machine:'), enroll
+assert {p['home_id']: p['host_id'] for p in json.loads(sys.argv[2])['participants']}['remote-home'] == enroll[0]['host_id']
+PY
+make_home switch
+make_brief switch switch 103
+adapter "$tmp/switch" dispatch switch "$repo" "$repo" "$tmp/switch.brief" branch/switch claude > /dev/null 2>&1 || fail 'direct transport must dispatch'
+printf '{"mode":"shadow","home_id":"switch","repos":["owner/repo"],"remote":{"host":"coord.example","command":"%s/bin/fm-coord.sh","db":"%s"}}\n' "$ROOT" "$db" > "$tmp/switch/config/coordination.json"
+PATH="$tmp/sshbin:$PATH" adapter "$tmp/switch" heartbeat switch > /dev/null 2> "$tmp/switch.err" || fail "transport switch must reuse the journaled enrollment: $(cat "$tmp/switch.err")"
 pass 'fixed-argument SSH transport enrolls a remote home against one authority'
+
+make_home no-intent
+for checkpoint in "heartbeat ghost" "pre-ci ghost $repo" "pre-ci ghost" "pre-push ghost $repo"; do
+  # shellcheck disable=SC2086
+  adapter "$tmp/no-intent" $checkpoint > /dev/null 2> "$tmp/no-intent.err" || fail "$checkpoint without a local intent must stay advisory: $(cat "$tmp/no-intent.err")"
+  case "$checkpoint:$(cat "$tmp/no-intent.err")" in *"no local intent record"*) ;; *) fail "$checkpoint without a local intent must say so" ;; esac
+done
+pass 'checkpoints for a task without a local intent warn instead of failing'
 
 make_home remote-offline
 make_brief remote-offline offline-remote 102

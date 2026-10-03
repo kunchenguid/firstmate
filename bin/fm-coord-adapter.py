@@ -8,6 +8,7 @@ with the same request ID. This adapter never treats an offline request as a gran
 """
 
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,16 @@ import uuid
 
 ROOT = Path(__file__).resolve().parent
 OID = re.compile(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?\Z")
+
+
+def machine_host_id():
+    spec = importlib.util.spec_from_file_location("fm_coord", ROOT / "fm-coord.py")
+    coord = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(coord)
+    try:
+        return coord.local_host_id()
+    except coord.Refusal as exc:
+        raise ValueError(str(exc))
 
 
 def warn(message):
@@ -180,13 +191,27 @@ class Adapter:
 
     def setup(self):
         home_id = self.config["home_id"]
-        if self.send("enroll", "enroll", {"home_id": home_id, "repos": self.config["repos"]}) is None:
+        if "enroll" in self.state["requests"]:
+            enroll = {k: v for k, v in self.state["requests"]["enroll"]["payload"].items() if k != "request_id"}
+        else:
+            enroll = {"home_id": home_id, "repos": self.config["repos"]}
+            if self.config.get("remote") is not None:
+                # The coordinator binds its own machine identity when host_id is absent, which would make this home's merge wrapper look local.
+                try:
+                    enroll["host_id"] = machine_host_id()
+                except ValueError as exc:
+                    warn(f"remote enrollment needs this home's machine identity: {exc}")
+                    return None
+        if self.send("enroll", "enroll", enroll) is None:
             return None
         session = self.send("session", "session", {"home_id": home_id})
         return session["generation"] if session else None
 
     def ensure_task(self, task_id):
-        task = self.state["tasks"][task_id]
+        task = self.state["tasks"].get(task_id)
+        if task is None:
+            warn(f"{task_id}: no local intent record; checkpoint skipped, no grant assumed")
+            return None
         if task["base_oid"] is None:
             warn(f"{task_id}: no base recorded; intent recorded locally as unclaimed")
             return task
@@ -252,6 +277,8 @@ class Adapter:
 
     def live_claim(self, task_id):
         task = self.ensure_task(task_id)
+        if task is None:
+            return None
         claim = task.get("claim")
         if not claim:
             warn(f"{task_id}: branch writer has no confirmed claim")
@@ -442,7 +469,7 @@ def run(adapter, command):
     elif command == "pre-ci" and len(sys.argv) in {3, 4}:
         task = adapter.state["tasks"].get(sys.argv[2])
         worktree = sys.argv[3] if len(sys.argv) == 4 else (task or {}).get("worktree")
-        if not worktree:
+        if task and not worktree:
             raise ValueError(f"{sys.argv[2]}: pre-ci needs a WORKTREE argument; this task has no recorded worktree")
         if task:
             task["worktree"] = worktree
