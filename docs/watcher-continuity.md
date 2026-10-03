@@ -191,7 +191,10 @@ The bounded turn-end guard enforces recovery at Stop when no watcher is live and
 So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 
 The recovery-episode contract below owns once-per-generation announcement.
-A handling successor does not re-announce.
+A handling successor does not re-announce rows inherited from its predecessor.
+It snapshots their highest queue sequence under the queue lock before becoming ready.
+An external append above that sequence can surface a new recovery notification, whether the prior handling turn is still running or has acknowledged its rows.
+Notification never consumes rows; sequence-bound, per-actor acknowledgement remains the owner of consumption.
 It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
 
 ### Manual recovery and other harnesses

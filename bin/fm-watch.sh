@@ -2440,6 +2440,17 @@ if [ -n "$EVICTED_PID" ]; then
   echo "watcher: replaced stalled pid $EVICTED_PID (beacon ${EVICTED_BEAT_AGE}s past hard bound ${WATCHER_STALL_BOUND}s)"
 fi
 WATCHER_RECOVERY_PENDING=0
+WATCHER_HANDLING_SEQUENCE=0
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  # The predecessor notification covers rows present before this successor is
+  # ready. Later rows need their own notification, even while that turn handles
+  # its inherited rows. Snapshot under the producer/drain lock.
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+  if [ -s "$FM_WAKE_QUEUE" ]; then
+    WATCHER_HANDLING_SEQUENCE=$(awk -F '\t' 'NF >= 5 && $2 > n { n = $2 } END { print n+0 }' "$FM_WAKE_QUEUE") || exit 1
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
+fi
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
@@ -2611,11 +2622,18 @@ rerecord_device_shifted_pr_poll() {  # <id>
 }
 
 resurface_after_downtime() {
-  # Handling successors already have a predecessor-delivered wake on the way.
-  # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
+  # Suppress only rows covered by the predecessor's notification. A permanent
+  # successor exemption strands external inbox appends while the beacon stays
+  # fresh. Do not consume rows here: the actor's sequence-bound drain owns that.
   if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
+    local newer=0
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || exit 1
+    if [ -s "$FM_WAKE_QUEUE" ] && awk -F '\t' -v covered="$WATCHER_HANDLING_SEQUENCE" \
+      'NF >= 5 && $2 > covered { found = 1 } END { exit !found }' "$FM_WAKE_QUEUE"; then
+      newer=1
+    fi
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK" || exit 1
+    [ "$newer" -eq 1 ] || return 0
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
