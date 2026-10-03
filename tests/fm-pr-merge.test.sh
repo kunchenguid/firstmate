@@ -808,6 +808,51 @@ test_github_unreadable_outcome_keeps_pr_bookkeeping() {
   pass "fm-pr-merge keeps PR bookkeeping when it cannot read a successful merge call's outcome"
 }
 
+# A coordinated home: the wrapper's adapter calls are logged by a python3 shim
+# that runs every other script on the real interpreter. Args: case_dir
+add_coord_adapter_log() {
+  local case_dir=$1
+  printf '{}\n' > "$case_dir/home/config/coordination.json"
+  cat > "$case_dir/fakebin/python3" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  */bin/fm-coord-adapter.py) shift; printf '%s\\n' "\$*" >> "$case_dir/coord.log" ;;
+  *) exec "$(command -v python3)" "\$@" ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/python3"
+}
+
+# The forge outcome after an attempted coordinated merge settles the integration
+# slot through the adapter: merged, refused when the PR reads back unmerged and
+# unqueued after a failed merge call, and unknown when the outcome is unreadable.
+test_github_merge_outcome_is_reported_to_coordination() {
+  local outcome case_dir head=7070707070707070707070707070707070707070
+  for outcome in merged refused unknown; do
+    case_dir=$(make_case "coord-outcome-$outcome")
+    mkdir -p "$case_dir/wt"
+    add_gh_mocks "$case_dir" "$head"
+    case "$outcome" in
+      refused)
+        add_gh_mocks_merge_fails "$case_dir" "$head"
+        write_github_outcome "$case_dir" OPEN false false main
+        ;;
+      unknown)
+        add_gh_mock_outcome_read_fails "$case_dir"
+        add_gh_axi_mock_view_fails "$case_dir"
+        ;;
+    esac
+    add_coord_adapter_log "$case_dir"
+    : > "$case_dir/gh-axi.log"
+    run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+      > "$case_dir/stdout" 2> "$case_dir/stderr" || true
+    [ "$(cat "$case_dir/coord.log")" = "pre-merge task-x1 https://github.com/example/repo/pull/71 $head
+merge-result task-x1 https://github.com/example/repo/pull/71 $outcome" ] \
+      || fail "coord-outcome-$outcome: the adapter did not receive the $outcome outcome: $(cat "$case_dir/coord.log")"
+  done
+  pass "fm-pr-merge reports merged, refused, and unknown forge outcomes to coordination"
+}
+
 test_github_refusal_quotes_the_forge_output() {
   local case_dir rc
   case_dir=$(make_case github-refusal-quotes-forge)
@@ -2371,6 +2416,7 @@ test_github_mergeable_unknown_exhausts_bound_and_reports_pending
 test_github_mergeable_unknown_retry_rechecks_checks
 test_github_mergeable_conflicting_is_not_retried
 test_github_unreadable_outcome_keeps_pr_bookkeeping
+test_github_merge_outcome_is_reported_to_coordination
 test_github_refusal_quotes_the_forge_output
 test_github_unreadable_outcome_refusal_quotes_the_forge_output
 test_github_accepted_queue_flags_do_not_echo_back_the_same_command
