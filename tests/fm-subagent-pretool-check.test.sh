@@ -245,6 +245,29 @@ test_stdin_transports_and_output_shapes() {
   pass "both stdin transports classify correctly and Claude's deny keeps stdout empty"
 }
 
+test_cursor_transport_keeps_classifying() {
+  local mode tool payload rc
+  for mode in --cursor --claude; do
+    for tool in Shell Read Edit Glob Agent; do
+      payload=$(jq -cn --arg tool "$tool" --arg mode "$mode" \
+        '{tool_name:$tool} + (if $mode == "--claude" then {cursor_version:"fixture"} else {} end)')
+      rc=0
+      printf '%s' "$payload" \
+        | FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+          "$CHECK" "$mode" > "$OUT" 2> "$ERR" || rc=$?
+      [ "$rc" -eq 0 ] || fail "Cursor $tool via $mode must exit 0, got $rc"
+      [ ! -s "$ERR" ] || fail "Cursor $tool via $mode wrote stderr: $(cat "$ERR")"
+      if [ "$tool" = Agent ]; then
+        jq -es 'length == 1 and (.[0] | .permission == "deny" and (.user_message | startswith("[subagent-dispatch]") and contains("blocked tool: Agent")))' "$OUT" >/dev/null \
+          || fail "Cursor delegation via $mode must still deny: $(cat "$OUT")"
+      else
+        [ "$(cat "$OUT")" = '{"permission":"allow"}' ] || fail "Cursor $tool via $mode must emit the allow document"
+      fi
+    done
+  done
+  pass "Cursor flag and Claude-compatible payload both allow ordinary tools and deny delegation with one decision"
+}
+
 test_malformed_transport_fails_open() {
   local rc payload
   for payload in '{not-json' '' '{}' '{"tool_name":null}'; do
@@ -287,5 +310,6 @@ test_escape_hatch_allows_deliberate_use
 test_task_worktree_and_non_firstmate_repo_are_inert
 test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
+test_cursor_transport_keeps_classifying
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
