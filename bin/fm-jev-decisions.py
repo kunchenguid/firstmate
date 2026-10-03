@@ -402,7 +402,8 @@ def main() -> None:
         f"{shlex.quote(str(fm_root.resolve() / 'bin' / 'fm-send.sh'))} "
     )
 
-    # Concurrently classify items
+    # Concurrently classify items. Mechanics here; interpretation is delegated to Jev per intent:
+    # the category arrives pre-interpreted and is only applied by fixed templates and policy gates.
     if withheld_reason:
         print(f"warning: {withheld_reason}", file=sys.stderr)
         for item in items:
