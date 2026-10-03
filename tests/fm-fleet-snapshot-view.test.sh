@@ -1152,6 +1152,56 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# 160 done rows and 80 task records are past the kernel per-argument limit
+# (120 rows alone already is). That busy-home shape has two symptoms:
+# contribution-input comes back empty, and --secondmate-home-summary spends
+# the same shape in per-task observation (about 40 seconds on this fixture),
+# which is the cost that blows the 60-second refresh deadline.
+# This test pins the empty-document failure.
+test_busy_home_contribution_input_survives_argument_limit() {
+  local home out err rc i id
+  home=$(make_home busy-argument-limit)
+  {
+    printf '## Done\n'
+    i=1
+    while [ "$i" -le 160 ]; do
+      printf -- '- [x] done-%04d - Delivered work %d https://github.com/example/sample/pull/%d (repo: sample) (kind: ship) (merged 2026-07-01)\n' \
+        "$i" "$i" "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+  i=1
+  while [ "$i" -le 80 ]; do
+    id=$(printf 'task-%04d' "$i")
+    fm_write_meta "$home/state/$id.meta" \
+      "kind=ship" \
+      "pr=https://github.com/example/sample/pull/$i" \
+      "pr_head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    i=$((i + 1))
+  done
+  err=$home/err
+  out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input 2>"$err")
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "busy home contribution input exited $rc: $(cat "$err")"
+  printf '%s' "$out" | jq -e '
+    (.backlog.present == true)
+      and (.backlog.records | length) == 160
+      and .backlog.records[0].id == "done-0001"
+      and .backlog.records[159].id == "done-0160"
+      and (.tasks | length) == 80
+      and (.tasks | map(.id) | sort | .[0]) == "task-0001"
+      and (.tasks | map(.id) | sort | .[79]) == "task-0080"
+      and (.tasks[] | select(.id == "task-0007") | .pr.url) == "https://github.com/example/sample/pull/7"
+      and (.tasks[] | select(.id == "task-0007") | .kind) == "ship"
+      and (.tasks[] | select(.id == "task-0007") | .merge_authority) == "attended"
+  ' >/dev/null \
+    || fail "busy home contribution input was empty or incomplete (rc=$rc bytes=${#out}): $(cat "$err")"
+  if grep -q 'Argument list too long' "$err"; then
+    fail "busy home contribution input still hit the argument limit"
+  fi
+  pass "busy home contribution input keeps the backlog and every task record"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1170,3 +1220,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_busy_home_contribution_input_survives_argument_limit
