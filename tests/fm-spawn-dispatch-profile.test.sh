@@ -560,6 +560,22 @@ test_codex_threads_model_and_max_effort() {
   pass "codex Luna receives --model and model_reasoning_effort max profile flags"
 }
 
+test_codex_threads_max_effort_for_gpt6_luna() {
+  local rec id out status launch
+  id=profile-codex-max6-z4a
+  rec=$(make_spawn_case profile-codex-max6 codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-luna --effort max)
+  status=$?
+  expect_code 0 "$status" "codex gpt-6-luna spawn with max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-luna max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread gpt-6-luna's max reasoning effort config"
+  pass "codex gpt-6-luna receives model_reasoning_effort max"
+}
+
 test_codex_omits_max_effort_for_unsupported_model() {
   local rec id out status launch
   id=profile-codex-max-unsupported-z4b
@@ -1904,6 +1920,7 @@ test_chained_raw_launch_strips_ai_trailer_in_every_step
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
+test_codex_threads_max_effort_for_gpt6_luna
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
