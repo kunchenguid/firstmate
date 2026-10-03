@@ -133,6 +133,7 @@ while IFS= read -r -d '' a; do rargs+=("$a"); done \
   < <(perl -MMIME::Base64=decode_base64 -e 'print decode_base64($ARGV[0])' "$argv_b64")
 cmd=${rargs[0]}
 rc=0
+/bin/sleep "${FM_FAKE_SSH_DELAY:-0}"
 env FM_HOME="$remote_home" FM_ROOT_OVERRIDE="$FM_REMOTE_CODE_ROOT" \
   "$FM_REMOTE_CODE_ROOT/bin/$cmd" "${rargs[@]:1}" || rc=$?
 if [ "${FM_FAKE_SSH_AMBIGUOUS:-0}" = 1 ] \
@@ -774,6 +775,51 @@ SH
   done
 }
 
+test_remote_tiny_budget_preserves_confirmation() {
+  local delay dir fb ssh_log home rhome rc pend rec
+  for delay in 1 3; do
+    dir="$TMP_ROOT/remote-tiny-budget-$delay"; mkdir -p "$dir"
+    fb=$(make_stubs "$dir"); ssh_log="$dir/ssh.log"; : > "$ssh_log"
+    ln -sf /bin/sleep "$fb/sleep"
+    rhome=$(setup_remote_secondmate_home "remote-tiny-budget-$delay")
+    home=$(setup_remote_parent_home "remote-tiny-budget-$delay" "$rhome")
+    cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+rec=$(find "$FM_FAKE_RING_HOME/state/parent-route/rsm.inbox" -maxdepth 1 -name '*.msg' | head -1)
+[ -n "$rec" ] || exit 91
+printf 'notification-start\n' >> "$FM_FAKE_RING_LOG"
+/bin/sleep 30
+exit 1
+SH
+    chmod +x "$fb/herdr"
+    rc=0
+    send_env "$fb" "$home" "$ssh_log" \
+      FM_SEND_REMOTE_BUDGET=5 FM_FAKE_SSH_DELAY="$delay" \
+      FM_BACKEND_HERDR_CLIENT_SESSION=fm-remote FM_BACKEND_HERDR_BIN="$fb/herdr" \
+      FM_FAKE_RING_HOME="$rhome" FM_FAKE_RING_LOG="$dir/ring.log" \
+      "$SEND" rsm "please rename the metric" >"$dir/out" 2>"$dir/err" || rc=$?
+    expect_code 0 "$rc" "tiny remaining budget must still confirm durable acceptance: $(cat "$dir/err")"
+    if [ "$delay" -eq 1 ]; then
+      assert_grep 'notification-start' "$dir/ring.log" "the bounded notification must start after enqueue"
+      assert_contains "$(cat "$dir/err")" 'doorbell attempt exceeded its' \
+        "the stalled notification must time out within the remaining budget"
+    else
+      [ ! -f "$dir/ring.log" ] || fail "notification started without a confirmation reserve"
+      assert_contains "$(cat "$dir/err")" 'send budget reserved for confirmation' \
+        "the depleted budget must skip notification"
+    fi
+    rec=$(remote_inbox_records "$rhome")
+    [ -f "$rec" ] || fail "tiny-budget acceptance must retain exactly one durable record"
+    pend=$(pending_record "$home")
+    [ -n "$pend" ] && [ -n "$(fm_pending_reply_get "$pend" delivered_epoch)" ] \
+      || fail "tiny-budget acceptance left delivery unconfirmed"
+    [ "$(fm_pending_reply_get "$pend" phase)" = awaiting_report ] \
+      || fail "tiny-budget acceptance must await the worker's separate reply"
+  done
+  pass "fm-send remote: tiny remaining budgets bound or skip notification and confirm acceptance"
+}
+
 test_remote_enqueue_failure_never_confirms_acceptance() {
   local dir fb ssh_log home rhome rc
   dir="$TMP_ROOT/remote-enqueue-failure"; mkdir -p "$dir"
@@ -886,6 +932,7 @@ test_remote_exit3_no_longer_delivered
 test_remote_transport_loss_preserves_expectation
 test_remote_send_budget_bounds_busy_lane
 test_remote_slow_notification_confirms_acceptance
+test_remote_tiny_budget_preserves_confirmation
 test_remote_enqueue_failure_never_confirms_acceptance
 test_local_pending_reports_delivered_unconfirmed
 test_local_pending_does_not_close_resolve_key

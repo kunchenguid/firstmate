@@ -6,7 +6,7 @@
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
-#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget]
+#   fm-remote-secondmate-control.sh send <id> <message> [fire-and-forget|""] [deadline-epoch]
 #   fm-remote-secondmate-control.sh key <id> <key>
 #   fm-remote-secondmate-control.sh capture <id> [lines]
 #   fm-remote-secondmate-control.sh observe <id>
@@ -52,8 +52,11 @@
 # the default-off path. print_route echoes the carrier the endpoint actually
 # holds, including for an already-alive endpoint that was not relaunched, so the
 # parent records the identity the agent really received rather than an intent.
-# A send's post-enqueue doorbell attempt is bounded to five seconds; expiry
-# still confirms durable acceptance, not worker acknowledgement or a reply.
+# A send's post-enqueue doorbell attempt is bounded to five seconds, capped by
+# the parent's remaining deadline-epoch budget minus two seconds for timeout
+# cleanup and result relay (the hosts' epoch clocks must agree). With at most
+# two seconds remaining, no doorbell is attempted; the inbox watcher re-rings.
+# Expiry still confirms durable acceptance, not worker acknowledgement or a reply.
 # Enqueue and synchronous lifecycle commands retain their existing bounds.
 set -eu
 
@@ -275,8 +278,13 @@ cmd_relaunch() {
 
 cmd_send() {
   local id=$1 message=$2 delivery_mode=${3:-} rec ring_rc=0 meta meta_lock
+  local deadline=${4:-} remaining ring_budget=5
   validate_id "$id"
   [ -z "$delivery_mode" ] || [ "$delivery_mode" = fire-and-forget ] || die "invalid send delivery mode"
+  case "$deadline" in
+    '') ;;
+    *[!0-9]*|0*) die "send deadline must be a positive epoch second" ;;
+  esac
   validate_home "$id"
   meta=$(meta_path "$id")
   meta_lock=$(fm_meta_lock_path "$meta") || die "remote secondmate metadata lock path is invalid"
@@ -312,7 +320,15 @@ cmd_send() {
   # budget after acceptance. Bound the whole best-effort ring, including its
   # liveness and foreign-composer checks, in a child process group; the timeout
   # owner also reaps stalled descendants. The durable inbox remains recoverable.
-  fm_run_timed 5 bash -c '
+  if [ -n "$deadline" ]; then
+    remaining=$(( deadline - $(date +%s) ))
+    if [ "$remaining" -le 2 ]; then
+      printf 'notice: doorbell skipped (send budget reserved for confirmation); the steer is durably recorded at %s\n' "$rec" >&2
+      return 0
+    fi
+    [ "$remaining" -ge 7 ] || ring_budget=$(( remaining - 2 ))
+  fi
+  fm_run_timed "$ring_budget" bash -c '
     . "$1"
     shift
     fm_task_inbox_ring "$@"
@@ -322,7 +338,7 @@ cmd_send() {
     1) printf 'notice: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at %s\n' "$rec" >&2 ;;
     2) printf 'notice: doorbell did not reach %s; the steer is durably recorded at %s\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
     3) printf 'notice: doorbell not typed because the agent in %s has exited; the steer is durably recorded at %s for recovery\n' "$REMOTE_ENDPOINT_TARGET" "$rec" >&2 ;;
-    124) printf 'notice: doorbell attempt exceeded its 5s budget; the steer is durably recorded at %s for recovery\n' "$rec" >&2 ;;
+    124) printf 'notice: doorbell attempt exceeded its %ss budget; the steer is durably recorded at %s for recovery\n' "$ring_budget" "$rec" >&2 ;;
   esac
 }
 
@@ -454,7 +470,7 @@ case "${1:-}" in
   relaunch) shift; [ "$#" -eq 4 ] || usage; cmd_relaunch "$@" ;;
   state) shift; [ "$#" -eq 1 ] || usage; validate_id "$1"; validate_home "$1"; state_value "$1" ;;
   route) shift; [ "$#" -eq 1 ] || usage; cmd_route "$1" ;;
-  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage; cmd_send "$@" ;;
+  send) shift; [ "$#" -ge 2 ] && [ "$#" -le 4 ] || usage; cmd_send "$@" ;;
   key) shift; [ "$#" -eq 2 ] || usage; cmd_key "$@" ;;
   capture) shift; [ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage; cmd_capture "$@" ;;
   observe) shift; [ "$#" -eq 1 ] || usage; cmd_observe "$@" ;;
