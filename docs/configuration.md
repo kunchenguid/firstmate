@@ -448,6 +448,13 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 
+Herdr Codex ship tasks can opt into NVIDIA OpenShell through the home-local,
+gitignored `config/herdr-codex-openshell` file. Its gateway and provider
+configuration, task-scoped file-transfer bridge, worktree synchronization,
+supported scope, and recovery procedure are owned by
+[`docs/openshell-codex.md`](openshell-codex.md). The setting does not change
+other backend or harness launches.
+
 ### Liveness classification
 
 The session-start secondmate liveness sweep and the watcher's secondmate liveness tick use the recovery-grade `fm_backend_agent_state` classifier where verified.

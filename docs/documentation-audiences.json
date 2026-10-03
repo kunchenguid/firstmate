@@ -28,6 +28,7 @@
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
+    "docs/openshell-codex.md",
     "docs/zellij-backend.md",
     "docs/orca-backend.md",
     "docs/cmux-backend.md",
@@ -387,6 +388,10 @@
     {
       "path": "docs/jev-guards.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/openshell-codex.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/orca-backend.md",
