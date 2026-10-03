@@ -1,4 +1,4 @@
-// Live-Pi reminder over the original task record. MAIN owns material progress
+// Live-Pi reminder over the canonical per-task record. MAIN owns material progress
 // updates; existing executor, effect, lease, inbox, merge and cleanup owners act.
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -149,7 +149,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     if (!current()) throw new Error("readback receiver generation changed");
     if (!observations.length && !reconciliations.length) return;
     // A persisted native delivery is only a pacing receipt.  Progress remains
-    // in the original task record and changes only through MAIN's update.
+    // in the canonical task record and changes only through MAIN's update.
     for (const entry of ctx.sessionManager.getBranch()) {
       if (entry.type === "custom_message") readDelivery(entry);
       if (entry.type === "custom" && entry.customType === "fm-continuation-branch-delivery") {
@@ -162,7 +162,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
     for (const item of reconciliations) {
       const id = `q.${item.key}`;
       if (!submitted.has(id) && !delivered.has(id)) escalations.push({ id, task: item.task_id,
-        reason: `task progress read refused; inspect the original task record: ${item.reason}`, reconciliation: true });
+        reason: `task progress read refused; inspect the canonical task record: ${item.reason}`, reconciliation: true });
     }
     for (const item of observations) {
       const paceId = `progress:${item.task_id}`;
@@ -327,7 +327,7 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
 
   registerFirstmateTool(pi, {
     name: "fm_task_continuation", label: "Task continuation",
-    description: "Read or materially update compact MAIN-owned continuation fields in the original task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step with the record_token returned by read. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
+    description: "Read or materially update compact MAIN-owned continuation fields in the canonical per-task record. The task title is its goal; update records the acceptance method, current state, remaining gap and next step. A read token may be returned by older callers but is not an update precondition. Unchanged waits and individual commands need no update. This tool neither discovers tasks nor edits intent, reads history, executes work, or accepts a goal from process success.",
     executionMode: "sequential",
     parameters: Type.Object({ action: Type.Union([Type.Literal("read"), Type.Literal("update")]),
       task: Type.String(), record_token: Type.Optional(Type.String()),
@@ -341,11 +341,13 @@ export function installTaskContinuation(pi: ExtensionAPI, options: {
           if (!atom(params.task)) throw new Error("read requires an existing canonical task id");
           result = await command(["progress", params.task]);
         } else if (params.action === "update") {
-          if (!atom(params.task) || !params.record_token || !params.progress) {
-            throw new Error("update requires task, the record_token returned by read, and compact progress fields");
+          if (!atom(params.task) || !params.progress) {
+            throw new Error("update requires task and compact progress fields");
           }
-          result = await command(["update-progress", params.task, "--expected-token", params.record_token,
-            "--progress", JSON.stringify(params.progress)]);
+          const args = ["update-progress", params.task];
+          if (params.record_token) args.push("--expected-token", params.record_token);
+          args.push("--progress", JSON.stringify(params.progress));
+          result = await command(args);
         } else {
           throw new Error("unsupported compact continuation action");
         }

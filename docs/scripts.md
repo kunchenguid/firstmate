@@ -67,9 +67,10 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-watch-checkpoint.sh` | Run one bounded foreground watcher checkpoint for Codex-style supervision            |
 | `fm-watch.sh`            | Singleton-safe watcher: absorb benign wakes and exit on actionable ones |
 | `fm-inactive-reconcile.sh` | Reconcile long-inactive direct crewmate terminal outcomes without forge access |
-| `fm-task-progress.py`    | Parse and replace the compact MAIN-owned continuation block in an existing task body |
-| `fm-task-progress-lib.sh` | Read and update compact original-row progress through the configured backlog owner |
-| `fm-task-state.sh`       | Read provider-aware task state, compact original-row progress, and historical lifecycle recovery interfaces |
+| `fm-task-record.py`      | Own one atomic business and progress record per task plus unified on-demand list/filter reads |
+| `fm-task-import.sh`      | Import retained markdown backlog/archive evidence through the fleet snapshot parser |
+| `fm-task-progress-lib.sh` | Project MAIN-owned continuation from the canonical per-task record |
+| `fm-task-state.sh`       | Read provider-aware task state, compact per-task progress, and historical lifecycle recovery interfaces |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-native-review.sh`    | Bind exact committed base/candidate plus task intent to a supported harness-native review |
 | `fm-nm-run-lib.sh`       | Historical validation run-attribution compatibility used by state and cleanup      |
@@ -79,10 +80,10 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
 | `fm-ff-lib.sh`           | Shared guarded fast-forward helper for origin pulls |
 | `fm-lock-lib.sh`         | Shared "is this git lock provably abandoned?" proof used by teardown and fleet-sync   |
-| `fm-tasks-axi.sh`        | Run `tasks-axi` against this home's backlog from any working directory               |
+| `fm-tasks-axi.sh`        | Compatibility task CRUD entrypoint over canonical records, plus the explicit non-task public-followup bridge |
 | `fm-tasks-axi-lib.sh`    | Shared backlog-backend selector, markdown archive resolver, and `tasks-axi` compatibility probe |
-| `fm-task-disposition-lib.sh` | Classify task identities against the current backlog and configured markdown Done archive |
-| `fm-backlog-transition-lib.sh` | Pair task-record changes with their backlog transitions and replay interrupted closes |
+| `fm-task-disposition-lib.sh` | Guard effects with canonical dispositions and retained legacy markdown evidence |
+| `fm-backlog-transition-lib.sh` | Apply canonical task transitions and replay interrupted operation-owned closes |
 | `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside status, outcome-backstop, decision, divergence, recovery, and supervision checks |
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |

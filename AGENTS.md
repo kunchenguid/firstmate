@@ -206,7 +206,7 @@ On an opted-in Pi primary, prefer `fm_short_submit` for an independent read-only
 
 Dispatch only through `bin/fm-task-dispatch.sh`, whose `local-agent` path delegates to `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 Every local-agent spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-When the configured tasks-axi backlog gate applies, the local spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
+The local spawn itself moves the canonical task record to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember.
 Before selecting or dispatching `remote-agent/aime` or `remote-agent/ida`, operating a legacy `cloud-worker/aime` record, adopting or retiring remote work, handling its process-event wake or result, or responding to a remote cancellation request, load `cloud-research-worker`.
 After spawning, confirm the worker is processing the brief, handle any trust dialog through `harness-adapters`, and record ship or scout work as under way.
 
@@ -302,8 +302,8 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
 At each actionable review, re-read the task's durable goal contract, compare its acceptance evidence with the current artifacts, identify the remaining gap, and take or route the next authorized action before yielding.
-At intake, make the ordinary task title state the goal and record its acceptance method, current state, remaining gap and next step through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
-Update that original task record only after material changes; [goal-directed continuation](docs/task-continuation.md) owns progress recovery while the existing operation owners retain archive and residual-cleanup responsibilities.
+At intake, make the canonical `data/<task>/task.json` title state the goal and record its acceptance method, current state, remaining gap and next step through `bin/fm-task-state.sh progress|update-progress` before the task leaves MAIN's current context.
+Update that canonical task record only after material changes; [goal-directed continuation](docs/task-continuation.md) owns progress recovery while the existing operation owners retain archive and residual-cleanup responsibilities.
 An empty worker inbox, process exit, provider success, status `done`, implementation commit, report, or intermediate milestone never closes that comparison by itself.
 Do not broaden authority to close a goal gap: stop only at a genuine permission boundary, a decision the captain must make, an explicit stop, or an evidenced external blocker whose bounded retries and materially different authorized recovery path are exhausted.
 Relay may require that same live cycle with no fleet work.
@@ -325,7 +325,7 @@ Handle actionable wakes as follows:
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
-4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
+4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the relevant task records, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When Relay-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, use its promised-final reconciliation when a typed public commitment exists, otherwise post the final completion follow-up so the link clears even if earlier follow-ups were spent.
@@ -389,21 +389,21 @@ Use plain chat for decisions and durable local files for structured reports.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
-## 10. Backlog contract
+## 10. Task-record contract
 
-The configured `tasks-axi` backend is the durable queue; the tracked default is `data/backlog.md`.
-It tracks work items only, never agents.
+The durable work queue is the set of canonical `data/<task>/task.json` records.
+Each record tracks one work item and its descriptive progress, never an agent; `bin/fm-fleet-snapshot.sh` derives aggregate views without persisting a second index.
 A decision is simply a task held for the captain: create the task with `bin/fm-tasks-axi.sh add` when needed, then always hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers it.
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or structured reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
-When the automatic transition gate applies, dispatch, business completion, and resource cleanup move the item themselves - `bin/fm-spawn.sh`, `bin/fm-task-retire.sh`, and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
+Dispatch, business completion, and resource cleanup update the named record themselves - `bin/fm-spawn.sh`, `bin/fm-task-retire.sh`, and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
 
-`.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
-Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise; keep only the configured recent Done entries.
+`bin/fm-task-record.py` owns the record schema and atomic mutation mechanics; `docs/configuration.md` owns layout and explicit legacy import.
+Use `bin/fm-tasks-axi.sh` for routine task CRUD so existing callers reach the canonical record owner from any directory.
 
 Keep free-form notes free of temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.
-Inspect the current task note before replacing its considered body, and archive the superseded body when recoverability matters rather than appending by default.
+Inspect the current task note before replacing its considered body, and preserve superseded material in the record history when recoverability matters rather than appending by default.
 Verify volatile details against their authoritative config, live system, or API before acting, and correct or delete stale prose immediately.
 Preserve durable structured identifiers, dependencies, and completion artifact links, and route reusable knowledge to section 6 rather than scattering it through task notes.
 

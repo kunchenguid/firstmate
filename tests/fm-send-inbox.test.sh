@@ -207,15 +207,16 @@ test_branch_compact_progress_routes_exact_next_step() {
     'arbitrary compact payload did not request MAIN authority'
 
   sed -i 's/^spawn_gen=s1$/spawn_gen=s2/' "$dir/home/state/t1.meta"
+  [ "$(FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" progress t1 | jq -r .record_token)" = "$token" ] \
+    || fail 'executor-generation change altered descriptive progress identity'
   run_send "$dir" "$err" \
     "FM_SUPERVISION_ACTOR=branch" "FM_LEASE_HOLDER_PID=$$" "FM_BRANCH_GENERATION=1" "FM_BRANCH_TASK_SCOPE=[\"t1\"]" \
     "$branch_env" "FM_BRANCH_MAIN_SESSION_FILE=$dir/home/main.jsonl" -- \
-    t1 --idempotent "Start the existing no-mistakes run"
-  rc=$?
-  expect_code 6 "$rc" "stale compact executor generation"
-  assert_contains "$(cat "$err")" "executor generation changed" \
-    'stale compact admission did not preserve executor-generation fencing'
-  pass 'Branch compact progress routes only the exact idempotent next_step and never re-rings an acknowledged receipt'
+    t1 --idempotent "Start the existing no-mistakes run" \
+    || fail 'descriptive progress was incorrectly coupled to executor generation'
+  count=$(find "$dir/home/state/t1.inbox" -name '*.msg' -type f | wc -l | tr -d ' ')
+  [ "$count" = 3 ] || fail "new executor generation did not receive its own effect-owner inbox record"
+  pass 'Branch compact progress keeps one descriptive identity while the effect owner independently binds delivery to executor generation'
 }
 
 test_pending_composer_does_not_gate_native_prompt() {
@@ -501,34 +502,25 @@ test_removed_lifecycle_action_flags_refuse() {
   pass "fm-send: removed lifecycle action flags cannot bypass compact continuation"
 }
 
-test_done_row_with_open_gap_allows_repair_steer() {
-  local dir err
+test_done_row_with_open_gap_requires_main_reopen() {
+  local dir err rc
   dir=$(setup_case done-open-gap)
   err="$dir/send.err"
   mkdir -p "$dir/home/data"
-  printf 'backend="markdown"\n[markdown]\npath="data/backlog.md"\n' >"$dir/home/.tasks.toml"
-  cat >"$dir/home/data/backlog.md" <<'EOF'
-## In flight
-
-## Queued
-
-## Done
-- [x] t1 - Prematurely closed fixture (kind: ship)
-  <!-- firstmate-progress:v1 context=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->
-  acceptance: "MAIN verifies the complete outcome"
-  current_state: "Only a partial result exists"
-  remaining_gap: "Acceptance is not met"
-  next_step: "Continue the authorized work"
-  <!-- /firstmate-progress -->
-EOF
-  run_send "$dir" "$err" -- t1 "repair the unfinished goal" \
-    || fail "Done row with an open compact gap rejected its repair steer: $(cat "$err")"
-  [ -f "$dir/home/state/t1.inbox/001.msg" ] \
-    || fail "Done row with an open compact gap did not retain its repair steer"
-  pass "fm-send: Done cannot hide a nonempty compact gap"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" add t1 'Prematurely closed fixture' --kind ship --start >/dev/null
+  FM_HOME="$dir/home" "$ROOT/bin/fm-task-state.sh" update-progress t1 --progress \
+    '{"acceptance":"MAIN verifies the complete outcome","current_state":"Only a partial result exists","remaining_gap":"Acceptance is not met","next_step":"Continue the authorized work"}' >/dev/null
+  FM_HOME="$dir/home" "$ROOT/bin/fm-tasks-axi.sh" 'done' t1 >/dev/null
+  run_send "$dir" "$err" -- t1 "repair the unfinished goal"
+  rc=$?
+  [ "$rc" -eq 6 ] || fail "Done task repair steer exited $rc instead of 6: $(cat "$err")"
+  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
+    'Done task repair refusal did not require MAIN to reopen the business task'
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail 'Done task repair created an inbox record'
+  pass "fm-send: a Done task with an open gap requires MAIN to reopen before routing effects"
 }
 
-test_non_markdown_terminal_read_refuses_steer() {
+test_noncanonical_external_task_refuses_steer() {
   local dir err rc
   dir=$(setup_case non-markdown-terminal)
   err="$dir/send.err"
@@ -546,10 +538,10 @@ SH
   run_send "$dir" "$err" -- t1 "must not resume external terminal work"
   rc=$?
   [ "$rc" -eq 6 ] || fail "non-Markdown terminal steer exited $rc instead of 6: $(cat "$err")"
-  assert_contains "$(cat "$err")" 'explicitly terminal (done)' \
-    "non-Markdown terminal steer did not use the backend-neutral exact read"
+  assert_contains "$(cat "$err")" 'cannot assume it is nonterminal' \
+    "an external row without a canonical task record did not fail closed"
   [ ! -d "$dir/home/state/t1.inbox" ] || fail "non-Markdown terminal steer created an inbox record"
-  pass "fm-send: backend-neutral task reads preserve terminal effect guards"
+  pass "fm-send: external rows without canonical task records cannot bypass effect guards"
 }
 
 test_text_steer_rides_inbox
@@ -569,5 +561,5 @@ test_empty_message_refused
 test_terminal_task_refuses_new_steer
 test_terminal_task_refuses_native_task_sends
 test_removed_lifecycle_action_flags_refuse
-test_done_row_with_open_gap_allows_repair_steer
-test_non_markdown_terminal_read_refuses_steer
+test_done_row_with_open_gap_requires_main_reopen
+test_noncanonical_external_task_refuses_steer

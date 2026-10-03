@@ -49,26 +49,27 @@ fm_cleanup_completion_mode() ( # <task> <generation>; emits accepted|archived
   progress_error=$(mktemp "${TMPDIR:-/tmp}/fm-cleanup-progress.XXXXXX") || return 1
   trap 'rm -f "$progress_error"' EXIT
   if projection=$(fm_task_progress_read "$id" 2>"$progress_error"); then
-    # A current original task row always outranks any retained rich-lifecycle
-    # file from an older scope. Worker exit, delivery, or historical acceptance
-    # therefore cannot clear a current compact gap.
+    # A current canonical task record always outranks any retained
+    # rich-lifecycle file from an older scope.
+    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = archived ]; then
+      printf 'archived\n'; return 0
+    fi
+    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ]; then
+      printf 'accepted\n'; return 0
+    fi
     if printf '%s' "$projection" | jq -e '
       .recorded == true and .task_state == "in_flight" and .task_held == "no" and
        .task_blocked == "no" and .remaining_gap == "" and .next_step == ""' >/dev/null; then
       printf 'accepted\n'; return 0
     fi
     values=$(fm_task_progress_values "$id") || return $?
-    # The context digest is a concurrency token, not a second progress store.
-    # State/hold changes may invalidate it without changing MAIN's four raw
-    # fields, so their empty gap remains authoritative. Legacy Done rows that
-    # predate compact progress also retain their exact terminal fact.
+    # Backlog disposition may deactivate branch routing without changing
+    # MAIN's four fields, so an empty gap remains authoritative.
+    # Legacy Done rows that predate compact progress retain their terminal fact.
     if [ "$values" != null ] && printf '%s' "$projection" | jq -e \
         '(.context_relation == "exact" or .context_relation == "disposition_only") and
+         .acceptance != "" and .current_state != "" and
          .remaining_gap == "" and .next_step == ""' >/dev/null; then
-      printf 'accepted\n'; return 0
-    fi
-    if [ "$(printf '%s' "$projection" | jq -r '.task_state')" = "done" ] && \
-        [ "$values" = null ]; then
       printf 'accepted\n'; return 0
     fi
     echo "REFUSED: compact task $id is not MAIN-accepted; clear its current remaining gap or explicitly archive it before cleanup" >&2

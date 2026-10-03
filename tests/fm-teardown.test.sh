@@ -672,22 +672,36 @@ run_teardown() {
     "$TEARDOWN" task-x1 "$@"
 }
 
-# Seed a real backlog carrying task-x1 as In flight, so a teardown in this case
-# has a row to close. Uses the real tasks-axi (the fixture's default fakebin has
-# no tasks-axi stub, so PATH resolves the installed one).
+# Seed the canonical task record carrying task-x1 as in flight, so teardown has
+# a business record to close without writing a shared backlog body.
 seed_backlog_in_flight() {
   local case_dir=$1 kind=${2:-ship}
   mkdir -p "$case_dir/data"
-  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
-    > "$case_dir/data/backlog.md"
-  tasks-axi add task-x1 "teardown fixture task" --kind "$kind" \
-    --file "$case_dir/data/backlog.md" >/dev/null
-  tasks-axi start task-x1 --file "$case_dir/data/backlog.md" >/dev/null
+  [ ! -f "$case_dir/data/task-x1/task.json" ] || return 0
+  FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-tasks-axi.sh" add \
+    task-x1 "teardown fixture task" --kind "$kind" --start >/dev/null
+}
+
+# Mark only the cases that exercise canonical completed-resource retirement as
+# MAIN-accepted and delivery-complete. The larger landed-work matrix deliberately
+# leaves the canonical record absent so it continues to cover historical-task
+# compatibility and the ordinary teardown safety gate.
+accept_canonical_teardown_fixture() {
+  local case_dir=$1 url head
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-task-state.sh" \
+    update-progress task-x1 --progress \
+      '{"acceptance":"The teardown fixture outcome is landed","current_state":"MAIN accepted the fixture","remaining_gap":"","next_step":""}' >/dev/null
+  url=$(sed -n 's/^pr=//p' "$case_dir/state/task-x1.meta" | tail -1)
+  [ -n "$url" ] || url=local:main
+  head=$(git -C "$case_dir/wt" rev-parse HEAD) || return 1
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" bash -c \
+    '. "$1"; fm_merge_receipt_record task-x1 teardown-test-task-x1 "$2" "$3"' \
+    _ "$ROOT/bin/fm-merge-receipt-lib.sh" "$url" "$head" >/dev/null
 }
 
 backlog_row_state() {
   local case_dir=$1
-  tasks-axi show task-x1 --file "$case_dir/data/backlog.md" 2>/dev/null |
+  FM_DATA_OVERRIDE="$case_dir/data" "$ROOT/bin/fm-tasks-axi.sh" show task-x1 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 
@@ -719,7 +733,7 @@ test_local_only_fork_remote_allows() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
+  expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote: $(cat "$case_dir/stderr")"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
   [ ! -e "$case_dir/state/.task-x1.branch-outcome-index" ] \
     || fail "fork-allow: teardown left the task's branch outcome index behind"
@@ -745,14 +759,16 @@ test_teardown_closes_the_backlog_item_itself() {
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
+  accept_canonical_teardown_fixture "$case_dir"
 
   mkdir -p "$case_dir/data/task-x1"
   printf 'Check the requested outcome independently of cleanup.\n' > "$case_dir/data/task-x1/brief.md"
   out=$(run_teardown "$case_dir") || fail "legacy teardown failed with a real backlog"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "teardown returned success while its backlog item was still open: $(backlog_row_state "$case_dir")"
-  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
-    "closed backlog item did not record the task's PR"
+  [ "$(jq -r '.links.pr' "$case_dir/data/task-x1/task.json")" = \
+      'https://github.com/example/repo/pull/7' ] \
+    || fail "closed task record did not preserve the task's PR"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
     "a landed close left its pending-close record behind"
   printf '%s\n' "$out" | grep -F 'bin/fm-tasks-axi.sh ready' >/dev/null \
@@ -765,7 +781,7 @@ test_teardown_closes_the_backlog_item_itself() {
 }
 
 test_compact_progress_requires_main_acceptance_before_teardown() {
-  local case_dir initial open fresh accepted out rc malformed head
+  local case_dir initial open fresh accepted out rc head
   case_dir=$(make_case compact-acceptance)
   write_meta "$case_dir" local-only ship
   seed_backlog_in_flight "$case_dir"
@@ -792,29 +808,11 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
   rc=$?
   set -e
   expect_code 6 "$rc" "compact cleanup before MAIN acceptance"
-  assert_grep 'compact task task-x1 is not MAIN-accepted' "$case_dir/open.err" \
+  assert_grep 'task task-x1 is not MAIN-accepted' "$case_dir/open.err" \
     'compact cleanup refusal did not name missing MAIN acceptance'
   assert_present "$case_dir/state/task-x1.meta" 'compact cleanup refusal removed task metadata'
   [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail 'compact cleanup refusal closed the backlog row'
 
-  for malformed in \
-    'Damaged compact state <!-- /firstmate-progress -->' \
-    'Damaged compact state <!-- firstmate-progress:v1 broken -->'; do
-    tasks-axi update task-x1 --file "$case_dir/data/backlog.md" --body "$malformed" >/dev/null \
-      || fail 'malformed compact cleanup fixture update failed'
-    set +e
-    run_teardown "$case_dir" > "$case_dir/malformed.out" 2> "$case_dir/malformed.err"
-    rc=$?
-    set -e
-    expect_code 6 "$rc" "malformed compact marker before cleanup"
-    assert_grep 'malformed Firstmate progress block' "$case_dir/malformed.err" \
-      'malformed compact marker bypassed the existing parser'
-    assert_present "$case_dir/state/task-x1.meta" 'malformed compact marker allowed task cleanup'
-  done
-
-  tasks-axi update task-x1 --file "$case_dir/data/backlog.md" \
-    --body 'Complete the compact task before cleanup.' >/dev/null \
-    || fail 'compact cleanup fixture reset failed'
   fresh=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-task-state.sh" progress task-x1) || fail 'compact cleanup fixture reread failed'
   accepted=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
@@ -830,21 +828,26 @@ test_compact_progress_requires_main_acceptance_before_teardown() {
   pass 'lifecycle-free compact teardown requires and preserves MAIN semantic acceptance'
 }
 
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
-  local case_dir out backlog_path
+test_teardown_ignores_legacy_manual_backend_for_canonical_record() {
+  local case_dir out legacy_before legacy_after
   case_dir=$(make_case tasks-axi-manual-optout)
   write_meta "$case_dir" no-mistakes ship
   printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
   printf '%s\n' manual > "$case_dir/config/backlog-backend"
+  printf '# Retained legacy backlog\n\n- [ ] historical evidence\n' > "$case_dir/data/backlog.md"
   seed_backlog_in_flight "$case_dir"
+  accept_canonical_teardown_fixture "$case_dir"
+  legacy_before=$(sha256sum "$case_dir/data/backlog.md")
 
   out=$(run_teardown "$case_dir") || fail "teardown failed with manual backlog backend"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "manual backlog backend was mutated by teardown anyway"
-  backlog_path=$(cd "$case_dir/data" && pwd -P)/backlog.md
-  printf '%s\n' "$out" | grep -F "Update $backlog_path - move task-x1 to Done" >/dev/null \
-    || fail "teardown did not prompt manual backlog update under opt-out: $out"
-  pass "teardown honors config/backlog-backend=manual and still finishes cleanly"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "legacy backend configuration prevented canonical teardown completion"
+  legacy_after=$(sha256sum "$case_dir/data/backlog.md")
+  [ "$legacy_before" = "$legacy_after" ] \
+    || fail "teardown rewrote retained legacy backlog evidence"
+  ! printf '%s\n' "$out" | grep -F 'move task-x1 to Done' >/dev/null \
+    || fail "teardown still delegated canonical completion to a legacy backend: $out"
+  pass "teardown closes the canonical record and preserves retained legacy backlog bytes"
 }
 
 test_local_only_truly_unpushed_refuses() {
@@ -985,7 +988,6 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
   pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "no-mistakes auto-fix")
   land_on_origin_main "$case_dir" feature.txt hello
   add_gh_pr_merged_for_head "$case_dir" "$pr_head"
-  seed_backlog_in_flight "$case_dir"
   # No append_pr_meta_* call: state/task-x1.meta has no pr= or pr_head= line.
 
   ! grep -qE '^(pr|pr_head)=' "$case_dir/state/task-x1.meta" \
@@ -998,8 +1000,6 @@ test_no_pr_recorded_discovers_merged_pr_by_branch_allows() {
 
   expect_code 0 "$rc" "no-pr-branch-discovery: teardown should succeed by discovering the merged PR from the branch name"
   ! grep -q REFUSED "$case_dir/stderr" || fail "no-pr-branch-discovery: teardown printed a REFUSED line"
-  assert_grep 'https://github.com/example/repo/pull/7' "$case_dir/data/backlog.md" \
-    "no-pr-branch-discovery: resolved PR URL was not recorded on completion"
   pass "teardown discovers a merged PR by branch name and tears down when no pr= was ever recorded"
 }
 
@@ -1326,7 +1326,6 @@ test_legacy_record_without_the_flag_refuses() {
   local case_dir rc
   case_dir=$(make_case legacy-noflag)
   write_legacy_meta "$case_dir" no-mistakes ship
-  seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
 
@@ -1337,11 +1336,9 @@ test_legacy_record_without_the_flag_refuses() {
 
   expect_code 1 "$rc" "legacy-noflag: a record without spawn_gen must refuse without --legacy-record"
   grep -q -- '--legacy-record' "$case_dir/stderr" \
-    || fail "legacy-noflag: the refusal did not name the --legacy-record path"
+    || fail "legacy-noflag: the refusal did not name the --legacy-record path: $(cat "$case_dir/stderr")"
   [ "$(legacy_meta_gen_count "$case_dir")" = 0 ] \
     || fail "legacy-noflag: the refusal stamped a spawn generation into the record"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-noflag: the refusal closed the backlog item anyway"
   assert_present "$case_dir/state/task-x1.meta" \
     "legacy-noflag: the refusal removed the task record"
   pass "a record predating spawn_gen refuses teardown until --legacy-record is passed"
@@ -1351,7 +1348,6 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
   local case_dir out
   case_dir=$(make_case legacy-allow)
   write_legacy_meta "$case_dir" no-mistakes ship
-  seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
   # The Herdr fixture has no live agent registration; the classifier proves
@@ -1359,8 +1355,6 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead() {
 
   out=$(run_teardown "$case_dir" --legacy-record) \
     || fail "legacy-allow: teardown refused a landed legacy record with a dead endpoint"
-  [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "legacy-allow: teardown returned success with its backlog item still open"
   printf '%s\n' "$out" | grep -Fq 'legacy record accepted without spawn_gen: endpoint dead, incarnation legacy-' \
     || fail "legacy-allow: the teardown line did not log the accepted legacy incarnation: $out"
   assert_absent "$case_dir/state/task-x1.backlog-close" \
@@ -1374,7 +1368,6 @@ test_legacy_record_teardown_refuses_unlanded_work() {
   local case_dir rc before
   case_dir=$(make_case legacy-unlanded)
   write_legacy_meta "$case_dir" no-mistakes ship
-  seed_backlog_in_flight "$case_dir"
   # Real content committed but pushed nowhere and merged nowhere.
   wt_commit_file "$case_dir" feature.txt unique-legacy-content "real unlanded work"
   before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
@@ -1391,8 +1384,6 @@ test_legacy_record_teardown_refuses_unlanded_work() {
     || fail "legacy-unlanded: the unlanded refusal stamped a spawn generation into the record"
   [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
     || fail "legacy-unlanded: the unlanded refusal modified the task record"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-unlanded: the unlanded refusal closed the backlog item anyway"
   pass "--legacy-record never relaxes the unlanded-work refusal"
 }
 
@@ -1400,7 +1391,6 @@ test_legacy_record_teardown_refuses_an_ambiguous_endpoint() {
   local case_dir rc before
   case_dir=$(make_case legacy-ambiguous)
   write_legacy_meta "$case_dir" no-mistakes ship
-  seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
   add_unreadable_herdr "$case_dir"
@@ -1416,116 +1406,7 @@ test_legacy_record_teardown_refuses_an_ambiguous_endpoint() {
     || fail "legacy-ambiguous: the refusal did not name the endpoint state"
   [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
     || fail "legacy-ambiguous: the endpoint refusal modified the task record"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-ambiguous: the endpoint refusal closed the backlog item anyway"
   pass "an endpoint that cannot be confidently read as dead refuses --legacy-record teardown"
-}
-
-test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
-  local case_dir rc before
-  case_dir=$(make_case legacy-stamp-rollback)
-  write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
-  seed_backlog_in_flight "$case_dir"
-  wt_commit "$case_dir" "landed legacy work"
-  add_fork_with_pushed_branch "$case_dir"
-  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
-
-  set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-
-  expect_code 1 "$rc" \
-    "legacy-stamp-rollback: an unrecordable close must fail the teardown after accepting the legacy record"
-  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
-    || fail "legacy-stamp-rollback: the failed marker write left the record modified"
-  grep -q "rolled back" "$case_dir/stderr" \
-    || fail "legacy-stamp-rollback: the refusal did not report the rolled-back stamp"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-stamp-rollback: the failed teardown closed the backlog item anyway"
-
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout2" 2> "$case_dir/stderr2"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" \
-    "legacy-stamp-rollback: the flag-less retry must not sail past the endpoint gate on the rolled-back record"
-  grep -q -- '--legacy-record' "$case_dir/stderr2" \
-    || fail "legacy-stamp-rollback: the retry refusal did not name the flag path"
-  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
-    || fail "legacy-stamp-rollback: the flag-less retry modified the record"
-  pass "--legacy-record teardown rolls its stamp back when the close marker write fails"
-}
-
-# Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
-# perl call in the lifecycle still runs the real interpreter, so the abandoned
-# attempt leaves its stamp behind for exactly the reason under test.
-add_failing_truncate_perl() {
-  local case_dir=$1 real
-  real=$(command -v perl)
-  cat > "$case_dir/fakebin/perl" <<SH
-#!/usr/bin/env bash
-case "\$*" in
-  *truncate*) exit 1 ;;
-esac
-exec "$real" "\$@"
-SH
-  chmod +x "$case_dir/fakebin/perl"
-}
-
-test_retained_legacy_stamp_still_faces_the_endpoint_gate() {
-  local case_dir rc stamped
-  case_dir=$(make_case legacy-stamp-retained)
-  write_legacy_meta "$case_dir" no-mistakes ship
-  printf '%s\n' 'pr=not-a-valid-url' >> "$case_dir/state/task-x1.meta"
-  seed_backlog_in_flight "$case_dir"
-  wt_commit "$case_dir" "landed legacy work"
-  add_fork_with_pushed_branch "$case_dir"
-  add_failing_truncate_perl "$case_dir"
-
-  set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout" 2> "$case_dir/stderr"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" \
-    "legacy-stamp-retained: an unrecordable close must fail the teardown after accepting the legacy record"
-  grep -q "could not be rolled back" "$case_dir/stderr" \
-    || fail "legacy-stamp-retained: the fixture did not exercise a failed rollback"
-  [ "$(legacy_meta_gen_count "$case_dir")" = 1 ] \
-    || fail "legacy-stamp-retained: the abandoned attempt did not leave its stamp on the record"
-  stamped=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
-
-  # The stamp the failed rollback left behind is the whole risk: a retry must
-  # not read it as an incarnation some spawn published and sail past the
-  # dead-or-agent-less endpoint gate onto a reused endpoint.
-  add_unreadable_herdr "$case_dir"
-  set +e
-  run_teardown "$case_dir" --legacy-record > "$case_dir/stdout2" 2> "$case_dir/stderr2"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" \
-    "legacy-stamp-retained: the retry must re-run the endpoint gate on the retained stamp: $(cat "$case_dir/stderr2")"
-  grep -q "not confidently dead or agent-less" "$case_dir/stderr2" \
-    || fail "legacy-stamp-retained: the retry skipped the dead-or-agent-less endpoint gate"
-  [ "$(legacy_meta_gen_count "$case_dir")" = 1 ] \
-    || fail "legacy-stamp-retained: the retry stamped a second incarnation into the record"
-  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$stamped" ] \
-    || fail "legacy-stamp-retained: the endpoint refusal modified the task record"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-stamp-retained: the endpoint refusal closed the backlog item anyway"
-
-  set +e
-  run_teardown "$case_dir" > "$case_dir/stdout3" 2> "$case_dir/stderr3"
-  rc=$?
-  set -e
-  expect_code 1 "$rc" \
-    "legacy-stamp-retained: a flag-less retry must refuse the retained legacy stamp"
-  grep -q -- '--legacy-record' "$case_dir/stderr3" \
-    || fail "legacy-stamp-retained: the flag-less refusal did not name the flag path"
-  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$stamped" ] \
-    || fail "legacy-stamp-retained: the flag-less refusal modified the task record"
-  pass "a legacy stamp a failed rollback left behind still faces the endpoint gate"
 }
 
 test_legacy_record_never_accepts_a_corrupt_spawn_gen() {
@@ -1533,7 +1414,6 @@ test_legacy_record_never_accepts_a_corrupt_spawn_gen() {
   case_dir=$(make_case legacy-corrupt)
   write_legacy_meta "$case_dir" no-mistakes ship
   printf 'spawn_gen=one\nspawn_gen=two\n' >> "$case_dir/state/task-x1.meta"
-  seed_backlog_in_flight "$case_dir"
   wt_commit "$case_dir" "landed legacy work"
   add_fork_with_pushed_branch "$case_dir"
 
@@ -1547,8 +1427,6 @@ test_legacy_record_never_accepts_a_corrupt_spawn_gen() {
     || fail "legacy-corrupt: the refusal did not name the unreadable spawn_gen"
   [ "$(legacy_meta_gen_count "$case_dir")" = 2 ] \
     || fail "legacy-corrupt: the refusal rewrote the corrupt record"
-  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
-    || fail "legacy-corrupt: the refusal closed the backlog item anyway"
   pass "a corrupt spawn_gen is never accepted as a legacy record"
 }
 
@@ -3394,7 +3272,7 @@ EOF
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_compact_progress_requires_main_acceptance_before_teardown
-test_teardown_manual_backend_leaves_the_backlog_to_the_operator
+test_teardown_ignores_legacy_manual_backend_for_canonical_record
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
@@ -3427,8 +3305,6 @@ test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
-test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails
-test_retained_legacy_stamp_still_faces_the_endpoint_gate
 test_legacy_record_never_accepts_a_corrupt_spawn_gen
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

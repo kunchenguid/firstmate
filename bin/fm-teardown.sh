@@ -17,11 +17,9 @@
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
-# config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
-# non-markdown adapter remains active without a markdown file; any active
-# automatic backend without compatible tasks-axi refuses before cleanup.
+# is retried by the next session start. The transition always addresses the
+# named canonical `data/<id>/task.json` record; legacy backlog configuration
+# neither redirects nor suppresses it, and retained backlog bytes stay inert.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The original task must be MAIN-accepted through compact progress or explicitly
@@ -506,6 +504,7 @@ teardown_completed_bookkeeping() {
     BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
     fm_backlog_atomic_transition remove "$meta" 'completed resource record' "$STATE" || exit 1
   fi
+  rm -f "$STATE/.$ID.branch-outcome-index"
   teardown_endpoint_receipt record_close confirmed completed-record-retired || exit 1
   facts=$(jq -cn --arg disposition "$disposition" '{taskRecordRemoved:true,endpointConfirmedGone:true,copyDisposition:$disposition,bookkeepingComplete:true}')
   fm_cleanup_receipt completion-record "$ID" "$generation" --facts "$facts" >/dev/null || {
@@ -685,12 +684,19 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   exit 1
 }
 fm_control_require_recoverable_harness "$(fm_meta_get "$META" harness)" || exit 1
-# Ordinary compact continuation retains semantic acceptance in the existing
-# task body. Historical tasks without that block keep the prior landed-work
-# cleanup behavior below.
+# Ordinary compact continuation retains semantic acceptance in the canonical
+# per-task business and progress record. Historical tasks without that record
+# or an embedded legacy block keep the prior landed-work cleanup behavior below.
 # shellcheck source=bin/fm-task-progress-lib.sh
 . "$SCRIPT_DIR/fm-task-progress-lib.sh"
 fm_task_progress_completion_guard "$ID" || exit $?
+TEARDOWN_CANONICAL_RECORD=1
+if fm_task_progress_current_absent "$ID"; then
+  TEARDOWN_CANONICAL_RECORD=0
+else
+  progress_record_status=$?
+  [ "$progress_record_status" -eq 1 ] || exit "$progress_record_status"
+fi
 ENDPOINT_PHASE_DONE=0
 if [ "$ENDPOINT_ONLY" = 1 ]; then
   # This branch is before all worktree, slot, branch and record retirement
@@ -729,7 +735,9 @@ TEARDOWN_LEGACY_RETAINED_STAMP=
 TEARDOWN_LEGACY_PRESTAMP_SIZE=0
 TEARDOWN_BACKLOG_APPLIES=0
 TEARDOWN_BACKLOG_SKIP_REASON=
-if fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
+if [ "$TEARDOWN_CANONICAL_RECORD" = 0 ]; then
+  TEARDOWN_BACKLOG_SKIP_REASON="historical task has no canonical business record"
+elif fm_backlog_transition_applies "$CONFIG" "$DATA" "$TEARDOWN_META_KIND"; then
   TEARDOWN_BACKLOG_APPLIES=1
 else
   TEARDOWN_BACKLOG_GATE_STATUS=$?
@@ -739,7 +747,7 @@ else
   fi
   TEARDOWN_BACKLOG_SKIP_REASON=$FM_BACKLOG_TRANSITION_SKIP
 fi
-if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+if [ "$TEARDOWN_META_KIND" != secondmate ]; then
   if ! fm_backlog_meta_spawn_gen "$META" "$STATE"; then
     TEARDOWN_LEGACY_GEN_COUNT=$(LC_ALL=C awk -F= '$1 == "spawn_gen" { count++ } END { print count + 0 }' "$META" 2>/dev/null || printf '0\n')
     if [ "$TEARDOWN_LEGACY_GEN_COUNT" = 0 ] && [ "$LEGACY_RECORD_GIVEN" = 1 ]; then

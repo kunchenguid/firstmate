@@ -148,121 +148,83 @@ write_task_meta() {  # <home> <id> <pane>
     "kind=scout" "mode=no-mistakes" "spawn_gen=g-$id"
 }
 
-test_archived_and_parked_execution_records_are_not_underway() {
+test_terminal_and_parked_canonical_records_are_not_underway() {
   local home fakebin fleet bearings
-  command -v tasks-axi >/dev/null 2>&1 || {
-    pass "skipped archived projection regression: tasks-axi not installed"
-    return
-  }
-  home=$(make_home archive-projection)
+  home=$(make_home canonical-dispositions)
   fakebin=$(make_fakebin "$home")
-  mkdir -p "$home/records"
-  cat > "$home/.tasks.toml" <<'EOF'
-backend = "markdown"
-
-[markdown]
-path = "data/backlog.md"
-archive = "records/completed.md"
-done_keep = 1
-EOF
 
   task_in "$home" add parked-residual 'Parked residual' --kind scout --queue >/dev/null
-  task_in "$home" hold parked-residual --reason 'synthetic archival disposition' --kind parked >/dev/null
+  task_in "$home" hold parked-residual --reason 'synthetic parked disposition' --kind parked >/dev/null
   write_task_meta "$home" parked-residual p-active-stale-parked
-  printf 'blocked [key=stale]: historical parked wait\n' > "$home/state/parked-residual.status"
 
-  task_in "$home" add done-pruned 'Done pruned' --kind scout --start >/dev/null
-  task_in "$home" 'done' done-pruned --report data/done-pruned/report.md --no-prune >/dev/null
-  write_task_meta "$home" done-pruned p-active-stale-done
-  printf 'needs-decision [key=stale]: historical completed decision\n' > "$home/state/done-pruned.status"
-  task_in "$home" add prune-trigger 'Prune trigger' --kind scout --start >/dev/null
-  task_in "$home" 'done' prune-trigger --report data/prune-trigger/report.md --keep 1 >/dev/null
+  task_in "$home" add done-residual 'Done residual' --kind scout --start >/dev/null
+  task_in "$home" 'done' done-residual --report data/done-residual/report.md >/dev/null
+  write_task_meta "$home" done-residual p-active-stale-done
+
+  task_in "$home" add archived-residual 'Archived residual' --kind scout --start >/dev/null
+  task_in "$home" archive archived-residual --report data/archived-residual/report.md >/dev/null
+  write_task_meta "$home" archived-residual p-missing-archived
 
   task_in "$home" add healthy-active 'Healthy active' --kind scout --start >/dev/null
   write_task_meta "$home" healthy-active p-active
-  task_in "$home" add ambiguous-duplicate 'Ambiguous duplicate' --kind scout --queue >/dev/null
-  sed -i '/ambiguous-duplicate/p' "$home/data/backlog.md"
-  write_task_meta "$home" ambiguous-duplicate p-missing-ambiguous
-  task_in "$home" add reused-active 'Old completed incarnation' --kind scout --start >/dev/null
-  task_in "$home" 'done' reused-active --report data/reused-active/report.md --keep 0 >/dev/null
-  task_in "$home" add reused-active 'Current active incarnation' --kind scout --start >/dev/null
-  write_task_meta "$home" reused-active p-active-reused
   write_task_meta "$home" orphan-unknown p-missing-orphan
 
   fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s\n' "$fleet" | jq -e '
-    (.tasks[] | select(.id == "done-pruned")
-      | .backlog == null and .record_disposition == "archive_done"
+    (.tasks[] | select(.id == "done-residual")
+      | .backlog.state == "done" and .record_disposition == "done"
         and .current_state.state == "working" and .retained_record == false)
     and (.tasks[] | select(.id == "parked-residual")
       | .backlog.state == "queued" and .record_disposition == "parked"
         and .current_state.state == "working" and .retained_record == false)
+    and (.tasks[] | select(.id == "archived-residual")
+      | .backlog.state == "done" and .record_disposition == "archive_done"
+        and .current_state.state != "working" and .retained_record == true)
     and (.tasks[] | select(.id == "healthy-active")
-      | .backlog.state == "in_flight" and .record_disposition == "active"
-        and .current_state.state == "working" and .retained_record == false)
-    and (.tasks[] | select(.id == "ambiguous-duplicate")
-      | .backlog.state == "queued" and .record_disposition == "ambiguous"
-        and .retained_record == false)
-    and (.tasks[] | select(.id == "reused-active")
       | .backlog.state == "in_flight" and .record_disposition == "active"
         and .current_state.state == "working" and .retained_record == false)
     and (.tasks[] | select(.id == "orphan-unknown")
       | .backlog == null and .record_disposition == "unknown" and .retained_record == false)
-  ' >/dev/null || fail "fleet lost an authoritative archived, parked, active, or unknown disposition: $fleet"
+  ' >/dev/null || fail "fleet lost a canonical terminal, parked, active, or unknown disposition: $fleet"
 
-  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-in-flight --all-queued --all-unhealthy)
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-in-flight --all-queued --all-unhealthy --all-retained)
   printf '%s\n' "$bearings" | jq -e '
     ([.in_flight[].id] | index("healthy-active") != null)
-      and ([.in_flight[].id] | index("reused-active") != null)
       and ([.in_flight[].id] | index("parked-residual") == null)
-      and ([.in_flight[].id] | index("done-pruned") == null)
-      and ([.in_flight[].id] | index("ambiguous-duplicate") == null)
+      and ([.in_flight[].id] | index("done-residual") == null)
+      and ([.in_flight[].id] | index("archived-residual") == null)
       and ([.in_flight[].id] | index("orphan-unknown") == null)
-      and ([.retained_records[].id] | index("done-pruned") == null)
-      and ([.gates[] | select(.id == "done-pruned" and .reason == "task record integrity")] | length == 1)
+      and ([.retained_records[].id] | index("archived-residual") != null)
+      and ([.gates[] | select(.id == "done-residual" and .reason == "task record integrity")] | length == 1)
       and ([.gates[].id] | index("parked-residual") != null)
-      and ([.gates[] | select(.id == "ambiguous-duplicate" and .reason == "task record integrity")] | length >= 1)
       and ([.gates[] | select(.id == "orphan-unknown" and .reason == "task record integrity")] | length == 1)
       and ([.unhealthy_endpoints[].id] | index("orphan-unknown") != null)
-  ' >/dev/null || fail "bearings confused work identity, process identity, or an unknown orphan: $bearings"
-  pass "archived and parked residual execution records stay out of Underway while active and unknown evidence remain visible"
+  ' >/dev/null || fail "bearings confused canonical work, process identity, or an unknown orphan: $bearings"
+  pass "canonical terminal and parked residuals stay out of Underway while active and unknown evidence remain visible"
 }
 
-test_unsupported_backend_never_infers_terminal_disposition() {
+test_legacy_backend_config_does_not_override_canonical_disposition() {
   local home fakebin fleet bearings
-  command -v tasks-axi >/dev/null 2>&1 || {
-    pass "skipped unsupported-backend projection regression: tasks-axi not installed"
-    return
-  }
-  home=$(make_home unsupported-backend)
+  home=$(make_home canonical-over-backend)
   fakebin=$(make_fakebin "$home")
-  cat > "$home/.tasks.toml" <<'EOF'
-backend = "markdown"
-
-[markdown]
-path = "data/backlog.md"
-archive = "data/completed.md"
-done_keep = 10
-EOF
-  task_in "$home" add backend-unknown 'Backend unknown' --kind scout --start >/dev/null
-  task_in "$home" 'done' backend-unknown --report data/backend-unknown/report.md --no-prune >/dev/null
-  write_task_meta "$home" backend-unknown p-missing-backend
+  task_in "$home" add backend-terminal 'Canonical terminal' --kind scout --start >/dev/null
+  task_in "$home" 'done' backend-terminal --report data/backend-terminal/report.md >/dev/null
+  write_task_meta "$home" backend-terminal p-missing-backend
   printf 'backend = "github"\n' > "$home/.tasks.toml"
 
   fleet=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$ROOT/bin/fm-fleet-snapshot.sh" --json)
   printf '%s\n' "$fleet" | jq -e '
-    .tasks[] | select(.id == "backend-unknown")
-      | .backlog.state == "done" and .record_disposition == "unknown"
-        and .retained_record == false
-  ' >/dev/null || fail "an unsupported backend was treated as terminal evidence: $fleet"
+    .tasks[] | select(.id == "backend-terminal")
+      | .backlog.state == "done" and .record_disposition == "done"
+        and .retained_record == true
+  ' >/dev/null || fail "legacy backend config overrode the canonical terminal disposition: $fleet"
 
-  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-queued --all-unhealthy)
+  bearings=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$BEARINGS" --json --all-retained --all-unhealthy)
   printf '%s\n' "$bearings" | jq -e '
-    ([.in_flight[].id] | index("backend-unknown") == null)
-      and ([.retained_records[].id] | index("backend-unknown") == null)
-      and ([.gates[] | select(.id == "backend-unknown" and .reason == "task record integrity")] | length == 1)
-  ' >/dev/null || fail "an unsupported backend disappeared instead of remaining an integrity gate: $bearings"
-  pass "unsupported task backends preserve terminal-looking execution records as unknown integrity evidence"
+    ([.in_flight[].id] | index("backend-terminal") == null)
+      and ([.retained_records[].id] | index("backend-terminal") != null)
+  ' >/dev/null || fail "canonical terminal work did not remain retained: $bearings"
+  pass "legacy backend configuration cannot override a canonical task disposition"
 }
 
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read() {
@@ -397,7 +359,7 @@ test_targeted_task_requires_a_value() {
 test_empty_projection
 test_main_home_projection_is_local_and_complete
 test_removed_secondmate_flag_is_rejected
-test_archived_and_parked_execution_records_are_not_underway
-test_unsupported_backend_never_infers_terminal_disposition
+test_terminal_and_parked_canonical_records_are_not_underway
+test_legacy_backend_config_does_not_override_canonical_disposition
 test_mixed_history_stays_compact_and_long_decision_has_targeted_read
 test_targeted_task_requires_a_value

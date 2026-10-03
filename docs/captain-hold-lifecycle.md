@@ -5,25 +5,25 @@ This document records the deterministic mechanism, structured surfaces, compatib
 
 ## Mechanism
 
-A decision is not a separate thing in this system: it is an ordinary backlog task held for the captain, and the task id is the identity every surface and channel uses.
-`bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive.
+A decision is not a separate thing in this system: it is an ordinary canonical task held for the captain, and the task id is the identity every surface and channel uses.
+`bin/fm-captain-hold.sh` is the only lifecycle command layered on that primitive and the canonical per-task record.
 It never reads report bodies, review artifacts, terminal output, or chat.
 
-The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp as the leading line of the task body, then invokes the underlying tasks-axi hold operation and verifies both records.
+The `hold` subcommand is the mandatory captain-hold creation path: it uses an existing task or creates one when nothing exists to hold, records its UTC hold-set timestamp as the leading line of the task body, then updates the canonical hold fields and verifies the record.
 Publishing the stamp first ensures a snapshot cannot observe a newly captain-held task without the timestamp that defines its age.
-Retries of an active hold preserve its hold-set timestamp, while re-holding released work starts a new timestamped lifecycle; a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
+Retries of an active hold preserve its hold-set timestamp, while re-holding released work starts a new timestamped lifecycle; a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date in the same record.
 
 The `answer` subcommand records the captain's exact words and resolves the call in the same act: it closes a question-shaped call, while `answer --release` frees a captain-gated work item to proceed without completing it.
-It requires a non-empty captain decision file of at most 8192 bytes, durably writes a resolution block carrying the decision digest and a `Resolution mode:` while retaining the leading hold-set stamp until the selected `tasks-axi done` or `tasks-axi unhold` transition succeeds, then restores the successful record's resolution-first body ordering (the previous body remains preserved below the block and archived through tasks-axi `--archive-body`).
+It requires a non-empty captain decision file of at most 8192 bytes, durably writes a resolution block carrying the decision digest and a `Resolution mode:` while retaining the leading hold-set stamp until the selected canonical `done` or `unhold` transition succeeds, then restores the successful record's resolution-first body ordering; `--archive-body` compatibility preserves the prior body in record history.
 If the close is interrupted, the still-held task therefore keeps its original age basis.
 A matching retry also completes any resolution-first normalization left unfinished after the close itself succeeded.
 An exact retry is idempotent only when the requested close mode matches the newest record; a drifted answer or mode mismatch is rejected, while a re-held task accepts a new answer as a new record on top.
-On a task closed outside the script, `answer` records the missing block only when the captain-hold annotations tasks-axi preserves through a close prove the captain owned it, and it verifies the task stays closed.
-A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held, so an expired deferral remains answerable.
+On a task closed outside the script, `answer` records the missing block only when the canonical hold annotations preserved through the close prove the captain owned it, and it verifies the task stays closed.
+A hold whose `--until` date has passed keeps those annotations, so an expired deferral remains answerable.
 
 The `complete` subcommand unions the reviewed captain-held task ids into one current `decision_keys=` / `decisions_reviewed=1` pair while originating task metadata is live, preserving superseded assignments as audit comments under the metadata lock.
 A post-teardown structured review can complete against the surviving report and durable tasks without recreating volatile task metadata.
-It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against tasks-axi before recording completion.
+It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed canonical task before recording completion.
 With a non-empty inventory it appends a `captain-held [key=<key>]: tracked by <inventory>` transfer event for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
@@ -32,16 +32,14 @@ The legacy `--force` path remains the explicit captain-approved discard escape h
 
 ## Cleanup never closes a captain call
 
-The policy prefers holding the very work item a question gates, so the backlog row a finished task's cleanup is about to close is routinely the captain's own call.
-`bin/fm-teardown.sh` therefore asks the read-only `open` subcommand before its automatic backlog close: exit 0 means the row is still an open captain call (not Done, `hold_kind: captain`), 1 means it is not, and 2 means the answer could not be established and grants no permission to change the row.
-For compact-progress tasks that MAIN accepted or the user explicitly archived, endpoint and copy handling is an independent completed-resource phase that may already have finished when this backlog read refuses; the task record and backlog row remain for a plain retry.
+The policy prefers holding the very work item a question gates, so the canonical record a finished task's cleanup is about to close is routinely the captain's own call.
+`bin/fm-teardown.sh` therefore asks the read-only `open` subcommand before its automatic completion transition: exit 0 means the record is still an open captain call (not Done or archived, `hold.kind: captain`), 1 means it is not, and 2 means the answer could not be established and grants no permission to change the record.
+For tasks that MAIN accepted or explicitly archived, endpoint and copy handling is an independent completed-resource phase; the canonical business record remains available for a plain retry when resource readback refuses.
 Legacy teardown keeps the earlier fail-closed ordering and performs no destructive cleanup when that read is uncertain.
-On 0 only the close changes: after cleanup and still under the task's own lock, teardown records one `Deliverable of the finished work: ...` line at the end of the task body, copies a supported GitHub pull request or canonical `data/<id>/report.md` into the row's structured artifact fields, retains a canonical Codebase MR URL in that deliverable line under the [backlog compatibility contract](configuration.md#backlog-backend-taskstoml--configbacklog-backend), and runs `tasks-axi reopen`, so the row returns to Queued with its hold intact and remains on the appropriate Captain's Call or Charted Next decision surface instead of reading as work still under way.
-For MAIN-accepted or explicitly archived tasks, teardown stages the pending-close record after completed resource handling and includes the copy disposition, so session-start replay finishes only backlog bookkeeping and the cleanup receipt without repeating endpoint or copy effects.
+On 0 only the close changes: after cleanup, teardown records the finished deliverable in the task body and structured artifact links, then reopens the same canonical record as Queued with its captain hold intact. It remains on the Captain's Call or Charted Next surface instead of reading as work still under way.
+For MAIN-accepted or explicitly archived tasks, teardown stages the pending-close record after completed resource handling and includes the copy disposition, so session-start replay finishes only business-record bookkeeping and the cleanup receipt without repeating endpoint or copy effects.
 Legacy teardown stages the pending-close record before destructive cleanup and carries a retained close as `mode=retain`; if the captain answers before replay, `answer` validates that record and applies any supported retained GitHub pull request, Codebase MR note, or report before closing it, after which replay retires the record.
-Two retained-delivery gaps remain bounded by tasks-axi 0.2.5 and are recorded for separate upstream work rather than representing defects introduced by this branch.
-A retained local-only delivery cannot reach the row because `--note` exists on `tasks-axi done` but not on `tasks-axi update`, while the durable pending-close record carrying that note is retired when retention completes.
-A relocated retained report cannot reach the row because tasks-axi accepts only `data/<id>/report.md`: `done` reports `Task report link must be a data/<id>/report.md path`, and `update` reports `--report must be a data/<id>/report.md path`.
+The canonical record accepts the existing note, PR, and report compatibility flags directly; retained delivery no longer depends on an external tasks-axi version or shared backlog rewrite.
 When an interrupted retention leaves such a relocated report in the validated pending-close record, `answer` skips only that known-unsupported row artifact and closes normally, so the delivery remains absent from Recently Landed instead of wedging the captain's answer.
 A pending-close record that fails validation outright is a different case and still refuses the answer, but the refusal names the record and the validation reason so the captain can repair it rather than facing a bare failure.
 `--force` does not lift the deferral, because it authorizes discarding unlanded work on the legacy path, never the captain's question, and does not relax completed-copy preservation; only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
@@ -100,7 +98,7 @@ No path here closes a captain call without either the captain's words through `a
 
 ## Structured read surfaces
 
-`bin/fm-fleet-snapshot.sh` parses canonical tasks-axi `(hold: ...)`, `(hold-kind: ...)`, and `(hold-until: ...)` metadata alongside existing backlog fields.
+`bin/fm-fleet-snapshot.sh` reads canonical `hold.reason`, `hold.kind`, and `hold.until` fields from the task record.
 It resolves every repeated `blocked-by:` edge against structured Done records and keeps missing blockers unresolved.
 It then assigns every captain hold exactly one `hold_bucket`, decided only from structured fields - `hold_kind`, `state`, `hold_until`, `unresolved_blocker_ids`, and the machine-written hold-set timestamp.
 Hold reason and body prose are never matched, so no wording can hide, reveal, or reclassify a decision.
@@ -117,13 +115,13 @@ A `blocked`, `dated`, or `aged` hold leaves the default Captain's Call, renders 
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate, so an available hold is never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
-Three accepted limits remain deliberate:
+One accepted limit remains deliberate:
 
 - A rare concurrent answer-close and re-hold race can leave the newly re-held task without its age basis.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
-A local-only landing's note is written by `tasks-axi done --note` as the last of the row's indented body lines rather than into the row title, so the snapshot reads that final line as the note as well as parsing the title, and the landing is published carrying its recorded note.
+A local-only landing's note is stored in canonical task history rather than in the title, and the landing projection publishes that recorded note.
 A body that carries a captain resolution record is the captain's own prose and is never mined for that note, so a decision worded `local main` does not become a delivery artifact.
 The projection remains read-only and uses the canonical snapshot's structured fields, including the machine-written hold-set timestamp.
 
@@ -146,45 +144,25 @@ A `captain-held [key=...]` close is the verified transfer `complete` writes, so 
 A still-open keyed status decision belongs to the OPEN DECISIONS fold.
 And the absence of a routed work item is legitimate rather than incomplete - when the decision is the deliverable there is nothing to route - so routed work is no part of the test.
 
-Cost stays flat: one `tasks-axi list`, one key scan per status log, and the precise per-key fold only for a key that already names a still-open task.
-The comparison is refused unless the status directory is the active home's own, since tasks-axi reads that home's backlog and a mismatch would report one home's logs against another's tasks.
-If tasks-axi is unavailable or its listing cannot be parsed, the guard cannot read the structured record and prints nothing.
+Cost stays flat: one canonical record inventory, one key scan per status log, and the precise per-key fold only for a key that already names a still-open task.
+The comparison is refused unless the status directory is the active home's own, since a mismatch would report one home's logs against another home's task records.
+If the record inventory cannot be parsed, the guard prints nothing.
 
 ## Compatibility with pre-collapse installs
 
-Older installs created derived `<origin>-decision-<key>` identities through the retired `bin/fm-decision-hold.sh`.
-Those rows are already plain task ids, so they render, answer, verify, and close through the collapsed surfaces with no data migration.
-Three legacy inputs are resolved in place: a `decision_keys=` metadata entry that names no task resolves through `<origin>-decision-<entry>`; a channel key that names no task resolves the same way when the source's binding carries a concrete legacy origin; and resolution records written by the old script are recognized wherever a record is read.
-On the Beads backend, an attested legacy markdown id that resolves to no task is accepted through the row the markdown-to-beads hold migration produced, found by the authoritative evidence first: a row whose notes carry the marker line `migrated from data/backlog.md id <legacy id>`, either alone or followed by ` on <date>` as fm-hold-migration wrote it on 2026-09-04.
-Only when no row carries that marker line is the legacy id tried under the configured beads prefix, and that name-only guess is accepted solely for a single row still held for the captain - two such rows refuse rather than attest.
-Because that acceptance rests on a name rather than on evidence, `complete` names the resolved row beside each prefix-attested legacy id in its completion line, so the guess is auditable after the fact.
-A markdown home keeps its legacy rows verbatim, so its resolution is unchanged.
-The shim recognizes an exact replay of a pre-collapse routed resolution by its historical answer digest and routed ids, then finishes any still-recorded dependency-edge cleanup without rewriting the old decision text.
-The compatibility logic remains inside `bin/fm-captain-hold.sh`; the retired command alias is no longer installed.
+`bin/fm-task-import.sh` is the explicit migration owner for retained markdown backlog and archive evidence.
+It creates canonical task records without rewriting or deleting either legacy source.
+Existing captain-hold ids and resolution bodies remain ordinary task ids and body text after import, so current hold, answer, verify, and close commands consume them without a second live backend.
 
 ## Verification record
 
-The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic `sample` identities and decision text.
-It proves: cleanup of a finished task whose own row is the captain call leaves that call open, queued, held, carrying its deliverable, and visible in Bearings' Captain's Call, leaves no pending record behind, survives a `--force` cleanup, and closes only when `answer` records the captain's words, while an ordinary finished task in the same home still closes with its report link; an interrupted cleanup leaves the row In flight and untouched with its pending record, the next session start retains it as queued and held with the deliverable recorded when it remains unanswered, and an answer before replay preserves that record's completed report while closing the call so the next session start retires the satisfied record without losing the delivery from Recently Landed; separately, an exact Codebase MR URL survives that answer as a note while an ordinary GitHub PR remains a structured PR artifact; a pending-close record that cannot be validated refuses the answer while naming the record and the reason; a relocated data directory keeps the retention in its one configured backlog; direct PR and local-only merge entrypoint calls refuse a still-held task before reaching the forge or moving local main, while a released pull request passes the guarded PR entrypoint, cleanup records its artifact, and Recently Landed publishes it; an ordinary release still survives zero-retention cleanup and archives when configured; a legacy ship row whose captain hold cannot be read refuses cleanup before any destructive step and surfaces the read failure; the reconstructed silent-divergence case is signalled - a status resolution over a still-open captain-held task reaches both `diverged` and the drain's `RECORD DIVERGENCE` section, under the collapsed and the legacy identity alike, while the backlog task, its hold, and the status log all survive the report unchanged and the printed hint names both reconciliation directions; the false-signal boundary holds - a captain call with no routed work item, a verified `captain-held` transfer, a still-open status decision, an already answered call, and an ordinary task whose keyed question was answered all stay silent; a released call whose decision text is `local main`, closed with no artifact, is not published as a local-only landing; a report-only unresolved captain call refuses `--none` completion before teardown can erase the source; non-forced scout teardown always requires the durable inventory verification; the recorded-answer guard (a bare `tasks-axi done` close fails `verify` until `answer` records the captain's word, and an ordinary finished task cannot be dressed up as an answered call); answer-time resolution through a bound channel with task-id keys, including the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys; the chat channel reaching the same intake; hold-set stamping that precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release; interrupted answer closure retaining the stamp until close and restoring resolution-first ordering on retry; deferral through `--until` leaving `captain_actionable` false until due; and every legacy path (composed identities through the shim, pre-collapse `decision_keys=` metadata, routed-resolution replay, and a concrete-origin binding).
-The suite does not test the accepted merge-to-cleanup re-hold window or asynchronous queued-forge landing because those events occur after the locally serialized merge command has returned.
-
-Two of its cases pin how a task body is read back rather than any decision behavior, because both paths that read one are otherwise silent when they get it wrong.
-Holding a task that carries a body, and cleanup's retention of a captain-held row, both work where the installed JSON::PP defaults `allow_nonref` off and therefore rejects the JSON-encoded bare string a shown scalar field arrives as; the case forces that older default back off and probes that the simulation really does reject a bare scalar, so it cannot pass vacuously on a lenient library.
-A fleet host does carry such a library, and both failures reproduce on it natively with no shim, so that behavior is observed and not only simulated.
-The case still forces the older default rather than depending on the installed one, which is what makes it deterministic on any host.
-A retained body's non-ASCII characters also survive cleanup's rewrite as their exact UTF-8 bytes, and the case asserts bytes rather than decoded strings: a codepoint at or below U+00FF is the one a stream with no raw layer emits as a single latin-1 byte, and comparing decoded strings cannot see that.
-It uses one row per character class, because any character above U+00FF makes the whole string print as UTF-8 and would mask the latin-1 case in a mixed body.
-That latin-1 byte loss also reproduces natively on the fleet host carrying the older library, with no shim.
-
-The markdown-to-beads migration family runs the same suite's beads fixture (bd-driven scratch graph, self-skipping on markdown-only tasks-axi installs) and proves: `verify` and `complete` resolve an attested legacy id through a migrated row's marker note, through the configured prefix when no row carries a note - naming the resolved row in the completion line - and through the marker note of a pre-collapse derived identity; a marker-noted row wins over an unrelated captain-held row occupying the bare prefix namesake; an unresolvable id is refused once naming the id (never an empty name); and the attested id stays in `decision_keys=` for idempotent re-verification.
-One case in that family needs no beads install and always runs: a stubbed tasks-axi that fails any markdown file override proves the captain-hold hold, answer, and close mutations reach a beads-configured home without one.
-
-The reconcile path is pinned in the same suite: a reconcile answer arriving through the keyed-answer intake, in the default close mode and in the `release` mode a captain-gated work card declares, is refused and leaves both tasks held with no resolution record or request; only the separately bound captured-source intake records one durable request per task idempotently across a replay.
-It also proves the two verification outcomes - an evidence-backed `reconciled` close that records the evidence under its own label and never as the captain's words, and a note that leaves the call queued, held, and dated - while both outcomes refuse without a pending captured-source request, each durable mutation applies only once across close, probe, and request-retirement failures, a later distinct request with the same note still appends its own dated record, every failed retirement is surfaced with its pending request retained, incompatible resolution modes cannot replay as captain answers, and normal close, release, and replay paths retire pending requests.
-The captured-source coverage proves the retired compatibility parser separates versioned structured selections from notes, bare and annotated Reconcile choices never reach keyed answers, genuine current and legacy choices still close normally, legacy bare and separator-annotated reconcile values feed neither intake, mixed repeated selections preserve every other key's final value, the generic runner creates a request only through a verified bound source, chat reconcile text creates none, and the resulting request authorizes evidence-backed closure.
-[`verification/process-event-sources.md`](verification/process-event-sources.md) owns the process-event ownership and reclamation evidence exercised by `tests/fm-procevent.test.sh`.
+The focused end-to-end regression suite is `tests/fm-captain-hold-lifecycle.test.sh`, using only synthetic identities and decision text.
+It proves that hold, answer, and release mutate one canonical task record without rewriting retained backlog evidence; completion records the canonical captain-call inventory while leaving the call open; and ordinary Done work cannot be relabeled or revived through the answer path.
+`tests/fm-teardown.test.sh` owns cleanup ordering, semantic acceptance, retained resources, artifact recording, unsafe-copy preservation, and interrupted-close replay.
+`tests/fm-send-resolve-key.test.sh` and `tests/fm-procevent.test.sh` own the chat and captured-result answer intakes.
+[`verification/process-event-sources.md`](verification/process-event-sources.md) owns process-event ownership and reclamation evidence.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
 Projection regressions live in `tests/fm-fleet-snapshot-view.test.sh` (the total structured-only bucket classifier, hold-until parsing, kind-independent captain actionability, undated-hold aging, and title stripping) and `tests/fm-bearings-snapshot.test.sh` (default and expanded decision-bucket membership, deferral explanations, blocker-overflow disclosure, working-hold dual surfaces, remote-summary schema invalidation, exact leading-kind inference, artifact-kind mismatch and answered-question exclusion, kind-bearing and kindless local-only landings publishing their recorded note, and scout-report precedence over competing pull-request links).
-The exact commands and their summarized outputs are recorded in the shipping PR's evidence; run the four suites above plus `tests/fm-send-resolve-key.test.sh`, `tests/fm-procevent.test.sh`, and `bin/fm-lint.sh` to refresh this record.
+The exact commands and their summarized outputs are recorded in the shipping PR's evidence; run the named focused suites and `bin/fm-lint.sh` to refresh this record.

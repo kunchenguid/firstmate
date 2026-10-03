@@ -9,14 +9,14 @@
 # captain actually said, the investigation completion gate, and the one
 # keyed-answer intake every channel feeds.
 #
-# There is no separate decision type. A captain call is an ordinary backlog
+# There is no separate decision type. A captain call is an ordinary canonical
 # task held for the captain through this script's mandatory `hold` subcommand,
 # and its identity is simply the task id. Older installs created derived
 # `<origin>-decision-<key>` identities through bin/fm-decision-hold.sh; those
 # rows are already plain task ids, so they keep working here unchanged, and
 # the legacy inputs noted below resolve them without a migration.
-# All backlog reads and mutations address the active home's configured data
-# directory the way bin/fm-backlog-transition-lib.sh does, which keeps main-home
+# All task reads and mutations address the active home's configured data
+# directory through fm-tasks-axi.sh, which keeps main-home
 # and task ownership aligned with the work that discovered the call.
 #
 # Usage:
@@ -44,25 +44,25 @@
 # hold set:` timestamp in the task body: repeating an active hold preserves the
 # existing timestamp, while re-holding released work starts a new lifecycle.
 # A task already closed is refused rather than reopened. `--until` records the
-# captain's own deferral date through `tasks-axi hold --until`, so a "revisit
+# captain's own deferral date through the canonical `hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
 # writes a resolution block while preserving the leading hold-set stamp until
-# the close succeeds (the previous body is preserved and archived through
-# tasks-axi --archive-body). It closes a question with `tasks-axi done` - or,
-# with `--release`, lifts the hold with `tasks-axi unhold` so a captain-gated
+# the close succeeds (the previous body is preserved in record history through
+# `--archive-body` compatibility). It closes a question with canonical `done` - or,
+# with `--release`, lifts the hold with canonical `unhold` so a captain-gated
 # WORK item resumes without closing - and restores resolution-first body
 # ordering. An exact retry also completes unfinished ordering normalization and
 # is idempotent only when its requested close mode
 # matches the newest record; a changed decision or a mode mismatch is rejected.
 # A re-held task may record a new answer on top. On a task already closed outside this script,
 # `answer` records the missing resolution block (the old `repair` path) only
-# when the task still carries the captain-hold provenance tasks-axi preserves
+# when the task still carries the captain-hold provenance the record preserves
 # through a close, so an ordinary finished task cannot be dressed up as an
 # answered captain call. A hold that expired by date (`--until` in the past) is
-# still answerable: the surviving hold annotations, not tasks-axi's live
+# still answerable: the surviving hold annotations, not a transient live
 # `held:` bit, prove the captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
@@ -305,29 +305,14 @@ load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
   DECISION_DIGEST=$(sha256_text "$decision")
 }
 
-# Mutations address the configured data directory's backlog from its root, the
-# way bin/fm-backlog-transition-lib.sh addresses every transition, so a home
-# with a relocated data directory keeps one backlog. The explicit --file file
-# belongs to the markdown backend only; a non-markdown backend is addressed by
-# the root's own tasks-axi configuration, exactly like the transition library's
-# mutate path.
+# Mutations address the canonical per-task record owner in the configured data
+# directory. The established function name remains local compatibility only.
 tasks_axi() {
-  local data file root backend
-  data=$(fm_backlog_data_absolute "$DATA") || fail "data directory cannot be resolved: $DATA"
-  root=$(fm_backlog_root "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
-  backend=$(fm_tasks_axi_backend "$root") || return 2
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") || fail "$FM_BACKLOG_TRANSITION_ERROR"
-    (cd "$root" && tasks-axi "$@" --file "$file")
-  else
-    (cd "$root" && tasks-axi "$@")
-  fi
+  FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"
 }
 
 require_tasks_axi() {
-  fm_tasks_axi_compatible || fail "compatible tasks-axi is required"
-  tasks-axi hold --help 2>&1 | grep -F -- '--kind captain' >/dev/null \
-    || fail "tasks-axi does not expose the captain-hold contract"
+  [ -x "$SCRIPT_DIR/fm-tasks-axi.sh" ] || fail "canonical task-record owner is unavailable"
 }
 
 # Read one row into TASK_SHOW_OUTPUT; a non-zero return means the row is
@@ -1773,9 +1758,9 @@ EOF
 # of fact can prove its first reading wrong - so the report says only that the
 # two records disagree and names both reconciliation directions above.
 #
-# Cost stays flat on a healthy home: one `tasks-axi list`, one key scan per
+# Cost stays flat on a healthy home: one canonical record inventory, one key scan per
 # status log, and the precise per-key fold only for a key that already names a
-# still-open task. If tasks-axi is unavailable or its listing cannot be parsed,
+# still-open task. If the record inventory cannot be parsed,
 # the guard cannot read the structured record and prints nothing.
 #
 # Output: one `<task-id>\t<origin>\t<key>\t<title>` line per divergence, in
@@ -1815,15 +1800,13 @@ command_diverged() {
   local ids resolve f origin tokens id keys key show title
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   # Both records must belong to the SAME home or the comparison is meaningless:
-  # tasks-axi reads $FM_HOME's backlog, so a state dir pointed somewhere else
+# the canonical records live under $FM_HOME, so a state dir pointed somewhere else
   # would report one home's status logs against another home's tasks. Every
   # production caller pairs the two; a mismatch stays silent rather than
   # inventing a cross-home divergence.
   [ "$STATE" = "$FM_HOME/state" ] || return 0
-  # A read-only listing on a per-wake path, so it skips the mutation-oriented
-  # compatibility floor and its extra probes: a listing this parser cannot read
-  # simply yields no candidates and the report stays silent.
-  command -v tasks-axi >/dev/null 2>&1 || return 0
+  # A listing this parser cannot read simply yields no candidates and the
+  # report stays silent.
   ids=$(open_task_ids) || return 0
   [ -n "$ids" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -1864,13 +1847,12 @@ EOF
 }
 
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
-# A row this home does not carry is 3 when the caller requests the distinction,
-# and so is a home with no backlog file at all, because a backlog that does not
-# exist holds nothing. Every read failure over a record that DOES exist is a 2,
+# A task record this home does not carry is 3 when the caller requests the
+# distinction. Every read failure over a record that DOES exist is a 2,
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+  local id='' identity=0 distinguish_absent=0 data state show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
@@ -1891,27 +1873,9 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   esac
   data=$(fm_backlog_data_absolute "$DATA") \
     || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
-  root=$(fm_backlog_root "$data") \
-    || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-  if ! backend=$(fm_tasks_axi_backend_resolve "$root"); then
-    exit 2
-  fi
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") \
-      || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      # No backlog file at all: this home records no captain calls, so the task
-      # is absent from it rather than held. A record that EXISTS but cannot be
-      # read is a different state and still leaves by the exit 2 paths below,
-      # because that one may hide a live hold.
-      [ "$distinguish_absent" = 0 ] || return 3
-      return 1
-    fi
-  fi
-  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
   if fm_backlog_row_probe "$data" "$id"; then
     state=${FM_BACKLOG_ROW_STATE%% *}
-    if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+    if [ "$state" != "done" ] && [ "$state" != "archived" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
       if [ "$identity" -eq 1 ]; then
         task_show "$id" || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2

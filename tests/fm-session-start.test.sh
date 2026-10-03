@@ -1484,6 +1484,54 @@ EOF
   pass "compatible tasks-axi backlog rendering drops done rows and keeps every in-flight, held, and blocked row"
 }
 
+test_canonical_task_records_are_visible_at_startup_without_legacy_backlog() {
+  local rec root home fakebin out
+  rec=$(new_world canonical-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_pi "$fakebin"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
+    add active-canonical "Canonical active goal" --kind ship --start >/dev/null
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
+    add held-canonical "Canonical held goal" --kind scout >/dev/null
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
+    hold held-canonical --reason "Wait until review window" --kind captain --until 2099-01-01 >/dev/null
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "active-canonical,in_flight,ship" \
+    "session start omitted a canonical in-flight task when no legacy backlog existed"
+  assert_contains "$out" "held-canonical,queued,scout" \
+    "session start omitted a canonical held task when no legacy backlog existed"
+  assert_not_contains "$out" "data/backlog.md\nABSENT" \
+    "session start treated the absent legacy backlog as absence of canonical tasks"
+  pass "session start discovers canonical active and held tasks without a legacy backlog"
+}
+
+test_partial_migration_keeps_legacy_only_tasks_visible_at_startup() {
+  local rec root home fakebin out
+  rec=$(new_world partial-migration-startup)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_pi "$fakebin"
+  mkdir -p "$root/bin"
+  ln -s "$ROOT"/bin/* "$root/bin/"
+  printf '## In flight\n\n- [ ] legacy-only - Legacy unfinished goal (kind: ship, since 2026-10-01)\n\n## Queued\n\n## Done\n' \
+    > "$home/data/backlog.md"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" "$ROOT/bin/fm-tasks-axi.sh" \
+    add canonical-only "Canonical unfinished goal" --kind ship --start >/dev/null
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'canonical-only,in_flight,ship' \
+    'partial migration startup omitted the canonical task'
+  assert_contains "$out" 'legacy-only,in_flight,Legacy unfinished goal' \
+    'partial migration startup hid the unimported legacy task'
+  pass 'partial migration startup merges legacy-only unfinished tasks with canonical inventory'
+}
+
 # The bound may only ever cut the dispatchable-now listing, and whatever it cuts
 # must be disclosed with an exact count and the command that shows the rest.
 test_backlog_queued_bound_discloses_its_remainder() {
@@ -2307,6 +2355,8 @@ test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
+test_canonical_task_records_are_visible_at_startup_without_legacy_backlog
+test_partial_migration_keeps_legacy_only_tasks_visible_at_startup
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
 test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
