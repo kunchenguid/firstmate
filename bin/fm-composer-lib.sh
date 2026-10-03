@@ -1063,6 +1063,9 @@ EOF
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
+# The title may hold only printable ASCII and U+00B7, each counted as one
+# column. A bottom exactly as wide as the top is accepted with ANY such title
+# (no Grok shape check); only a wider bottom reaches the Grok overhang rule.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   local family=$1 inner=$2 expected=$3 dash spaces title effort model
   fm_composer_normalize_trim_var inner
@@ -1078,6 +1081,7 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  local middot; printf -v middot '%b' '\302\267'; spaces=${spaces//"$middot"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -1086,15 +1090,21 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
 
   # Grok 1.0.5 renders its real model title FM_COMPOSER_GROK_TITLE_OVERHANG
   # columns wider than the otherwise aligned top and content rows (issue
-  # #3436; see the constant's definition for provenance and caveats). Accept
-  # only that exact overhang and only the typed Grok model/effort title
-  # shape. This keeps arbitrary malformed bottoms ambiguous while preserving
-  # the complete-box proof around a genuinely idle or pending Grok composer.
+  # #3436; see the constant's definition for provenance and caveats). A
+  # wider bottom is accepted only at that exact overhang and only with the
+  # typed Grok model/effort title shape, optionally followed by a U+00B7
+  # footer suffix; everything after the first middle dot is dropped before
+  # effort parsing. Grok 1.0.41 --always-approve renders
+  # 'Grok <model> (<effort>) · always-approve' aligned with the top, so it
+  # already passed the equal-width return above once the dot counts as one
+  # column. This keeps arbitrary malformed wider bottoms ambiguous while
+  # preserving the complete-box proof around an idle or pending Grok composer.
   local overhang
   overhang=$(printf '%*s' "$FM_COMPOSER_GROK_TITLE_OVERHANG" '')
   [ "$spaces" = "$expected$overhang" ] || return 1
   title=${inner//"$dash"/}
   fm_composer_normalize_trim_var title
+  case "$title" in *"$middot"*) title=${title%%"$middot"*} ; fm_composer_normalize_trim_var title ;; esac
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;
