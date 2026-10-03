@@ -163,6 +163,62 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
   done
 }
 
+# A fake df that reports 1 KiB free for paths under FM_FAKE_DF_FULL_DIR and
+# plenty everywhere else, so the project clone and the pool read as two disks.
+fake_df_full_under() {  # <fakebin>
+  cat > "$1/df" <<'SH'
+#!/usr/bin/env bash
+path=${!#}
+avail=$((100 * 1048576))
+case "$path" in "$FM_FAKE_DF_FULL_DIR" | "$FM_FAKE_DF_FULL_DIR"/*) avail=1 ;; esac
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/fake 200000000 1 %s 1%% /\n' "$avail"
+SH
+  chmod +x "$1/df"
+}
+
+test_free_disk_floor_measures_the_pool_disk() {
+  local rec id out status pool_disk pane_log
+  id='pool-disk-full-r1'
+  rec=$(make_case pool-disk-full "$id")
+  read_case_record "$rec"
+  fake_df_full_under "$FAKEBIN_DIR"
+  pool_disk="$CASE_DIR/pool-disk"
+  pane_log="$CASE_DIR/pane.log"
+  mkdir -p "$pool_disk"
+
+  # The pool root does not exist yet, so the check measures its nearest
+  # existing parent, and it must refuse before treehouse is ever asked for a copy.
+  out=$(TREEHOUSE_ROOT="$pool_disk/root" FM_FAKE_DF_FULL_DIR=$pool_disk FM_FAKE_PANE_LOG=$pane_log \
+    run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a pool whose disk is under the floor"$'\n'"$out"
+  assert_contains "$out" "refused by the free-disk check" \
+    "a full pool disk was not refused by the free-disk check"$'\n'"$out"
+  [ ! -s "$pane_log" ] || fail "a free-disk refusal typed into a pane:"$'\n'"$(cat "$pane_log")"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a free-disk refusal published task metadata"
+
+  id='project-disk-full-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(TREEHOUSE_ROOT="$pool_disk/root" FM_FAKE_DF_FULL_DIR=$PROJECT_DIR run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "a full project disk must not refuse a pool with room"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the spawn into a pool with room did not report success"
+
+  # A pool root set only in the user's treehouse config is the disk measured.
+  id='config-pool-disk-full-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  mkdir -p "$HOME_DIR/user-home/.config/treehouse"
+  printf 'root = "%s"\n' "$pool_disk/config-root" > "$HOME_DIR/user-home/.config/treehouse/config.toml"
+  out=$(TREEHOUSE_ROOT='' FM_FAKE_DF_FULL_DIR=$pool_disk run_spawn "$id" --scout)
+  status=$?
+  rm -f "$HOME_DIR/user-home/.config/treehouse/config.toml"
+  [ "$status" -ne 0 ] || fail "spawn launched into a configured pool whose disk is under the floor"$'\n'"$out"
+  assert_contains "$out" "refused by the free-disk check" \
+    "a full configured pool disk was not refused by the free-disk check"$'\n'"$out"
+  pass "the free-disk floor measures the Treehouse pool disk before any work copy is acquired"
+}
+
 test_stale_pool_base_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-base-r1'
@@ -746,6 +802,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
+test_free_disk_floor_measures_the_pool_disk
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch

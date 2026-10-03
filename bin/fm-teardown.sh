@@ -73,6 +73,9 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Just before a task's own treehouse copy (or a child's) goes back to the pool,
+# teardown deletes its rebuildable ignored build output, which the return would
+# keep; bin/fm-disk.sh owns what qualifies, and it never blocks cleanup.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -3279,6 +3282,7 @@ cleanup_firstmate_home_children() {
           "$child_wt/.opencode/plugins/fm-busy-state.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
         if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+          FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-disk.sh" reclaim "$child_wt" || true
           if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
             fm_treehouse_slot_owner_release "$child_wt" "$child_id"
           else
@@ -3607,6 +3611,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
+  # Free rebuildable ignored build output before the copy goes back to the pool,
+  # where `treehouse return` would keep it (bin/fm-disk.sh owns what qualifies).
+  # Best effort: it never blocks cleanup.
+  FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-disk.sh" reclaim "$WT" || true
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety

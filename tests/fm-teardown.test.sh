@@ -704,6 +704,32 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+test_teardown_reclaims_ignored_build_output() {
+  local case_dir rc
+  case_dir=$(make_case reclaim-build-output)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  printf '%s\n' node_modules .venv >> "$(git -C "$case_dir/wt" rev-parse --git-common-dir)/info/exclude"
+  mkdir -p "$case_dir/wt/app/node_modules/dep" "$case_dir/wt/.venv"
+  printf 'x\n' > "$case_dir/wt/app/node_modules/dep/index.js"
+  printf 'x\n' > "$case_dir/wt/.venv/keep"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "reclaim: teardown should succeed"
+  [ ! -e "$case_dir/wt/app/node_modules" ] \
+    || fail "reclaim: teardown returned the copy with its ignored node_modules still in it"
+  [ -e "$case_dir/wt/.venv/keep" ] \
+    || fail "reclaim: teardown deleted an ignored directory that is not in the reclaim list"
+  grep -q 'reclaimed .* of rebuildable build output' "$case_dir/stderr" \
+    || fail "reclaim: teardown did not report what it reclaimed"
+  pass "teardown reclaims listed ignored build output before returning the copy and keeps everything else"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -4296,6 +4322,7 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
+test_teardown_reclaims_ignored_build_output
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
