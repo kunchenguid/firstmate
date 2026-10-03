@@ -64,7 +64,7 @@ test_worker_decides_findings_flag() {
   assert_grep 'repeats the causal theme of a finding already fixed this run, or is destructive, irreversible, or security-sensitive' "$ship" \
     "the self-decision policy lost the repeated-theme and destructive escalation cases"
   # shellcheck disable=SC2016 # Backticks and placeholders are literal generated Markdown.
-  assert_grep '`working [at=<epoch>]: ask-user self-decided run=<run> step=<step> fixed=<ids|none> declined=<ids|none> file=<that snapshot path>`' "$ship" \
+  assert_grep '`working [at=<epoch>]: ask-user self-decided run=<run> step=<step> fixed=<ids|none> declined=<ids|none> file=<that nm-<run>-<step>-<epoch>-findings.txt path>`' "$ship" \
     "the self-decision policy lost its one-line audit record"
   # shellcheck disable=SC2016 # Backticks and placeholders are literal generated Markdown.
   assert_grep 'needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=' "$ship" \
