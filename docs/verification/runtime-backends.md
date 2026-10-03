@@ -38,6 +38,59 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
 Before that boundary existed, a Codex session started from an environment that had retained `CLAUDECODE=1` reported `claude`, and session start emitted Claude's Stop-owned supervision protocol to a Codex primary.
 The same live shape, reproduced with a real process named `codex` and no installed harness, now reports `codex` with the marker present and `claude` with the marker present and ancestry blinded, which is what proves the case is not vacuous.
 
+### Startup wrapper ancestry depth
+
+Verified on 2026-09-23 on Darwin 25.6.0 with codex-cli 0.156.1 and Bash 3.2.57.
+The tracked Codex hook, source-routing wrapper, and external-timeout status wrapper put native Codex at ancestry position nine, counting the detector itself as position one.
+The sixteen-position walk identifies that process while retaining nearest-ancestor and marker precedence and the existing PID-1 behavior.
+Refresh the portable executable regression with:
+
+```sh
+bin/fm-test-run.sh tests/fm-harness-precedence.test.sh tests/fm-session-start.test.sh tests/fm-session-lock-ancestry.test.sh
+```
+
+Observed output included:
+
+```text
+ok - ancestry reaches positions nine and sixteen and stops before seventeen
+ok - tracked Codex startup wrappers preserve native harness attribution
+FM_TEST_SUMMARY total=3 failed=0 skipped_gate=0 duration_ms=280536
+```
+
+The depth regression uses real nested shells and asserts positions nine and sixteen resolve to `comm codex`, while position seventeen remains outside the bound.
+The startup regression executes the tracked hook command in an isolated git home under a real executable named `codex`, including the external-timeout path on macOS, and asserts successful lock acquisition and the Codex supervision protocol.
+External tools are stubbed in that portable case; process ancestry and the startup executables are real.
+
+For native proof, copy `bin/`, `.codex/`, and `docs/supervision-protocols/` into an isolated plain-git home with `AGENTS.md` and empty `state/`, `data/`, and `config/` directories.
+From a native Codex tool call, execute the tracked hook with `os.execvpe` so an extra probe parent does not change the measured wrapper depth:
+
+```python
+from pathlib import Path
+import json, os, shlex
+lab = Path("<isolated-home>").resolve()
+os.chdir(lab)
+env = dict(os.environ, FM_HOME=str(lab), FM_ROOT_OVERRIDE=str(lab))
+payload = lab / "payload.json"
+payload.write_text('{"source":"startup"}')
+os.dup2(os.open(payload, os.O_RDONLY), 0)
+command = json.loads((lab / ".codex/hooks.json").read_text())["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+os.execvpe("bash", shlex.split(command), env)
+```
+
+The full digest acquired its isolated lock, emitted `SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex` and `Mode: Codex foreground checkpoint.`, and reached its completion reminder.
+This exercises the real hook command beneath native Codex; it does not claim automatic vendor hook delivery or alter hook trust.
+No runtime identity marker was introduced.
+A detection-only copy stopped before lock acquisition returned `unknown` with the eight-position bound and `codex` with the corrected bound through the same native wrapper chain.
+
+The existing live drift guard also passed for all three installed adapters: Claude Code 2.1.281 (`comm claude`), codex-cli 0.156.1 (`comm codex;args codex`), and Grok 1.0.13 (`comm grok`):
+
+```sh
+bin/fm-test-run.sh tests/fm-harness-liveness-drift-live-e2e.test.sh
+```
+
+It reported OpenCode, Pi, Pi-signed, Kimi, Cursor, and Muse absent and printed `checked 3 installed harness(es)`.
+The shared ancestry change is backend-independent; no runtime backend launch, lifecycle, or transport behavior changed.
+
 ### A real Codex session holding a retained Claude marker
 
 The portable regression builds its process tree from renamed executables, so the same guarantee is proven again against the real installed Codex.

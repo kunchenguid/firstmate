@@ -261,7 +261,9 @@ harness_process_verdict() {  # <pid>
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
   local pid=${1:-$$} verdict
-  for _ in 1 2 3 4 5 6 7 8; do
+  # Match the session-lock ancestry budget: native startup's hook and timeout
+  # wrappers can put the harness beyond eight positions even in a plain home.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -281,8 +283,8 @@ harness_ancestry() {  # [<pid>]
 # Print the pids on the UPWARD path between the deepest descendant of <root> and
 # <root> itself, deepest first. Optional <eligible-leaf-pid> values restrict which
 # descendants may be chosen as that deepest one; with none given every descendant
-# is eligible. Bounded to the same eight levels harness_ancestry climbs, so a deep
-# or pathological tree cannot make this walk unbounded.
+# is eligible. Bounded to eight descendant levels, so a deep or pathological
+# tree cannot make this diagnostic search unbounded.
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0
