@@ -5,12 +5,11 @@
 # library so the scripts that source the library do not re-analyse the scan.
 # docs/configuration.md "Escalated pending-reply re-surfacing" owns the switch.
 
-# Read the parent status log once and print open or dismissed.
+# Read the parent status log line by line and print open or dismissed.
 # A status log that cannot be read is a failure, not an open result.
 _fm_pending_reply_scan_dismissal() {  # <status-file> <key>
-  local parent_status=$1 key=$2 content line untimed seen=''
+  local parent_status=$1 key=$2 line untimed seen=''
   [ -f "$parent_status" ] && [ -r "$parent_status" ] || return 1
-  content=$(cat -- "$parent_status") || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *"[key=$key]"*) ;; *) continue ;; esac
     _fm_status_untimed "$line" untimed
@@ -18,7 +17,7 @@ _fm_pending_reply_scan_dismissal() {  # <status-file> <key>
       "blocked [key=$key]: "*) seen=open ;;
       "resolved [key=$key]: pending-reply-resolved: "*) [ -z "$seen" ] || seen=dismissed ;;
     esac
-  done <<< "$content"
+  done < "$parent_status" || return 1
   if [ "$seen" = dismissed ]; then
     printf 'dismissed'
   else

@@ -66,8 +66,9 @@
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
-#   surfaced_session=       live session token that last surfaced this
-#                           escalation; empty until then
+#   surfaced_session=       session that already received this escalation,
+#                           recorded when it is opened and updated when a
+#                           later session is reminded; empty until then
 #   escalation_dismissed_epoch=
 #                           when a later session found the operator's keyed
 #                           close of this escalation; once set, the record is
@@ -1354,12 +1355,13 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
-  # This session already receives the status wake. A later session reminds
-  # only when the home opted in.
+  # This session already receives the status wake. Record it even when
+  # re-surfacing is off, so turning the flag on later in this session does
+  # not send another wake. The reminder still runs only when the flag is on.
+  fm_pending_reply_set "$rec" surfaced_session \
+    "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
   if fm_pending_reply_resurface_enabled; then
     fm_pending_reply_set "$rec" escalation_dismissed_epoch '' || return 1
-    fm_pending_reply_set "$rec" surfaced_session \
-      "$("$_FM_PENDING_REPLY_LIB_DIR/fm-pending-reply-remind.sh" --token "$state")" || return 1
   fi
   return 0
 }

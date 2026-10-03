@@ -2425,8 +2425,8 @@ test_resurface_stays_off_without_the_flag() {
   export FM_PENDING_REPLY_SESSION=s1
   corr=$(escalate_new "$home" "$state" "once only")
   rec=$(fm_pending_reply_path "$state" "$corr")
-  [ -z "$(fm_pending_reply_get "$rec" surfaced_session)" ] \
-    || fail "an opted-out escalation recorded a later-session surface"
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s1 ] \
+    || fail "an opted-out escalation did not record the session that received it"
   export FM_PENDING_REPLY_SESSION=s2
   fm_pending_reply_tick "$state" || fail "tick failed"
   grep -F $'\tcheck\tpending-reply-escalated\t' "$state/.wake-queue" >/dev/null \
@@ -2471,6 +2471,62 @@ test_resurface_flag_follows_the_config_dir() {
     || fail "the flag in FM_CONFIG_OVERRIDE did not turn the reminder on"
   unset FM_PENDING_REPLY_SESSION FM_CONFIG_OVERRIDE FM_HOME
   pass "the resurface flag is read from FM_CONFIG_OVERRIDE or FM_HOME/config"
+}
+
+# Turning the flag on during the session that received the escalation does
+# not send another reminder. A later session still gets one.
+test_mid_session_opt_in_does_not_repeat_the_reminder() {
+  local home state corr rec
+  home=$(setup_parent mid-session-opt-in)
+  state="$home/state"
+  export FM_HOME="$home"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(escalate_new "$home" "$state" "opt in later")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ "$(fm_pending_reply_get "$rec" surfaced_session)" = s1 ] \
+    || fail "the escalating session was not recorded before the flag existed"
+  opt_in_resurface "$home"
+  : > "$state/.wake-queue"
+  fm_pending_reply_tick "$state" || fail "same-session tick failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    && fail "turning the flag on repeated the reminder in the same session"
+  export FM_PENDING_REPLY_SESSION=s2
+  fm_pending_reply_tick "$state" || fail "later-session tick failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    || fail "a later session was not reminded after the mid-session opt-in"
+  unset FM_PENDING_REPLY_SESSION FM_HOME
+  pass "a mid-session opt-in does not repeat the reminder"
+}
+
+# A close past a long status log is still found. The scan must not need the
+# whole log resident to see it.
+test_dismissal_scan_finds_a_close_after_a_long_log() {
+  local home state corr rec status i scan
+  home=$(setup_parent long-log-close)
+  state="$home/state"
+  export FM_HOME="$home"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  export FM_PENDING_REPLY_SESSION=s1
+  corr=$(escalate_new "$home" "$state" "long log")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  status=$(fm_pending_reply_get "$rec" parent_status)
+  fm_pending_reply_set "$rec" escalation_dismiss_scan ""
+  for i in $(seq 1 4000); do
+    printf 'note [at=%s]: unrelated line %s\n' "$i" "$i"
+  done >> "$status"
+  printf 'resolved [key=pending-reply-%s]: pending-reply-resolved: ack\n' "$corr" >> "$status"
+  scan=
+  fm_pending_reply_escalation_dismissed "$rec" scan \
+    || fail "a close after a long status log was not found"
+  case "$scan" in
+    *" dismissed") ;;
+    *) fail "the close was not offered to save, got: $scan" ;;
+  esac
+  unset FM_PENDING_REPLY_SESSION FM_HOME
+  pass "a dismissal scan finds a close after a long status log"
 }
 
 # A status log that cannot be read is not remembered as still open.
@@ -2522,6 +2578,8 @@ test_unchanged_status_log_is_not_reread_for_dismissal
 test_dismissal_scan_is_saved_under_record_lock
 test_resurface_stays_off_without_the_flag
 test_resurface_flag_follows_the_config_dir
+test_mid_session_opt_in_does_not_repeat_the_reminder
+test_dismissal_scan_finds_a_close_after_a_long_log
 test_failed_dismissal_read_is_not_cached_as_open
 test_queued_reminder_does_not_mark_unnamed_record
 test_reminder_leaves_state_alone_without_escalations

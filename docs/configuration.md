@@ -580,6 +580,7 @@ The optional local, gitignored `config/pending-reply-resurface` presence flag op
 With the file absent, an escalation is surfaced once, on the status line written when it escalates. Later sessions do not remind, and Bearings does not add a row.
 
 With the file present, `bin/fm-pending-reply-remind.sh` enqueues one check wake per later live session until the correlated reply arrives or the operator closes that escalation with `fm-send --resolve-key`. Bearings lists the open escalation until then.
+Creating the file during the session that already received the escalation does not send another wake in that session.
 
 The flag is not inherited by secondmate homes. `bin/fm-pending-reply-remind.sh` owns the reminder, and `bin/fm-pending-reply-resurface-lib.sh` owns the dismissal scan.
 
