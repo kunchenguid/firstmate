@@ -59,13 +59,14 @@ encode_base64() {
 }
 
 STDIN_MODE=closed
+EXPLICIT_ROUTE=0
 EXPLICIT_ROOT=
 EXPLICIT_HOME=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --stdin) STDIN_MODE=caller; shift ;;
-    --root) [ "$#" -ge 2 ] || usage; EXPLICIT_ROOT=$2; shift 2 ;;
-    --home) [ "$#" -ge 2 ] || usage; EXPLICIT_HOME=$2; shift 2 ;;
+    --root) [ "$#" -ge 2 ] || usage; EXPLICIT_ROUTE=1; EXPLICIT_ROOT=$2; shift 2 ;;
+    --home) [ "$#" -ge 2 ] || usage; EXPLICIT_ROUTE=1; EXPLICIT_HOME=$2; shift 2 ;;
     *) break ;;
   esac
 done
@@ -86,7 +87,7 @@ LOCAL_COMMAND="$FM_ROOT/bin/$COMMAND"
 git -C "$FM_ROOT" ls-files --error-unmatch "bin/$COMMAND" >/dev/null 2>&1 \
   || die "remote command is not tracked by this Firstmate checkout: $COMMAND"
 
-if [ -n "$EXPLICIT_ROOT$EXPLICIT_HOME" ]; then
+if [ "$EXPLICIT_ROUTE" -eq 1 ]; then
   [ -n "$EXPLICIT_ROOT" ] && [ -n "$EXPLICIT_HOME" ] || die "an explicit route needs both --root and --home"
   [ "$COMMAND" = fm-remote-doctor.sh ] || die "an explicit --root/--home route runs only fm-remote-doctor.sh; seed the host to route other commands"
   [ "$STDIN_MODE" = closed ] || die "an explicit --root/--home route does not forward stdin"

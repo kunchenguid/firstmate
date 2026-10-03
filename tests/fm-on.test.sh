@@ -368,6 +368,20 @@ if out=$(fm_on other-host fm-remote-doctor.sh 2>&1); then
   fail "an unregistered alias was routed without an explicit root and home"
 fi
 assert_contains "$out" 'pass --root and --home' "the unregistered-alias refusal did not name the pre-seed route"
+# Supplied but empty paths are still an explicit route, never a silent fallback
+# to the registered route for the same alias.
+ssh_before_empty_refusals=$(cat "$SSH_COUNT")
+if out=$(fm_on --root '' --home '' remote-mac fm-probe-two.sh 2>&1); then
+  fail "empty explicit paths fell back to the registered route for a non-doctor command"
+fi
+assert_contains "$out" 'needs both --root and --home' "the empty explicit route was not refused as incomplete"
+if fm_on --root '' --home '' ios fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "empty explicit paths fell back to the registered route for the doctor"
+fi
+if fm_on --root '' --home "$REMOTE_HOME" remote-mac fm-remote-doctor.sh >/dev/null 2>&1; then
+  fail "an empty explicit root was accepted"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_empty_refusals" ] || fail "an empty explicit route reached SSH"
 pass "an explicit root and home check an unseeded host with the doctor only"
 
 fm_on ios fm-probe-two.sh >/dev/null
