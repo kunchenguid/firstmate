@@ -98,9 +98,11 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale. A slot claim naming another
-# task skips slot cleanup only when no other record names the slot; two records
-# require the explicit --release-duplicate-claim branch and endpoint proof.
+# collision itself, whichever record is stale. The one exception is a slot whose
+# owner claim (below) names another task: this teardown is then records-only and
+# touches nothing under the slot, so the scan is skipped rather than stranding
+# the stale record and, with it, the claimant's own teardown. With no claim, the
+# stale record is retired through --release-duplicate-claim (Usage below).
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -109,12 +111,16 @@
 # reads the slot's own owner claim, written by bin/fm-spawn.sh at the moment the
 # slot is taken and dropped here once it is genuinely returned; bin/fm-wake-lib.sh
 # owns the claim, its location, and its states. A claim naming another task is
-# proof of reassignment: the slot is no longer this task's. With no second
-# record, teardown finishes only this task's cleanup and skips every operation
-# on the slot. With a second record, ordinary teardown refuses and the explicit
-# records-only release proves the stale task's branch work first. Neither path
-# kills processes under the slot, inspects its checkout for the stale task's
-# work, removes hooks there, returns it, or removes the other task's claim.
+# proof of reassignment: the slot is no longer this task's, so teardown warns,
+# names the claimant, and then finishes only this task's own cleanup - endpoint,
+# status, records, checks, backlog - while every step that would read or touch
+# that slot is skipped: no process kill under it, no dirty or landed-work
+# inspection of it, no branch or hook removal in it, no Treehouse return, and
+# never the other task's claim. Skipping the inspection discards nothing of this
+# task's: whatever unlanded work it had in that slot was already destroyed when
+# the pool handed the slot on. Refusing instead would strand the record, because
+# bin/fm-backend.sh's endpoint validation refuses an empty or missing worktree=
+# unconditionally, so there is no line an operator could clear to get past it.
 # A claim that cannot be read proves nothing either way and refuses; inspect or
 # repair the claim file at the printed path and re-run - never remove it, since
 # an absent claim proceeds and would return a slot that may be another task's. An
@@ -173,15 +179,16 @@
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #        fm-teardown.sh <task-id> --release-duplicate-claim
-#   --release-duplicate-claim retires a stale ship record on a Treehouse slot
-#   also recorded by another local task. The slot claim must identify that
-#   other task, or its endpoint must be alive when the claim is absent. The
-#   stale endpoint must be dead or missing, and the stale task's own branch
-#   commits must be reachable from the other task's branch or a remote. It
-#   archives the stale record under data/<id>/,
-#   closes its exact endpoint and backlog item, and leaves the shared worktree,
-#   slot claim, and live processes untouched. It cannot combine with --force;
-#   missing or ambiguous proof refuses before cleanup.
+#   --release-duplicate-claim retires a stale ship or scout record on an
+#   unclaimed Treehouse slot also recorded by other local tasks, exactly one of
+#   which has a live endpoint. The stale endpoint must be dead or missing. A
+#   ship's work is read from its own branch ref, never the shared checkout, and
+#   must pass ordinary teardown's landed-work proofs (a pruned ref only through
+#   a merged PR); a scout must pass the report and completion gates. It
+#   archives the stale record under data/<id>/, closes its exact endpoint and
+#   backlog item, and leaves the shared worktree, slot, and live processes
+#   untouched. It cannot combine with --force; missing or ambiguous proof
+#   refuses before cleanup.
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -1466,13 +1473,18 @@ remove_pr_poll_artifacts() {
     "$state_dir/$id.merge-authority" "$state_dir/$id.check-trust" || return 1
 }
 
+# Where the landed-work proofs below read the task's work: the worktree's HEAD,
+# or a records-only release's branch ref in the project.
+LANDED_DIR=$WT
+LANDED_REF=HEAD
+
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
 pr_number_from_branch() {
   local branch=$1 out n
   [ -n "$branch" ] && [ "$branch" != HEAD ] || return 1
-  out=$( cd "$WT" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
+  out=$( cd "$LANDED_DIR" && gh-axi pr list --state all --head "$branch" --limit 1 2>/dev/null ) || return 1
   n=$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([0-9][0-9]*\),.*/\1/p' | head -1)
   [ -n "$n" ] || return 1
   printf '%s' "$n"
@@ -1497,26 +1509,26 @@ pr_number_from_target() {
 
 ensure_commit_object() {
   local target=$1 commit=$2 n
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
+  git -C "$LANDED_DIR" cat-file -e "$commit^{commit}" 2>/dev/null && return 0
   n=$(pr_number_from_target "$target") || return 1
-  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
-  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
-  git -C "$WT" cat-file -e "$commit^{commit}" 2>/dev/null
+  git -C "$LANDED_DIR" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$LANDED_DIR" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  git -C "$LANDED_DIR" cat-file -e "$commit^{commit}" 2>/dev/null
 }
 
 patch_id_for_commit() {
   local commit=$1
-  git -C "$WT" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
+  git -C "$LANDED_DIR" show --pretty=medium --no-ext-diff "$commit" 2>/dev/null \
     | git patch-id --stable 2>/dev/null \
     | awk 'NR == 1 { print $1 }'
 }
 
 unpushed_patches_are_in_pr_head() {
   local pr_head=$1 current base pr_patch_ids commit patch_id unpushed
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  base=$(git -C "$WT" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
+  current=$(git -C "$LANDED_DIR" rev-parse --verify "$LANDED_REF" 2>/dev/null) || return 1
+  base=$(git -C "$LANDED_DIR" merge-base "$current" "$pr_head" 2>/dev/null) || return 1
   pr_patch_ids=$(
-    git -C "$WT" log --format=%H "$base..$pr_head" -- 2>/dev/null \
+    git -C "$LANDED_DIR" log --format=%H "$base..$pr_head" -- 2>/dev/null \
       | while IFS= read -r commit; do
           patch_id_for_commit "$commit"
         done \
@@ -1524,7 +1536,7 @@ unpushed_patches_are_in_pr_head() {
       | sort -u
   ) || return 1
   [ -n "$pr_patch_ids" ] || return 1
-  unpushed=$(git -C "$WT" log --format=%H HEAD --not --remotes -- 2>/dev/null) || return 1
+  unpushed=$(git -C "$LANDED_DIR" log --format=%H "$LANDED_REF" --not --remotes -- 2>/dev/null) || return 1
   [ -n "$unpushed" ] || return 1
   while IFS= read -r commit; do
     [ -n "$commit" ] || continue
@@ -1549,7 +1561,7 @@ pr_is_merged() {
     target=$(pr_number_from_branch "$branch") || return 1
   fi
   [ -n "$target" ] || return 1
-  view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+  view=$(cd "$LANDED_DIR" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
   state=${view%%$'\t'*}
   remainder=${view#*$'\t'}
   [ "$state" != "$view" ] || return 1
@@ -1561,12 +1573,16 @@ pr_is_merged() {
     *) return 1 ;;
   esac
   [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
-  current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
-  if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+  if [ "$LANDED_REF" != HEAD ] && ! git -C "$LANDED_DIR" show-ref --verify --quiet "$LANDED_REF"; then
     landed=1
-  elif unpushed_patches_are_in_pr_head "$head"; then
-    landed=1
+  else
+    ensure_commit_object "$target" "$head" || return 1
+    current=$(git -C "$LANDED_DIR" rev-parse --verify "$LANDED_REF" 2>/dev/null) || return 1
+    if git -C "$LANDED_DIR" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
+      landed=1
+    elif unpushed_patches_are_in_pr_head "$head"; then
+      landed=1
+    fi
   fi
   [ "$landed" = 1 ] || return 1
   if [ -z "$PR_URL" ]; then
@@ -1586,17 +1602,17 @@ pr_is_merged() {
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
-  if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+  if git -C "$LANDED_DIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$LANDED_DIR" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+  elif git -C "$LANDED_DIR" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
     ref="refs/heads/$name"
   else
     return 1
   fi
-  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  default_tree=$(git -C "$LANDED_DIR" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+  merged_tree=$(git -C "$LANDED_DIR" merge-tree --write-tree "$ref" "$LANDED_REF" 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
   [ "$merged_tree" = "$default_tree" ]
 }
@@ -2367,14 +2383,13 @@ collect_local_firstmate_states() {
   done
 }
 
-find_other_record_for_slot() {
+find_other_records_for_slot() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
-  TEARDOWN_DUPLICATE_META=
-  TEARDOWN_DUPLICATE_ID=
-  TEARDOWN_DUPLICATE_FIELD=
-  TEARDOWN_DUPLICATE_SCAN_OK=0
-  slot=$(canonical_existing_dir "$worktree") || return 1
+  TEARDOWN_DUPLICATE_METAS=()
+  TEARDOWN_DUPLICATE_IDS=()
+  TEARDOWN_DUPLICATE_FIELDS=()
+  slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
@@ -2390,39 +2405,30 @@ find_other_record_for_slot() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        TEARDOWN_DUPLICATE_META=$other
-        TEARDOWN_DUPLICATE_ID=$other_id
-        TEARDOWN_DUPLICATE_FIELD=$field
-        TEARDOWN_DUPLICATE_SCAN_OK=1
-        return 0
+        TEARDOWN_DUPLICATE_METAS+=("$other")
+        TEARDOWN_DUPLICATE_IDS+=("$other_id")
+        TEARDOWN_DUPLICATE_FIELDS+=("$field")
+        continue 2
       done
     done
   done
-  TEARDOWN_DUPLICATE_SCAN_OK=1
-  return 1
 }
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4 slot
   slot=$(canonical_existing_dir "$worktree") || return 0
-  # A claim naming another task proves reassignment, but a second surviving
-  # record needs the stricter records-only branch proof before retirement.
+  # A slot whose owner claim names another task was reassigned, so this record's
+  # teardown is records-only and touches nothing under it; another record naming
+  # the slot is then no hazard, and refusing would strand this stale record and
+  # block the claimant's own teardown behind it.
   fm_treehouse_slot_owner_state "$slot" "$record_id"
-  if [ "$FM_TREEHOUSE_SLOT_OWNER" = other ]; then
-    if find_other_record_for_slot "$record_meta" "$record_id" "$record_state" "$slot"; then
-      echo "REFUSED: task $record_id's recorded worktree $slot is also task $TEARDOWN_DUPLICATE_ID's recorded $TEARDOWN_DUPLICATE_FIELD; use --release-duplicate-claim for the stale, agent-free task after its branch work lands." >&2
-      return 1
-    fi
-    [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ] || return 1
-    return 0
-  fi
-  if find_other_record_for_slot "$record_meta" "$record_id" "$record_state" "$slot"; then
-    echo "REFUSED: task $record_id's recorded worktree $slot is also task $TEARDOWN_DUPLICATE_ID's recorded $TEARDOWN_DUPLICATE_FIELD." >&2
-    echo "Returning that pool slot would kill $TEARDOWN_DUPLICATE_ID's processes and reset its copy, so nothing was changed - not even with --force." >&2
-    echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $TEARDOWN_DUPLICATE_ID), then re-run teardown." >&2
-    return 1
-  fi
-  [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ]
+  [ "$FM_TREEHOUSE_SLOT_OWNER" != other ] || return 0
+  find_other_records_for_slot "$record_meta" "$record_id" "$record_state" "$slot" || return 1
+  [ "${#TEARDOWN_DUPLICATE_IDS[@]}" -gt 0 ] || return 0
+  echo "REFUSED: task $record_id's recorded worktree $slot is also task ${TEARDOWN_DUPLICATE_IDS[0]}'s recorded ${TEARDOWN_DUPLICATE_FIELDS[0]}." >&2
+  echo "Returning that pool slot would kill ${TEARDOWN_DUPLICATE_IDS[0]}'s processes and reset its copy, so nothing was changed - not even with --force." >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh ${TEARDOWN_DUPLICATE_IDS[0]}), or retire a stale, agent-free, landed record with bin/fm-teardown.sh <stale-id> --release-duplicate-claim, then re-run teardown." >&2
+  return 1
 }
 
 require_exclusive_task_worktree_slot() {
@@ -2431,45 +2437,42 @@ require_exclusive_task_worktree_slot() {
   require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
 }
 
-# The shared checkout now belongs to the other record. Check this task's own
-# branch ref in the project's git database, never HEAD or status in that slot.
-# Reachability from the other task's branch or any remote proves the commits
-# survive. A content-equivalent squash alone cannot prove a unique commit is
-# recoverable, so this stricter repair path refuses it.
+# The shared checkout now belongs to the other record, so the stale task's work
+# is read from its own branch ref in the project's git database, never from HEAD
+# or status in that slot. The proofs are ordinary teardown's: reachable from a
+# remote (or the live owner's branch), merged into local main for local-only,
+# or landed through a merged PR or default-branch content. A pruned branch ref
+# is landed only through a merged PR.
 duplicate_claim_branch_is_landed() {
-  local branch owner_branch ref owner_ref remaining
+  local branch owner_branch owner_ref= remaining name
   branch=$(fm_meta_get "$META" branch)
   if [ -z "$branch" ] || ! git check-ref-format --branch "$branch" >/dev/null 2>&1; then
     echo "REFUSED: task $ID has no valid recorded branch ref; its work cannot be proved landed without reading the live owner's checkout." >&2
     return 1
   fi
-  ref="refs/heads/$branch"
-  git -C "$PROJ" show-ref --verify --quiet "$ref" || {
-    echo "REFUSED: task $ID's branch ref $ref is missing; its commits cannot be checked." >&2
-    return 1
-  }
-  owner_branch=$(fm_meta_get "$TEARDOWN_DUPLICATE_META" branch)
-  owner_ref=
-  if [ -n "$owner_branch" ] && git check-ref-format --branch "$owner_branch" >/dev/null 2>&1 \
-    && git -C "$PROJ" show-ref --verify --quiet "refs/heads/$owner_branch"; then
-    owner_ref="refs/heads/$owner_branch"
-  fi
-  if [ -n "$owner_ref" ] && git -C "$PROJ" merge-base --is-ancestor "$ref" "$owner_ref" 2>/dev/null; then
-    return 0
-  fi
-  if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-    git -C "$PROJ" fetch --quiet origin >/dev/null 2>&1 || {
-      echo "REFUSED: task $ID's branch is not contained in the other task's branch and origin could not be fetched to verify remote reachability." >&2
+  LANDED_DIR=$PROJ
+  LANDED_REF="refs/heads/$branch"
+  if git -C "$PROJ" show-ref --verify --quiet "$LANDED_REF"; then
+    owner_branch=$(fm_meta_get "$RELEASE_OWNER_META" branch)
+    if [ -n "$owner_branch" ] && git check-ref-format --branch "$owner_branch" >/dev/null 2>&1 \
+      && git -C "$PROJ" show-ref --verify --quiet "refs/heads/$owner_branch"; then
+      owner_ref="refs/heads/$owner_branch"
+    fi
+    remaining=$(git -C "$PROJ" rev-list "$LANDED_REF" --not ${owner_ref:+"$owner_ref"} --remotes 2>/dev/null) || remaining=unreadable
+    [ -n "$remaining" ] || return 0
+    if [ "$MODE" = local-only ]; then
+      name=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+      remaining=$(git -C "$PROJ" rev-list "$LANDED_REF" --not "$name" 2>/dev/null) || remaining=unreadable
+      [ -n "$remaining" ] || return 0
+      echo "REFUSED: local-only task $ID's branch $LANDED_REF has work not yet merged into $name and not on any remote." >&2
       return 1
-    }
+    fi
+  elif [ "$MODE" = local-only ]; then
+    echo "REFUSED: local-only task $ID's branch ref $LANDED_REF is missing; its landing on local main cannot be checked." >&2
+    return 1
   fi
-  if [ -n "$owner_ref" ]; then
-    remaining=$(git -C "$PROJ" rev-list "$ref" --not "$owner_ref" --remotes 2>/dev/null) || remaining=unreadable
-  else
-    remaining=$(git -C "$PROJ" rev-list "$ref" --not --remotes 2>/dev/null) || remaining=unreadable
-  fi
-  [ -n "$remaining" ] || return 0
-  echo "REFUSED: task $ID's own branch $ref has unique unlanded commits; records-only release would lose the only task record naming them." >&2
+  work_is_landed "$branch" && return 0
+  echo "REFUSED: task $ID's branch $LANDED_REF has work not on any remote and not landed; records-only release would lose the only task record naming it." >&2
   return 1
 }
 
@@ -3410,48 +3413,47 @@ remove_secondmate_registry_entry() {
 }
 
 if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
-  if [ "$KIND" != ship ] || [ "$BACKEND" = orca ] \
+  if { [ "$KIND" != ship ] && [ "$KIND" != scout ]; } || [ "$BACKEND" = orca ] \
     || ! fm_treehouse_pool_slot "$PROJ" "$WT"; then
-      echo "REFUSED: --release-duplicate-claim requires a ship task's recorded Treehouse pool slot." >&2
+      echo "REFUSED: --release-duplicate-claim requires a ship or scout task's recorded Treehouse pool slot." >&2
       exit 1
-  fi
-  if ! find_other_record_for_slot "$META" "$ID" "$STATE" "$WT"; then
-    if [ "$TEARDOWN_DUPLICATE_SCAN_OK" = 1 ]; then
-      echo "REFUSED: no other task record claims $WT; records-only release is unavailable." >&2
-    else
-      echo "REFUSED: duplicate-claim records could not be inspected completely; records-only release left every record intact." >&2
-    fi
-    exit 1
   fi
   fm_treehouse_slot_owner_state "$WT" "$ID"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
+    absent) ;;
     other)
-      [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$TEARDOWN_DUPLICATE_ID" ] || {
-        echo "REFUSED: slot claim names task $FM_TREEHOUSE_SLOT_OWNER_ID, not the other recorded task $TEARDOWN_DUPLICATE_ID; ownership is ambiguous." >&2
-        exit 1
-      }
-      if [ -n "$FM_TREEHOUSE_SLOT_OWNER_HOME" ]; then
-        RELEASE_CLAIM_HOME=$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME") || RELEASE_CLAIM_HOME=
-        RELEASE_RECORD_HOME=$(canonical_existing_dir "${TEARDOWN_DUPLICATE_META%/state/*}") || RELEASE_RECORD_HOME=
-        [ -n "$RELEASE_CLAIM_HOME" ] && [ "$RELEASE_CLAIM_HOME" = "$RELEASE_RECORD_HOME" ] || {
-          echo "REFUSED: slot claim and task $TEARDOWN_DUPLICATE_ID's record name different homes; ownership is ambiguous." >&2
-          exit 1
-        }
-      fi
-      ;;
-    absent)
-      fm_backend_validate_task_endpoint "$TEARDOWN_DUPLICATE_META" "$TEARDOWN_DUPLICATE_ID" || exit 1
-      RELEASE_OWNER_STATE=$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")
-      [ "$RELEASE_OWNER_STATE" = alive ] || {
-        echo "REFUSED: the slot has no owner claim and task $TEARDOWN_DUPLICATE_ID's endpoint reads '$RELEASE_OWNER_STATE'; the live owner cannot be identified." >&2
-        exit 1
-      }
+      echo "REFUSED: the slot claim names task $FM_TREEHOUSE_SLOT_OWNER_ID; ordinary teardown of $ID already retires its record without touching the slot." >&2
+      exit 1
       ;;
     *)
       echo "REFUSED: the slot claim reads '$FM_TREEHOUSE_SLOT_OWNER'; task $ID cannot be proved the stale duplicate." >&2
       exit 1
       ;;
   esac
+  find_other_records_for_slot "$META" "$ID" "$STATE" "$WT" || {
+    echo "REFUSED: duplicate-claim records could not be inspected completely; records-only release left every record intact." >&2
+    exit 1
+  }
+  [ "${#TEARDOWN_DUPLICATE_IDS[@]}" -gt 0 ] || {
+    echo "REFUSED: no other task record claims $WT; records-only release is unavailable." >&2
+    exit 1
+  }
+  RELEASE_OWNER_META=
+  RELEASE_OWNER_ID=
+  for RELEASE_I in "${!TEARDOWN_DUPLICATE_IDS[@]}"; do
+    fm_backend_validate_task_endpoint "${TEARDOWN_DUPLICATE_METAS[$RELEASE_I]}" "${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]}" || continue
+    [ "$(fm_backend_agent_state "$FM_BACKEND_VALIDATED_BACKEND" "$FM_BACKEND_VALIDATED_TARGET")" = alive ] || continue
+    [ -z "$RELEASE_OWNER_ID" ] || {
+      echo "REFUSED: tasks $RELEASE_OWNER_ID and ${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]} both have live endpoints on $WT; ownership is ambiguous." >&2
+      exit 1
+    }
+    RELEASE_OWNER_META=${TEARDOWN_DUPLICATE_METAS[$RELEASE_I]}
+    RELEASE_OWNER_ID=${TEARDOWN_DUPLICATE_IDS[$RELEASE_I]}
+  done
+  [ -n "$RELEASE_OWNER_ID" ] || {
+    echo "REFUSED: the slot has no owner claim and no other task recording $WT has a live endpoint; the live owner cannot be identified." >&2
+    exit 1
+  }
   if [ "$TEARDOWN_WINDOWLESS" = 1 ]; then
     RELEASE_ENDPOINT_STATE=missing
   else
@@ -3464,10 +3466,10 @@ if [ "$RELEASE_DUPLICATE_CLAIM" = 1 ]; then
       exit 1
       ;;
   esac
-  duplicate_claim_branch_is_landed || exit 1
+  [ "$KIND" = scout ] || duplicate_claim_branch_is_landed || exit 1
   TEARDOWN_SLOT_REASSIGNED=1
-  TEARDOWN_SLOT_REASSIGNED_TO=$TEARDOWN_DUPLICATE_ID
-  TEARDOWN_SLOT_REASSIGNED_HOME=${TEARDOWN_DUPLICATE_META%/state/*}
+  TEARDOWN_SLOT_REASSIGNED_TO=$RELEASE_OWNER_ID
+  TEARDOWN_SLOT_REASSIGNED_HOME=${RELEASE_OWNER_META%/state/*}
 else
   require_exclusive_task_worktree_slot || exit 1
   require_owned_task_worktree_slot || exit 1
