@@ -280,6 +280,10 @@ The registrations in detail:
   The guarded set is the `SessionStart` entry, the two `PreToolUse` Bash entries, and both `Stop` entries.
   Cursor 2026.08.11-e8db854 does not fire the Claude-shaped `Stop` entry at all, but it is guarded anyway because Cursor has no `asyncRewake`.
   If a later build did fire it, `bin/fm-claude-stop-autoarm.sh` would run synchronously inside Cursor's stop step and hold that turn open for its declared multi-hour timeout, exactly the wedge grok 1.0.0 produced.
+- Devin registers `SessionStart`, `Stop`, and `PreToolUse` hooks in tracked `.devin/hooks.v1.json` and delegates the whole turn boundary to `bin/fm-turnend-guard-devin.sh`, the park described below.
+  Tracked `.devin/config.json` sets `read_config_from.claude` false, so Devin never loads the repo's `.claude/settings.json` hooks and no Claude-shaped entrypoint can double-execute; `AGENTS.md` and `.agents/skills` still load, verified live on devin 3000.11.3.
+  Defense in depth, `bin/fm-hook-host-lib.sh` also stands every unflagged caller down on a Devin-delivered payload, identified by a non-empty `DEVIN_PROJECT_DIR` environment marker plus a payload object with no `transcript_path` key; each of Devin's own registrations passes `--devin` to bypass that arm.
+  Devin injects `DEVIN_PROJECT_DIR` into hook processes only, never tool shells, and Claude payloads always carry `transcript_path`, so neither half of the test can fire on a genuine Claude event or a Devin tool shell.
 - Grok registers a `Stop` hook in `.grok/hooks/fm-primary-turnend-guard.json` and delegates capability selection to `bin/fm-turnend-guard-grok.sh`.
   The tracked Claude Stop entries are inert when `GROK_AGENT` or `GROK_HOOK_EVENT` is present, so Grok's Claude-compatible settings loading cannot create a second continuation path.
   Both markers are required because Grok does not inject the same variables into every process kind.
@@ -511,6 +515,26 @@ Cursor's `beforeSubmitPrompt` step fires once on a real captain message and does
 The step is now registered only for the [dialog mirror](supervision-host.md#the-dialog-mirror); it does not invalidate the park baton.
 Baton invalidation and the `preCompact` surface remain deferred.
 
+Devin CAN block a turn end: a `Stop` hook's stdout `{"decision":"block","reason":...}` object, or exit 2 with stderr, maps to one forced continuation inside the SAME turn with the reason delivered to the model verbatim, verified live on devin 3000.11.3.
+`bin/fm-turnend-guard-devin.sh` therefore never exits nonzero and never emits more than one decision object on stdout; the adapter uses the block-decision channel, not exit 2.
+Devin runs that hook synchronously and awaits it, so one script owns both halves of the boundary the way Cursor's does.
+While supervision is needed it PARKS: it runs `bin/fm-watch-arm.sh` as its own tracked child, polls it every `FM_DEVIN_PARK_POLL` (default 2) seconds, holds the boundary open until the watcher closes, and returns an actionable close as one `watcher`-kind block continuation, spending no model tokens while parked.
+The turn boundary is shared by a block continuation: `prompt_id` is constant across it and `stop_hook_active` true, so the continuation fires no `UserPromptSubmit`, verified live.
+This is the same between-turns shape as Claude's Stop auto-arm, so `fm_supervision_model` classifies Devin as `autoarm`.
+When the park cannot establish a cycle it asks this shared guard with `--devin` and renders a returned exit 2 as one bounded `turn-end-guard` block continuation, capped by `FM_DEVIN_TURNEND_BLOCK_BUDGET` (default 3) consecutive unproductive nags per session; a delivered wake resets that budget.
+Devin carries no `loop_count`: its payload offers only boolean `stop_hook_active`, but `prompt_id` is constant across block continuations and rotates on each real user message, so the park keeps `state/.devin-park-loops` (`session`/`prompt`/`count`) and increments once per emitted block, resetting when `prompt_id` changes.
+`FM_DEVIN_TURNEND_LOOP_CEILING` (default 180) emits one loud ceiling notice at exactly that count and goes silent above it, because Devin has no host-side ceiling that would still bound a broken adapter.
+
+The captain keeps control while the hook is parked, which is where Devin's park differs from Cursor's.
+A captain message typed plus Enter into a parked Devin pane is NOT delivered and does not interrupt the hook: it lands in a visible FIFO queue that drains only after the hook exits without a block, verified live on devin 3000.11.3.
+Each poll tick the park reads its own pane - tmux via `TMUX`+`TMUX_PANE`, Herdr via `HERDR_ENV`+`HERDR_PANE_ID`, resolved by `bin/fm-supervisor-target-lib.sh` - and stands down silently (arm killed, hook exits 0) when the pane shows Devin's queue marker (`─+ N queued ─+` or `Press Enter to send queued messages now`) or the single-Escape marker `(esc again to interrupt)` on the `Typing` spinner row (verified during a real park, devin 3000.11.3), so the turn closes, the queue drains, and the message runs as its own turn.
+The verdict is computed only on the bottom composer region of the capture - trailing blank rows dropped, the last 12 rows matched with line-anchored patterns - because the transcript above can legitimately print the same strings inside tool output.
+The markers are plain text and theme-independent: devin 3000.11.3 renders no SGR in the composer at all in the light theme, so no styled-capture variant is needed.
+A queued message never reaches a block continuation either: the continuation completes first and the queue drains after it, verified live.
+If the park cannot locate or read its own pane at park start it refuses to park blind - the captain would be locked out for the whole hook timeout - and instead spends one bounded `turn-end-guard` repair continuation asking for a tmux or Herdr pane, then exits.
+Devin kills only the hook's own shell at its timeout and orphans the hook's children, verified live; a surviving arm child from that edge case is picked up by the next park's attach, and the poll trap kills a still-tracked child on every ordinary exit path.
+Each invocation publishes its sequence in `state/.devin-park-owner` under the short publication and commit lock `state/.devin-park-owner.lock`, with the same bounded critical section and supersession semantics as the Cursor park.
+
 ### Adapter failures in the pull guard
 
 If a passive adapter cannot invoke its SDK, or the Grok legacy fallback cannot find `grok` or a session id, the next pull-based `fm-guard.sh` call reports the problem.
@@ -525,6 +549,9 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - OpenCode headless mode and untrusted Grok project hooks remain fail-open at the host boundary.
 - Cursor's `stop` step does not fire in headless `cursor-agent -p`, the same class of limit as OpenCode headless; firstmate primaries run interactive.
 - A Cursor primary must be launched with `--trust`, or its project hooks never load and the whole integration is inert.
+- A Devin primary must run inside a tmux or Herdr pane the Stop hook can read, or its captain stand-down cannot fire; the park degrades to a bounded repair continuation instead of parking blind.
+- Devin's default hook timeout is about 60 seconds and orphans the hook's children when it kills the hook shell; the registered `Stop` timeout of 28800 is what makes a long park possible.
+- Devin's `Stop` hook behavior outside an interactive session is unverified; firstmate primaries run interactive.
 - Cursor's `preCompact` step is deliberately unregistered.
   Its response can return only `user_message` and it is absent from Cursor's `additional_context` step set, so a post-compaction re-emit needs its own design and is deferred to a follow-up ([`sessionstart-nudge.md`](sessionstart-nudge.md) owns that uncovered surface).
 - Kimi Code CLI 0.29.1 exposes only global `[[hooks]]` configuration in `~/.kimi-code/config.toml`, including a `Stop` event with snake_case payload fields `hook_event_name`, `session_id`, `cwd`, and `stop_hook_active`.
@@ -556,7 +583,7 @@ That warning uses `bin/fm-supervision-instructions.sh --repair-line`, so it alwa
 - The away-mode beacon's poll-derived grace widening for a live daemon still mid-cycle and its bound against a dead daemon, a beacon older than that wider grace, and FM_POLL's inapplicability with away mode off.
 - Pi logical-run latching.
 - Missing-`jq` behavior.
-- All five primary registrations.
+- The non-Devin primary registrations that route through this shared suite.
 - Grok native and legacy selection.
 - Typed field precedence.
 - Malformed input.
@@ -585,6 +612,16 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 - Child-worktree exclusion.
 - That the adapter never exits 2.
 
+`tests/fm-devin-primary.test.sh` covers the Devin park end to end over real processes with no harness installed:
+
+- Devin-delivered payloads standing down every tracked Claude-shaped duplicate entrypoint.
+- The `--devin` path reaching the shared guard and rendering Devin's block-decision shape.
+- The bounded repair nag and prompt-id-keyed loop ceiling.
+- Queued captain-input and Escape stand-down through the pane reader.
+- Supersession, away-mode, and lock-ownership inertness.
+- SessionStart context injection and tracked `.devin/hooks.v1.json` registration shape.
+- That the adapter never exits nonzero.
+
 `tests/fm-kimi-harness.test.sh` covers the separate Kimi crew hook's format preservation, idempotence, refusal cases, token guard, spawn registration, and teardown cleanup.
 `tests/fm-supervision-instructions.test.sh` covers recovery-line ownership and pi-signed's identity-preserving reuse of Pi's protocol.
 `tests/fm-omp-harness.test.sh` covers the omp extension pair over a fake omp API (forced continuation on exit 2, the `stop_hook_active` bound, the seatbelt block, the ownership proof).
@@ -592,6 +629,7 @@ It also covers true-reason banner wording and reason-keyed episode dedup survivi
 The opt-in live tests are:
 
 - `FM_CURSOR_PRIMARY_LIVE_E2E=1 tests/fm-cursor-primary-live-e2e.test.sh` is the opt-in guard that proves the Cursor park behavior covered by `tests/fm-cursor-primary.test.sh` against the installed cursor-agent and fails naming the harness and version.
+- `FM_DEVIN_PRIMARY_LIVE_E2E=1 tests/fm-devin-primary-live-e2e.test.sh` is the opt-in guard that proves the Devin park behavior covered by `tests/fm-devin-primary.test.sh` against the installed Devin CLI and fails naming the harness and version.
 - `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` is the opt-in isolated Pi path.
 - `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` is the opt-in isolated omp path.
 

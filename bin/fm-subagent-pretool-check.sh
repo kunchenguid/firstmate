@@ -55,7 +55,7 @@ set -u
 # Lowercase substrings that mark a tool name as delegation-shaped: it creates
 # work, an agent, a schedule, or an isolated workspace that firstmate would not
 # know about. This list is the single owner of the shipped classification.
-DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate spawn dispatch handoff remote sendmessage monitor'
+DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate spawn dispatch handoff remote sendmessage monitor sidekick'
 
 # Exact lowercase tool names that match a stem above but only OBSERVE or STOP
 # work that already exists. Reading or ending unaccounted work is not creating
@@ -63,7 +63,7 @@ DELEGATION_STEMS='agent subagent task workflow cron schedul worktree delegate sp
 # or end it. A local Claude deny list may still remove these from the
 # schema; this shipped guard deliberately stays narrower so it can never be the
 # reason a runaway task cannot be stopped.
-OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell'
+OBSERVE_ONLY_TOOLS='taskoutput taskstop taskget tasklist cronlist bashoutput killshell readsubagent'
 
 # Exact lowercase tool names that match a stem above but create no RUNNABLE
 # work. These write only the harness's session-local todo list, which has no
@@ -81,10 +81,11 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 TOOL=""
 TOOL_SET=0
 CLAUDE_MODE=0
+DEVIN_MODE=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude]
+Usage: fm-subagent-pretool-check.sh [--tool <tool-name>] [--claude] [--devin]
 
 With no --tool, reads a PreToolUse-style JSON payload on stdin (Claude/Codex
 tool_name, or Grok toolName).
@@ -119,6 +120,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --claude)
       CLAUDE_MODE=1
+      shift
+      ;;
+    --devin)
+      DEVIN_MODE=1
       shift
       ;;
     -h|--help)
@@ -202,6 +207,10 @@ json_escape() {
 }
 
 ESCAPED=$(json_escape "$REASON")
+if [ "$DEVIN_MODE" -eq 1 ]; then
+  printf '{"decision":"block","reason":"%s"}\n' "$ESCAPED"
+  exit 0
+fi
 printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"},"systemMessage":"%s"}\n' "$ESCAPED" >&2
 [ "$CLAUDE_MODE" -eq 1 ] || printf '{"decision":"deny","reason":"%s"}\n' "$ESCAPED"
 exit 2

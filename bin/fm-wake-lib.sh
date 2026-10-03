@@ -239,7 +239,7 @@ fm_supervision_model() {
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
+    claude|cursor|devin) printf 'autoarm\n' ;;
     pi|pi-signed|omp) printf 'extension\n' ;;
     *) printf 'persistent\n' ;;
   esac

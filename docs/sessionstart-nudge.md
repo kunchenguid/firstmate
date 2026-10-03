@@ -26,7 +26,7 @@ The tier is a property of the harness surface, not of the home.
 
 | Tier | What the adapter does | Used by |
 | --- | --- | --- |
-| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor |
+| Run | Executes `bin/fm-session-start.sh` through the native session-open adapter and gates its ordered digest into model context before the first turn. | Claude, `codex exec`, Pi / pi-signed, omp, Cursor, Devin |
 | Nudge | Asks the agent to run the digest through the native adapter or the tracked session-start instruction. | Grok, OpenCode, and run-tier sources routed to the nudge |
 
 Codex's interactive TUI has no tracked session-open, compaction, or re-emit channel and is not covered by either tier.
@@ -42,6 +42,7 @@ Codex's interactive TUI has no tracked session-open, compaction, or re-emit chan
 | OpenCode | Nudge | [OpenCode](#opencode) |
 | Grok | Nudge | [Grok](#grok) |
 | Cursor | Run | [Cursor](#cursor) |
+| Devin | Run | [Devin](#devin) |
 | omp | Run | [omp](#omp) |
 | Cursor compaction | Uncovered | [Cursor compaction](#cursor-compaction) |
 
@@ -344,6 +345,14 @@ Project hooks load only when the workspace is launched with `--trust`.
 Cursor's `sessionStart` fires at every session open with no source distinction, including a resumed session.
 So a resume re-runs the full digest.
 That is redundant and idempotent rather than a lost helm.
+
+### Devin
+
+Devin is a run-tier harness.
+`.devin/hooks.v1.json` registers `SessionStart`, anchored through `$DEVIN_PROJECT_DIR` with a 180s timeout, invoking `bin/fm-sessionstart-devin.sh`.
+The adapter reads the payload's own `source` field (`startup`, `resume`, and friends) and forwards it to the run wrapper as `--source`.
+It returns the digest as `hookSpecificOutput.additionalContext`, the field Devin injects into model context.
+Tracked `.devin/config.json` sets `read_config_from.claude` false, so the repo's `.claude/settings.json` `SessionStart` entry cannot double-fire beside it; defense in depth, `bin/fm-hook-host-lib.sh` stands the unflagged Claude-shaped wrapper down on a Devin-delivered payload.
 
 ### omp
 

@@ -18,7 +18,10 @@
 # this guard back with --cursor from bin/fm-turnend-guard-cursor.sh and renders
 # exit 2 as one bounded follow-up, because exit 2 is a silent no-op on Cursor's
 # stop step; without that flag a Cursor-shaped payload is the Claude-settings
-# duplicate Cursor also loads, and this guard stands down.
+# duplicate Cursor also loads, and this guard stands down. Devin calls it back
+# with --devin from bin/fm-turnend-guard-devin.sh, which renders exit 2 as one
+# bounded {"decision":"block"} follow-up; without that flag a Devin-delivered
+# payload is the Claude-compatibility duplicate and this guard stands down.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -100,6 +103,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+DEVIN_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -111,7 +115,8 @@ for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --devin) DEVIN_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--devin]" >&2; exit 2 ;;
   esac
 done
 
@@ -137,7 +142,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 # which calls this guard back with --cursor. Without that flag a Cursor-delivered
 # payload is the Claude-compatibility duplicate and must not create a second
 # continuation path (docs/turnend-guard.md "Harness integrations").
-if [ "$CURSOR_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
+if [ "$CURSOR_MODE" -eq 0 ] && [ "$DEVIN_MODE" -eq 0 ] && fm_hook_payload_is_foreign_host "$PAYLOAD"; then
   exit 0
 fi
 
@@ -150,7 +155,7 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$DEVIN_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
