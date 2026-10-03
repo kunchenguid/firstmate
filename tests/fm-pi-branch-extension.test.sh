@@ -4787,6 +4787,54 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+# An Orca task's stale rows are keyed by its terminal handle, not a window
+# (bin/fm-watch.sh keys Orca endpoints by terminal=). The dispatcher must
+# resolve that terminal key to its task, so a terminal-keyed stale row queued
+# alongside another eligible row stays branch-owned instead of sending the
+# whole wake to main.
+test_branch_dispatch_resolves_terminal_keyed_orca_stale_row() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-terminal-root"
+  home="$TMP_ROOT/dispatch-terminal-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
+  printf 'project=%s/projects/approved\nterminal=orca-term-1\n' "$home" > "$home/state/orca-task.meta"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const project = `${process.env.FM_HOME}/projects/approved`;
+
+for (const heartbeat of [false, true]) {
+  const queue = heartbeat
+    ? ["1\t1\theartbeat\theartbeat\theartbeat", "1\t2\tstale\torca-term-1\tstale: orca-term-1"]
+    : ["1\t1\tsignal\torca-task.status\tsignal: orca-task.status", "1\t2\tstale\torca-term-1\tstale: orca-term-1"];
+  writeFileSync(`${state}/.wake-queue`, queue.join("\n"));
+  const scope = scopeForUnreadWake(state, heartbeat);
+  if (!scope.eligible || scope.corrupted || scope.eligibleSeqs.slice().sort().join(",") !== "1,2") {
+    throw new Error(`a terminal-keyed stale row was not branch-owned (heartbeat=${heartbeat}): ${JSON.stringify(scope)}`);
+  }
+  if (scope.taskByWakeKey["orca-term-1"] !== "orca-task") {
+    throw new Error(`the terminal key did not resolve to its task: ${JSON.stringify(scope)}`);
+  }
+  if (!scope.projects.includes(project)) {
+    throw new Error(`the terminal-keyed task lost its project context: ${JSON.stringify(scope.projects)}`);
+  }
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a terminal-keyed Orca stale row must resolve to its task: $out"
+  pass "scopeForUnreadWake resolves a terminal-keyed Orca stale row to its task alongside another eligible row"
+}
+
 # A second mate's status log is one shared channel for many independently keyed
 # decisions, so its signal rows are judged by the span presented since the last
 # drain (bounded by bin/fm-classify-lib.sh's own presentation-cursor writer),
@@ -5808,6 +5856,7 @@ test_abbreviated_processing_request_points_to_full_outcome
 test_large_unprocessed_backlog_replays_in_batches
 test_undated_unprocessed_outcome_surfaces_and_stays_unprocessed
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
+test_branch_dispatch_resolves_terminal_keyed_orca_stale_row
 test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
