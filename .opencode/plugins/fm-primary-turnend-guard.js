@@ -22,6 +22,15 @@ function runProcess(command, args, input = "") {
     });
     child.on("error", () => resolve({ code: 0, stdout: "", stderr: "" }));
     child.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    // A short-lived child (the guard fixture, or the real guard script once
+    // it decides it has nothing to do) can exit and close its stdin read end
+    // before this write reaches the kernel, especially under CPU contention
+    // that delays this process relative to the child's own scheduling. That
+    // EPIPE is not a real failure - the close handler above already captures
+    // the child's actual exit code and output - but with no listener on the
+    // stdin stream itself, Node treats it as an unhandled error and crashes
+    // the whole process. Swallow it so a closed stdin cannot do that.
+    child.stdin.on("error", () => {});
     child.stdin.end(input);
   });
 }

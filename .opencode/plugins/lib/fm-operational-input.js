@@ -35,6 +35,12 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
       }
       reject(new Error(stderr.trim() || `operational-input encoder exited ${code ?? "unknown"}`));
     });
+    // See fm-primary-turnend-guard.js's runProcess for why this listener is
+    // required: a closed stdin pipe on write is not a real failure here
+    // either, since the close handler above is what actually decides success
+    // or failure, and without this listener Node treats the EPIPE as
+    // unhandled and crashes the process instead of reaching that handler.
+    child.stdin.on("error", () => {});
     child.stdin.end(content);
   });
 }
