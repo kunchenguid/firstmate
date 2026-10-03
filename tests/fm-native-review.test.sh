@@ -42,7 +42,12 @@ if [ "\${1:-}" = --version ]; then echo '$name test-version'; exit 0; fi
 [ "\${3:-}" = "\${3#developer_instructions=}" ] && exit 93
 [ "\${4:-}" = --base ] || exit 94
 printf '%s\n' "\$@" >'$dir/argv'
-printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
+printf 'reviewed source mentions INTENT_CONFORMANCE: pass and INTENT_CONFORMANCE: fail\n' >&2
+if [ '$name' = traex ]; then
+  printf 'TraeCode CLI\nNo findings.\nINTENT_CONFORMANCE: $conclusion\nhook: SubagentStop\nhook: SubagentStop Completed\n' >&2
+else
+  printf 'No findings.\nINTENT_CONFORMANCE: $conclusion\n'
+fi
 EOF
   chmod +x "$dir/bin/$name"
 }
@@ -95,6 +100,20 @@ test_moving_or_uncommitted_candidate_is_refused() {
   pass "native review: moving candidate state is refused"
 }
 
+test_candidate_change_during_review_is_refused() {
+  local dir base candidate out rc=0
+  dir=$(make_case traex)
+  write_reviewer "$dir" traex
+  sed -i "/if \[ 'traex' = traex \]/ i printf 'changed during review\\n' >> '$dir/repo/file'" "$dir/bin/traex"
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" 2>&1) || rc=$?
+  expect_code 2 "$rc" "a candidate changed during review must be refused"
+  assert_contains "$out" "changed while native review was running" "post-review candidate refusal was not actionable"
+  pass "native review: candidate identity is revalidated after review"
+}
+
 test_untracked_candidate_input_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case traex)
@@ -145,11 +164,36 @@ PY
   pass "native review: promoted ships use the current ship-time contract"
 }
 
-test_structured_result_marker_is_accepted() {
-  local dir base candidate output
+test_legacy_promoted_ship_uses_normalized_intent() {
+  local dir base candidate
   dir=$(make_case traex)
   write_reviewer "$dir" traex
-  sed -i "s/printf 'No findings.\\\\nINTENT_CONFORMANCE: pass\\\\n'/printf 'Summary. INTENT_CONFORMANCE: pass\\\\n\\\\nFull review comments:\\\\nNone.\\\\n'/" "$dir/bin/traex"
+  cat >"$dir/home/data/task/brief.md" <<'EOF'
+# Task
+Legacy unsectioned scout instructions.
+EOF
+  cat >"$dir/home/data/task/ship-instructions.md" <<'EOF'
+# Task
+## Captain's intent
+Preserve the normalized legacy request.
+
+## Firstmate spec
+Apply the current promoted acceptance contract.
+EOF
+  base=$(cat "$dir/base")
+  candidate=$(cat "$dir/candidate")
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
+    --base "$base" --candidate "$candidate" >/dev/null \
+    || fail "legacy promoted native review route failed"
+  assert_grep "Preserve the normalized legacy request" "$dir/argv" "legacy promoted review omitted normalized Captain intent"
+  pass "native review: legacy promoted intent falls back to ship instructions"
+}
+
+test_structured_result_marker_is_accepted() {
+  local dir base candidate output
+  dir=$(make_case codex)
+  write_reviewer "$dir" codex
+  sed -i "s/printf 'No findings.\\\\nINTENT_CONFORMANCE: pass\\\\n'/printf 'Summary. INTENT_CONFORMANCE: pass\\\\n\\\\nFull review comments:\\\\nNone.\\\\n'/" "$dir/bin/codex"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   output="$dir/home/data/task/structured.md"
@@ -188,7 +232,7 @@ test_missing_conclusion_is_refused() {
   local dir base candidate out rc=0
   dir=$(make_case codex)
   write_reviewer "$dir" codex omitted
-  sed -i '/INTENT_CONFORMANCE:/d' "$dir/bin/codex"
+  sed -i 's/INTENT_CONFORMANCE:/NO_CONCLUSION:/g' "$dir/bin/codex"
   base=$(cat "$dir/base")
   candidate=$(cat "$dir/candidate")
   out=$(PATH="$dir/bin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-native-review.sh" task \
@@ -216,8 +260,10 @@ test_failing_conclusion_preserves_evidence_and_stops_delivery() {
 test_supported_harness_binds_contract_and_identity
 test_missing_capability_fails_actionably
 test_moving_or_uncommitted_candidate_is_refused
+test_candidate_change_during_review_is_refused
 test_untracked_candidate_input_is_refused
 test_promoted_ship_uses_current_ship_contract
+test_legacy_promoted_ship_uses_normalized_intent
 test_structured_result_marker_is_accepted
 test_output_must_resolve_under_task_directory
 test_missing_conclusion_is_refused

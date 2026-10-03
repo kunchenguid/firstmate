@@ -52,7 +52,7 @@ if [ -e "$SHIP_INSTRUCTIONS" ] || [ -L "$SHIP_INSTRUCTIONS" ]; then
     echo "error: current ship review contract is not a regular file: $SHIP_INSTRUCTIONS" >&2
     exit 2
   }
-  REVIEW_CONTRACT="$BRIEF (Captain intent) + $SHIP_INSTRUCTIONS (current ship spec)"
+  REVIEW_CONTRACT="$BRIEF (latest Captain intent, with promoted fallback) + $SHIP_INSTRUCTIONS (current ship spec)"
   INTENT_CONTRACT=$BRIEF
   SPEC_CONTRACT=$SHIP_INSTRUCTIONS
 else
@@ -86,7 +86,15 @@ git -C "$WORKTREE" merge-base --is-ancestor "$BASE_FULL" "$CANDIDATE_FULL" || {
 
 INTENT=$(fm_brief_task_heading_body "$INTENT_CONTRACT" "## Captain's intent")
 SPEC=$(fm_brief_task_heading_body "$SPEC_CONTRACT" "## Firstmate spec")
-[ -n "$(printf '%s%s' "$INTENT" "$SPEC" | tr -d '[:space:]')" ] || {
+if [ -z "$(printf '%s' "$INTENT" | tr -d '[:space:]')" ] \
+    && [ "$INTENT_CONTRACT" != "$SPEC_CONTRACT" ]; then
+  # Legacy scouts may predate the canonical intent subsection. Promotion
+  # normalized their intent into ship-instructions.md; newer authenticated
+  # updates live in brief.md and therefore win whenever present.
+  INTENT=$(fm_brief_task_heading_body "$SPEC_CONTRACT" "## Captain's intent")
+fi
+[ -n "$(printf '%s' "$INTENT" | tr -d '[:space:]')" ] \
+  && [ -n "$(printf '%s' "$SPEC" | tr -d '[:space:]')" ] || {
   echo "error: task $ID has no reviewable Captain intent and Firstmate spec" >&2
   exit 2
 }
@@ -147,18 +155,72 @@ command -v "$COMMAND" >/dev/null 2>&1 || {
 VERSION=$($COMMAND --version 2>&1 | head -1)
 PROMPT_CONFIG=$(python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' <<<"$PROMPT")
 RESULT=$(mktemp "$(dirname "$OUTPUT")/.native-review-result.XXXXXX")
-trap 'rm -f "$TMP" "$RESULT"' EXIT HUP INT TERM
+TRACE=$(mktemp "$(dirname "$OUTPUT")/.native-review-trace.XXXXXX")
+trap 'rm -f "$TMP" "$RESULT" "$TRACE"' EXIT HUP INT TERM
 # Current Codex and TraeX review CLIs make the target selector and positional
 # prompt mutually exclusive. Pass the immutable contract through the supported
 # invocation-local developer-instructions setting while retaining --base as the
 # native diff selector. JSON string syntax is valid TOML basic-string syntax and
 # preserves newlines without shell evaluation.
-if ! (cd "$WORKTREE" && "$COMMAND" review \
-  -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>&1; then
+REVIEW_RC=0
+REVIEW_TERMINATED=0
+if [ "$HARNESS" = traex ]; then
+  # TraeX writes its final response to stderr inside an explicit CLI frame,
+  # alongside runtime and hook traces. Its current installed runtime can also
+  # remain alive after SubagentStop has completed, so stop only that completed
+  # review process and accept the signal status only when the complete frame is
+  # present. Never parse marker examples from the surrounding trace.
+  (cd "$WORKTREE" && "$COMMAND" review \
+    -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" &
+  REVIEW_PID=$!
+  while kill -0 "$REVIEW_PID" 2>/dev/null; do
+    if grep -qx 'hook: SubagentStop Completed' "$TRACE"; then
+      REVIEW_TERMINATED=1
+      kill -TERM "$REVIEW_PID" 2>/dev/null || true
+      break
+    fi
+    sleep 0.2
+  done
+  wait "$REVIEW_PID" || REVIEW_RC=$?
+  python3 - "$TRACE" >"$RESULT" <<'PY' || REVIEW_RC=1
+import sys
+
+lines = open(sys.argv[1], encoding='utf-8', errors='replace').read().splitlines()
+starts = [index for index, line in enumerate(lines) if line == 'TraeCode CLI']
+if not starts or 'hook: SubagentStop Completed' not in lines[starts[-1] + 1:]:
+    raise SystemExit(1)
+start = starts[-1] + 1
+try:
+    end = lines.index('hook: SubagentStop', start)
+except ValueError:
+    raise SystemExit(1)
+result = '\n'.join(lines[start:end]).strip()
+if not result:
+    raise SystemExit(1)
+print(result)
+PY
+  if [ "$REVIEW_TERMINATED" -eq 1 ] && [ "$REVIEW_RC" -eq 143 ]; then
+    REVIEW_RC=0
+  fi
+else
+  (cd "$WORKTREE" && "$COMMAND" review \
+    -c "developer_instructions=$PROMPT_CONFIG" --base "$BASE_FULL") >"$RESULT" 2>"$TRACE" \
+    || REVIEW_RC=$?
+fi
+if [ "$REVIEW_RC" -ne 0 ]; then
   cat "$RESULT" >&2
+  cat "$TRACE" >&2
   echo "error: $HARNESS native review failed for $BASE_FULL..$CANDIDATE_FULL" >&2
   exit 1
 fi
+POST_HEAD=$(git -C "$WORKTREE" rev-parse HEAD)
+[ "$POST_HEAD" = "$CANDIDATE_FULL" ] \
+  && [ -z "$(git -C "$WORKTREE" status --porcelain --untracked-files=all)" ] || {
+    cat "$RESULT" >&2
+    cat "$TRACE" >&2
+    echo "error: task worktree changed while native review was running; refusing stale evidence" >&2
+    exit 2
+  }
 CONCLUSIONS=$(python3 - "$RESULT" <<'PY'
 import re
 import sys
@@ -188,10 +250,12 @@ CONTRACT_SHA=$(printf '%s' "$PROMPT" | sha256sum | awk '{print $1}')
   printf '## Immutable review contract\n\n%s\n\n' "$PROMPT"
   printf '## Native review result\n\n```text\n'
   cat "$RESULT"
+  printf '\n%s\n\n## Runtime trace\n\n%s\n' '```' '```text'
+  cat "$TRACE"
   printf '\n```\n'
 } >"$TMP"
 mv "$TMP" "$OUTPUT"
-trap 'rm -f "$RESULT"' EXIT HUP INT TERM
+trap 'rm -f "$RESULT" "$TRACE"' EXIT HUP INT TERM
 printf 'native review evidence: %s\n' "$OUTPUT"
 [ "$CONCLUSIONS" = 'INTENT_CONFORMANCE: pass' ] || {
   echo "error: native review found the candidate does not conform to the accepted intent; preserve $OUTPUT and resolve or escalate its findings" >&2
