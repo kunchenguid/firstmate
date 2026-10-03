@@ -152,12 +152,14 @@ The launch brief gives every supported harness the same `pre-push`, `pre-ci`, an
 `heartbeat` checks the fence and renews the lease at a worker checkpoint; a lease that has already expired is reported as stale.
 Missing adapters, undeclared resources, denied claims, stale fences, and offline central reads print warnings without granting authority or blocking the existing delivery path.
 
-Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
+Use `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py replay` to retry a participant's locally journaled requests after an outage; it revisits only tasks with a pending dispatch or checkpoint, so finished tasks never reclaim resources, and `FM_HOME=/path/to/home python3 bin/fm-coord-adapter.py view` for the central projection plus local pending requests.
 Each request is written to the home-local journal named in [configuration](configuration.md) before it is sent with a stable UUID; a lost reply reuses that UUID and receives the stored central receipt.
 The file is serialized with a home-local lock and replaced atomically; a checkpoint that cannot take the lock within five seconds warns and skips.
 An offline request remains pending and is never represented as a confirmed claim.
 A refused claim or amendment is dropped from the journal, so the next checkpoint retries it with a new request ID.
+A task whose declaration changes before any central submission is rerecorded with the new declaration.
 When the coordinator reports an expired session generation, the adapter starts a fresh session and resubmits every local task as a new intent; a claim that is no longer active resubmits that task the same way.
 Stale `publish-head` requests are resent only by `pre-push` or `replay` in head order, so the published head chain stays consistent.
+A head already published for the intent, such as after a reset to an earlier commit, is not republished; `pre-push` warns and the next new head chains from the latest central head.
 
 The current test entry points are `bin/fm-test-run.sh tests/fm-coord.test.sh tests/fm-coord-queue.test.sh tests/fm-coord-adapter.test.sh`.

@@ -138,12 +138,17 @@ db=sqlite3.connect(sys.argv[1])
 db.execute("UPDATE claims SET expires_mono_ns=0 WHERE intent_id LIKE 'offline:%'")
 db.commit()
 PY
-adapter "$tmp/challenger" replay > /dev/null 2> "$tmp/retry.err" || fail 'refused claim retry must complete'
+adapter "$tmp/challenger" replay > /dev/null 2> "$tmp/retry.err" || fail 'replay after refusal must complete'
+python3 - "$tmp/challenger/state/fm-coord-adapter.json" <<'PY' || fail 'replay must not reclaim resources for a task without a pending dispatch or checkpoint'
+import json,sys
+assert 'claim' not in json.load(open(sys.argv[1]))['tasks']['challenger']
+PY
+adapter "$tmp/challenger" pre-ci challenger > /dev/null 2> "$tmp/retry.err" || fail 'refused claim retry must complete'
 python3 - "$tmp/challenger/state/fm-coord-adapter.json" <<'PY' || fail 'refused claim must be retried after the holder lease expires'
 import json,sys
 assert json.load(open(sys.argv[1]))['tasks']['challenger']['claim']['ok'] is True
 PY
-pass 'refused claim is retried with a new request once the conflict clears'
+pass 'refused claim is retried by the next live checkpoint, never by replay alone'
 
 printf 'extra\n' > "$repo/src/extra.py"
 git -C "$repo" add src/extra.py
@@ -201,7 +206,7 @@ python3 - "$tmp/codex/state/fm-coord-adapter.json" "$(git -C "$repo" rev-parse H
 import json,sys
 path,previous,h1=sys.argv[1:]
 state=json.load(open(path))
-state['requests']['codex:head:'+h1].pop('reply')
+state['requests']['codex:head:'+previous+':'+h1].pop('reply')
 state['tasks']['codex']['published_head']=previous
 state['tasks']['codex']['pending_head']=h1
 json.dump(state,open(path,'w'))
@@ -216,6 +221,22 @@ assert not view['local_pending'], view['local_pending']
 assert view['local_tasks']['codex']['published_head']==sys.argv[2]
 PY
 pass 'lost publish-head reply is replayed before the next head is published'
+
+h2=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" commit -q --amend -m h2-rebased
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'rebased push checkpoint must complete'
+git -C "$repo" reset -q --hard "$h2"
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'reset push checkpoint must complete'
+printf 'h3\n' > "$repo/src/codex.py"
+git -C "$repo" commit -qam h3
+adapter "$tmp/codex" pre-push codex "$repo" > /dev/null 2>&1 || fail 'h3 push checkpoint must complete'
+python3 - "$(adapter "$tmp/codex" view)" "$(git -C "$repo" rev-parse HEAD)" <<'PY' || fail 'returning to an earlier head must not wedge later head publication'
+import json,sys
+view=json.loads(sys.argv[1])
+assert not view['local_pending'], view['local_pending']
+assert view['local_tasks']['codex']['published_head']==sys.argv[2]
+PY
+pass 'a head republished after a rebase keeps the central head chain'
 
 python3 - "$tmp/codex/state/fm-coord-adapter.json" <<'PY'
 import json,sys
@@ -282,6 +303,12 @@ python3 - "$tmp/scaffold/state/fm-coord-adapter.json" <<'PY' || fail 'empty decl
 import json,sys
 task=json.load(open(sys.argv[1]))['tasks']['scaffold']
 assert task['declared']==[] and 'claim' not in task
+PY
+sed -i.bak 's#^Coordination resources: \[\]$#Coordination resources: [{"type":"file","name":"src/scaffold.py"}]#' "$tmp/scaffold/data/scaffold/brief.md"
+adapter "$tmp/scaffold" dispatch scaffold "$repo" "$tmp/scaffold/data/scaffold/brief.md" branch/scaffold codex > /dev/null 2> "$tmp/scaffold-filled.err" || fail "filled declaration must replace the unsubmitted one: $(cat "$tmp/scaffold-filled.err")"
+python3 - "$tmp/scaffold/state/fm-coord-adapter.json" <<'PY' || fail 'filled declaration must be submitted and claimed'
+import json,sys
+assert json.load(open(sys.argv[1]))['tasks']['scaffold']['claim']['ok'] is True
 PY
 mkdir -p "$tmp/plain/data"
 FM_HOME="$tmp/plain" "$ROOT/bin/fm-brief.sh" plain some-proj --mode local-only > /dev/null 2>&1 || fail 'uncoordinated brief must scaffold'

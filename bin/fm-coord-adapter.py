@@ -196,6 +196,8 @@ class Adapter:
             warn(f"{task_id}: intent pending; no claim granted")
             return task
         claim = self.send(f"{task_id}:claim", "claim", {**common, "version": submitted["version"]})
+        if claim is not None and task.pop("pending_dispatch", None):
+            self.save()
         if claim is None:
             warn(f"{task_id}: claim pending; no grant assumed")
         elif not claim["ok"]:
@@ -222,12 +224,16 @@ class Adapter:
             raise ValueError("base does not resolve to a full Git OID")
         key = f"{repo}:{task_id}"
         task = self.state["tasks"].get(task_id)
+        if task is not None and (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue):
+            if "reply" in self.state["requests"].get(f"{task_id}:submit", {}):
+                raise ValueError(f"{task_id}: coordination declaration changed after submission")
+            self.reset_task(task_id)
+            task.update({"repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "declared": resources, "issue": issue, "harness": harness, "pending_dispatch": bool(resources)})
+            self.save()
         if task is None:
-            task = {"intent_id": f"{self.config['home_id']}:{key}", "repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "goal": task_id, "declared": resources, "issue": issue, "harness": harness, "pending_paths": []}
+            task = {"intent_id": f"{self.config['home_id']}:{key}", "repo": repo, "base": base, "base_oid": base_oid, "branch": branch, "goal": task_id, "declared": resources, "issue": issue, "harness": harness, "pending_paths": [], "pending_dispatch": bool(resources)}
             self.state["tasks"][task_id] = task
             self.save()
-        elif (task["repo"], task["branch"], task["declared"], task["issue"]) != (repo, branch, resources, issue):
-            raise ValueError(f"{task_id}: coordination declaration changed after submission")
         self.ensure_task(task_id)
 
     def live_claim(self, task_id):
@@ -297,9 +303,15 @@ class Adapter:
                 self.save()
         if head != task.get("published_head"):
             previous = task.get("published_head")
-            reply = self.send(f"{task_id}:head:{head}", "publish-head", {**live, "intent_id": task["intent_id"], "head_oid": head, "expected_previous_oid": previous})
+            key = f"{task_id}:head:{previous}:{head}"
+            reply = self.send(key, "publish-head", {**live, "intent_id": task["intent_id"], "head_oid": head, "expected_previous_oid": previous})
             if reply:
                 task["published_head"] = head
+                task.pop("pending_head", None)
+                self.save()
+            elif "UNIQUE constraint failed: heads" in self.last_error:
+                warn(f"{task_id}: head {head} was already published for this intent; central head remains {previous}")
+                del self.state["requests"][key]
                 task.pop("pending_head", None)
                 self.save()
         else:
@@ -312,11 +324,12 @@ class Adapter:
                 return
             if "reply" not in item and item["op"] != "publish-head":
                 self.send(key, item["op"], {k: v for k, v in item["payload"].items() if k != "request_id"})
-        for task_id in list(self.state["tasks"]):
+        for task_id, task in list(self.state["tasks"].items()):
             if self.reset:
                 return
+            if not any(task.get(flag) for flag in ("pending_dispatch", "pending_head", "pending_ci", "pending_paths", "renew_key")):
+                continue
             self.ensure_task(task_id)
-            task = self.state["tasks"][task_id]
             if (task.get("pending_paths") or task.get("pending_head")) and task.get("worktree"):
                 self.scope(task_id, task["worktree"])
             if task.get("pending_ci") and self.live_claim(task_id):
@@ -343,7 +356,7 @@ class Adapter:
     def view(self):
         central = self.call("view", {})
         pending = [{"key": key, "operation": item["op"], "request_id": item["payload"]["request_id"]} for key, item in self.state["requests"].items() if "reply" not in item]
-        pending.extend({"key": task_id, "operation": action} for task_id, task in self.state["tasks"].items() for action, flag in (("pre-push", task.get("pending_head")), ("pre-ci", task.get("pending_ci")), ("scope-amend", task.get("pending_paths")), ("heartbeat", task.get("renew_key"))) if flag)
+        pending.extend({"key": task_id, "operation": action} for task_id, task in self.state["tasks"].items() for action, flag in (("dispatch", task.get("pending_dispatch")), ("pre-push", task.get("pending_head")), ("pre-ci", task.get("pending_ci")), ("scope-amend", task.get("pending_paths")), ("heartbeat", task.get("renew_key"))) if flag)
         print(json.dumps({"mode": self.config["mode"], "central": central, "local_pending": pending, "local_tasks": self.state["tasks"]}, sort_keys=True))
 
 
